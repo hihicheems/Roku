@@ -602,3 +602,45 @@
 1. Introduce artifact blob abstraction (`bytes + media_type + size`) and object-store adapters.
 2. Add content retention and lifecycle policies (TTL, archival, GC).
 3. Add authenticated download policies and optional signed URL mode for external clients.
+
+## 2026-03-07 - Session Milestone (Phase 17)
+
+### Completed Modules
+
+- `roku-llm-adapter`
+  - Added new crate for multi-provider model routing.
+  - Introduced risk-aware model contract:
+    - `RiskTier`
+    - `ModelProfile` with `max_risk_tier`, context window, and cost metadata
+  - Introduced budget-aware request contract:
+    - token budget guard
+    - cost budget guard
+    - preferred provider constraint
+  - Added routing policy contract (`max_request_cost_usd`, `max_latency_ms`).
+  - Added provider abstraction (`LlmProvider`) and response contracts (`ProviderResponse`, `LlmResponse`).
+  - Implemented `LlmRouter`:
+    - model eligibility filtering
+    - high-risk preference for stronger models
+    - low-risk preference for lower-cost models
+    - provider registration and dispatch
+    - post-call budget/latency enforcement
+  - Added error taxonomy (`NoEligibleModel`, `ProviderNotRegistered`, `BudgetExceeded`, `LatencyExceeded`, `ProviderCallFailed`).
+  - Added unit tests for strategy routing, preferred provider, budget rejection, and latency rejection.
+
+### Verification Status
+
+- `cargo test -p roku-llm-adapter`: passed
+- `cargo fmt --all`: passed
+- `cargo check --workspace`: passed
+
+### Remaining Work
+
+- `roku-llm-adapter` is not yet wired into planning/runtime execution flow.
+- No provider-specific retry/circuit-breaker policy is attached yet.
+- No request/response audit hook integration into observability layer yet.
+
+### Next Recommended Steps
+
+1. Integrate `roku-llm-adapter` into planning/reasoning calls in `roku-runtime-service`.
+2. Add provider-level resilience policy (retry budget, jitter backoff, breaker state).
+3. Emit model routing and cost telemetry through `roku-observability`.

@@ -1049,6 +1049,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "roku-llm-adapter"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "roku-mcp-bridge"
 version = "0.1.0"
 

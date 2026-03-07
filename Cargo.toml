@@ -15,6 +15,7 @@ members = [
     "crates/roku-execution-graph-builder",
     "crates/roku-agent-instance-factory",
     "crates/roku-agent-runtime",
+    "crates/roku-llm-adapter",
     "crates/roku-capability-auth",
     "crates/roku-validation-plane",
     "crates/roku-tool-runtime",
