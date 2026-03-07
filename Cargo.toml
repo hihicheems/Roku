@@ -24,6 +24,7 @@ members = [
     "crates/roku-connectors-telegram",
     "crates/roku-state-store",
     "crates/roku-observability",
+    "crates/roku-runtime-service",
     "crates/roku-e2e",
 ]
 
