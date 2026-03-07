@@ -179,6 +179,7 @@ impl RuntimeService {
 		ticket.decided_by = Some(decision.actor.clone());
 		ticket.comment = decision.comment.clone();
 		self.save_approval_ticket(ticket.clone())?;
+		self.metrics.inc_approvals_resolved();
 
 		self.audit_sink
 			.record(AuditRecord {
@@ -322,6 +323,9 @@ impl RuntimeService {
 				.append_event(event)
 				.map_err(|error| RuntimeError::new(error.to_string()))?;
 		}
+		if disposition.terminal_state == TaskState::DeadLetter {
+			self.metrics.inc_dead_letters();
+		}
 		Ok(disposition.terminal_state)
 	}
 
@@ -416,6 +420,7 @@ impl RuntimeService {
 
 		self.record_transition(task, TaskState::WaitingApproval, "approval required")?;
 		task.pending_approval_id = Some(approval_id.clone());
+		self.metrics.inc_approvals_created();
 		self.save_approval_ticket(ticket)?;
 		self.save_task(task.clone())?;
 
