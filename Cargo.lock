@@ -979,18 +979,9 @@ dependencies = [
 name = "roku-cmd"
 version = "0.1.0"
 dependencies = [
- "roku-agent-instance-factory",
- "roku-agent-runtime",
  "roku-api-gateway",
- "roku-capability-auth",
  "roku-common-types",
- "roku-execution-graph-builder",
- "roku-observability",
- "roku-orchestrator",
- "roku-planning-engine",
- "roku-state-store",
- "roku-task-planner",
- "roku-validation-plane",
+ "roku-runtime-service",
 ]
 
 [[package]]
@@ -1052,6 +1043,23 @@ dependencies = [
 [[package]]
 name = "roku-planning-engine"
 version = "0.1.0"
+
+[[package]]
+name = "roku-runtime-service"
+version = "0.1.0"
+dependencies = [
+ "roku-agent-instance-factory",
+ "roku-agent-runtime",
+ "roku-capability-auth",
+ "roku-common-types",
+ "roku-execution-graph-builder",
+ "roku-observability",
+ "roku-orchestrator",
+ "roku-planning-engine",
+ "roku-state-store",
+ "roku-task-planner",
+ "roku-validation-plane",
+]
 
 [[package]]
 name = "roku-state-store"
