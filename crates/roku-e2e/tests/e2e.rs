@@ -75,7 +75,8 @@ async fn http_gateway_executes_runtime_service() {
 
 	let response: SubmitResponse = actix_web::test::call_and_read_body_json(&app, request).await;
 	assert_eq!(response.status, "succeeded");
-	assert_eq!(response.message, "task succeeded");
+	assert!(!response.message.is_empty());
+	assert_eq!(response.message, "generic execution completed");
 	assert!(response.request_id.starts_with("req-"));
 }
 

@@ -15,10 +15,10 @@ pub struct AdaptiveTaskPlanner;
 impl TaskPlanner for AdaptiveTaskPlanner {
 	fn build_outline(&self, request: &RequestEnvelope, decision: &PlanningDecision) -> PlanOutline {
 		let steps = match decision.mode {
-			PlanningMode::ReAct => build_react_steps(decision),
-			PlanningMode::TaskDecomposition => build_decomposition_steps(decision),
-			PlanningMode::TreeSearch => build_tree_search_steps(decision),
-			PlanningMode::IterativeRefinement => build_refinement_steps(decision),
+			PlanningMode::ReAct => build_react_steps(&request.goal, decision),
+			PlanningMode::TaskDecomposition => build_decomposition_steps(&request.goal, decision),
+			PlanningMode::TreeSearch => build_tree_search_steps(&request.goal, decision),
+			PlanningMode::IterativeRefinement => build_refinement_steps(&request.goal, decision),
 		};
 
 		PlanOutline {

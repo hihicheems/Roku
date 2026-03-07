@@ -129,7 +129,7 @@
 | AR-03 | 基于 `PolicyBindings` 做最小预算拒绝保护 | §14 预算传播规则 | DONE |
 | AR-04 | 支持动态注册自定义 worker | §7.8 可演进性 | DONE |
 | AR-05 | 将 worker 执行真实接入 `roku-tool-runtime` 而非合成结果 | §9 请求生命周期 | DONE |
-| AR-06 | 将复杂 reasoning worker 接入 `roku-llm-adapter` | §3 规划与执行分离 / §7 | TODO |
+| AR-06 | 将复杂 reasoning worker 接入 `roku-llm-adapter` | §3 规划与执行分离 / §7 | DONE |
 | AR-07 | 按 profile / task type 选择输出 schema 和 evidence 模板 | §11 结果合同 | TODO |
 | AR-08 | 将 timeout / retry / budget 消耗下放到 worker 执行层 | §14 预算与超时 | TODO |
 
@@ -146,6 +146,7 @@
 | LLM-07 | 将 provider 选择、token / cost 消耗输出到 observability | §16 指标 | TODO |
 | LLM-08 | 将 adapter 真正接入 planning / runtime / coding provider 选择链路 | §4.1 / §7.5 | TODO |
 | LLM-09 | 增加 deterministic request key / prompt cache / replay 支持 | §20 回归测试 / replay | TODO |
+| LLM-10 | 增加 OpenRouter provider、环境变量装配和 account-default model 回退 | §4.1 / §19 llm-adapter | DONE |
 
 ## roku-capability-auth
 

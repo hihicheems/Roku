@@ -835,3 +835,42 @@
 1. Implement `TR-08` so tool outputs are validated against declared output schemas before they re-enter agent execution.
 2. Implement `TR-09` so tool execution produces auditable persisted artifacts and budget/accounting records.
 3. Continue into `roku-state-store` production adapters or dispatch/backpressure infrastructure.
+
+## 2026-03-07 - Session Milestone (Phase 23)
+
+### Completed Modules
+
+- `roku-llm-adapter`
+  - Split the crate into explicit modules:
+    - `types.rs`
+    - `router.rs`
+    - `openrouter.rs`
+  - Added an `OpenRouterProvider` implementation over the existing router abstraction.
+  - Added environment-backed OpenRouter bootstrap with support for account-default model fallback when `OPENROUTER_MODEL` is not set.
+  - Added parser coverage for both string and part-array OpenRouter message content formats.
+- `roku-agent-runtime`
+  - Added `GenericAgentRuntime::with_llm_router(...)` so built-in workers can execute through live LLM-backed tool descriptors instead of only deterministic report tools.
+  - Added a unit test that exercises the live LLM-backed runtime path without external network calls.
+- `roku-task-planner`
+  - Injected the original request goal into plan-step summaries so downstream execution workers receive the real user intent.
+- `roku-runtime-service`
+  - Successful responses now surface the last execution result message instead of the old fixed `"task succeeded"` placeholder.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test -p roku-llm-adapter`: passed
+- `cargo test -p roku-task-planner -p roku-agent-runtime -p roku-runtime-service -p roku-e2e`: passed
+- `cargo check --workspace`: passed
+
+### Remaining Work
+
+- OpenRouter is integrated for runtime use, but there is still no provider retry/backoff/circuit-breaker policy.
+- Planning and coding-provider routing are not yet using the llm-adapter path.
+- Telegram transport is still missing a real polling or webhook runner.
+
+### Next Recommended Steps
+
+1. Add a real Telegram polling runner and wire it to the live runtime path.
+2. Add `cargo clippy --workspace --all-targets -- -D warnings` after the Telegram integration lands.
+3. Continue with tool output schema enforcement and artifact/audit persistence.

@@ -6,7 +6,7 @@ use roku_common_types::{
 use roku_execution_graph_builder::TaskGraphScheduler;
 use roku_observability::{AuditCorrelation, AuditRecord};
 
-use crate::helpers::failure_message;
+use crate::helpers::{failure_message, success_message};
 use crate::{RunMode, RuntimeService};
 
 impl RuntimeService {
@@ -72,7 +72,7 @@ impl RuntimeService {
 		Ok(ResponseEnvelope {
 			request_id,
 			status: ResponseStatus::Succeeded,
-			message: "task succeeded".to_string(),
+			message: success_message(task.last_result.as_ref()),
 			artifacts,
 		})
 	}
