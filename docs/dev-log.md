@@ -16,8 +16,10 @@
 - `roku-state-store`
   - Added `SessionPreferenceRepository` and `ConversationRepository`.
   - Added in-memory and file-backed adapters for planning preferences and conversation history.
+  - Added PostgreSQL-backed adapters for session preferences and conversation history.
 - `roku-cmd`
   - Added session state handling for Telegram: load recent conversation history, apply session planning override, and persist user/assistant turns.
+  - Added PostgreSQL-backed Telegram session state bootstrap via `ROKU_DATABASE_URL` / `DATABASE_URL`, with automatic in-memory fallback when no database is configured.
   - Installed environment-configurable global logging with async rotating file sinks.
 - `roku-agent-instance-factory` / `roku-agent-runtime` / `roku-task-planner` / `roku-runtime-service`
   - Propagated recent conversation history into planner prompts and worker prompts.

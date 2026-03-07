@@ -1,5 +1,7 @@
 //! Trait-backed state repositories with in-memory and file adapters.
 
+mod postgres;
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,12 +12,18 @@ use roku_common_types::{
 };
 use thiserror::Error;
 
+pub use postgres::{
+	PostgresConversationRepository, PostgresSessionPreferenceRepository, PostgresStoreConfig,
+};
+
 #[derive(Debug, Error)]
 pub enum StoreError {
 	#[error("io error: {0}")]
 	Io(#[from] std::io::Error),
 	#[error("serialization error: {0}")]
 	Serde(#[from] serde_json::Error),
+	#[error("postgres error: {0}")]
+	Postgres(String),
 }
 
 pub trait TaskRepository {

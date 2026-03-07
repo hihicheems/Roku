@@ -25,6 +25,8 @@ pub enum CommandError {
 	Usage(String),
 	#[error("invalid logging configuration: {0}")]
 	LoggingConfiguration(String),
+	#[error("failed to bootstrap state store: {0}")]
+	StateStoreBootstrap(String),
 	#[error(transparent)]
 	Runtime(#[from] roku_common_types::RuntimeError),
 	#[error(transparent)]
