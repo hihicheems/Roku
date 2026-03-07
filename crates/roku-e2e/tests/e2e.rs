@@ -2,12 +2,14 @@ use std::sync::Arc;
 
 use actix_web::{App, web};
 use roku_api_gateway::{
-	ApprovalDecisionRequest, ApprovalExecutor, ApprovalTicketResponse, GatewayAppState,
-	RequestExecutor, RuntimeServiceExecutor, SubmitRequest, SubmitResponse, configure_routes,
+	ApprovalDecisionRequest, ApprovalExecutor, ApprovalTicketResponse, ArtifactResponse,
+	ExperimentResponse, GatewayAppState, RequestExecutor, RuntimeServiceExecutor, SubmitRequest,
+	SubmitResponse, TaskDataExecutor, configure_routes,
 };
 use roku_cmd::{RunMode, run_once, run_with_mode};
 use roku_common_types::{
-	ApprovalDecision, ApprovalId, RequestEnvelope, ResponseStatus, RuntimeError,
+	ApprovalDecision, ApprovalId, Artifact, ExperimentRun, RequestEnvelope, ResponseStatus,
+	RuntimeError, TaskId,
 };
 use roku_runtime_service::RuntimeService;
 
@@ -71,10 +73,52 @@ async fn http_gateway_executes_runtime_service() {
 		})
 		.to_request();
 
+let response: SubmitResponse = actix_web::test::call_and_read_body_json(&app, request).await;
+assert_eq!(response.status, "succeeded");
+assert_eq!(response.message, "task succeeded");
+assert!(response.request_id.starts_with("req-"));
+}
+
+#[actix_web::test]
+async fn http_gateway_exposes_task_artifacts_and_experiment() {
+	let service = Arc::new(RuntimeService::default());
+	let state = web::Data::new(GatewayAppState::new(Arc::new(RuntimeServiceExecutor::new(
+		service,
+	))));
+	let app = actix_web::test::init_service(
+		App::new()
+			.app_data(state)
+			.app_data(web::JsonConfig::default().limit(8 * 1024))
+			.configure(configure_routes),
+	)
+	.await;
+
+	let request = actix_web::test::TestRequest::post()
+		.uri("/v1/requests")
+		.set_json(&SubmitRequest {
+			session_id: "http-session".to_string(),
+			goal: "build execution graph".to_string(),
+		})
+		.to_request();
+
 	let response: SubmitResponse = actix_web::test::call_and_read_body_json(&app, request).await;
-	assert_eq!(response.status, "succeeded");
-	assert_eq!(response.message, "task succeeded");
-	assert!(response.request_id.starts_with("req-"));
+	let task_id = format!("task-{}", response.request_id);
+
+	let artifacts_request = actix_web::test::TestRequest::get()
+		.uri(&format!("/v1/tasks/{task_id}/artifacts"))
+		.to_request();
+	let artifacts: Vec<ArtifactResponse> =
+		actix_web::test::call_and_read_body_json(&app, artifacts_request).await;
+	assert_eq!(artifacts.len(), 2);
+	assert!(artifacts.iter().all(|artifact| artifact.uri.starts_with("artifact://")));
+
+	let experiment_request = actix_web::test::TestRequest::get()
+		.uri(&format!("/v1/tasks/{task_id}/experiment"))
+		.to_request();
+	let experiment: ExperimentResponse =
+		actix_web::test::call_and_read_body_json(&app, experiment_request).await;
+	assert_eq!(experiment.status, "succeeded");
+	assert_eq!(experiment.artifact_ids.len(), 2);
 }
 
 struct FixedModeExecutor {
@@ -105,6 +149,16 @@ impl ApprovalExecutor for FixedModeExecutor {
 		decision: ApprovalDecision,
 	) -> Result<roku_common_types::ResponseEnvelope, RuntimeError> {
 		self.service.decide_approval(approval_id, decision)
+	}
+}
+
+impl TaskDataExecutor for FixedModeExecutor {
+	fn list_artifacts(&self, task_id: &TaskId) -> Result<Vec<Artifact>, RuntimeError> {
+		self.service.list_artifacts(task_id)
+	}
+
+	fn get_experiment_run(&self, task_id: &TaskId) -> Result<Option<ExperimentRun>, RuntimeError> {
+		self.service.get_experiment_run(task_id)
 	}
 }
 
