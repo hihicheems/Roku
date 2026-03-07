@@ -6,6 +6,25 @@ authors = ["itscheems"]
 
 [workspace]
 resolver = "3"
-members = ["crates/cmd"]
+members = [
+    "crates/roku-cmd",
+    "crates/roku-common-types",
+    "crates/roku-orchestrator",
+    "crates/roku-planning-engine",
+    "crates/roku-task-planner",
+    "crates/roku-execution-graph-builder",
+    "crates/roku-agent-instance-factory",
+    "crates/roku-agent-runtime",
+    "crates/roku-capability-auth",
+    "crates/roku-validation-plane",
+    "crates/roku-tool-runtime",
+    "crates/roku-mcp-bridge",
+    "crates/roku-coding-provider-adapter",
+    "crates/roku-api-gateway",
+    "crates/roku-connectors-telegram",
+    "crates/roku-state-store",
+    "crates/roku-observability",
+    "crates/roku-e2e",
+]
 
 [workspace.dependencies]

@@ -1,0 +1,119 @@
+//! Task state machine and orchestration primitives.
+
+use roku_common_types::{
+	ErrorClass, RequestEnvelope, RuntimeError, Task, TaskEvent, TaskId, TaskState,
+};
+
+#[derive(Debug, Clone)]
+pub struct OrchestratorConfig {
+	pub max_attempts: u32,
+}
+
+impl Default for OrchestratorConfig {
+	fn default() -> Self {
+		Self { max_attempts: 3 }
+	}
+}
+
+#[derive(Debug, Default)]
+pub struct Orchestrator {
+	pub config: OrchestratorConfig,
+}
+
+impl Orchestrator {
+	pub fn with_config(config: OrchestratorConfig) -> Self {
+		Self { config }
+	}
+
+	pub fn create_task(&self, request: &RequestEnvelope) -> Task {
+		Task {
+			task_id: TaskId(format!("task-{}", request.request_id.0)),
+			request_id: request.request_id.clone(),
+			state: TaskState::Queued,
+			attempts: 0,
+			graph: None,
+		}
+	}
+
+	pub fn transition(
+		&self,
+		task: &mut Task,
+		next: TaskState,
+		reason: impl Into<String>,
+		error_class: Option<ErrorClass>,
+	) -> Result<TaskEvent, RuntimeError> {
+		if !is_valid_transition(task.state, next) {
+			return Err(RuntimeError::new(format!(
+				"invalid transition: {:?} -> {:?}",
+				task.state, next
+			)));
+		}
+
+		let event = TaskEvent {
+			task_id: task.task_id.clone(),
+			from: task.state,
+			to: next,
+			reason: reason.into(),
+			error_class,
+		};
+		task.state = next;
+		Ok(event)
+	}
+
+	pub fn mark_failed_or_dead_letter(&self, task: &mut Task) -> TaskState {
+		task.attempts = task.attempts.saturating_add(1);
+		if task.attempts >= self.config.max_attempts {
+			task.state = TaskState::DeadLetter;
+		} else {
+			task.state = TaskState::Failed;
+		}
+		task.state
+	}
+}
+
+pub fn build_idempotency_key(task_id: &TaskId, node_id: &str, attempt: u32) -> String {
+	format!("{}:{}:{}", task_id.0, node_id, attempt)
+}
+
+pub fn is_valid_transition(from: TaskState, to: TaskState) -> bool {
+	matches!(
+		(from, to),
+		(TaskState::Queued, TaskState::Planning)
+			| (TaskState::Planning, TaskState::GraphBuilding)
+			| (TaskState::GraphBuilding, TaskState::Delegating)
+			| (TaskState::Delegating, TaskState::Executing)
+			| (TaskState::Executing, TaskState::Validating)
+			| (TaskState::Validating, TaskState::Executing)
+			| (TaskState::Validating, TaskState::Aggregating)
+			| (TaskState::Validating, TaskState::WaitingApproval)
+			| (TaskState::WaitingApproval, TaskState::Executing)
+			| (TaskState::Executing, TaskState::Aggregating)
+			| (TaskState::Aggregating, TaskState::Succeeded)
+			| (_, TaskState::Failed)
+			| (TaskState::Failed, TaskState::DeadLetter)
+			| (_, TaskState::Cancelled)
+	)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use roku_common_types::{RequestEnvelope, RequestId};
+
+	#[test]
+	fn transition_rules_are_enforced() {
+		let orchestrator = Orchestrator::default();
+		let request = RequestEnvelope {
+			request_id: RequestId("req-1".to_string()),
+			session_id: "s1".to_string(),
+			goal: "g".to_string(),
+		};
+		let mut task = orchestrator.create_task(&request);
+
+		let ok = orchestrator.transition(&mut task, TaskState::Planning, "plan", None);
+		assert!(ok.is_ok());
+
+		let bad = orchestrator.transition(&mut task, TaskState::Succeeded, "skip", None);
+		assert!(bad.is_err());
+	}
+}
