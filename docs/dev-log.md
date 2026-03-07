@@ -253,3 +253,76 @@
 1. Introduce explicit node result aggregation types instead of relying on raw `ResultEnvelope` lists for validation joins.
 2. Continue splitting `roku-runtime-service` into `service`, `execution`, and `approval` modules.
 3. Start the `Artifact Store` / `Experiment Registry` implementation and route validation evidence through that layer.
+
+## 2026-03-07 - Session Milestone (Phase 7)
+
+### Completed Modules
+
+- `roku-common-types`
+  - Added `Artifact`, `ArtifactId`, `ExperimentRun`, `ExperimentMetric`, and `ValidationEvidenceSet`.
+- `roku-artifact-store`
+  - Added dedicated data-plane crate with in-memory and file-backed artifact repositories.
+  - Added `ArtifactStore` service to persist node result artifacts and resolve them by URI.
+- `roku-experiment-registry`
+  - Added dedicated data-plane crate with in-memory and file-backed experiment run repositories.
+  - Added `ExperimentRegistry` service for start/attach/complete/fail lifecycle management.
+- `roku-observability`
+  - Added artifact and experiment metrics counters.
+- `roku-validation-plane`
+  - Added artifact-backed provenance validation via `ValidationEvidenceSet`.
+  - Added tests for missing artifact evidence and valid artifact-backed payloads.
+- `roku-runtime-service`
+  - Persisted execution results as formal artifacts.
+  - Started and finalized experiment runs around task execution.
+  - Attached persisted artifacts to experiment runs.
+  - Switched validation input construction from raw results to artifact-backed evidence sets.
+
+### Verification Status
+
+- `cargo test -p roku-common-types -p roku-artifact-store -p roku-experiment-registry`: passed
+- `cargo test -p roku-observability -p roku-validation-plane -p roku-runtime-service -p roku-e2e`: passed
+
+### Remaining Work
+
+- `ExecutionGraphBuilder` still compiles a linear outline rather than a true dependency-aware multi-parent DAG with explicit join policies.
+- Validation still aggregates by iterating raw evidence sets; explicit `AggregationPolicy` / `NodeResultSet` types are not implemented yet.
+- Artifact and experiment state are in-memory/file-backed only; PostgreSQL/Redis/NATS backends remain missing.
+- Queue/dispatch plane and organization-layer A2A contracts are still not implemented.
+
+### Next Recommended Steps
+
+1. Introduce explicit aggregation contracts for multi-parent validation and aggregation nodes.
+2. Extend `ExecutionGraphBuilder` so plan compilation can emit real branch/join graphs instead of only linear flows.
+3. Add production backends for artifact, experiment, task, and event persistence.
+
+## 2026-03-07 - Session Milestone (Phase 8)
+
+### Completed Modules
+
+- `roku-runtime-service`
+  - Split the crate into `data_plane` and `execution` modules, reducing root-file responsibility.
+- `roku-api-gateway`
+  - Added task data endpoints:
+    - `GET /v1/tasks/{task_id}/artifacts`
+    - `GET /v1/tasks/{task_id}/experiment`
+  - Extended gateway executor traits to expose artifact and experiment queries.
+  - Added route tests for task data lookup behavior.
+- `roku-e2e`
+  - Added HTTP integration coverage for task artifact listing and experiment lookup after request execution.
+
+### Verification Status
+
+- `cargo test -p roku-runtime-service -p roku-e2e`: passed
+- `cargo test -p roku-api-gateway -p roku-e2e`: passed
+
+### Remaining Work
+
+- Runtime root file is smaller, but approval flow still shares the main entry module and can be extracted further.
+- HTTP layer exposes read-only task data; no artifact download/content endpoint exists yet.
+- Data plane is still prototype-grade and lacks retention, versioning, and backend abstraction parity with the design doc.
+
+### Next Recommended Steps
+
+1. Introduce explicit artifact content retrieval / download endpoints once artifact payload storage is separated from metadata.
+2. Finish splitting `roku-runtime-service` so approval handling and orchestration entrypoints are isolated.
+3. Push `ExecutionGraphBuilder` and runtime scheduling toward true graph joins and resumable partial reruns.
