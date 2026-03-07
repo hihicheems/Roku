@@ -170,9 +170,10 @@
 | VP-04 | 对低置信度结果进行 policy 拒绝 | §11.2 Policy Checker | DONE |
 | VP-05 | 支持 artifact-backed evidence set 校验 | §11.3 验证流水线 | DONE |
 | VP-06 | 接入 schema registry，支持 schema version 兼容与字段级错误提示 | §11.2 Schema Validation | TODO |
-| VP-07 | 增加 cross-check / independent verification / 双执行复核链路 | §11.2 Cross-Check | TODO |
+| VP-07 | 增加基础 cross-check，覆盖 artifact 去重、schema 一致性与异常置信度校验 | §11.2 Cross-Check | DONE |
 | VP-08 | 增加 reviewer agent / alternate worker escalation path | §11.4 失败处理策略 | TODO |
 | VP-09 | 增加 `untrusted result` 隔离状态，不允许其进入最终聚合 | §11.4 / §11.5 | TODO |
+| VP-10 | 增加 independent verification / 双执行复核链路，支持独立结果比对与分歧升级 | §11.2 Cross-Check | TODO |
 
 ## roku-tool-runtime
 
