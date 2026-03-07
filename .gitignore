@@ -22,6 +22,10 @@ debug
 **/*.DS_Store
 logs/
 .env
+run/
+tmp/
+prompts/
+plans/
 
 # Python
 **/__pycache__/
