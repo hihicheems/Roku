@@ -681,7 +681,7 @@
 ### Completed Modules
 
 - `roku-task-planner`
-  - Removed the `SimpleTaskPlanner` naming and replaced it with `AdaptiveTaskPlanner`.
+  - Replaced the prior placeholder-style planner name with `AdaptiveTaskPlanner`.
   - Split the crate into explicit modules:
     - `planner.rs`
     - `strategies.rs`
@@ -713,7 +713,7 @@
 - `cargo fmt --all`: passed
 - `cargo check --workspace`: passed
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed
-- `Simple*` / `Mock*` naming scan across `crates/` and `docs/`: clean
+- Placeholder-style naming scan across `crates/` and `docs/`: clean
 
 ### Remaining Work
 
@@ -726,3 +726,43 @@
 1. Integrate `roku-agent-runtime` with `roku-tool-runtime` so node execution stops returning synthetic results.
 2. Add provider degradation and approval-aware capability attenuation in `roku-coding-provider-adapter`.
 3. Start splitting other single-file crates (`roku-capability-auth`, `roku-validation-plane`, `roku-llm-adapter`) along the same module-oriented standard.
+
+## 2026-03-07 - Session Milestone (Phase 20)
+
+### Completed Modules
+
+- `roku-validation-plane`
+  - Split the crate into explicit validation stages instead of keeping all logic in a single `lib.rs`:
+    - `config.rs`
+    - `schema.rs`
+    - `semantic.rs`
+    - `provenance.rs`
+    - `policy.rs`
+    - `cross_check.rs`
+    - `pipeline.rs`
+  - Kept the existing schema, semantic, provenance, and policy validation flow intact behind the new module boundaries.
+  - Added a baseline cross-check stage for artifact-reference deduplication, artifact/result schema consistency, and suspicious confidence on error results.
+  - Extended pipeline tests to cover cross-check rejection paths.
+- Repository-wide naming hygiene
+  - Removed the remaining placeholder-style naming references from project documentation.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test -p roku-validation-plane -p roku-runtime-service -p roku-e2e`: passed
+- `cargo check --workspace`: passed
+- `cargo clippy -p roku-validation-plane --all-targets -- -D warnings`: passed
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed
+- Placeholder-style naming scan across the repository: clean
+
+### Remaining Work
+
+- `roku-validation-plane` still lacks schema registry integration and field-level compatibility diagnostics.
+- Independent verification, dual-run reconciliation, and escalation into alternate workers or reviewer agents are still pending.
+- Validation failures are still reported as flat strings rather than structured reason codes.
+
+### Next Recommended Steps
+
+1. Deepen `roku-agent-runtime` so workers execute through `roku-tool-runtime` instead of returning synthetic output.
+2. Add structured validation reason codes and schema-registry-driven compatibility checks.
+3. Extend validation failure handling toward reviewer escalation and quarantined `untrusted result` states.
