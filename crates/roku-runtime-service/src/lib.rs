@@ -8,12 +8,16 @@ use std::sync::{Arc, Mutex};
 
 use roku_agent_instance_factory::AgentInstanceFactory;
 use roku_agent_runtime::{AgentWorker, GenericAgentRuntime};
+use roku_artifact_store::ArtifactStore;
 use roku_capability_auth::{CapabilityAuthority, CapabilityRequest};
 use roku_common_types::{
-	ApprovalDecision, ApprovalId, ApprovalStatus, ApprovalTicket, ErrorClass, RequestEnvelope,
-	ResponseEnvelope, ResponseStatus, RuntimeError, Task, TaskNode, TaskNodeKind, TaskState,
+	ApprovalDecision, ApprovalId, ApprovalStatus, ApprovalTicket, Artifact, ArtifactId, ErrorClass,
+	EvidenceItem, ExperimentMetric, ExperimentRun, NodeId, RequestEnvelope, ResponseEnvelope,
+	ResponseStatus, ResultEnvelope, RuntimeError, Task, TaskId, TaskNode, TaskNodeKind, TaskState,
+	ValidationEvidenceSet,
 };
 use roku_execution_graph_builder::{ExecutionGraphBuilder, GraphBuildConfig, TaskGraphScheduler};
+use roku_experiment_registry::ExperimentRegistry;
 use roku_observability::{AuditRecord, AuditSink, InMemoryAuditSink, Metrics, MetricsSnapshot};
 use roku_orchestrator::Orchestrator;
 use roku_planning_engine::{DefaultPlanningEngine, PlanningInput, RiskLevel, StrategySelector};
@@ -42,6 +46,8 @@ struct RuntimeState {
 	event_repo: Box<dyn EventRepository + Send>,
 	approval_repo: Box<dyn ApprovalRepository + Send>,
 	result_repo: Box<dyn ResultRepository + Send>,
+	artifact_store: ArtifactStore,
+	experiment_registry: ExperimentRegistry,
 }
 
 pub struct RuntimeService {
@@ -65,6 +71,26 @@ impl RuntimeService {
 		result_repo: Box<dyn ResultRepository + Send>,
 		audit_sink: Arc<dyn AuditSink>,
 	) -> Self {
+		Self::new_with_data_plane(
+			task_repo,
+			event_repo,
+			approval_repo,
+			result_repo,
+			ArtifactStore::default(),
+			ExperimentRegistry::default(),
+			audit_sink,
+		)
+	}
+
+	pub fn new_with_data_plane(
+		task_repo: Box<dyn TaskRepository + Send>,
+		event_repo: Box<dyn EventRepository + Send>,
+		approval_repo: Box<dyn ApprovalRepository + Send>,
+		result_repo: Box<dyn ResultRepository + Send>,
+		artifact_store: ArtifactStore,
+		experiment_registry: ExperimentRegistry,
+		audit_sink: Arc<dyn AuditSink>,
+	) -> Self {
 		Self {
 			orchestrator: Orchestrator::default(),
 			planning_engine: DefaultPlanningEngine,
@@ -81,6 +107,8 @@ impl RuntimeService {
 				event_repo,
 				approval_repo,
 				result_repo,
+				artifact_store,
+				experiment_registry,
 			}),
 		}
 	}
@@ -131,6 +159,7 @@ impl RuntimeService {
 		task.next_node_index = 0;
 		task.pending_approval_id = None;
 		task.last_result = None;
+		self.start_experiment_run(&task, &request.goal, &format!("{:?}", decision.mode))?;
 
 		self.record_transition(&mut task, TaskState::Delegating, "delegate")?;
 		self.process_task(&mut task, mode)
@@ -213,6 +242,7 @@ impl RuntimeService {
 			self.metrics.inc_failures();
 			let terminal_state =
 				self.fail_task(&mut task, "approval rejected", ErrorClass::NonRetriable)?;
+			self.fail_experiment_run(&task, "approval rejected")?;
 			self.save_task(task)?;
 
 			Ok(ResponseEnvelope {
@@ -226,6 +256,25 @@ impl RuntimeService {
 
 	pub fn metrics_snapshot(&self) -> MetricsSnapshot {
 		self.metrics.snapshot()
+	}
+
+	pub fn list_artifacts(&self, task_id: &TaskId) -> Result<Vec<Artifact>, RuntimeError> {
+		let state = self.lock_state()?;
+		state
+			.artifact_store
+			.list_by_task(task_id)
+			.map_err(|error| RuntimeError::new(error.to_string()))
+	}
+
+	pub fn get_experiment_run(
+		&self,
+		task_id: &TaskId,
+	) -> Result<Option<ExperimentRun>, RuntimeError> {
+		let state = self.lock_state()?;
+		state
+			.experiment_registry
+			.load_by_task(task_id)
+			.map_err(|error| RuntimeError::new(error.to_string()))
 	}
 
 	fn record_transition(
@@ -300,14 +349,20 @@ impl RuntimeService {
 
 		self.record_transition(task, TaskState::Aggregating, "aggregate")?;
 		self.record_transition(task, TaskState::Succeeded, "done")?;
-		let _ = self.metrics.snapshot();
+		let result_count = self.list_results(&task.task_id)?.len();
+		self.complete_experiment_run(task, result_count)?;
+		let artifacts = self
+			.list_artifacts(&task.task_id)?
+			.into_iter()
+			.map(|artifact| artifact.uri)
+			.collect();
 		self.save_task(task.clone())?;
 
 		Ok(ResponseEnvelope {
 			request_id,
 			status: ResponseStatus::Succeeded,
 			message: "task succeeded".to_string(),
-			artifacts: vec!["artifact://result/1".to_string()],
+			artifacts,
 		})
 	}
 
@@ -355,11 +410,92 @@ impl RuntimeService {
 			.map_err(|error| RuntimeError::new(error.to_string()))
 	}
 
+	fn persist_result_artifact(&self, result: &ResultEnvelope) -> Result<Artifact, RuntimeError> {
+		let mut state = self.lock_state()?;
+		state
+			.artifact_store
+			.persist_result_artifact(result)
+			.map_err(|error| RuntimeError::new(error.to_string()))
+	}
+
+	fn attach_artifact_to_experiment(
+		&self,
+		task_id: &TaskId,
+		artifact_id: ArtifactId,
+	) -> Result<(), RuntimeError> {
+		let mut state = self.lock_state()?;
+		state
+			.experiment_registry
+			.attach_artifact(task_id, artifact_id)
+			.map(|_| ())
+			.map_err(|error| RuntimeError::new(error.to_string()))
+	}
+
+	fn list_results(&self, task_id: &TaskId) -> Result<Vec<ResultEnvelope>, RuntimeError> {
+		let state = self.lock_state()?;
+		state
+			.result_repo
+			.list_results(task_id)
+			.map_err(|error| RuntimeError::new(error.to_string()))
+	}
+
+	fn start_experiment_run(
+		&self,
+		task: &Task,
+		goal: &str,
+		strategy: &str,
+	) -> Result<(), RuntimeError> {
+		let mut state = self.lock_state()?;
+		state
+			.experiment_registry
+			.start_run(&task.task_id, &task.request_id, goal, strategy)
+			.map_err(|error| RuntimeError::new(error.to_string()))?;
+		self.metrics.inc_experiments_started();
+		Ok(())
+	}
+
+	fn complete_experiment_run(
+		&self,
+		task: &Task,
+		result_count: usize,
+	) -> Result<(), RuntimeError> {
+		let mut state = self.lock_state()?;
+		state
+			.experiment_registry
+			.complete_run(
+				&task.task_id,
+				"task succeeded",
+				vec![
+					ExperimentMetric {
+						name: "completed_nodes".to_string(),
+						value: task.completed_nodes.len() as f64,
+					},
+					ExperimentMetric {
+						name: "validated_results".to_string(),
+						value: result_count as f64,
+					},
+				],
+			)
+			.map_err(|error| RuntimeError::new(error.to_string()))?;
+		self.metrics.inc_experiments_succeeded();
+		Ok(())
+	}
+
+	fn fail_experiment_run(&self, task: &Task, reason: &str) -> Result<(), RuntimeError> {
+		let mut state = self.lock_state()?;
+		state
+			.experiment_registry
+			.fail_run(&task.task_id, reason)
+			.map_err(|error| RuntimeError::new(error.to_string()))?;
+		self.metrics.inc_experiments_failed();
+		Ok(())
+	}
+
 	fn collect_upstream_results(
 		&self,
 		task: &Task,
-		node_id: &roku_common_types::NodeId,
-	) -> Result<Vec<roku_common_types::ResultEnvelope>, RuntimeError> {
+		node_id: &NodeId,
+	) -> Result<Vec<ResultEnvelope>, RuntimeError> {
 		let graph = task
 			.graph
 			.as_ref()
@@ -398,6 +534,44 @@ impl RuntimeService {
 		}
 
 		Ok(results)
+	}
+
+	fn load_artifacts_for_result(
+		&self,
+		result: &ResultEnvelope,
+	) -> Result<Vec<Artifact>, RuntimeError> {
+		let state = self.lock_state()?;
+		let mut artifacts = Vec::new();
+
+		for evidence in result
+			.evidence
+			.iter()
+			.filter(|item| item.kind == "artifact_ref")
+		{
+			if let Some(artifact) = state
+				.artifact_store
+				.load_by_uri(&evidence.value)
+				.map_err(|error| RuntimeError::new(error.to_string()))?
+			{
+				artifacts.push(artifact);
+			}
+		}
+
+		Ok(artifacts)
+	}
+
+	fn collect_validation_evidence(
+		&self,
+		task: &Task,
+		node_id: &NodeId,
+	) -> Result<Vec<ValidationEvidenceSet>, RuntimeError> {
+		let results = self.collect_upstream_results(task, node_id)?;
+		let mut evidence_sets = Vec::with_capacity(results.len());
+		for result in results {
+			let artifacts = self.load_artifacts_for_result(&result)?;
+			evidence_sets.push(ValidationEvidenceSet { result, artifacts });
+		}
+		Ok(evidence_sets)
 	}
 
 	fn process_execution_node(
@@ -441,6 +615,7 @@ impl RuntimeService {
 				task.attempts = self.orchestrator.config.max_attempts.saturating_sub(1);
 			}
 			let terminal_state = self.fail_task(task, "capability denied", ErrorClass::Security)?;
+			self.fail_experiment_run(task, "capability denied")?;
 			self.save_task(task.clone())?;
 
 			return Ok(Some(ResponseEnvelope {
@@ -455,11 +630,19 @@ impl RuntimeService {
 			self.record_transition(task, TaskState::Executing, "execute")?;
 		}
 		let mut result = self.runtime.execute(&spec, node);
+		let artifact = self.persist_result_artifact(&result)?;
 		if matches!(mode, RunMode::MissingEvidence | RunMode::RetryExhausted) {
 			result.evidence.clear();
+		} else {
+			result.evidence.push(EvidenceItem {
+				kind: "artifact_ref".to_string(),
+				value: artifact.uri.clone(),
+			});
 		}
 
 		self.save_result(result.clone())?;
+		self.attach_artifact_to_experiment(&task.task_id, artifact.artifact_id.clone())?;
+		self.metrics.inc_artifacts();
 		task.last_result = Some(result);
 		self.mark_node_completed(task, node);
 		Ok(None)
@@ -502,16 +685,16 @@ impl RuntimeService {
 		node: &TaskNode,
 		mode: RunMode,
 	) -> Result<Option<ResponseEnvelope>, RuntimeError> {
-		let results = self.collect_upstream_results(task, &node.node_id)?;
-		if results.is_empty() {
+		let evidence_sets = self.collect_validation_evidence(task, &node.node_id)?;
+		if evidence_sets.is_empty() {
 			return Err(RuntimeError::new(
 				"validation node reached before upstream execution results",
 			));
 		}
 		self.record_transition(task, TaskState::Validating, "validate")?;
 		let mut failures = Vec::new();
-		for result in &results {
-			let report = self.validator.validate(result);
+		for evidence_set in &evidence_sets {
+			let report = self.validator.validate_evidence_set(evidence_set);
 			if !report.accepted {
 				failures.extend(report.failures);
 			}
@@ -524,6 +707,7 @@ impl RuntimeService {
 			}
 			let terminal_state =
 				self.fail_task(task, "validation failed", ErrorClass::Validation)?;
+			self.fail_experiment_run(task, &failures.join(", "))?;
 			self.save_task(task.clone())?;
 
 			return Ok(Some(ResponseEnvelope {
@@ -534,12 +718,12 @@ impl RuntimeService {
 			}));
 		}
 
-		for result in &results {
+		for evidence_set in &evidence_sets {
 			self.audit_sink
 				.record(AuditRecord {
-					actor: result.producer.clone(),
+					actor: evidence_set.result.producer.clone(),
 					action: "validate".to_string(),
-					resource: result.schema_version.clone(),
+					resource: evidence_set.result.schema_version.clone(),
 					outcome: "accepted".to_string(),
 				})
 				.map_err(|error| RuntimeError::new(error.to_string()))?;

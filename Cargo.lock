@@ -1073,9 +1073,11 @@ version = "0.1.0"
 dependencies = [
  "roku-agent-instance-factory",
  "roku-agent-runtime",
+ "roku-artifact-store",
  "roku-capability-auth",
  "roku-common-types",
  "roku-execution-graph-builder",
+ "roku-experiment-registry",
  "roku-observability",
  "roku-orchestrator",
  "roku-planning-engine",
