@@ -51,7 +51,9 @@ pub struct TelegramBotClient {
 
 impl TelegramBotClient {
 	pub fn new(config: TelegramBotConfig) -> Result<Self, TelegramTransportError> {
-		let client = Client::builder().build()?;
+		let client = Client::builder()
+			.build()
+			.map_err(TelegramTransportError::HttpClientBuild)?;
 		Ok(Self { client, config })
 	}
 
@@ -67,7 +69,8 @@ impl TelegramBotClient {
 				timeout: self.config.poll_timeout_seconds,
 				allowed_updates: vec!["message".to_string(), "callback_query".to_string()],
 			})
-			.send()?;
+			.send()
+			.map_err(TelegramTransportError::HttpRequest)?;
 		parse_api_response::<Vec<TelegramUpdate>>(response)
 	}
 
@@ -85,7 +88,8 @@ impl TelegramBotClient {
 				disable_web_page_preview: message.disable_web_page_preview,
 				reply_markup: message.reply_markup.clone(),
 			})
-			.send()?;
+			.send()
+			.map_err(TelegramTransportError::HttpRequest)?;
 		let _: serde_json::Value = parse_api_response(response)?;
 		Ok(())
 	}
@@ -102,7 +106,8 @@ impl TelegramBotClient {
 				callback_query_id: callback_query_id.to_string(),
 				text: Some(text.to_string()),
 			})
-			.send()?;
+			.send()
+			.map_err(TelegramTransportError::HttpRequest)?;
 		let _: serde_json::Value = parse_api_response(response)?;
 		Ok(())
 	}
@@ -124,7 +129,9 @@ pub enum TelegramTransportError {
 	#[error("invalid environment variable {key}: {message}")]
 	InvalidEnv { key: &'static str, message: String },
 	#[error("failed to construct telegram http client: {0}")]
-	HttpClient(#[from] reqwest::Error),
+	HttpClientBuild(reqwest::Error),
+	#[error("telegram http request failed: {0}")]
+	HttpRequest(reqwest::Error),
 	#[error("telegram api returned an error: {0}")]
 	Api(String),
 }
@@ -166,7 +173,9 @@ fn parse_api_response<T: for<'de> Deserialize<'de>>(
 	response: reqwest::blocking::Response,
 ) -> Result<T, TelegramTransportError> {
 	let status = response.status();
-	let body = response.text()?;
+	let body = response
+		.text()
+		.map_err(TelegramTransportError::HttpRequest)?;
 	if !status.is_success() {
 		return Err(TelegramTransportError::Api(format!(
 			"http status {status}: {body}"

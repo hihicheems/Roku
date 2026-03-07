@@ -1046,3 +1046,34 @@
 1. Replace the current stderr-first diagnostics with a structured logging / exporter path that still works well locally.
 2. Add Telegram rich artifact / experiment rendering and long-task progress callbacks.
 3. Extend `roku-llm-adapter` into coding-provider selection to close `LLM-08`.
+
+## 2026-03-07 - Session Milestone (Phase 29)
+
+### Completed Modules
+
+- `roku-connectors-telegram`
+  - Made the polling loop resilient to transient Telegram API failures so a single `getUpdates` or `sendMessage` error no longer terminates the bot process.
+  - Shortened approval callback payloads from the previous verbose format to a compact `ap:<action>:<id>` format.
+  - Split Telegram HTTP client errors into client-build vs request-time failures so runtime diagnostics are no longer misleading.
+- `roku-runtime-service`
+  - Replaced verbose approval ids with compact deterministic ids to keep Telegram callback payloads within the platform's 64-byte button-data limit.
+  - Added a regression test that explicitly guards the callback-data length constraint.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test -p roku-connectors-telegram -p roku-runtime-service -p roku-cmd -p roku-e2e`: passed
+- `cargo check --workspace`: passed
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed
+
+### Remaining Work
+
+- Telegram transport is now more robust, but long-task progress push and richer artifact / experiment rendering still remain.
+- Logging is still stderr-first and should eventually move onto a structured sink/exporter path.
+- Coding-provider routing still does not use the unified llm-adapter path.
+
+### Next Recommended Steps
+
+1. Add Telegram rich artifact / experiment rendering and long-task progress callbacks.
+2. Move stderr-first diagnostics onto structured logging/exporters while keeping local usability.
+3. Extend `roku-llm-adapter` into coding-provider selection to close `LLM-08`.

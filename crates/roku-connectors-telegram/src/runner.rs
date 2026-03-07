@@ -46,7 +46,14 @@ impl TelegramPollingRunner {
 	{
 		let mut next_offset = None;
 		loop {
-			let updates = self.client.get_updates(next_offset)?;
+			let updates = match self.client.get_updates(next_offset) {
+				Ok(updates) => updates,
+				Err(error) => {
+					eprintln!("[telegram] poll_error={error}");
+					thread::sleep(Duration::from_millis(self.idle_backoff_ms));
+					continue;
+				}
+			};
 			if updates.is_empty() {
 				thread::sleep(Duration::from_millis(self.idle_backoff_ms));
 				continue;
@@ -54,7 +61,10 @@ impl TelegramPollingRunner {
 
 			for update in updates {
 				next_offset = Some(update.update_id.saturating_add(1));
-				self.process_update(&handler, update)?;
+				if let Err(error) = self.process_update(&handler, update) {
+					eprintln!("[telegram] process_error={error}");
+					thread::sleep(Duration::from_millis(self.idle_backoff_ms));
+				}
 			}
 		}
 	}

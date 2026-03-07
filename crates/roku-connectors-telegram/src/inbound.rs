@@ -153,19 +153,19 @@ impl TelegramConnector {
 }
 
 pub(crate) fn approval_callback_data(approval_id: &ApprovalId, approved: bool) -> String {
-	let action = if approved { "approve" } else { "reject" };
-	format!("approval:{action}:{}", approval_id.0)
+	let action = if approved { "a" } else { "r" };
+	format!("ap:{action}:{}", approval_id.0)
 }
 
 fn parse_approval_callback_data(data: &str) -> Result<(ApprovalId, bool), TelegramConnectorError> {
 	let mut parts = data.splitn(3, ':');
-	if parts.next() != Some("approval") {
+	if parts.next() != Some("ap") {
 		return Err(TelegramConnectorError::InvalidCallbackData);
 	}
 
 	let approved = match parts.next() {
-		Some("approve") => true,
-		Some("reject") => false,
+		Some("a") => true,
+		Some("r") => false,
 		Some(_) => return Err(TelegramConnectorError::UnsupportedCallbackAction),
 		None => return Err(TelegramConnectorError::InvalidCallbackData),
 	};
@@ -277,7 +277,7 @@ mod tests {
 						}),
 						text: Some("approve".to_string()),
 					}),
-					data: Some("approval:approve:approval-42".to_string()),
+					data: Some("ap:a:approval-42".to_string()),
 				}),
 			})
 			.expect("callback query should map to approval action");
@@ -321,7 +321,7 @@ mod tests {
 						from: None,
 						text: None,
 					}),
-					data: Some("approval:hold:approval-42".to_string()),
+					data: Some("ap:x:approval-42".to_string()),
 				}),
 			})
 			.expect_err("invalid callback action should fail");
