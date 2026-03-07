@@ -8,6 +8,7 @@ use crate::runtime::build_live_runtime_service_from_env;
 pub fn run_telegram_bot_from_env() -> Result<(), CommandError> {
 	let service = Arc::new(build_live_runtime_service_from_env()?);
 	let runner = roku_connectors_telegram::TelegramPollingRunner::from_env()?;
+	eprintln!("[roku-cmd] starting telegram bot polling loop");
 	runner
 		.run(RuntimeServiceTelegramHandler { service })
 		.map_err(CommandError::TelegramTransport)

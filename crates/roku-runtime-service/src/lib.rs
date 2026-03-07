@@ -234,17 +234,37 @@ impl RuntimeService {
 		mode: RunMode,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		self.metrics.inc_requests();
+		eprintln!(
+			"[runtime] request_id={} session_id={} mode={:?} goal={}",
+			request.request_id.0,
+			request.session_id,
+			mode,
+			truncate_for_log(&request.goal, 200),
+		);
 		let mut task = self.orchestrator.create_task(&request);
 
 		self.record_transition(&mut task, TaskState::Planning, "start planning")?;
 
-		let decision = self
-			.planning_engine
-			.select(&planning_input_for_request(&request));
+		let planning_input = planning_input_for_request(&request);
+		let decision = self.planning_engine.select(&planning_input);
 		let planning_mode_label = format!("{:?}", decision.mode);
+		eprintln!(
+			"[runtime] request_id={} planning_mode={} complexity_score={} uncertainty_score={} risk_level={:?} budget_tokens={}",
+			request.request_id.0,
+			planning_mode_label,
+			planning_input.complexity_score,
+			planning_input.uncertainty_score,
+			planning_input.risk_level,
+			planning_input.budget_tokens,
+		);
 		self.metrics.inc_planning_run();
 		self.metrics.inc_planning_strategy(&planning_mode_label);
 		let mut outline = self.planner.build_outline(&request, &decision);
+		eprintln!(
+			"[runtime] request_id={} outline_steps={}",
+			request.request_id.0,
+			outline.steps.len(),
+		);
 		if matches!(mode, RunMode::ApprovalRequired)
 			&& let Some(step) = outline.steps.last_mut()
 		{
@@ -506,4 +526,14 @@ fn score_from_hits(base: u64, hits: u8, divisor: u64, max_score: u8) -> u8 {
 		.saturating_add(u64::from(hits).saturating_mul(2));
 	let capped = derived.min(u64::from(max_score));
 	u8::try_from(capped).unwrap_or(max_score)
+}
+
+fn truncate_for_log(value: &str, max_chars: usize) -> String {
+	let mut chars = value.chars();
+	let truncated = chars.by_ref().take(max_chars).collect::<String>();
+	if chars.next().is_some() {
+		format!("{truncated}...")
+	} else {
+		truncated
+	}
 }

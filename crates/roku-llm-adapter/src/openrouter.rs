@@ -5,7 +5,6 @@ use std::time::Instant;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use roku_observability::Metrics;
-use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;
 
@@ -146,13 +145,36 @@ impl LlmProvider for OpenRouterProvider {
 			.text()
 			.map_err(|error| format!("failed to read response body: {error}"))?;
 		if !status.is_success() {
+			eprintln!(
+				"[openrouter] provider={} model={} status={} body={}",
+				OPENROUTER_PROVIDER,
+				model.model_id,
+				status,
+				truncate_for_log(&response_body, 800),
+			);
 			return Err(format!(
 				"openrouter returned status {status}: {response_body}"
 			));
 		}
 
-		let parsed = parse_response(&response_body)?;
+		let parsed = parse_response(&response_body).inspect_err(|error| {
+			eprintln!(
+				"[openrouter] provider={} model={} parse_error={} body={}",
+				OPENROUTER_PROVIDER,
+				model.model_id,
+				error,
+				truncate_for_log(&response_body, 800),
+			);
+		})?;
 		let latency_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+		eprintln!(
+			"[openrouter] provider={} model={} status=ok latency_ms={} prompt_tokens={} output_tokens={}",
+			OPENROUTER_PROVIDER,
+			model.model_id,
+			latency_ms,
+			parsed.prompt_tokens,
+			parsed.output_tokens,
+		);
 		Ok(ProviderResponse {
 			output: parsed.output,
 			prompt_tokens: parsed.prompt_tokens,
@@ -209,37 +231,30 @@ struct ParsedOpenRouterResponse {
 }
 
 fn parse_response(response_body: &str) -> Result<ParsedOpenRouterResponse, String> {
-	let response: OpenRouterResponse = serde_json::from_str(response_body)
+	let response: Value = serde_json::from_str(response_body)
 		.map_err(|error| format!("invalid response json: {error}"))?;
-	let choice = response
-		.choices
-		.into_iter()
-		.next()
-		.ok_or_else(|| "openrouter response contained no choices".to_string())?;
-	let output = match choice.message.content {
-		OpenRouterMessageContent::Text(text) => text,
-		OpenRouterMessageContent::Parts(parts) => {
-			let text = parts
-				.into_iter()
-				.filter_map(|part| part.text)
-				.collect::<Vec<_>>()
-				.join("");
-			if text.is_empty() {
-				return Err("openrouter response content parts contained no text".to_string());
-			}
-			text
-		}
-	};
+	let message = response
+		.get("choices")
+		.and_then(Value::as_array)
+		.and_then(|choices| choices.first())
+		.and_then(|choice| choice.get("message"))
+		.ok_or_else(|| "openrouter response contained no message payload".to_string())?;
+	let output = extract_content_text(message).ok_or_else(|| {
+		format!(
+			"openrouter response message contained no readable text: {}",
+			truncate_for_log(&message.to_string(), 400)
+		)
+	})?;
 
 	let prompt_tokens = response
-		.usage
-		.as_ref()
-		.and_then(|usage| usage.prompt_tokens)
+		.get("usage")
+		.and_then(|usage| usage.get("prompt_tokens"))
+		.and_then(Value::as_u64)
 		.unwrap_or_else(|| estimate_prompt_tokens(&output));
 	let output_tokens = response
-		.usage
-		.as_ref()
-		.and_then(|usage| usage.completion_tokens)
+		.get("usage")
+		.and_then(|usage| usage.get("completion_tokens"))
+		.and_then(Value::as_u64)
 		.unwrap_or_else(|| estimate_prompt_tokens(&output));
 
 	Ok(ParsedOpenRouterResponse {
@@ -249,42 +264,45 @@ fn parse_response(response_body: &str) -> Result<ParsedOpenRouterResponse, Strin
 	})
 }
 
-#[derive(Debug, Deserialize)]
-struct OpenRouterResponse {
-	choices: Vec<OpenRouterChoice>,
-	#[serde(default)]
-	usage: Option<OpenRouterUsage>,
+fn extract_content_text(content: &Value) -> Option<String> {
+	match content {
+		Value::String(text) => Some(text.clone()),
+		Value::Array(parts) => {
+			let text = parts
+				.iter()
+				.filter_map(extract_content_text)
+				.collect::<Vec<_>>()
+				.join("");
+			if text.trim().is_empty() {
+				None
+			} else {
+				Some(text)
+			}
+		}
+		Value::Object(object) => object
+			.get("text")
+			.and_then(Value::as_str)
+			.map(str::to_string)
+			.or_else(|| object.get("content").and_then(extract_content_text))
+			.or_else(|| {
+				object
+					.get("refusal")
+					.and_then(Value::as_str)
+					.map(str::to_string)
+			})
+			.or_else(|| object.get("reasoning").and_then(extract_content_text)),
+		_ => None,
+	}
 }
 
-#[derive(Debug, Deserialize)]
-struct OpenRouterChoice {
-	message: OpenRouterMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenRouterMessage {
-	content: OpenRouterMessageContent,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum OpenRouterMessageContent {
-	Text(String),
-	Parts(Vec<OpenRouterContentPart>),
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenRouterContentPart {
-	#[serde(default)]
-	text: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenRouterUsage {
-	#[serde(default)]
-	prompt_tokens: Option<u64>,
-	#[serde(default)]
-	completion_tokens: Option<u64>,
+fn truncate_for_log(value: &str, max_chars: usize) -> String {
+	let mut chars = value.chars();
+	let truncated = chars.by_ref().take(max_chars).collect::<String>();
+	if chars.next().is_some() {
+		format!("{truncated}...")
+	} else {
+		truncated
+	}
 }
 
 fn env_var_required(key: &'static str) -> Result<String, OpenRouterBootstrapError> {
@@ -396,5 +414,35 @@ mod tests {
 		assert_eq!(parsed.output, "hello world");
 		assert_eq!(parsed.prompt_tokens, 12);
 		assert_eq!(parsed.output_tokens, 6);
+	}
+
+	#[test]
+	fn parse_response_reads_object_content_payload() {
+		let parsed = parse_response(
+			r#"{
+				"choices":[{"message":{"content":{"type":"text","text":"hello from object payload"}}}],
+				"usage":{"prompt_tokens":14,"completion_tokens":5}
+			}"#,
+		)
+		.expect("object-shaped content should parse");
+
+		assert_eq!(parsed.output, "hello from object payload");
+		assert_eq!(parsed.prompt_tokens, 14);
+		assert_eq!(parsed.output_tokens, 5);
+	}
+
+	#[test]
+	fn parse_response_falls_back_to_reasoning_when_content_is_null() {
+		let parsed = parse_response(
+			r#"{
+				"choices":[{"message":{"role":"assistant","content":null,"reasoning":"hello from reasoning"}}],
+				"usage":{"prompt_tokens":9,"completion_tokens":3}
+			}"#,
+		)
+		.expect("reasoning fallback should parse");
+
+		assert_eq!(parsed.output, "hello from reasoning");
+		assert_eq!(parsed.prompt_tokens, 9);
+		assert_eq!(parsed.output_tokens, 3);
 	}
 }

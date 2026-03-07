@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+dotenvy = "0.15"
 roku-agent-runtime = { path = "../roku-agent-runtime" }
 roku-api-gateway = { path = "../roku-api-gateway" }
 roku-common-types = { path = "../roku-common-types" }

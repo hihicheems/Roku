@@ -1010,3 +1010,39 @@
 1. Extend `roku-llm-adapter` into coding-provider selection so `LLM-08` is fully closed.
 2. Add tool-runtime timeout / deny-rate / cost telemetry to complete the remaining observability gap.
 3. Add richer Telegram artifact / experiment rendering and progress callbacks.
+
+## 2026-03-07 - Session Milestone (Phase 28)
+
+### Completed Modules
+
+- `roku-llm-adapter`
+  - Reworked OpenRouter response parsing away from the previous rigid untagged enum so the adapter now accepts string content, array content, object-shaped content, and `reasoning` fallback when providers return `content: null`.
+  - Added runtime-side stderr diagnostics for provider HTTP failures, parse failures, latency, and token counts.
+- `roku-runtime-service`
+  - Added minimal stderr request/planning logs so live execution now emits request id, planning mode, derived planning input, and outline step count.
+- `roku-connectors-telegram`
+  - Added stderr diagnostics around inbound update handling and outbound response delivery so Telegram polling runs are debuggable from the server side.
+- `roku-cmd`
+  - Added explicit bot startup log for the Telegram polling command.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test -p roku-llm-adapter -p roku-connectors-telegram -p roku-runtime-service -p roku-cmd`: passed
+- `cargo check --workspace`: passed
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed
+- Live smoke:
+  - `cargo run -p roku-cmd -- live-once '哎哎哎！你现在是 kiki 还是 roku 呀？'`
+  - Result: `我是 roku。`
+
+### Remaining Work
+
+- Logging is now minimally useful, but it is still stderr-first rather than a full structured sink/exporter.
+- Telegram long-task progress push and richer artifact / experiment rendering remain open.
+- Coding-provider routing still does not use the unified llm-adapter selection path.
+
+### Next Recommended Steps
+
+1. Replace the current stderr-first diagnostics with a structured logging / exporter path that still works well locally.
+2. Add Telegram rich artifact / experiment rendering and long-task progress callbacks.
+3. Extend `roku-llm-adapter` into coding-provider selection to close `LLM-08`.
