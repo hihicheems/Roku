@@ -970,6 +970,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "roku-artifact-store"
+version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "roku-capability-auth"
 version = "0.1.0"
 dependencies = [
@@ -1024,6 +1033,15 @@ name = "roku-execution-graph-builder"
 version = "0.1.0"
 dependencies = [
  "roku-common-types",
+]
+
+[[package]]
+name = "roku-experiment-registry"
+version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
