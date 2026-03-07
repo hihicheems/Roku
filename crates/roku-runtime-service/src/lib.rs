@@ -15,7 +15,7 @@ use roku_orchestrator::Orchestrator;
 use roku_planning_engine::{DefaultPlanningEngine, PlanningInput, RiskLevel, StrategySelector};
 use roku_state_store::{
 	ApprovalRepository, EventRepository, InMemoryApprovalRepository, InMemoryEventRepository,
-	InMemoryTaskRepository, TaskRepository,
+	InMemoryResultRepository, InMemoryTaskRepository, ResultRepository, TaskRepository,
 };
 use roku_task_planner::{SimpleTaskPlanner, TaskPlanner};
 use roku_validation_plane::ValidationPipeline;
@@ -35,6 +35,7 @@ struct RuntimeState {
 	task_repo: Box<dyn TaskRepository + Send>,
 	event_repo: Box<dyn EventRepository + Send>,
 	approval_repo: Box<dyn ApprovalRepository + Send>,
+	result_repo: Box<dyn ResultRepository + Send>,
 }
 
 pub struct RuntimeService {
@@ -55,6 +56,7 @@ impl RuntimeService {
 		task_repo: Box<dyn TaskRepository + Send>,
 		event_repo: Box<dyn EventRepository + Send>,
 		approval_repo: Box<dyn ApprovalRepository + Send>,
+		result_repo: Box<dyn ResultRepository + Send>,
 		audit_sink: Arc<dyn AuditSink>,
 	) -> Self {
 		Self {
@@ -72,6 +74,7 @@ impl RuntimeService {
 				task_repo,
 				event_repo,
 				approval_repo,
+				result_repo,
 			}),
 		}
 	}
@@ -81,6 +84,7 @@ impl RuntimeService {
 			Box::new(InMemoryTaskRepository::default()),
 			Box::new(InMemoryEventRepository::default()),
 			Box::new(InMemoryApprovalRepository::default()),
+			Box::new(InMemoryResultRepository::default()),
 			Arc::new(InMemoryAuditSink::default()),
 		)
 	}
@@ -337,6 +341,59 @@ impl RuntimeService {
 			.map_err(|error| RuntimeError::new(error.to_string()))
 	}
 
+	fn save_result(&self, result: roku_common_types::ResultEnvelope) -> Result<(), RuntimeError> {
+		let mut state = self.lock_state()?;
+		state
+			.result_repo
+			.save_result(result)
+			.map_err(|error| RuntimeError::new(error.to_string()))
+	}
+
+	fn collect_upstream_results(
+		&self,
+		task: &Task,
+		node_id: &roku_common_types::NodeId,
+	) -> Result<Vec<roku_common_types::ResultEnvelope>, RuntimeError> {
+		let graph = task
+			.graph
+			.as_ref()
+			.ok_or_else(|| RuntimeError::new("task graph is missing"))?;
+		let mut pending = graph
+			.edges
+			.iter()
+			.filter(|edge| edge.to == *node_id)
+			.map(|edge| edge.from.clone())
+			.collect::<Vec<_>>();
+		let mut visited = std::collections::HashSet::new();
+		let mut results = Vec::new();
+		let state = self.lock_state()?;
+
+		while let Some(current) = pending.pop() {
+			if !visited.insert(current.0.clone()) {
+				continue;
+			}
+
+			if let Some(result) = state
+				.result_repo
+				.load_result(&task.task_id, &current)
+				.map_err(|error| RuntimeError::new(error.to_string()))?
+			{
+				results.push(result);
+				continue;
+			}
+
+			pending.extend(
+				graph
+					.edges
+					.iter()
+					.filter(|edge| edge.to == current)
+					.map(|edge| edge.from.clone()),
+			);
+		}
+
+		Ok(results)
+	}
+
 	fn process_execution_node(
 		&self,
 		task: &mut Task,
@@ -396,6 +453,7 @@ impl RuntimeService {
 			result.evidence.clear();
 		}
 
+		self.save_result(result.clone())?;
 		task.last_result = Some(result);
 		self.mark_node_completed(task, node);
 		Ok(None)
@@ -438,13 +496,21 @@ impl RuntimeService {
 		node: &TaskNode,
 		mode: RunMode,
 	) -> Result<Option<ResponseEnvelope>, RuntimeError> {
-		let result = task
-			.last_result
-			.clone()
-			.ok_or_else(|| RuntimeError::new("validation node reached before execution result"))?;
+		let results = self.collect_upstream_results(task, &node.node_id)?;
+		if results.is_empty() {
+			return Err(RuntimeError::new(
+				"validation node reached before upstream execution results",
+			));
+		}
 		self.record_transition(task, TaskState::Validating, "validate")?;
-		let report = self.validator.validate(&result);
-		if !report.accepted {
+		let mut failures = Vec::new();
+		for result in &results {
+			let report = self.validator.validate(result);
+			if !report.accepted {
+				failures.extend(report.failures);
+			}
+		}
+		if !failures.is_empty() {
 			self.metrics.inc_failures();
 			self.metrics.inc_validation_failures();
 			if matches!(mode, RunMode::RetryExhausted) {
@@ -457,19 +523,21 @@ impl RuntimeService {
 			return Ok(Some(ResponseEnvelope {
 				request_id: task.request_id.clone(),
 				status: ResponseStatus::Failed,
-				message: failure_message(&report.failures.join(", "), terminal_state),
+				message: failure_message(&failures.join(", "), terminal_state),
 				artifacts: Vec::new(),
 			}));
 		}
 
-		self.audit_sink
-			.record(AuditRecord {
-				actor: result.producer.clone(),
-				action: "validate".to_string(),
-				resource: result.schema_version.clone(),
-				outcome: "accepted".to_string(),
-			})
-			.map_err(|error| RuntimeError::new(error.to_string()))?;
+		for result in &results {
+			self.audit_sink
+				.record(AuditRecord {
+					actor: result.producer.clone(),
+					action: "validate".to_string(),
+					resource: result.schema_version.clone(),
+					outcome: "accepted".to_string(),
+				})
+				.map_err(|error| RuntimeError::new(error.to_string()))?;
+		}
 		self.mark_node_completed(task, node);
 
 		Ok(None)
@@ -519,7 +587,10 @@ fn ticket_status_label(status: ApprovalStatus) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-	use roku_common_types::{RequestId, ResponseStatus};
+	use roku_common_types::{
+		EvidenceItem, NodeId, RequestId, ResponseStatus, ResultEnvelope, ResultStatus, Task,
+		TaskEdge, TaskGraph, TaskId, TaskNode, TaskNodeKind, TaskState,
+	};
 
 	use super::*;
 
@@ -671,5 +742,75 @@ mod tests {
 			},
 		);
 		assert!(duplicate.is_err());
+	}
+
+	#[test]
+	fn validation_collects_results_through_approval_nodes() {
+		let service = RuntimeService::default();
+		let task = Task {
+			task_id: TaskId("task-1".to_string()),
+			request_id: RequestId("req-1".to_string()),
+			state: TaskState::Executing,
+			attempts: 0,
+			completed_nodes: vec![NodeId("extract".to_string())],
+			next_node_index: 1,
+			pending_approval_id: None,
+			last_result: None,
+			graph: Some(TaskGraph {
+				task_id: TaskId("task-1".to_string()),
+				nodes: vec![
+					TaskNode {
+						node_id: NodeId("extract".to_string()),
+						kind: TaskNodeKind::Execution,
+						description: "extract".to_string(),
+						capabilities: Vec::new(),
+					},
+					TaskNode {
+						node_id: NodeId("extract-approval".to_string()),
+						kind: TaskNodeKind::Approval,
+						description: "approval".to_string(),
+						capabilities: Vec::new(),
+					},
+					TaskNode {
+						node_id: NodeId("validate".to_string()),
+						kind: TaskNodeKind::Validation,
+						description: "validate".to_string(),
+						capabilities: Vec::new(),
+					},
+				],
+				edges: vec![
+					TaskEdge {
+						from: NodeId("extract".to_string()),
+						to: NodeId("extract-approval".to_string()),
+					},
+					TaskEdge {
+						from: NodeId("extract-approval".to_string()),
+						to: NodeId("validate".to_string()),
+					},
+				],
+			}),
+		};
+		service
+			.save_result(ResultEnvelope {
+				task_id: TaskId("task-1".to_string()),
+				node_id: NodeId("extract".to_string()),
+				producer: "agent".to_string(),
+				schema_version: "result.v1".to_string(),
+				status: ResultStatus::Ok,
+				payload: "payload".to_string(),
+				evidence: vec![EvidenceItem {
+					kind: "artifact_ref".to_string(),
+					value: "artifact://1".to_string(),
+				}],
+				confidence: 0.9,
+			})
+			.expect("result should be persisted");
+
+		let results = service
+			.collect_upstream_results(&task, &NodeId("validate".to_string()))
+			.expect("upstream results should resolve through approval nodes");
+
+		assert_eq!(results.len(), 1);
+		assert_eq!(results[0].node_id.0, "extract");
 	}
 }
