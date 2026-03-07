@@ -13,6 +13,9 @@ pub struct NodeId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RequestId(pub String);
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ApprovalId(pub String);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestEnvelope {
 	pub request_id: RequestId,
@@ -76,6 +79,12 @@ pub struct Task {
 	pub request_id: RequestId,
 	pub state: TaskState,
 	pub attempts: u32,
+	#[serde(default)]
+	pub next_node_index: usize,
+	#[serde(default)]
+	pub pending_approval_id: Option<ApprovalId>,
+	#[serde(default)]
+	pub last_result: Option<ResultEnvelope>,
 	pub graph: Option<TaskGraph>,
 }
 
@@ -180,6 +189,32 @@ pub struct ResultEnvelope {
 pub struct ValidationReport {
 	pub accepted: bool,
 	pub failures: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApprovalStatus {
+	Pending,
+	Approved,
+	Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalDecision {
+	pub actor: String,
+	pub approved: bool,
+	pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalTicket {
+	pub approval_id: ApprovalId,
+	pub task_id: TaskId,
+	pub request_id: RequestId,
+	pub node_id: NodeId,
+	pub summary: String,
+	pub status: ApprovalStatus,
+	pub decided_by: Option<String>,
+	pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

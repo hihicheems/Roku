@@ -37,6 +37,9 @@ impl Orchestrator {
 			request_id: request.request_id.clone(),
 			state: TaskState::Queued,
 			attempts: 0,
+			next_node_index: 0,
+			pending_approval_id: None,
+			last_result: None,
 			graph: None,
 		}
 	}

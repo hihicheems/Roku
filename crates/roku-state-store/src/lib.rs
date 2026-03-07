@@ -176,6 +176,9 @@ mod tests {
 			request_id: RequestId("req-1".to_string()),
 			state: TaskState::Queued,
 			attempts: 0,
+			next_node_index: 0,
+			pending_approval_id: None,
+			last_result: None,
 			graph: None,
 		}
 	}
