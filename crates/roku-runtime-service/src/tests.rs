@@ -1,3 +1,4 @@
+use roku_agent_runtime::{GenericAgentRuntime, RuntimeWorker};
 use roku_common_types::{
 	AggregationMode, ApprovalDecision, ApprovalId, EvidenceItem, JoinPolicy, NodeId,
 	RequestEnvelope, RequestId, ResponseStatus, ResultEnvelope, ResultStatus, Task, TaskEdge,
@@ -134,6 +135,52 @@ fn service_reports_capability_denied() {
 	assert!(response.message.contains("capability denied"));
 	let metrics = service.metrics_snapshot();
 	assert_eq!(metrics.experiments_failed_total, 1);
+}
+
+#[test]
+fn service_surfaces_execution_failure_reason_before_validation() {
+	struct FailingWorker;
+
+	impl RuntimeWorker for FailingWorker {
+		fn worker_id(&self) -> &'static str {
+			"failing-worker"
+		}
+
+		fn supports(&self, _capabilities: &[String]) -> bool {
+			true
+		}
+
+		fn execute(
+			&self,
+			spec: &roku_common_types::AgentInstanceSpec,
+			node: &TaskNode,
+		) -> ResultEnvelope {
+			ResultEnvelope {
+				task_id: spec.context.task_id.clone(),
+				node_id: node.node_id.clone(),
+				producer: spec.instance_id.clone(),
+				schema_version: "result.v1".to_string(),
+				status: ResultStatus::Error,
+				payload: r#"{"message":"openrouter returned status 400: account default model is not configured"}"#.to_string(),
+				evidence: vec![EvidenceItem {
+					kind: "runtime".to_string(),
+					value: "failing-worker".to_string(),
+				}],
+				confidence: 0.0,
+			}
+		}
+	}
+
+	let mut runtime = GenericAgentRuntime::default();
+	runtime.register_worker(255, FailingWorker);
+	let service = RuntimeService::in_memory_with_agent_runtime(runtime);
+	let response = service
+		.execute(sample_request())
+		.expect("runtime service should return failure response");
+
+	assert_eq!(response.status, ResponseStatus::Failed);
+	assert!(response.message.contains("openrouter returned status 400"));
+	assert!(!response.message.contains("confidence below minimum"));
 }
 
 #[test]

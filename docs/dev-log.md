@@ -874,3 +874,43 @@
 1. Add a real Telegram polling runner and wire it to the live runtime path.
 2. Add `cargo clippy --workspace --all-targets -- -D warnings` after the Telegram integration lands.
 3. Continue with tool output schema enforcement and artifact/audit persistence.
+
+## 2026-03-07 - Session Milestone (Phase 24)
+
+### Completed Modules
+
+- `roku-connectors-telegram`
+  - Added a real blocking Telegram Bot API client with environment-backed configuration.
+  - Added a polling runner that converts inbound Telegram updates into `RequestEnvelope` values and sends formatted responses back to the originating chat.
+  - Switched outbound formatting to plain text by default so LLM output does not break Telegram Markdown parsing.
+- `roku-cmd`
+  - Split the crate into explicit `runtime.rs` and `bot.rs` modules.
+  - Added `live-once` and `telegram-bot` command paths.
+  - Added environment-backed OpenRouter runtime bootstrap for live execution.
+- `roku-runtime-service`
+  - Execution-node failures now surface their real tool/provider error instead of being masked by downstream validation failure text.
+- Live connectivity checks
+  - `cargo run -p roku-cmd -- live-once 'Reply with the single word OK.'` succeeded with the provided OpenRouter key and returned `OK`.
+  - Telegram `getMe` succeeded with the provided bot token; the bot identity resolved as `kikitest1024_bot`.
+- `roku-llm-adapter`
+  - Switched the default OpenRouter model fallback to the official free router `openrouter/free`, matching the current zero-cost bootstrap goal.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test -p roku-connectors-telegram -p roku-cmd -p roku-e2e`: passed
+- `cargo test -p roku-runtime-service`: passed
+- `cargo test -p roku-llm-adapter -p roku-cmd`: passed
+- `cargo clippy --workspace --all-targets -- -D warnings`: pending final rerun after docs sync
+
+### Remaining Work
+
+- Telegram polling is implemented, but long-task status push / approval callback interactions are still not implemented.
+- Planning still uses hard-coded heuristic inputs; it is not yet driven by live llm-adapter requests.
+- Tool output schema enforcement and artifact/audit persistence still need to be added on the tool-runtime side.
+
+### Next Recommended Steps
+
+1. Add `TR-08` and `TR-09` so live tool execution has output-schema validation and persisted audit/artifact records.
+2. Add Telegram approval callbacks and long-task status updates.
+3. Move planning inputs and richer reasoning paths onto the llm-adapter layer.

@@ -22,9 +22,13 @@ pub(crate) fn ticket_status_label(status: ApprovalStatus) -> &'static str {
 
 pub(crate) fn success_message(last_result: Option<&ResultEnvelope>) -> String {
 	match last_result {
-		Some(result) => extract_message(&result.payload).unwrap_or_else(|| result.payload.clone()),
+		Some(result) => result_message(result),
 		None => "task succeeded".to_string(),
 	}
+}
+
+pub(crate) fn result_message(result: &ResultEnvelope) -> String {
+	extract_message(&result.payload).unwrap_or_else(|| result.payload.clone())
 }
 
 fn extract_message(payload: &str) -> Option<String> {

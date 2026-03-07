@@ -1,12 +1,12 @@
 use roku_agent_runtime::AgentWorker;
 use roku_common_types::{
-	ErrorClass, EvidenceItem, ResponseEnvelope, ResponseStatus, RuntimeError, Task, TaskNode,
-	TaskNodeKind, TaskState,
+	ErrorClass, EvidenceItem, ResponseEnvelope, ResponseStatus, ResultStatus, RuntimeError, Task,
+	TaskNode, TaskNodeKind, TaskState,
 };
 use roku_execution_graph_builder::TaskGraphScheduler;
 use roku_observability::{AuditCorrelation, AuditRecord};
 
-use crate::helpers::{failure_message, success_message};
+use crate::helpers::{failure_message, result_message, success_message};
 use crate::{RunMode, RuntimeService};
 
 impl RuntimeService {
@@ -179,6 +179,25 @@ impl RuntimeService {
 		self.save_result(result.clone())?;
 		self.attach_artifact_to_experiment(&task.task_id, artifact.artifact_id.clone())?;
 		self.metrics.inc_artifacts();
+
+		if matches!(result.status, ResultStatus::Error) {
+			self.metrics.inc_failures();
+			if matches!(mode, RunMode::RetryExhausted) {
+				task.attempts = self.orchestrator.config.max_attempts.saturating_sub(1);
+			}
+			let reason = result_message(&result);
+			let terminal_state = self.fail_task(task, &reason, ErrorClass::Dependency)?;
+			self.fail_experiment_run(task, &reason)?;
+			self.save_task(task.clone())?;
+
+			return Ok(Some(ResponseEnvelope {
+				request_id: task.request_id.clone(),
+				status: ResponseStatus::Failed,
+				message: failure_message(&reason, terminal_state),
+				artifacts: vec![artifact.uri],
+			}));
+		}
+
 		task.last_result = Some(result);
 		self.mark_node_completed(task, node);
 		Ok(None)

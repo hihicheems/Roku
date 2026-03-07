@@ -2,6 +2,7 @@ use roku_common_types::{ResponseEnvelope, ResponseStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TelegramParseMode {
+	PlainText,
 	MarkdownV2,
 }
 
@@ -33,7 +34,16 @@ impl TelegramOutboundMessage {
 		Self {
 			chat_id,
 			text: lines.join("\n"),
-			parse_mode: TelegramParseMode::MarkdownV2,
+			parse_mode: TelegramParseMode::PlainText,
+			disable_web_page_preview: true,
+		}
+	}
+
+	pub fn from_error(chat_id: i64, message: &str) -> Self {
+		Self {
+			chat_id,
+			text: format!("Status: failed\nMessage: {message}"),
+			parse_mode: TelegramParseMode::PlainText,
 			disable_web_page_preview: true,
 		}
 	}
@@ -68,6 +78,15 @@ mod tests {
 		assert_eq!(message.chat_id, 1001);
 		assert!(message.text.contains("Status: succeeded"));
 		assert!(message.text.contains("artifact://task/result"));
-		assert_eq!(message.parse_mode, TelegramParseMode::MarkdownV2);
+		assert_eq!(message.parse_mode, TelegramParseMode::PlainText);
+	}
+
+	#[test]
+	fn outbound_message_formats_error_as_plain_text() {
+		let message = TelegramOutboundMessage::from_error(1001, "runtime exploded");
+		assert_eq!(message.chat_id, 1001);
+		assert!(message.text.contains("Status: failed"));
+		assert!(message.text.contains("runtime exploded"));
+		assert_eq!(message.parse_mode, TelegramParseMode::PlainText);
 	}
 }
