@@ -26,6 +26,7 @@ where
 	I: IntoIterator<Item = S>,
 	S: Into<String>,
 {
+	let _ = dotenvy::dotenv();
 	let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
 	match args.first().map(String::as_str) {
 		None => {

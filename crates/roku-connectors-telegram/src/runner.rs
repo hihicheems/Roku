@@ -81,9 +81,22 @@ impl TelegramPollingRunner {
 
 		match self.connector.interaction_from_update(update) {
 			Ok(TelegramInteraction::Request { chat_id, request }) => {
+				eprintln!(
+					"[telegram] update_type=request chat_id={} request_id={} goal={}",
+					chat_id,
+					request.request_id.0,
+					truncate_for_log(&request.goal, 160),
+				);
 				self.dispatch_response(chat_id, handler.handle_request(request))
 			}
 			Ok(TelegramInteraction::ApprovalDecision(action)) => {
+				eprintln!(
+					"[telegram] update_type=approval chat_id={} approval_id={} actor={} approved={}",
+					action.chat_id,
+					action.approval_id.0,
+					action.decision.actor,
+					action.decision.approved,
+				);
 				let response =
 					handler.handle_approval_decision(action.approval_id, action.decision);
 				self.client.answer_callback_query(
@@ -92,8 +105,12 @@ impl TelegramPollingRunner {
 				)?;
 				self.dispatch_response(action.chat_id, response)
 			}
-			Err(TelegramConnectorError::BotOriginIgnored) => Ok(()),
+			Err(TelegramConnectorError::BotOriginIgnored) => {
+				eprintln!("[telegram] ignored bot-originated update");
+				Ok(())
+			}
 			Err(error) => {
+				eprintln!("[telegram] update_error={error}");
 				if let Some(chat_id) = chat_id {
 					self.client
 						.send_message(&TelegramOutboundMessage::from_error(
@@ -113,15 +130,29 @@ impl TelegramPollingRunner {
 		response: Result<ResponseEnvelope, RuntimeError>,
 	) -> Result<(), TelegramTransportError> {
 		match response {
-			Ok(response) => self
-				.client
-				.send_message(&TelegramOutboundMessage::from_response(chat_id, &response)),
-			Err(error) => self
-				.client
-				.send_message(&TelegramOutboundMessage::from_error(
+			Ok(response) => {
+				eprintln!(
+					"[telegram] response chat_id={} request_id={} status={:?} message={}",
 					chat_id,
-					&error.message,
-				)),
+					response.request_id.0,
+					response.status,
+					truncate_for_log(&response.message, 200),
+				);
+				self.client
+					.send_message(&TelegramOutboundMessage::from_response(chat_id, &response))
+			}
+			Err(error) => {
+				eprintln!(
+					"[telegram] response chat_id={} status=error message={}",
+					chat_id,
+					truncate_for_log(&error.message, 200),
+				);
+				self.client
+					.send_message(&TelegramOutboundMessage::from_error(
+						chat_id,
+						&error.message,
+					))
+			}
 		}
 	}
 }
@@ -134,5 +165,15 @@ fn callback_acknowledgement(response: &Result<ResponseEnvelope, RuntimeError>) -
 			roku_common_types::ResponseStatus::Failed => "Decision processed with failure",
 		},
 		Err(_) => "Approval decision failed",
+	}
+}
+
+fn truncate_for_log(value: &str, max_chars: usize) -> String {
+	let mut chars = value.chars();
+	let truncated = chars.by_ref().take(max_chars).collect::<String>();
+	if chars.next().is_some() {
+		format!("{truncated}...")
+	} else {
+		truncated
 	}
 }
