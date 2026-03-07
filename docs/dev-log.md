@@ -1145,14 +1145,43 @@
 ### Remaining Work
 
 - Coding-provider routing still does not use the unified llm-adapter selection path.
-- Telegram still lacks rich artifact / experiment rendering and long-task progress push.
+- Telegram still lacks long-task progress push.
 - Structured logging/export sinks are still not in place; current diagnostics remain stderr-first.
 
 ### Next Recommended Steps
 
 1. Close `LLM-08` by routing coding-provider model selection through `roku-llm-adapter`.
-2. Implement `TG-07` and `TG-08` so Telegram can render artifacts and stream long-task progress instead of only final status text.
-3. Revisit structured logging/export sinks once the Telegram artifact/progress path is in place.
+2. Implement `TG-08` so Telegram can stream long-task progress instead of only final status text.
+3. Revisit structured logging/export sinks once the Telegram progress path is in place.
+
+## 2026-03-08 - Session Milestone (Phase 33)
+
+### Completed Modules
+
+- `roku-connectors-telegram`
+  - Upgraded response rendering from flat plain text into MarkdownV2-rich sections for status, request id, message body, approvals, artifacts, experiments, and generic references.
+  - Kept approval buttons intact while rendering the approval id and action hint as structured rich text.
+  - Added URI-aware attachment grouping so `artifact://`, `experiment://`, and generic references are shown in separate sections.
+  - Added Markdown escaping so request ids, artifact URIs, experiment references, and arbitrary messages do not break Telegram formatting.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test -p roku-connectors-telegram -p roku-cmd -p roku-runtime-service -p roku-e2e`: passed
+- `cargo check --workspace`: passed
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed
+
+### Remaining Work
+
+- Coding-provider routing still does not use the unified llm-adapter selection path.
+- Telegram still lacks long-task progress push.
+- Structured logging/export sinks are still not in place; current diagnostics remain stderr-first.
+
+### Next Recommended Steps
+
+1. Close `LLM-08` by routing coding-provider model selection through `roku-llm-adapter`.
+2. Implement `TG-08` so Telegram can stream long-task progress instead of only final status text.
+3. Revisit structured logging/export sinks once the Telegram progress path is in place.
 
 ## 2026-03-08 - Session Milestone (Phase 32)
 
