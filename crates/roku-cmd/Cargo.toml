@@ -11,5 +11,6 @@ roku-api-gateway = { path = "../roku-api-gateway" }
 roku-common-types = { path = "../roku-common-types" }
 roku-connectors-telegram = { path = "../roku-connectors-telegram" }
 roku-llm-adapter = { path = "../roku-llm-adapter" }
+roku-observability = { path = "../roku-observability" }
 roku-runtime-service = { path = "../roku-runtime-service" }
 thiserror = "2"

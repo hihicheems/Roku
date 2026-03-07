@@ -60,7 +60,7 @@ pub struct RuntimeService {
 	factory: AgentInstanceFactory,
 	runtime: GenericAgentRuntime,
 	validator: ValidationPipeline,
-	metrics: Metrics,
+	metrics: Arc<Metrics>,
 	audit_sink: Arc<dyn AuditSink>,
 	state: Mutex<RuntimeState>,
 }
@@ -73,7 +73,7 @@ impl RuntimeService {
 		result_repo: Box<dyn ResultRepository + Send>,
 		audit_sink: Arc<dyn AuditSink>,
 	) -> Self {
-		Self::new_with_data_plane_and_runtime(
+		Self::new_with_data_plane_and_runtime_and_metrics(
 			task_repo,
 			event_repo,
 			approval_repo,
@@ -82,6 +82,7 @@ impl RuntimeService {
 			ExperimentRegistry::default(),
 			audit_sink,
 			GenericAgentRuntime::default(),
+			Arc::new(Metrics::default()),
 		)
 	}
 
@@ -94,7 +95,7 @@ impl RuntimeService {
 		experiment_registry: ExperimentRegistry,
 		audit_sink: Arc<dyn AuditSink>,
 	) -> Self {
-		Self::new_with_data_plane_and_runtime(
+		Self::new_with_data_plane_and_runtime_and_metrics(
 			task_repo,
 			event_repo,
 			approval_repo,
@@ -103,6 +104,7 @@ impl RuntimeService {
 			experiment_registry,
 			audit_sink,
 			GenericAgentRuntime::default(),
+			Arc::new(Metrics::default()),
 		)
 	}
 
@@ -116,6 +118,30 @@ impl RuntimeService {
 		audit_sink: Arc<dyn AuditSink>,
 		runtime: GenericAgentRuntime,
 	) -> Self {
+		Self::new_with_data_plane_and_runtime_and_metrics(
+			task_repo,
+			event_repo,
+			approval_repo,
+			result_repo,
+			artifact_store,
+			experiment_registry,
+			audit_sink,
+			runtime,
+			Arc::new(Metrics::default()),
+		)
+	}
+
+	pub fn new_with_data_plane_and_runtime_and_metrics(
+		task_repo: Box<dyn TaskRepository + Send>,
+		event_repo: Box<dyn EventRepository + Send>,
+		approval_repo: Box<dyn ApprovalRepository + Send>,
+		result_repo: Box<dyn ResultRepository + Send>,
+		artifact_store: ArtifactStore,
+		experiment_registry: ExperimentRegistry,
+		audit_sink: Arc<dyn AuditSink>,
+		runtime: GenericAgentRuntime,
+		metrics: Arc<Metrics>,
+	) -> Self {
 		Self {
 			orchestrator: Orchestrator::default(),
 			planning_engine: DefaultPlanningEngine,
@@ -124,7 +150,7 @@ impl RuntimeService {
 			factory: AgentInstanceFactory::default(),
 			runtime,
 			validator: ValidationPipeline::default(),
-			metrics: Metrics::default(),
+			metrics,
 			audit_sink,
 			state: Mutex::new(RuntimeState {
 				capability_auth: CapabilityAuthority::default(),
@@ -143,7 +169,7 @@ impl RuntimeService {
 	}
 
 	pub fn in_memory_with_agent_runtime(runtime: GenericAgentRuntime) -> Self {
-		Self::new_with_data_plane_and_runtime(
+		Self::new_with_data_plane_and_runtime_and_metrics(
 			Box::new(InMemoryTaskRepository::default()),
 			Box::new(InMemoryEventRepository::default()),
 			Box::new(InMemoryApprovalRepository::default()),
@@ -152,6 +178,24 @@ impl RuntimeService {
 			ExperimentRegistry::default(),
 			Arc::new(InMemoryAuditSink::default()),
 			runtime,
+			Arc::new(Metrics::default()),
+		)
+	}
+
+	pub fn in_memory_with_agent_runtime_and_metrics(
+		runtime: GenericAgentRuntime,
+		metrics: Arc<Metrics>,
+	) -> Self {
+		Self::new_with_data_plane_and_runtime_and_metrics(
+			Box::new(InMemoryTaskRepository::default()),
+			Box::new(InMemoryEventRepository::default()),
+			Box::new(InMemoryApprovalRepository::default()),
+			Box::new(InMemoryResultRepository::default()),
+			ArtifactStore::default(),
+			ExperimentRegistry::default(),
+			Arc::new(InMemoryAuditSink::default()),
+			runtime,
+			metrics,
 		)
 	}
 

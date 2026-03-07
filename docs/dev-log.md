@@ -944,3 +944,37 @@
 1. Add TG artifact / experiment rich rendering and long-task status push.
 2. Add LLM provider telemetry into `roku-observability` and surface it from the OpenRouter path.
 3. Move planning outline generation onto the llm-adapter path so the runtime matches the planning architecture in the design doc.
+
+## 2026-03-07 - Session Milestone (Phase 26)
+
+### Completed Modules
+
+- `roku-observability`
+  - Added LLM invocation metrics to the shared `Metrics` model, including request totals, success/failure counts, routing-failure counts, token totals, cumulative latency, cumulative estimated cost, and per-provider/model breakdown snapshots.
+- `roku-llm-adapter`
+  - Added observability hooks in `LlmRouter` so successful and failed provider calls emit structured metrics.
+  - Added explicit routing-failure accounting for cases where no model is eligible before a provider call happens.
+  - Added an OpenRouter builder variant that accepts a shared metrics handle, so live execution can report into the runtime's observability plane.
+- `roku-runtime-service`
+  - Switched the runtime service to hold `Arc<Metrics>` so the live runtime path and orchestration path can share the same metrics object.
+- `roku-cmd`
+  - Live runtime bootstrap now wires a shared metrics handle through OpenRouter router construction and runtime-service creation.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test -p roku-observability -p roku-llm-adapter -p roku-connectors-telegram -p roku-cmd -p roku-runtime-service`: passed
+- `cargo check --workspace`: passed
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed
+
+### Remaining Work
+
+- Provider metrics are now in place, but tool-runtime cost / timeout / deny-rate metrics are still not implemented.
+- Planning still uses heuristic inputs rather than the live llm-adapter path.
+- Telegram transport still lacks long-task progress push and richer artifact / experiment rendering.
+
+### Next Recommended Steps
+
+1. Move planning outline generation and reasoning selection onto `roku-llm-adapter`.
+2. Extend `roku-tool-runtime` and `roku-observability` with tool execution cost / timeout / deny-rate metrics.
+3. Add richer Telegram artifact / experiment rendering and task-progress push.

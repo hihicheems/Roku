@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use roku_observability::{LlmInvocationOutcome, Metrics};
+
 use crate::types::{
 	GenerationRequest, LlmAdapterError, LlmResponse, ModelProfile, ProviderResponse, RiskTier,
 	RoutingPolicy, estimate_cost_usd,
@@ -20,6 +22,7 @@ pub struct LlmRouter {
 	policy: RoutingPolicy,
 	models: Vec<ModelProfile>,
 	providers: HashMap<String, Arc<dyn LlmProvider>>,
+	metrics: Option<Arc<Metrics>>,
 }
 
 impl LlmRouter {
@@ -28,7 +31,13 @@ impl LlmRouter {
 			policy,
 			models: Vec::new(),
 			providers: HashMap::new(),
+			metrics: None,
 		}
+	}
+
+	pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
+		self.metrics = Some(metrics);
+		self
 	}
 
 	pub fn register_model(&mut self, model: ModelProfile) {
@@ -44,13 +53,26 @@ impl LlmRouter {
 	}
 
 	pub fn generate(&self, request: &GenerationRequest) -> Result<LlmResponse, LlmAdapterError> {
-		let selected_model = self.select_model(request)?;
+		let selected_model = match self.select_model(request) {
+			Ok(selected_model) => selected_model,
+			Err(error) => {
+				if let Some(metrics) = &self.metrics {
+					metrics.record_llm_routing_failure();
+				}
+				return Err(error);
+			}
+		};
 		let provider = self
 			.providers
 			.get(&selected_model.provider)
-			.ok_or_else(|| {
-				LlmAdapterError::ProviderNotRegistered(selected_model.provider.clone())
-			})?;
+			.ok_or_else(|| LlmAdapterError::ProviderNotRegistered(selected_model.provider.clone()));
+		let provider = match provider {
+			Ok(provider) => provider,
+			Err(error) => {
+				self.record_failure(selected_model, 0, 0, 0, 0.0);
+				return Err(error);
+			}
+		};
 
 		let provider_response = provider
 			.complete(selected_model, request)
@@ -58,9 +80,28 @@ impl LlmRouter {
 				provider: selected_model.provider.clone(),
 				model_id: selected_model.model_id.clone(),
 				message,
-			})?;
+			});
+		let provider_response = match provider_response {
+			Ok(provider_response) => provider_response,
+			Err(error) => {
+				self.record_failure(selected_model, 0, 0, 0, 0.0);
+				return Err(error);
+			}
+		};
 
 		if provider_response.latency_ms > self.policy.max_latency_ms {
+			self.record_failure(
+				selected_model,
+				provider_response.prompt_tokens,
+				provider_response.output_tokens,
+				provider_response.latency_ms,
+				estimate_cost_usd(
+					provider_response
+						.prompt_tokens
+						.saturating_add(provider_response.output_tokens),
+					selected_model.cost_per_1k_tokens_usd,
+				),
+			);
 			return Err(LlmAdapterError::LatencyExceeded {
 				latency_ms: provider_response.latency_ms,
 				max_latency_ms: self.policy.max_latency_ms,
@@ -71,6 +112,13 @@ impl LlmRouter {
 			.prompt_tokens
 			.saturating_add(provider_response.output_tokens);
 		if total_tokens > request.budget_tokens_remaining {
+			self.record_failure(
+				selected_model,
+				provider_response.prompt_tokens,
+				provider_response.output_tokens,
+				provider_response.latency_ms,
+				estimate_cost_usd(total_tokens, selected_model.cost_per_1k_tokens_usd),
+			);
 			return Err(LlmAdapterError::BudgetExceeded(format!(
 				"token budget exceeded: used={} budget={}",
 				total_tokens, request.budget_tokens_remaining
@@ -82,12 +130,26 @@ impl LlmRouter {
 		if estimated_cost_usd > request.budget_cost_remaining_usd
 			|| estimated_cost_usd > self.policy.max_request_cost_usd
 		{
+			self.record_failure(
+				selected_model,
+				provider_response.prompt_tokens,
+				provider_response.output_tokens,
+				provider_response.latency_ms,
+				estimated_cost_usd,
+			);
 			return Err(LlmAdapterError::BudgetExceeded(format!(
 				"cost budget exceeded: cost={estimated_cost_usd:.4} budget={:.4} policy_max={:.4}",
 				request.budget_cost_remaining_usd, self.policy.max_request_cost_usd
 			)));
 		}
 
+		self.record_success(
+			selected_model,
+			provider_response.prompt_tokens,
+			provider_response.output_tokens,
+			provider_response.latency_ms,
+			estimated_cost_usd,
+		);
 		Ok(LlmResponse {
 			provider: selected_model.provider.clone(),
 			model_id: selected_model.model_id.clone(),
@@ -98,6 +160,48 @@ impl LlmRouter {
 			estimated_cost_usd,
 			latency_ms: provider_response.latency_ms,
 		})
+	}
+
+	fn record_success(
+		&self,
+		model: &ModelProfile,
+		prompt_tokens: u64,
+		output_tokens: u64,
+		latency_ms: u64,
+		estimated_cost_usd: f64,
+	) {
+		if let Some(metrics) = &self.metrics {
+			metrics.record_llm_invocation(
+				&model.provider,
+				&model.model_id,
+				LlmInvocationOutcome::Success,
+				prompt_tokens,
+				output_tokens,
+				latency_ms,
+				estimated_cost_usd,
+			);
+		}
+	}
+
+	fn record_failure(
+		&self,
+		model: &ModelProfile,
+		prompt_tokens: u64,
+		output_tokens: u64,
+		latency_ms: u64,
+		estimated_cost_usd: f64,
+	) {
+		if let Some(metrics) = &self.metrics {
+			metrics.record_llm_invocation(
+				&model.provider,
+				&model.model_id,
+				LlmInvocationOutcome::Failure,
+				prompt_tokens,
+				output_tokens,
+				latency_ms,
+				estimated_cost_usd,
+			);
+		}
 	}
 
 	fn select_model(&self, request: &GenerationRequest) -> Result<&ModelProfile, LlmAdapterError> {
@@ -138,6 +242,10 @@ impl LlmRouter {
 
 #[cfg(test)]
 mod tests {
+	use std::sync::Arc;
+
+	use roku_observability::Metrics;
+
 	use crate::types::{
 		GenerationRequest, ModelProfile, ProviderResponse, RiskTier, RoutingPolicy,
 	};
@@ -301,5 +409,46 @@ mod tests {
 				max_latency_ms: 100
 			}
 		));
+	}
+
+	#[test]
+	fn router_records_provider_metrics() {
+		let metrics = Arc::new(Metrics::default());
+		let router = router_with_models().with_metrics(metrics.clone());
+
+		router
+			.generate(&sample_request(RiskTier::Low))
+			.expect("generation should succeed");
+
+		let snapshot = metrics.snapshot();
+		assert_eq!(snapshot.llm_requests_total, 1);
+		assert_eq!(snapshot.llm_successes_total, 1);
+		assert_eq!(snapshot.llm_failures_total, 0);
+		assert_eq!(snapshot.llm_prompt_tokens_total, 120);
+		assert_eq!(snapshot.llm_output_tokens_total, 220);
+
+		let provider_metrics = metrics.llm_provider_metrics();
+		assert_eq!(provider_metrics.len(), 1);
+		assert_eq!(provider_metrics[0].provider, "provider-a");
+		assert_eq!(provider_metrics[0].model_id, "a-lite");
+	}
+
+	#[test]
+	fn router_records_routing_failures_when_no_model_is_eligible() {
+		let metrics = Arc::new(Metrics::default());
+		let router = router_with_models().with_metrics(metrics.clone());
+		let mut request = sample_request(RiskTier::Critical);
+		request.budget_cost_remaining_usd = 0.00001;
+
+		let error = router
+			.generate(&request)
+			.expect_err("request should fail without an eligible model");
+		assert!(matches!(error, LlmAdapterError::NoEligibleModel));
+
+		let snapshot = metrics.snapshot();
+		assert_eq!(snapshot.llm_requests_total, 1);
+		assert_eq!(snapshot.llm_failures_total, 1);
+		assert_eq!(snapshot.llm_routing_failures_total, 1);
+		assert!(metrics.llm_provider_metrics().is_empty());
 	}
 }

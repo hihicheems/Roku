@@ -86,22 +86,22 @@ pub enum TelegramConnectorError {
 pub struct TelegramConnector;
 
 impl TelegramConnector {
-	pub fn into_interaction(
+	pub fn interaction_from_update(
 		&self,
 		update: TelegramUpdate,
 	) -> Result<TelegramInteraction, TelegramConnectorError> {
 		if let Some(callback_query) = update.callback_query {
-			return self.into_approval_action(callback_query);
+			return self.approval_action_from_callback(callback_query);
 		}
 
 		let chat_id = update.message.as_ref().map(|message| message.chat.id);
-		let request = self.into_request(update)?;
+		let request = self.request_from_update(update)?;
 		let chat_id = chat_id.ok_or(TelegramConnectorError::MissingMessage)?;
 
 		Ok(TelegramInteraction::Request { chat_id, request })
 	}
 
-	pub fn into_request(
+	pub fn request_from_update(
 		&self,
 		update: TelegramUpdate,
 	) -> Result<RequestEnvelope, TelegramConnectorError> {
@@ -120,7 +120,7 @@ impl TelegramConnector {
 		})
 	}
 
-	fn into_approval_action(
+	fn approval_action_from_callback(
 		&self,
 		callback_query: TelegramCallbackQuery,
 	) -> Result<TelegramInteraction, TelegramConnectorError> {
@@ -197,7 +197,7 @@ mod tests {
 	fn into_request_maps_text_message() {
 		let connector = TelegramConnector;
 		let request = connector
-			.into_request(TelegramUpdate {
+			.request_from_update(TelegramUpdate {
 				update_id: 42,
 				message: Some(TelegramMessage {
 					message_id: 7,
@@ -226,7 +226,7 @@ mod tests {
 	fn into_request_rejects_bot_message() {
 		let connector = TelegramConnector;
 		let error = connector
-			.into_request(TelegramUpdate {
+			.request_from_update(TelegramUpdate {
 				update_id: 42,
 				message: Some(TelegramMessage {
 					message_id: 7,
@@ -253,7 +253,7 @@ mod tests {
 	fn into_interaction_maps_callback_query_to_approval_action() {
 		let connector = TelegramConnector;
 		let interaction = connector
-			.into_interaction(TelegramUpdate {
+			.interaction_from_update(TelegramUpdate {
 				update_id: 42,
 				message: None,
 				callback_query: Some(TelegramCallbackQuery {
@@ -301,7 +301,7 @@ mod tests {
 	fn into_interaction_rejects_invalid_callback_payload() {
 		let connector = TelegramConnector;
 		let error = connector
-			.into_interaction(TelegramUpdate {
+			.interaction_from_update(TelegramUpdate {
 				update_id: 42,
 				message: None,
 				callback_query: Some(TelegramCallbackQuery {
