@@ -32,7 +32,7 @@
 | 21 | `roku-execution-graph-builder` / `roku-common-types` | 为 `PlanStep`、`TaskNode`、`TaskGraph` 增加 branch/join 语义与依赖元数据 | `done` |
 | 22 | `roku-runtime-service` / `roku-common-types` | 引入显式 `NodeResultSet`、`JoinPolicy`、`AggregationMode` 等聚合合同 | `done` |
 | 23 | `roku-runtime-service` | 在 aggregation / validation 节点中真正消费 join policy，而不是隐式遍历结果 | `done` |
-| 24 | `roku-tool-runtime` | 完善 tool descriptor、sandbox profile、timeout/retry 和 deterministic execution hooks | `todo` |
+| 24 | `roku-tool-runtime` | 完善 tool descriptor、sandbox profile、timeout/retry 和 deterministic execution hooks | `done` |
 | 25 | `roku-state-store` | 增加 PostgreSQL task/event/result backend，并抽象生产级 persistence boundary | `todo` |
 | 26 | `roku-state-store` / dispatch plane | 增加 Redis / NATS / JetStream 风格 dispatch 与 backpressure 抽象 | `todo` |
 | 27 | `roku-observability` | 增加 trace correlation、audit export、planning metrics 和 artifact/experiment telemetry | `todo` |
