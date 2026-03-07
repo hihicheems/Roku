@@ -1145,14 +1145,40 @@
 ### Remaining Work
 
 - Coding-provider routing still does not use the unified llm-adapter selection path.
-- Telegram still lacks long-task progress push.
 - Structured logging/export sinks are still not in place; current diagnostics remain stderr-first.
 
 ### Next Recommended Steps
 
 1. Close `LLM-08` by routing coding-provider model selection through `roku-llm-adapter`.
-2. Implement `TG-08` so Telegram can stream long-task progress instead of only final status text.
-3. Revisit structured logging/export sinks once the Telegram progress path is in place.
+2. Revisit structured logging/export sinks now that the Telegram response surface is richer and includes progress receipts.
+3. Expand Telegram UX further only if a stronger progress protocol or artifact actions are needed.
+
+## 2026-03-08 - Session Milestone (Phase 34)
+
+### Completed Modules
+
+- `roku-connectors-telegram`
+  - Added an explicit `running` progress receipt that is sent immediately after a user request is accepted.
+  - Preserved the final response as a separate completion receipt, so Telegram users now see a start-of-work acknowledgement and an end-of-work result.
+  - Added regression coverage for the new progress notice formatting.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test -p roku-connectors-telegram -p roku-cmd -p roku-runtime-service -p roku-e2e`: passed
+- `cargo check --workspace`: passed
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed
+
+### Remaining Work
+
+- Coding-provider routing still does not use the unified llm-adapter selection path.
+- Structured logging/export sinks are still not in place; current diagnostics remain stderr-first.
+
+### Next Recommended Steps
+
+1. Close `LLM-08` by routing coding-provider model selection through `roku-llm-adapter`.
+2. Revisit structured logging/export sinks now that the Telegram response surface is richer and includes progress receipts.
+3. Expand Telegram UX further only if a stronger progress protocol or artifact actions are needed.
 
 ## 2026-03-08 - Session Milestone (Phase 33)
 

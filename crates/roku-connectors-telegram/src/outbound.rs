@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use roku_common_types::{ApprovalId, ResponseEnvelope, ResponseStatus};
+use roku_common_types::{ApprovalId, RequestEnvelope, ResponseEnvelope, ResponseStatus};
 
 use crate::inbound::approval_callback_data;
 
@@ -31,6 +31,23 @@ pub struct TelegramInlineKeyboardButton {
 }
 
 impl TelegramOutboundMessage {
+	pub fn progress_notice(chat_id: i64, request: &RequestEnvelope) -> Self {
+		Self {
+			chat_id,
+			text: [
+				"*Status:* running".to_string(),
+				format!("*Request:* {}", escape_markdown_v2(&request.request_id.0)),
+				"*Message:* Processing your request\\. I will send the final result in a separate message\\."
+					.to_string(),
+				format!("*Goal:* {}", escape_markdown_v2(&request.goal)),
+			]
+			.join("\n"),
+			parse_mode: TelegramParseMode::MarkdownV2,
+			disable_web_page_preview: true,
+			reply_markup: None,
+		}
+	}
+
 	pub fn from_response(chat_id: i64, response: &ResponseEnvelope) -> Self {
 		let attachments = classify_attachments(response);
 		let mut lines = vec![
@@ -196,7 +213,7 @@ fn status_label(status: ResponseStatus) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-	use roku_common_types::{RequestId, ResponseEnvelope};
+	use roku_common_types::{RequestEnvelope, RequestId, ResponseEnvelope};
 
 	use super::*;
 
@@ -217,6 +234,29 @@ mod tests {
 		assert!(message.text.contains("*Artifacts:*"));
 		assert!(message.text.contains("result \\(artifact://task/result\\)"));
 		assert_eq!(message.parse_mode, TelegramParseMode::MarkdownV2);
+		assert!(message.reply_markup.is_none());
+	}
+
+	#[test]
+	fn outbound_message_formats_progress_notice() {
+		let message = TelegramOutboundMessage::progress_notice(
+			1001,
+			&RequestEnvelope {
+				request_id: RequestId("req-9".to_string()),
+				session_id: "chat-1".to_string(),
+				goal: "analyze the latest artifacts".to_string(),
+			},
+		);
+
+		assert_eq!(message.chat_id, 1001);
+		assert_eq!(message.parse_mode, TelegramParseMode::MarkdownV2);
+		assert!(message.text.contains("*Status:* running"));
+		assert!(message.text.contains("*Request:* req\\-9"));
+		assert!(
+			message
+				.text
+				.contains("*Goal:* analyze the latest artifacts")
+		);
 		assert!(message.reply_markup.is_none());
 	}
 
