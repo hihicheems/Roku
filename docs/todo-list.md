@@ -39,7 +39,7 @@
 | 28 | `roku-agent-instance-factory` / `roku-agent-runtime` | 完善 capability-based profile 装配、policy binding 和动态 worker 构造 | `done` |
 | 29 | `roku-planning-engine` / `roku-task-planner` | 增加 iterative refinement、tree search 轮次控制与 critique loop 钩子 | `done` |
 | 30 | `roku-api-gateway` / data plane | 增加 artifact content/download 端点与更细粒度错误映射 | `done` |
-| 31 | `roku-llm-adapter` | 新增多 provider 模型路由与预算/风险感知调用接口 | `todo` |
+| 31 | `roku-llm-adapter` | 新增多 provider 模型路由与预算/风险感知调用接口 | `done` |
 | 32 | `roku-skill-registry` | 新增 skill descriptor、版本化、验证、发布和熔断生命周期 | `todo` |
 | 33 | `roku-agent-directory` / A2A layer | 新增 AgentIdentity、CapabilityCard、WorkContract、DelegationTicket 与 discovery | `todo` |
 | 34 | `roku-runtime-service` / org policy | 实现组织级审批策略、风险动作 gating 和 capability/approval 联动 | `todo` |
