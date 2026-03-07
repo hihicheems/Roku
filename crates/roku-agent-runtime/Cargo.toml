@@ -7,3 +7,5 @@ authors.workspace = true
 
 [dependencies]
 roku-common-types = { path = "../roku-common-types" }
+roku-tool-runtime = { path = "../roku-tool-runtime" }
+serde_json = "1"

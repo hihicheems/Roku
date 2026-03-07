@@ -1,0 +1,164 @@
+use roku_common_types::{AgentInstanceSpec, EvidenceItem, ResultEnvelope, ResultStatus, TaskNode};
+use roku_tool_runtime::{SandboxProfile, ToolExecutionResult, ToolRuntimeError};
+use serde_json::{Value, json};
+
+pub(crate) fn policy_rejection_result(spec: &AgentInstanceSpec, node: &TaskNode) -> ResultEnvelope {
+	let payload = json!({
+		"error_code": "policy_bindings_rejected",
+		"message": "policy bindings rejected execution",
+		"node_id": node.node_id.0,
+	});
+
+	ResultEnvelope {
+		task_id: spec.context.task_id.clone(),
+		node_id: node.node_id.clone(),
+		producer: spec.instance_id.clone(),
+		schema_version: "result.v1".to_string(),
+		status: ResultStatus::Error,
+		payload: serialize_payload(&payload),
+		evidence: vec![EvidenceItem {
+			kind: "policy".to_string(),
+			value: "budget-exhausted".to_string(),
+		}],
+		confidence: 0.0,
+	}
+}
+
+pub(crate) fn tool_success_result(
+	spec: &AgentInstanceSpec,
+	node: &TaskNode,
+	worker_id: &str,
+	tool_name: &str,
+	execution: ToolExecutionResult,
+	confidence: f32,
+) -> ResultEnvelope {
+	let message = execution
+		.output
+		.get("message")
+		.and_then(Value::as_str)
+		.unwrap_or(&node.description);
+	let payload = json!({
+		"worker_id": worker_id,
+		"tool_name": tool_name,
+		"message": message,
+		"node_id": node.node_id.0,
+		"summary": node.description,
+		"attempts": execution.attempts,
+		"elapsed_ms": execution.elapsed_ms,
+		"output": execution.output,
+	});
+
+	ResultEnvelope {
+		task_id: spec.context.task_id.clone(),
+		node_id: node.node_id.clone(),
+		producer: spec.instance_id.clone(),
+		schema_version: "result.v1".to_string(),
+		status: ResultStatus::Ok,
+		payload: serialize_payload(&payload),
+		evidence: vec![
+			EvidenceItem {
+				kind: "runtime".to_string(),
+				value: worker_id.to_string(),
+			},
+			EvidenceItem {
+				kind: "tool".to_string(),
+				value: tool_name.to_string(),
+			},
+			EvidenceItem {
+				kind: "output_fingerprint".to_string(),
+				value: execution.output_fingerprint,
+			},
+			EvidenceItem {
+				kind: "sandbox_profile".to_string(),
+				value: sandbox_profile_label(&execution.sandbox_profile).to_string(),
+			},
+			EvidenceItem {
+				kind: "tool_attempts".to_string(),
+				value: execution.attempts.to_string(),
+			},
+			EvidenceItem {
+				kind: "policy".to_string(),
+				value: format!(
+					"budget_tokens={},time_budget_ms={}",
+					spec.policy_bindings.budget_tokens, spec.policy_bindings.time_budget_ms
+				),
+			},
+		],
+		confidence,
+	}
+}
+
+pub(crate) fn tool_failure_result(
+	spec: &AgentInstanceSpec,
+	node: &TaskNode,
+	worker_id: &str,
+	tool_name: &str,
+	error: ToolRuntimeError,
+) -> ResultEnvelope {
+	let error_code = tool_error_code(&error);
+	let payload = json!({
+		"error_code": error_code,
+		"message": error.to_string(),
+		"tool_name": tool_name,
+		"worker_id": worker_id,
+		"node_id": node.node_id.0,
+	});
+
+	ResultEnvelope {
+		task_id: spec.context.task_id.clone(),
+		node_id: node.node_id.clone(),
+		producer: spec.instance_id.clone(),
+		schema_version: "result.v1".to_string(),
+		status: ResultStatus::Error,
+		payload: serialize_payload(&payload),
+		evidence: vec![
+			EvidenceItem {
+				kind: "runtime".to_string(),
+				value: worker_id.to_string(),
+			},
+			EvidenceItem {
+				kind: "tool".to_string(),
+				value: tool_name.to_string(),
+			},
+			EvidenceItem {
+				kind: "tool_error".to_string(),
+				value: error_code.to_string(),
+			},
+		],
+		confidence: 0.0,
+	}
+}
+
+fn tool_error_code(error: &ToolRuntimeError) -> &'static str {
+	match error {
+		ToolRuntimeError::ToolNotFound(_) => "tool_not_found",
+		ToolRuntimeError::ToolAlreadyRegistered(_) => "tool_already_registered",
+		ToolRuntimeError::InvalidDescriptor(_) => "invalid_descriptor",
+		ToolRuntimeError::InputSchemaViolation { .. } => "input_schema_violation",
+		ToolRuntimeError::CapabilityDenied { .. } => "capability_denied",
+		ToolRuntimeError::Timeout { .. } => "timeout",
+		ToolRuntimeError::ExecutionFailed { retriable, .. } => {
+			if *retriable {
+				"retriable_execution_failed"
+			} else {
+				"execution_failed"
+			}
+		}
+	}
+}
+
+fn sandbox_profile_label(profile: &SandboxProfile) -> &'static str {
+	match profile {
+		SandboxProfile::NoIsolation => "no_isolation",
+		SandboxProfile::ReadOnlyFs => "read_only_fs",
+		SandboxProfile::PythonResearch => "python_research",
+		SandboxProfile::ContainerRestricted => "container_restricted",
+	}
+}
+
+fn serialize_payload(payload: &Value) -> String {
+	match serde_json::to_string(payload) {
+		Ok(serialized) => serialized,
+		Err(error) => format!(r#"{{"error_code":"serialization_failure","message":"{error}"}}"#),
+	}
+}

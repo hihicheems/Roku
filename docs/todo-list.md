@@ -128,7 +128,7 @@
 | AR-02 | 提供内建 `research-worker` / `data-worker` / `review-worker` / `generic-worker` | §7.7 默认 Profile | DONE |
 | AR-03 | 基于 `PolicyBindings` 做最小预算拒绝保护 | §14 预算传播规则 | DONE |
 | AR-04 | 支持动态注册自定义 worker | §7.8 可演进性 | DONE |
-| AR-05 | 将 worker 执行真实接入 `roku-tool-runtime` 而非合成结果 | §9 请求生命周期 | TODO |
+| AR-05 | 将 worker 执行真实接入 `roku-tool-runtime` 而非合成结果 | §9 请求生命周期 | DONE |
 | AR-06 | 将复杂 reasoning worker 接入 `roku-llm-adapter` | §3 规划与执行分离 / §7 | TODO |
 | AR-07 | 按 profile / task type 选择输出 schema 和 evidence 模板 | §11 结果合同 | TODO |
 | AR-08 | 将 timeout / retry / budget 消耗下放到 worker 执行层 | §14 预算与超时 | TODO |
