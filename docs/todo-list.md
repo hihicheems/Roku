@@ -37,7 +37,7 @@
 | 26 | `roku-state-store` / dispatch plane | 增加 Redis / NATS / JetStream 风格 dispatch 与 backpressure 抽象 | `todo` |
 | 27 | `roku-observability` | 增加 trace correlation、audit export、planning metrics 和 artifact/experiment telemetry | `todo` |
 | 28 | `roku-agent-instance-factory` / `roku-agent-runtime` | 完善 capability-based profile 装配、policy binding 和动态 worker 构造 | `todo` |
-| 29 | `roku-planning-engine` / `roku-task-planner` | 增加 iterative refinement、tree search 轮次控制与 critique loop 钩子 | `todo` |
+| 29 | `roku-planning-engine` / `roku-task-planner` | 增加 iterative refinement、tree search 轮次控制与 critique loop 钩子 | `done` |
 | 30 | `roku-api-gateway` / data plane | 增加 artifact content/download 端点与更细粒度错误映射 | `todo` |
 | 31 | `roku-llm-adapter` | 新增多 provider 模型路由与预算/风险感知调用接口 | `todo` |
 | 32 | `roku-skill-registry` | 新增 skill descriptor、版本化、验证、发布和熔断生命周期 | `todo` |
