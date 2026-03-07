@@ -1109,3 +1109,48 @@
 1. Add Telegram rich artifact / experiment rendering and long-task progress callbacks.
 2. Move stderr-first diagnostics onto structured logging/exporters while keeping local usability.
 3. Extend `roku-llm-adapter` into coding-provider selection to close `LLM-08`.
+
+## 2026-03-08 - Session Milestone (Phase 31)
+
+### Completed Modules
+
+- `roku-llm-adapter`
+  - Switched the default OpenRouter route from the generic `openrouter/free` router to an explicit model chain headed by `step-3.5-flash:free`, with fallbacks for `deepseek-chat` and `gemini-2.0-flash`.
+  - Normalized common shorthand model ids into OpenRouter-compatible ids so local env configuration can stay concise while runtime requests stay explicit.
+  - Moved request construction onto an explicit OpenAI-compatible chat-completions shape with separate `system` and `user` messages instead of flattening everything into one user prompt.
+  - Added support for OpenRouter `models[]` request fallback chains and surfaced both `requested_model` and `served_model` in runtime logs.
+  - Updated the optional OpenRouter app-name header to the documented `X-OpenRouter-Title` variant.
+- `roku-task-planner`
+  - Started sending planning requests with an explicit system instruction so model output remains constrained to the expected JSON outline contract.
+- `roku-agent-runtime`
+  - Tightened live worker prompting so final user-visible responses no longer leak internal execution-role framing, hidden instructions, or runtime metadata.
+  - Anchored the final conversational persona to `Roku` for direct user-facing replies.
+- `roku-connectors-telegram`
+  - Added a configurable poll-error suppression threshold so transient `getUpdates` failures stay quiet during routine operation.
+  - Preserved explicit poll warnings for sustained outages by logging only at configured consecutive-failure boundaries.
+- Local runtime configuration
+  - Updated `.env` defaults for the local machine to use the new OpenRouter primary/fallback chain and the Telegram poll-noise threshold.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test -p roku-llm-adapter -p roku-agent-runtime -p roku-task-planner -p roku-runtime-service -p roku-cmd -p roku-connectors-telegram`: passed
+- `cargo check --workspace`: passed
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed
+- Live smoke:
+  - `cargo run -p roku-cmd -- live-once '所以你现在到底是 roku 还是 kiki'`
+  - Result: `我是 Roku。`
+  - Observed log shape: `requested_model=stepfun/step-3.5-flash:free served_model=stepfun/step-3.5-flash:free`
+
+### Remaining Work
+
+- `roku-llm-adapter` still lacks provider-level retry / backoff / circuit-breaker behavior.
+- Coding-provider routing still does not use the unified llm-adapter selection path.
+- Telegram still lacks rich artifact / experiment rendering and long-task progress push.
+- Structured logging/export sinks are still not in place; current diagnostics remain stderr-first.
+
+### Next Recommended Steps
+
+1. Close `LLM-06` with provider retry / backoff / circuit-breaker semantics around OpenRouter and future providers.
+2. Close `LLM-08` by routing coding-provider model selection through `roku-llm-adapter`.
+3. Implement `TG-07` and `TG-08` so Telegram can render artifacts and stream long-task progress instead of only final status text.

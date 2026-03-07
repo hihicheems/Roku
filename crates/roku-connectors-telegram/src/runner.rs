@@ -24,6 +24,7 @@ pub struct TelegramPollingRunner {
 	connector: TelegramConnector,
 	client: TelegramBotClient,
 	idle_backoff_ms: u64,
+	poll_error_log_threshold: u32,
 }
 
 impl TelegramPollingRunner {
@@ -33,10 +34,12 @@ impl TelegramPollingRunner {
 
 	pub fn new(config: TelegramBotConfig) -> Result<Self, TelegramTransportError> {
 		let idle_backoff_ms = config.idle_backoff_ms;
+		let poll_error_log_threshold = config.poll_error_log_threshold;
 		Ok(Self {
 			connector: TelegramConnector,
 			client: TelegramBotClient::new(config)?,
 			idle_backoff_ms,
+			poll_error_log_threshold,
 		})
 	}
 
@@ -45,11 +48,24 @@ impl TelegramPollingRunner {
 		H: TelegramInteractionHandler,
 	{
 		let mut next_offset = None;
+		let mut consecutive_poll_failures = 0_u32;
 		loop {
 			let updates = match self.client.get_updates(next_offset) {
-				Ok(updates) => updates,
+				Ok(updates) => {
+					consecutive_poll_failures = 0;
+					updates
+				}
 				Err(error) => {
-					eprintln!("[telegram] poll_error={error}");
+					consecutive_poll_failures = consecutive_poll_failures.saturating_add(1);
+					if should_log_poll_error(
+						consecutive_poll_failures,
+						self.poll_error_log_threshold,
+					) {
+						eprintln!(
+							"[telegram] poll_error consecutive_failures={} error={}",
+							consecutive_poll_failures, error,
+						);
+					}
 					thread::sleep(Duration::from_millis(self.idle_backoff_ms));
 					continue;
 				}
@@ -185,5 +201,32 @@ fn truncate_for_log(value: &str, max_chars: usize) -> String {
 		format!("{truncated}...")
 	} else {
 		truncated
+	}
+}
+
+fn should_log_poll_error(consecutive_failures: u32, threshold: u32) -> bool {
+	if threshold == 0 {
+		return false;
+	}
+
+	consecutive_failures >= threshold && consecutive_failures.is_multiple_of(threshold)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::should_log_poll_error;
+
+	#[test]
+	fn poll_error_logging_is_suppressed_before_threshold() {
+		assert!(!should_log_poll_error(1, 5));
+		assert!(!should_log_poll_error(4, 5));
+	}
+
+	#[test]
+	fn poll_error_logging_emits_on_threshold_boundaries() {
+		assert!(should_log_poll_error(5, 5));
+		assert!(should_log_poll_error(10, 5));
+		assert!(!should_log_poll_error(7, 5));
+		assert!(!should_log_poll_error(3, 0));
 	}
 }
