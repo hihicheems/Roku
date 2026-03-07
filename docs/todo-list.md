@@ -28,10 +28,10 @@
 | 17 | `roku-api-gateway` | 完成 task artifact / experiment 查询路由与响应模型 | `done` |
 | 18 | `roku-cmd` / `roku-runtime-service` | 完成 CLI 到 runtime service 的可复用执行入口 | `done` |
 | 19 | `roku-mcp-bridge` / `roku-coding-provider-adapter` | 完成外部 Coding MCP Provider 的基础契约和接入边界 | `done` |
-| 20 | `roku-connectors-telegram` | 将 Telegram connector 从空壳推进到真实 request/response adapter | `todo` |
-| 21 | `roku-execution-graph-builder` / `roku-common-types` | 为 `PlanStep`、`TaskNode`、`TaskGraph` 增加 branch/join 语义与依赖元数据 | `doing` |
+| 20 | `roku-connectors-telegram` | 将 Telegram connector 从空壳推进到真实 request/response adapter | `doing` |
+| 21 | `roku-execution-graph-builder` / `roku-common-types` | 为 `PlanStep`、`TaskNode`、`TaskGraph` 增加 branch/join 语义与依赖元数据 | `done` |
 | 22 | `roku-runtime-service` / `roku-common-types` | 引入显式 `NodeResultSet`、`JoinPolicy`、`AggregationMode` 等聚合合同 | `done` |
-| 23 | `roku-runtime-service` | 在 aggregation / validation 节点中真正消费 join policy，而不是隐式遍历结果 | `doing` |
+| 23 | `roku-runtime-service` | 在 aggregation / validation 节点中真正消费 join policy，而不是隐式遍历结果 | `done` |
 | 24 | `roku-tool-runtime` | 完善 tool descriptor、sandbox profile、timeout/retry 和 deterministic execution hooks | `todo` |
 | 25 | `roku-state-store` | 增加 PostgreSQL task/event/result backend，并抽象生产级 persistence boundary | `todo` |
 | 26 | `roku-state-store` / dispatch plane | 增加 Redis / NATS / JetStream 风格 dispatch 与 backpressure 抽象 | `todo` |
