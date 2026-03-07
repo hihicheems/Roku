@@ -18,7 +18,9 @@ use roku_common_types::{
 };
 use roku_execution_graph_builder::{ExecutionGraphBuilder, GraphBuildConfig};
 use roku_experiment_registry::ExperimentRegistry;
-use roku_observability::{AuditRecord, AuditSink, InMemoryAuditSink, Metrics, MetricsSnapshot};
+use roku_observability::{
+	AuditCorrelation, AuditRecord, AuditSink, InMemoryAuditSink, Metrics, MetricsSnapshot,
+};
 use roku_orchestrator::Orchestrator;
 use roku_planning_engine::{DefaultPlanningEngine, PlanningInput, RiskLevel, StrategySelector};
 use roku_state_store::{
@@ -143,6 +145,9 @@ impl RuntimeService {
 			risk_level: RiskLevel::Low,
 			budget_tokens: 10_000,
 		});
+		let planning_mode_label = format!("{:?}", decision.mode);
+		self.metrics.inc_planning_run();
+		self.metrics.inc_planning_strategy(&planning_mode_label);
 		let mut outline = self.planner.build_outline(&request, &decision);
 		if matches!(mode, RunMode::ApprovalRequired)
 			&& let Some(step) = outline.steps.last_mut()
@@ -175,7 +180,7 @@ impl RuntimeService {
 		task.next_node_index = 0;
 		task.pending_approval_id = None;
 		task.last_result = None;
-		self.start_experiment_run(&task, &request.goal, &format!("{:?}", decision.mode))?;
+		self.start_experiment_run(&task, &request.goal, &planning_mode_label)?;
 
 		self.record_transition(&mut task, TaskState::Delegating, "delegate")?;
 		self.process_task(&mut task, mode)
@@ -237,16 +242,25 @@ impl RuntimeService {
 		self.metrics.inc_approvals_resolved();
 
 		self.audit_sink
-			.record(AuditRecord {
-				actor: decision.actor.clone(),
-				action: if decision.approved {
-					"approve".to_string()
-				} else {
-					"reject".to_string()
-				},
-				resource: approval_id.0.clone(),
-				outcome: ticket_status_label(ticket.status).to_string(),
-			})
+			.record(
+				AuditRecord::new(
+					decision.actor.clone(),
+					if decision.approved {
+						"approve"
+					} else {
+						"reject"
+					},
+					approval_id.0.clone(),
+					ticket_status_label(ticket.status),
+				)
+				.with_correlation(AuditCorrelation {
+					trace_id: format!("trace-{}", ticket.request_id.0),
+					span_id: "approval-decision".to_string(),
+					task_id: Some(ticket.task_id.0.clone()),
+					request_id: Some(ticket.request_id.0.clone()),
+				})
+				.with_attribute("approval_status", ticket_status_label(ticket.status)),
+			)
 			.map_err(|error| RuntimeError::new(error.to_string()))?;
 
 		task.pending_approval_id = None;
