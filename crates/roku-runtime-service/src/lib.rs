@@ -24,6 +24,8 @@ pub enum RunMode {
 	Normal,
 	MissingEvidence,
 	CapabilityDenied,
+	ApprovalRequired,
+	RetryExhausted,
 }
 
 struct RuntimeState {
@@ -97,7 +99,12 @@ impl RuntimeService {
 			risk_level: RiskLevel::Low,
 			budget_tokens: 10_000,
 		});
-		let outline = self.planner.build_outline(&request, decision.mode);
+		let mut outline = self.planner.build_outline(&request, decision.mode);
+		if matches!(mode, RunMode::ApprovalRequired)
+			&& let Some(step) = outline.steps.last_mut()
+		{
+			step.requires_approval = true;
+		}
 
 		self.record_transition(&mut task, TaskState::GraphBuilding, "build graph")?;
 		let graph =
@@ -107,93 +114,130 @@ impl RuntimeService {
 
 		self.record_transition(&mut task, TaskState::Delegating, "delegate")?;
 
-		let node = graph
-			.nodes
-			.first()
-			.ok_or_else(|| RuntimeError::new("graph has no nodes"))?;
-		let spec = self.factory.build_for_node(&task.task_id, node);
+		let mut latest_result = None;
+		for node in &graph.nodes {
+			match node.kind {
+				roku_common_types::TaskNodeKind::Execution => {
+					let spec = self.factory.build_for_node(&task.task_id, node);
+					let capability_allowed = {
+						let mut state = self.lock_state()?;
+						let token = state.capability_auth.issue(CapabilityRequest {
+							subject: spec.instance_id.clone(),
+							resource: "tool.runtime".to_string(),
+							actions: if matches!(mode, RunMode::CapabilityDenied) {
+								vec!["read".to_string()]
+							} else {
+								vec!["invoke".to_string()]
+							},
+							expires_at_unix: 999_999,
+						});
+						let is_allowed = state.capability_auth.verify(&token, "invoke", 100);
 
-		let capability_allowed = {
-			let mut state = self.lock_state()?;
-			let token = state.capability_auth.issue(CapabilityRequest {
-				subject: spec.instance_id.clone(),
-				resource: "tool.runtime".to_string(),
-				actions: if matches!(mode, RunMode::CapabilityDenied) {
-					vec!["read".to_string()]
-				} else {
-					vec!["invoke".to_string()]
-				},
-				expires_at_unix: 999_999,
-			});
-			let is_allowed = state.capability_auth.verify(&token, "invoke", 100);
+						if !is_allowed {
+							self.audit_sink
+								.record(AuditRecord {
+									actor: spec.instance_id.clone(),
+									action: "invoke".to_string(),
+									resource: token.resource,
+									outcome: "denied".to_string(),
+								})
+								.map_err(|error| RuntimeError::new(error.to_string()))?;
+						}
 
-			if !is_allowed {
-				self.audit_sink
-					.record(AuditRecord {
-						actor: spec.instance_id.clone(),
-						action: "invoke".to_string(),
-						resource: token.resource,
-						outcome: "denied".to_string(),
-					})
-					.map_err(|error| RuntimeError::new(error.to_string()))?;
+						is_allowed
+					};
+
+					if !capability_allowed {
+						self.metrics.inc_failures();
+						if matches!(mode, RunMode::RetryExhausted) {
+							task.attempts = self.orchestrator.config.max_attempts.saturating_sub(1);
+						}
+						let terminal_state = self.fail_task(
+							&mut task,
+							"capability denied",
+							roku_common_types::ErrorClass::Security,
+						)?;
+
+						return Ok(ResponseEnvelope {
+							request_id: request.request_id,
+							status: ResponseStatus::Failed,
+							message: failure_message("capability denied", terminal_state),
+							artifacts: Vec::new(),
+						});
+					}
+
+					if task.state != TaskState::Executing {
+						self.record_transition(&mut task, TaskState::Executing, "execute")?;
+					}
+					let mut result = self.runtime.execute(&spec, node);
+					if matches!(mode, RunMode::MissingEvidence | RunMode::RetryExhausted) {
+						result.evidence.clear();
+					}
+					latest_result = Some(result);
+				}
+				roku_common_types::TaskNodeKind::Approval => {
+					self.record_transition(
+						&mut task,
+						TaskState::WaitingApproval,
+						"approval required",
+					)?;
+					self.save_task(task)?;
+
+					return Ok(ResponseEnvelope {
+						request_id: request.request_id,
+						status: ResponseStatus::PendingApproval,
+						message: format!("approval required for {}", node.node_id.0),
+						artifacts: Vec::new(),
+					});
+				}
+				roku_common_types::TaskNodeKind::Validation => {
+					let result = latest_result.as_ref().ok_or_else(|| {
+						RuntimeError::new("validation node reached before execution result")
+					})?;
+					self.record_transition(&mut task, TaskState::Validating, "validate")?;
+					let report = self.validator.validate(result);
+					if !report.accepted {
+						self.metrics.inc_failures();
+						self.metrics.inc_validation_failures();
+						if matches!(mode, RunMode::RetryExhausted) {
+							task.attempts = self.orchestrator.config.max_attempts.saturating_sub(1);
+						}
+						let terminal_state = self.fail_task(
+							&mut task,
+							"validation failed",
+							roku_common_types::ErrorClass::Validation,
+						)?;
+
+						return Ok(ResponseEnvelope {
+							request_id: request.request_id,
+							status: ResponseStatus::Failed,
+							message: failure_message(&report.failures.join(", "), terminal_state),
+							artifacts: Vec::new(),
+						});
+					}
+
+					self.audit_sink
+						.record(AuditRecord {
+							actor: result.producer.clone(),
+							action: "validate".to_string(),
+							resource: result.schema_version.clone(),
+							outcome: "accepted".to_string(),
+						})
+						.map_err(|error| RuntimeError::new(error.to_string()))?;
+				}
+				roku_common_types::TaskNodeKind::Aggregation => {}
 			}
-
-			is_allowed
-		};
-
-		if !capability_allowed {
-			self.metrics.inc_failures();
-			self.orchestrator
-				.transition(&mut task, TaskState::Failed, "capability denied", None)
-				.map(|_| ())?;
-			self.save_task(task)?;
-
-			return Ok(ResponseEnvelope {
-				request_id: request.request_id,
-				status: ResponseStatus::Failed,
-				message: "task failed: capability denied".to_string(),
-				artifacts: Vec::new(),
-			});
 		}
 
-		self.record_transition(&mut task, TaskState::Executing, "execute")?;
-		let mut result = self.runtime.execute(&spec, node);
-		if matches!(mode, RunMode::MissingEvidence) {
-			result.evidence.clear();
-		}
-
-		self.record_transition(&mut task, TaskState::Validating, "validate")?;
-		let report = self.validator.validate(&result);
-		let response = if report.accepted {
+		let response = {
 			self.record_transition(&mut task, TaskState::Aggregating, "aggregate")?;
 			self.record_transition(&mut task, TaskState::Succeeded, "done")?;
-			self.audit_sink
-				.record(AuditRecord {
-					actor: result.producer,
-					action: "validate".to_string(),
-					resource: result.schema_version,
-					outcome: "accepted".to_string(),
-				})
-				.map_err(|error| RuntimeError::new(error.to_string()))?;
 
 			ResponseEnvelope {
 				request_id: request.request_id,
 				status: ResponseStatus::Succeeded,
 				message: "task succeeded".to_string(),
 				artifacts: vec!["artifact://result/1".to_string()],
-			}
-		} else {
-			self.metrics.inc_failures();
-			self.metrics.inc_validation_failures();
-			self.orchestrator
-				.transition(&mut task, TaskState::Failed, "validation failed", None)
-				.map(|_| ())?;
-
-			ResponseEnvelope {
-				request_id: request.request_id,
-				status: ResponseStatus::Failed,
-				message: format!("task failed: {}", report.failures.join(", ")),
-				artifacts: Vec::new(),
 			}
 		};
 
@@ -234,11 +278,38 @@ impl RuntimeService {
 			.lock()
 			.map_err(|_| RuntimeError::new("runtime state lock poisoned"))
 	}
+
+	fn fail_task(
+		&self,
+		task: &mut Task,
+		reason: &str,
+		error_class: roku_common_types::ErrorClass,
+	) -> Result<TaskState, RuntimeError> {
+		let disposition = self
+			.orchestrator
+			.register_failure(task, reason, Some(error_class))?;
+		let mut state = self.lock_state()?;
+		for event in disposition.events {
+			state
+				.event_repo
+				.append_event(event)
+				.map_err(|error| RuntimeError::new(error.to_string()))?;
+		}
+		Ok(disposition.terminal_state)
+	}
 }
 
 impl Default for RuntimeService {
 	fn default() -> Self {
 		Self::in_memory()
+	}
+}
+
+fn failure_message(reason: &str, terminal_state: TaskState) -> String {
+	if terminal_state == TaskState::DeadLetter {
+		format!("task dead-lettered: {reason}")
+	} else {
+		format!("task failed: {reason}")
 	}
 }
 
@@ -286,5 +357,27 @@ mod tests {
 
 		assert_eq!(response.status, ResponseStatus::Failed);
 		assert!(response.message.contains("capability denied"));
+	}
+
+	#[test]
+	fn service_returns_pending_approval_when_graph_contains_approval_gate() {
+		let service = RuntimeService::default();
+		let response = service
+			.execute_with_mode(sample_request(), RunMode::ApprovalRequired)
+			.expect("runtime service should stop at approval gate");
+
+		assert_eq!(response.status, ResponseStatus::PendingApproval);
+		assert!(response.message.contains("approval required"));
+	}
+
+	#[test]
+	fn service_dead_letters_when_retry_budget_is_exhausted() {
+		let service = RuntimeService::default();
+		let response = service
+			.execute_with_mode(sample_request(), RunMode::RetryExhausted)
+			.expect("runtime service should report dead-letter");
+
+		assert_eq!(response.status, ResponseStatus::Failed);
+		assert!(response.message.contains("dead-lettered"));
 	}
 }

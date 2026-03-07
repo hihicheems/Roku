@@ -140,6 +140,7 @@ pub async fn submit_handler(
 fn response_status_label(status: ResponseStatus) -> &'static str {
 	match status {
 		ResponseStatus::Succeeded => "succeeded",
+		ResponseStatus::PendingApproval => "pending_approval",
 		ResponseStatus::Failed => "failed",
 	}
 }
