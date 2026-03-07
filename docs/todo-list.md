@@ -206,7 +206,7 @@
 | --- | --- | --- | --- |
 | MCP-01 | 建立 MCP request / response 协议边界 | §13.3 MCP 集成边界 | DONE |
 | MCP-02 | 提供最小 `NoopMcpBridge`，用于本地协议占位 | 集成基线 | DONE |
-| MCP-03 | 增加远端 tool discovery 与 descriptor 映射 | §13.3 / §6.1 MCP Bridge | TODO |
+| MCP-03 | 增加远端 tool discovery 与 descriptor 映射 | §13.3 / §6.1 MCP Bridge | DONE |
 | MCP-04 | 强制本地 capability 决策高于远端 MCP tool 声明 | §13.3 / §10 | TODO |
 | MCP-05 | 增加 session lifecycle、retry taxonomy、transport recovery | §13.3 / §22 风险缓解 | TODO |
 | MCP-06 | 输出 trace / metrics / audit hooks，并与 observability 对接 | §16 可观测性 | TODO |
@@ -218,8 +218,8 @@
 | CPA-01 | 建立 `CodingProvider` 抽象 | §13.4 外部 Coding MCP Provider 设计 | DONE |
 | CPA-02 | 提供 `McpCodingProvider` 以通过 MCP 发起编码任务 | §13.4 | DONE |
 | CPA-03 | 输出最小 `CodeChangeReport` 结构化结果 | §13.4 code_change_report.v1 | DONE |
-| CPA-04 | 让 contract 包含 allowed paths、acceptance checks、budget 约束并传给 provider | §13.4 coding_work_contract | TODO |
-| CPA-05 | 规范化 provider 的命令执行结果、测试结果、残余风险 | §13.4 最小输出 | TODO |
+| CPA-04 | 让 contract 包含 allowed paths、acceptance checks、budget 约束并传给 provider | §13.4 coding_work_contract | DONE |
+| CPA-05 | 规范化 provider 的命令执行结果、测试结果、残余风险 | §13.4 最小输出 | DONE |
 | CPA-06 | 增加 provider 不可用 / 超预算 / 校验失败时的 degrade-to-advice 模式 | §13.4 适用原则 | TODO |
 | CPA-07 | 接入 capability attenuation，限制 provider 目录、命令与网络权限 | §10 / §13.4 | TODO |
 | CPA-08 | 将 provider 输出接入 validation-plane 与 artifact-store | §11 / §13.4 | TODO |

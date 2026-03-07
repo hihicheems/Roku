@@ -675,3 +675,54 @@
 1. Start executing the new roadmap from the highest-value unfinished infrastructure items in `roku-state-store`.
 2. Use the planned-crate sections as the trigger for when architecture pressure justifies extracting new crates from current integration crates.
 3. Keep `docs/todo-list.md` synchronized whenever a task lands or a crate boundary changes.
+
+## 2026-03-07 - Session Milestone (Phase 19)
+
+### Completed Modules
+
+- `roku-task-planner`
+  - Removed the `SimpleTaskPlanner` naming and replaced it with `AdaptiveTaskPlanner`.
+  - Split the crate into explicit modules:
+    - `planner.rs`
+    - `strategies.rs`
+  - Kept the existing planning behaviors intact while cleaning crate boundaries.
+- `roku-mcp-bridge`
+  - Reworked the crate from a single placeholder file into explicit modules:
+    - `bridge.rs`
+    - `catalog.rs`
+    - `error.rs`
+    - `types.rs`
+  - Added `McpToolDescriptor`, `McpToolCatalog`, and structured `McpError`.
+  - Added `discover_tools` support and a registry-backed `InMemoryMcpBridge`.
+  - Added tests for discovery, unknown-tool rejection, and deterministic tool-call response lookup.
+- `roku-coding-provider-adapter`
+  - Reworked the crate into explicit modules:
+    - `contract.rs`
+    - `error.rs`
+    - `provider.rs`
+  - Added `CodingProviderError` taxonomy.
+  - Added strict `CodingWorkContract` validation before provider execution.
+  - Switched MCP calls to send the full serialized work contract instead of only the goal string.
+  - Added structured provider payload parsing and normalization into `CodeChangeReport`.
+  - Rejected unstructured provider payloads instead of silently accepting free text.
+  - Added tests for invalid contract rejection, structured execution success, and malformed provider response rejection.
+
+### Verification Status
+
+- `cargo test -p roku-task-planner -p roku-mcp-bridge -p roku-coding-provider-adapter -p roku-runtime-service -p roku-e2e`: passed
+- `cargo fmt --all`: passed
+- `cargo check --workspace`: passed
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed
+- `Simple*` / `Mock*` naming scan across `crates/` and `docs/`: clean
+
+### Remaining Work
+
+- `roku-mcp-bridge` still lacks real transport/session recovery and external server integration.
+- `roku-coding-provider-adapter` still needs degraded fallback mode for provider unavailability or budget failure.
+- `roku-agent-runtime` and `roku-runtime-service` still do not execute real work through the coding provider path.
+
+### Next Recommended Steps
+
+1. Integrate `roku-agent-runtime` with `roku-tool-runtime` so node execution stops returning synthetic results.
+2. Add provider degradation and approval-aware capability attenuation in `roku-coding-provider-adapter`.
+3. Start splitting other single-file crates (`roku-capability-auth`, `roku-validation-plane`, `roku-llm-adapter`) along the same module-oriented standard.

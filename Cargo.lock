@@ -1001,6 +1001,9 @@ version = "0.1.0"
 dependencies = [
  "roku-common-types",
  "roku-mcp-bridge",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -1059,6 +1062,10 @@ dependencies = [
 [[package]]
 name = "roku-mcp-bridge"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
+]
 
 [[package]]
 name = "roku-observability"

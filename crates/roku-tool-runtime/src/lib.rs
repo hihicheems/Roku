@@ -18,17 +18,9 @@ pub enum SandboxProfile {
 	ContainerRestricted,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ToolSchema {
 	pub required_fields: Vec<String>,
-}
-
-impl Default for ToolSchema {
-	fn default() -> Self {
-		Self {
-			required_fields: Vec::new(),
-		}
-	}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
