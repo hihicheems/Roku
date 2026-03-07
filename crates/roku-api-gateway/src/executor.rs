@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use roku_common_types::{
-	ApprovalDecision, ApprovalId, ApprovalTicket, RequestEnvelope, RequestId, ResponseEnvelope,
-	ResponseStatus, RuntimeError,
+	ApprovalDecision, ApprovalId, ApprovalTicket, Artifact, ExperimentRun, RequestEnvelope,
+	RequestId, ResponseEnvelope, ResponseStatus, RuntimeError, TaskId,
 };
 use roku_runtime_service::RuntimeService;
 
@@ -42,9 +42,14 @@ pub trait ApprovalExecutor: Send + Sync {
 	) -> Result<ResponseEnvelope, RuntimeError>;
 }
 
-pub trait GatewayExecutor: RequestExecutor + ApprovalExecutor {}
+pub trait TaskDataExecutor: Send + Sync {
+	fn list_artifacts(&self, task_id: &TaskId) -> Result<Vec<Artifact>, RuntimeError>;
+	fn get_experiment_run(&self, task_id: &TaskId) -> Result<Option<ExperimentRun>, RuntimeError>;
+}
 
-impl<T> GatewayExecutor for T where T: RequestExecutor + ApprovalExecutor {}
+pub trait GatewayExecutor: RequestExecutor + ApprovalExecutor + TaskDataExecutor {}
+
+impl<T> GatewayExecutor for T where T: RequestExecutor + ApprovalExecutor + TaskDataExecutor {}
 
 #[derive(Debug, Default)]
 pub struct NoopExecutor;
@@ -74,6 +79,16 @@ impl ApprovalExecutor for NoopExecutor {
 		_decision: ApprovalDecision,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		Err(RuntimeError::new("approval executor is not configured"))
+	}
+}
+
+impl TaskDataExecutor for NoopExecutor {
+	fn list_artifacts(&self, _task_id: &TaskId) -> Result<Vec<Artifact>, RuntimeError> {
+		Ok(Vec::new())
+	}
+
+	fn get_experiment_run(&self, _task_id: &TaskId) -> Result<Option<ExperimentRun>, RuntimeError> {
+		Ok(None)
 	}
 }
 
@@ -107,6 +122,16 @@ impl ApprovalExecutor for RuntimeServiceExecutor {
 		decision: ApprovalDecision,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		self.service.decide_approval(approval_id, decision)
+	}
+}
+
+impl TaskDataExecutor for RuntimeServiceExecutor {
+	fn list_artifacts(&self, task_id: &TaskId) -> Result<Vec<Artifact>, RuntimeError> {
+		self.service.list_artifacts(task_id)
+	}
+
+	fn get_experiment_run(&self, task_id: &TaskId) -> Result<Option<ExperimentRun>, RuntimeError> {
+		self.service.get_experiment_run(task_id)
 	}
 }
 
