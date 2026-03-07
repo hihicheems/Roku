@@ -326,3 +326,35 @@
 1. Introduce explicit artifact content retrieval / download endpoints once artifact payload storage is separated from metadata.
 2. Finish splitting `roku-runtime-service` so approval handling and orchestration entrypoints are isolated.
 3. Push `ExecutionGraphBuilder` and runtime scheduling toward true graph joins and resumable partial reruns.
+
+## 2026-03-07 - Session Milestone (Phase 9)
+
+### Completed Modules
+
+- `roku-common-types`
+  - Added explicit graph-join contracts: `JoinPolicy`, `AggregationMode`, `NodeResultSet`.
+- `roku-runtime-service`
+  - Added `collect_node_result_set` to replace implicit "grab all upstream results" behavior with a typed result-set contract.
+  - Added branch resolution logic that walks through approval or non-result nodes until result-producing ancestors are found.
+  - Added join-policy enforcement for `AllParents`, `AnyParent`, and `Quorum`.
+  - Added aggregation-mode support for `CollectAll` and `HighestConfidence`.
+  - Switched validation evidence collection to be built from `NodeResultSet`.
+  - Added aggregation-node processing path that validates upstream branch availability before marking the node complete.
+- `roku-runtime-service` tests
+  - Added coverage for highest-confidence aggregation and quorum enforcement.
+
+### Verification Status
+
+- `cargo test -p roku-common-types -p roku-execution-graph-builder -p roku-runtime-service`: passed
+
+### Remaining Work
+
+- `ExecutionGraphBuilder` still emits a mostly linear graph; join policy now exists in types and runtime, but planner/builder do not yet populate richer dependency metadata.
+- Aggregation nodes validate branch readiness, but they do not yet emit dedicated aggregation artifacts or summaries.
+- Validation and aggregation still share the same result-set primitives; no specialized aggregation artifact schema exists yet.
+
+### Next Recommended Steps
+
+1. Extend `PlanStep` and `ExecutionGraphBuilder` so dependency sketches from the planner become real branch/join graphs.
+2. Emit aggregation-specific artifacts or summaries for aggregation nodes instead of only marking the node complete.
+3. Revisit scheduler and retry behavior once multi-parent graphs are emitted by the builder.
