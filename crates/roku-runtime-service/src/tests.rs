@@ -70,6 +70,18 @@ fn service_reports_capability_denied() {
 }
 
 #[test]
+fn service_tracks_planning_metrics() {
+	let service = RuntimeService::default();
+	service
+		.execute(sample_request())
+		.expect("runtime service should succeed");
+
+	let metrics = service.metrics_snapshot();
+	assert_eq!(metrics.planning_runs_total, 1);
+	assert_eq!(metrics.planning_react_total, 1);
+}
+
+#[test]
 fn service_returns_pending_approval_when_graph_contains_approval_gate() {
 	let service = RuntimeService::default();
 	let response = service

@@ -4,7 +4,7 @@ use roku_common_types::{
 	TaskNodeKind, TaskState,
 };
 use roku_execution_graph_builder::TaskGraphScheduler;
-use roku_observability::AuditRecord;
+use roku_observability::{AuditCorrelation, AuditRecord};
 
 use crate::helpers::failure_message;
 use crate::{RunMode, RuntimeService};
@@ -124,12 +124,21 @@ impl RuntimeService {
 
 			if !is_allowed {
 				self.audit_sink
-					.record(AuditRecord {
-						actor: spec.instance_id.clone(),
-						action: "invoke".to_string(),
-						resource: token.resource,
-						outcome: "denied".to_string(),
-					})
+					.record(
+						AuditRecord::new(
+							spec.instance_id.clone(),
+							"invoke",
+							token.resource,
+							"denied",
+						)
+						.with_correlation(AuditCorrelation {
+							trace_id: format!("trace-{}", task.request_id.0),
+							span_id: "capability-check".to_string(),
+							task_id: Some(task.task_id.0.clone()),
+							request_id: Some(task.request_id.0.clone()),
+						})
+						.with_attribute("node_id", node.node_id.0.clone()),
+					)
 					.map_err(|error| RuntimeError::new(error.to_string()))?;
 			}
 
@@ -216,12 +225,21 @@ impl RuntimeService {
 
 		for evidence_set in &evidence_sets {
 			self.audit_sink
-				.record(AuditRecord {
-					actor: evidence_set.result.producer.clone(),
-					action: "validate".to_string(),
-					resource: evidence_set.result.schema_version.clone(),
-					outcome: "accepted".to_string(),
-				})
+				.record(
+					AuditRecord::new(
+						evidence_set.result.producer.clone(),
+						"validate",
+						evidence_set.result.schema_version.clone(),
+						"accepted",
+					)
+					.with_correlation(AuditCorrelation {
+						trace_id: format!("trace-{}", task.request_id.0),
+						span_id: "validation".to_string(),
+						task_id: Some(task.task_id.0.clone()),
+						request_id: Some(task.request_id.0.clone()),
+					})
+					.with_attribute("node_id", evidence_set.result.node_id.0.clone()),
+				)
 				.map_err(|error| RuntimeError::new(error.to_string()))?;
 		}
 		self.mark_node_completed(task, node);

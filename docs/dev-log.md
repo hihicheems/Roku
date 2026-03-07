@@ -522,3 +522,43 @@
 1. Wire `roku-agent-runtime` worker execution to `roku-tool-runtime` so profile-dispatched workers run descriptor-governed tools.
 2. Add profile routing feedback loop using observability metrics (success rate, validation failures, timeout distribution).
 3. Introduce profile-level approval/capability attenuation templates to tighten high-risk worker operations.
+
+## 2026-03-07 - Session Milestone (Phase 15)
+
+### Completed Modules
+
+- `roku-observability`
+  - Added planning metrics family:
+    - `planning_runs_total`
+    - per-strategy counters (`react`, `task_decomposition`, `tree_search`, `iterative_refinement`)
+  - Added normalized planning-mode classifier for strategy metric accounting.
+  - Extended audit model with correlation and attributes:
+    - `AuditCorrelation` (`trace_id`, `span_id`, optional `task_id`/`request_id`)
+    - `AuditAttribute` key-value tags
+    - `AuditRecord` builder APIs (`new`, `with_correlation`, `with_attribute`)
+  - Kept JSONL exporter compatibility while serializing enriched audit records.
+- `roku-runtime-service`
+  - Integrated planning metrics updates in execute flow.
+  - Added correlated audit records for:
+    - capability denial
+    - validation acceptance
+    - approval decision
+  - Added test coverage for planning metric increment behavior.
+
+### Verification Status
+
+- `cargo test -p roku-observability -p roku-runtime-service`: passed
+- `cargo fmt --all`: passed
+- `cargo check --workspace`: passed
+
+### Remaining Work
+
+- Correlation currently uses deterministic local trace IDs derived from request ID; full distributed trace propagation is not connected yet.
+- Observability crate still exports raw snapshots only; no Prometheus/OpenTelemetry bridge implementation is present.
+- Planning metrics capture strategy selection but not loop convergence quality (iteration depth, stop reasons).
+
+### Next Recommended Steps
+
+1. Add runtime propagation of trace context from gateway ingress to all audit and tool execution events.
+2. Add OTEL/Prometheus exporters on top of current in-memory counters.
+3. Track planning stop reasons and loop depth histograms for strategy quality diagnosis.
