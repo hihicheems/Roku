@@ -644,3 +644,34 @@
 1. Integrate `roku-llm-adapter` into planning/reasoning calls in `roku-runtime-service`.
 2. Add provider-level resilience policy (retry budget, jitter backoff, breaker state).
 3. Emit model routing and cost telemetry through `roku-observability`.
+
+## 2026-03-07 - Session Milestone (Phase 18)
+
+### Completed Modules
+
+- `docs/todo-list.md`
+  - Reworked from a flat milestone table into a crate-oriented implementation roadmap.
+  - Reorganized the roadmap in the same layer order as `tmp/agent-design-doc.md`.
+  - Split work into crate-level sections with fine-grained subtasks and explicit `DONE` / `TODO` state.
+  - Added planned-crate sections for architecture gaps already required by the design doc:
+    - `roku-supervisor-agent`
+    - `roku-skill-registry`
+    - `roku-agent-directory`
+    - `roku-quant-domain-pack`
+  - Turned the roadmap into the primary execution reference for future development sessions.
+
+### Verification Status
+
+- Manual consistency review against `tmp/agent-design-doc.md`: completed
+- Manual consistency review against implemented crates and `docs/dev-log.md`: completed
+
+### Remaining Work
+
+- The roadmap is now significantly more useful, but it will need ongoing maintenance as crates split or new planned crates are actually scaffolded.
+- Some future tasks are still intentionally grouped under current crates (`roku-runtime-service`, `roku-tool-runtime`, `roku-state-store`) until the corresponding dedicated crates are extracted.
+
+### Next Recommended Steps
+
+1. Start executing the new roadmap from the highest-value unfinished infrastructure items in `roku-state-store`.
+2. Use the planned-crate sections as the trigger for when architecture pressure justifies extracting new crates from current integration crates.
+3. Keep `docs/todo-list.md` synchronized whenever a task lands or a crate boundary changes.
