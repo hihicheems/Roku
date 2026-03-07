@@ -802,3 +802,36 @@
 1. Push `roku-agent-runtime` deeper into `roku-llm-adapter` and provider-routing policy for nontrivial reasoning nodes.
 2. Add output-schema enforcement and artifact/audit persistence to `roku-tool-runtime`.
 3. Start the next infrastructure increment in `roku-state-store` or dispatch/backpressure plane.
+
+## 2026-03-07 - Session Milestone (Phase 22)
+
+### Completed Modules
+
+- `roku-tool-runtime`
+  - Split the crate into explicit modules:
+    - `descriptor.rs`
+    - `error.rs`
+    - `event.rs`
+    - `runtime.rs`
+    - `tests.rs`
+  - Preserved descriptor validation, capability checks, retry/timeout handling, deterministic hook emission, and fingerprint generation while removing the single-file bottleneck.
+  - Kept the public API stable so `roku-agent-runtime` and existing tests continued to work without integration changes.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test -p roku-tool-runtime -p roku-agent-runtime -p roku-runtime-service -p roku-e2e`: passed
+- `cargo check --workspace`: passed
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed
+
+### Remaining Work
+
+- `roku-tool-runtime` still lacks output-schema enforcement against descriptor-declared schemas.
+- Tool execution metadata is not yet persisted into artifacts or audit/event repositories.
+- Sandbox backends remain logical profiles only; there is still no WASI/container execution adapter behind them.
+
+### Next Recommended Steps
+
+1. Implement `TR-08` so tool outputs are validated against declared output schemas before they re-enter agent execution.
+2. Implement `TR-09` so tool execution produces auditable persisted artifacts and budget/accounting records.
+3. Continue into `roku-state-store` production adapters or dispatch/backpressure infrastructure.
