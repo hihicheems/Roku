@@ -116,4 +116,21 @@ mod tests {
 		let bad = orchestrator.transition(&mut task, TaskState::Succeeded, "skip", None);
 		assert!(bad.is_err());
 	}
+
+	#[test]
+	fn mark_dead_letter_after_max_attempts() {
+		let orchestrator = Orchestrator::with_config(OrchestratorConfig { max_attempts: 2 });
+		let request = RequestEnvelope {
+			request_id: RequestId("req-1".to_string()),
+			session_id: "s1".to_string(),
+			goal: "g".to_string(),
+		};
+		let mut task = orchestrator.create_task(&request);
+
+		let first = orchestrator.mark_failed_or_dead_letter(&mut task);
+		assert_eq!(first, TaskState::Failed);
+
+		let second = orchestrator.mark_failed_or_dead_letter(&mut task);
+		assert_eq!(second, TaskState::DeadLetter);
+	}
 }
