@@ -9,7 +9,7 @@ use roku_common_types::{
 	ApprovalDecision, ApprovalId, ApprovalStatus, ApprovalTicket, ErrorClass, RequestEnvelope,
 	ResponseEnvelope, ResponseStatus, RuntimeError, Task, TaskNode, TaskNodeKind, TaskState,
 };
-use roku_execution_graph_builder::{ExecutionGraphBuilder, GraphBuildConfig};
+use roku_execution_graph_builder::{ExecutionGraphBuilder, GraphBuildConfig, TaskGraphScheduler};
 use roku_observability::{AuditRecord, AuditSink, InMemoryAuditSink, Metrics, MetricsSnapshot};
 use roku_orchestrator::Orchestrator;
 use roku_planning_engine::{DefaultPlanningEngine, PlanningInput, RiskLevel, StrategySelector};
@@ -117,6 +117,7 @@ impl RuntimeService {
 			self.builder
 				.compile(task.task_id.clone(), &outline, &GraphBuildConfig::default());
 		task.graph = Some(graph.clone());
+		task.completed_nodes = Vec::new();
 		task.next_node_index = 0;
 		task.pending_approval_id = None;
 		task.last_result = None;
@@ -194,6 +195,7 @@ impl RuntimeService {
 
 		task.pending_approval_id = None;
 		if decision.approved {
+			self.mark_node_completed_by_id(&mut task, &ticket.node_id);
 			self.record_transition(&mut task, TaskState::Executing, "approval granted")?;
 			self.process_task(&mut task, RunMode::Normal)
 		} else {
@@ -247,25 +249,40 @@ impl RuntimeService {
 			.graph
 			.clone()
 			.ok_or_else(|| RuntimeError::new("task graph is missing"))?;
+		let scheduler = TaskGraphScheduler;
 
-		for (index, node) in graph.nodes.iter().enumerate().skip(task.next_node_index) {
-			match node.kind {
-				TaskNodeKind::Execution => {
-					if let Some(response) = self.process_execution_node(task, node, index, mode)? {
-						return Ok(response);
+		while !scheduler
+			.is_complete(&graph, &task.completed_nodes)
+			.map_err(|error| RuntimeError::new(error.to_string()))?
+		{
+			let ready_nodes = scheduler
+				.ready_nodes(&graph, &task.completed_nodes)
+				.map_err(|error| RuntimeError::new(error.to_string()))?;
+			if ready_nodes.is_empty() {
+				return Err(RuntimeError::new(
+					"task graph has no ready nodes but is not complete",
+				));
+			}
+
+			for node in ready_nodes {
+				match node.kind {
+					TaskNodeKind::Execution => {
+						if let Some(response) = self.process_execution_node(task, &node, mode)? {
+							return Ok(response);
+						}
 					}
-				}
-				TaskNodeKind::Approval => {
-					return self.process_approval_node(task, node, index);
-				}
-				TaskNodeKind::Validation => {
-					let report = self.process_validation_node(task, index, mode)?;
-					if let Some(response) = report {
-						return Ok(response);
+					TaskNodeKind::Approval => {
+						return self.process_approval_node(task, &node);
 					}
-				}
-				TaskNodeKind::Aggregation => {
-					task.next_node_index = index + 1;
+					TaskNodeKind::Validation => {
+						let report = self.process_validation_node(task, &node, mode)?;
+						if let Some(response) = report {
+							return Ok(response);
+						}
+					}
+					TaskNodeKind::Aggregation => {
+						self.mark_node_completed(task, &node);
+					}
 				}
 			}
 		}
@@ -320,7 +337,6 @@ impl RuntimeService {
 		&self,
 		task: &mut Task,
 		node: &TaskNode,
-		index: usize,
 		mode: RunMode,
 	) -> Result<Option<ResponseEnvelope>, RuntimeError> {
 		let spec = self.factory.build_for_node(&task.task_id, node);
@@ -377,7 +393,7 @@ impl RuntimeService {
 		}
 
 		task.last_result = Some(result);
-		task.next_node_index = index + 1;
+		self.mark_node_completed(task, node);
 		Ok(None)
 	}
 
@@ -385,7 +401,6 @@ impl RuntimeService {
 		&self,
 		task: &mut Task,
 		node: &TaskNode,
-		index: usize,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let approval_id = ApprovalId(format!("approval-{}-{}", task.task_id.0, node.node_id.0));
 		let ticket = ApprovalTicket {
@@ -400,7 +415,6 @@ impl RuntimeService {
 		};
 
 		self.record_transition(task, TaskState::WaitingApproval, "approval required")?;
-		task.next_node_index = index + 1;
 		task.pending_approval_id = Some(approval_id.clone());
 		self.save_approval_ticket(ticket)?;
 		self.save_task(task.clone())?;
@@ -416,7 +430,7 @@ impl RuntimeService {
 	fn process_validation_node(
 		&self,
 		task: &mut Task,
-		index: usize,
+		node: &TaskNode,
 		mode: RunMode,
 	) -> Result<Option<ResponseEnvelope>, RuntimeError> {
 		let result = task
@@ -451,9 +465,24 @@ impl RuntimeService {
 				outcome: "accepted".to_string(),
 			})
 			.map_err(|error| RuntimeError::new(error.to_string()))?;
-		task.next_node_index = index + 1;
+		self.mark_node_completed(task, node);
 
 		Ok(None)
+	}
+
+	fn mark_node_completed(&self, task: &mut Task, node: &TaskNode) {
+		self.mark_node_completed_by_id(task, &node.node_id);
+	}
+
+	fn mark_node_completed_by_id(&self, task: &mut Task, node_id: &roku_common_types::NodeId) {
+		if task
+			.completed_nodes
+			.iter()
+			.all(|completed| completed != node_id)
+		{
+			task.completed_nodes.push(node_id.clone());
+		}
+		task.next_node_index = task.completed_nodes.len();
 	}
 }
 
