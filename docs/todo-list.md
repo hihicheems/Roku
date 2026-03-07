@@ -254,7 +254,7 @@
 | TG-05 | 增加真实 webhook / polling transport runner | §4.1 Connector | DONE |
 | TG-06 | 增加 approval callback query 支持 | §15.3 人审闸门 | DONE |
 | TG-07 | 增加 artifact / experiment / approval 的富消息渲染 | §12 Artifact / §16 诊断 | DONE |
-| TG-08 | 增加长任务状态推送与结果回执能力 | 长任务体验 | TODO |
+| TG-08 | 增加长任务状态推送与结果回执能力 | 长任务体验 | DONE |
 | TG-09 | 为 polling transport 增加抑制式错误日志，隐藏 routine `getUpdates` 噪声并保留连续失败告警 | §16 可观测性 / Connector 运行治理 | DONE |
 
 ## roku-state-store

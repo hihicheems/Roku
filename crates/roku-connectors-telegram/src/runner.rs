@@ -113,6 +113,15 @@ impl TelegramPollingRunner {
 					request.request_id.0,
 					truncate_for_log(&request.goal, 160),
 				);
+				if let Err(error) = self
+					.client
+					.send_message(&TelegramOutboundMessage::progress_notice(chat_id, &request))
+				{
+					eprintln!(
+						"[telegram] progress_notice_error chat_id={} request_id={} error={}",
+						chat_id, request.request_id.0, error,
+					);
+				}
 				self.dispatch_response(chat_id, handler.handle_request(request))
 			}
 			Ok(TelegramInteraction::ApprovalDecision(action)) => {
