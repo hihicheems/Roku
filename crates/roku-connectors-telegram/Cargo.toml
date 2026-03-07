@@ -7,3 +7,5 @@ authors.workspace = true
 
 [dependencies]
 roku-common-types = { path = "../roku-common-types" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
