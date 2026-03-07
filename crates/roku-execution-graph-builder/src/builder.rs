@@ -87,12 +87,12 @@ impl ExecutionGraphBuilder {
 				.get(&step.step_id)
 				.expect("execution node should be built in first pass");
 			for dependency in &step.depends_on {
-				let dependency_terminal = terminal_nodes
-					.get(dependency)
-					.ok_or_else(|| GraphBuildError::MissingDependency {
+				let dependency_terminal = terminal_nodes.get(dependency).ok_or_else(|| {
+					GraphBuildError::MissingDependency {
 						step_id: step.step_id.clone(),
 						dependency: dependency.clone(),
-					})?;
+					}
+				})?;
 				edges.push(TaskEdge {
 					from: dependency_terminal.clone(),
 					to: execution_node_id.clone(),
@@ -127,7 +127,10 @@ impl ExecutionGraphBuilder {
 	}
 }
 
-fn terminal_step_nodes(outline: &PlanOutline, terminal_nodes: &HashMap<String, NodeId>) -> Vec<NodeId> {
+fn terminal_step_nodes(
+	outline: &PlanOutline,
+	terminal_nodes: &HashMap<String, NodeId>,
+) -> Vec<NodeId> {
 	let consumed_steps = outline
 		.steps
 		.iter()
@@ -239,9 +242,6 @@ mod tests {
 			)
 			.expect_err("missing dependency should fail graph compilation");
 
-		assert!(matches!(
-			error,
-			GraphBuildError::MissingDependency { .. }
-		));
+		assert!(matches!(error, GraphBuildError::MissingDependency { .. }));
 	}
 }
