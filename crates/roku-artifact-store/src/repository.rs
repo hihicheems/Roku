@@ -30,7 +30,8 @@ pub struct InMemoryArtifactRepository {
 
 impl ArtifactRepository for InMemoryArtifactRepository {
 	fn save_artifact(&mut self, artifact: Artifact) -> Result<(), ArtifactStoreError> {
-		self.artifacts.insert(artifact.artifact_id.0.clone(), artifact);
+		self.artifacts
+			.insert(artifact.artifact_id.0.clone(), artifact);
 		Ok(())
 	}
 

@@ -21,7 +21,10 @@ pub trait ExperimentRunRepository {
 		&self,
 		run_id: &ExperimentRunId,
 	) -> Result<Option<ExperimentRun>, ExperimentRegistryError>;
-	fn load_by_task(&self, task_id: &TaskId) -> Result<Option<ExperimentRun>, ExperimentRegistryError>;
+	fn load_by_task(
+		&self,
+		task_id: &TaskId,
+	) -> Result<Option<ExperimentRun>, ExperimentRegistryError>;
 }
 
 #[derive(Debug, Default)]
@@ -42,7 +45,10 @@ impl ExperimentRunRepository for InMemoryExperimentRunRepository {
 		Ok(self.runs.get(&run_id.0).cloned())
 	}
 
-	fn load_by_task(&self, task_id: &TaskId) -> Result<Option<ExperimentRun>, ExperimentRegistryError> {
+	fn load_by_task(
+		&self,
+		task_id: &TaskId,
+	) -> Result<Option<ExperimentRun>, ExperimentRegistryError> {
 		Ok(self
 			.runs
 			.values()
@@ -98,12 +104,12 @@ impl ExperimentRunRepository for FileExperimentRunRepository {
 		Ok(runs.get(&run_id.0).cloned())
 	}
 
-	fn load_by_task(&self, task_id: &TaskId) -> Result<Option<ExperimentRun>, ExperimentRegistryError> {
+	fn load_by_task(
+		&self,
+		task_id: &TaskId,
+	) -> Result<Option<ExperimentRun>, ExperimentRegistryError> {
 		let runs = self.read_all()?;
-		Ok(runs
-			.values()
-			.find(|run| run.task_id == *task_id)
-			.cloned())
+		Ok(runs.values().find(|run| run.task_id == *task_id).cloned())
 	}
 }
 
