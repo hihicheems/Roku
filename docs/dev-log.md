@@ -96,3 +96,43 @@
 1. Add `StorageBackend` trait with dedicated PG/Redis/NATS modules and integration tests.
 2. Introduce `roku-runtime-service` crate to host orchestration API and gateway executor binding.
 3. Add e2e matrix for retry budget exhaustion and dead-letter transitions.
+
+## 2026-03-07 - Session Milestone (Phase 3)
+
+### Completed Modules
+
+- `roku-runtime-service`
+  - Added reusable orchestration service boundary to host planning, graph compilation, execution, validation, state persistence, and audit hooks.
+  - Moved the main execution flow out of `roku-cmd` so CLI and HTTP can reuse the same runtime entrypoint.
+  - Upgraded execution from "first graph node only" to sequential graph-node processing.
+  - Added explicit run modes for approval gating and retry-budget exhaustion.
+- `roku-api-gateway`
+  - Added `RuntimeServiceExecutor` adapter to bind HTTP ingress directly to the real runtime service.
+  - Preserved generic `RequestExecutor` abstraction while replacing the placeholder-only path for integration use.
+- `roku-common-types`
+  - Added `ResponseStatus::PendingApproval` to represent approval gates as a first-class response outcome.
+- `roku-orchestrator`
+  - Added `register_failure` helper to emit `Failed` and `DeadLetter` events coherently.
+  - Added explicit `Failed -> Planning` retry path in the state machine for replan/retry flows.
+  - Added tests for retry-budget exhaustion and dead-letter transitions.
+- `roku-e2e`
+  - Added HTTP integration coverage against the real runtime service.
+  - Added end-to-end approval-gate and dead-letter scenarios.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test --workspace`: passed
+
+### Remaining Work
+
+- Add resumable approval handling so a `WaitingApproval` task can continue from persisted state instead of only returning a pending response.
+- Add production storage and queue backends behind repository abstractions.
+- Deepen graph execution to support branching, joins, and partial re-run from checkpoints.
+- Expand validation to schema registry integration, provenance cross-checks, and domain-specific semantic policies.
+
+### Next Recommended Steps
+
+1. Introduce persisted approval tickets and a resume API for `WaitingApproval -> Executing`.
+2. Add PostgreSQL-backed task/event repositories and a Redis/NATS-backed dispatch layer.
+3. Extend `ExecutionGraphBuilder` and `roku-runtime-service` from linear node iteration to dependency-aware DAG scheduling.
