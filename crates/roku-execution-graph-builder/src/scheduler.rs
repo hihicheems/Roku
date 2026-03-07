@@ -207,6 +207,8 @@ mod tests {
 			kind,
 			description: id.to_string(),
 			capabilities: Vec::new(),
+			join_policy: roku_common_types::JoinPolicy::AllParents,
+			aggregation_mode: roku_common_types::AggregationMode::CollectAll,
 		}
 	}
 

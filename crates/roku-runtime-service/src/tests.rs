@@ -1,7 +1,7 @@
 use roku_common_types::{
-	ApprovalDecision, ApprovalId, EvidenceItem, NodeId, RequestEnvelope, RequestId, ResponseStatus,
-	ResultEnvelope, ResultStatus, Task, TaskEdge, TaskGraph, TaskId, TaskNode, TaskNodeKind,
-	TaskState,
+	AggregationMode, ApprovalDecision, ApprovalId, EvidenceItem, JoinPolicy, NodeId,
+	RequestEnvelope, RequestId, ResponseStatus, ResultEnvelope, ResultStatus, Task, TaskEdge,
+	TaskGraph, TaskId, TaskNode, TaskNodeKind, TaskState,
 };
 
 use crate::{RunMode, RuntimeService};
@@ -199,18 +199,24 @@ fn validation_collects_results_through_approval_nodes() {
 					kind: TaskNodeKind::Execution,
 					description: "extract".to_string(),
 					capabilities: Vec::new(),
+					join_policy: JoinPolicy::AllParents,
+					aggregation_mode: AggregationMode::CollectAll,
 				},
 				TaskNode {
 					node_id: NodeId("extract-approval".to_string()),
 					kind: TaskNodeKind::Approval,
 					description: "approval".to_string(),
 					capabilities: Vec::new(),
+					join_policy: JoinPolicy::AllParents,
+					aggregation_mode: AggregationMode::CollectAll,
 				},
 				TaskNode {
 					node_id: NodeId("validate".to_string()),
 					kind: TaskNodeKind::Validation,
 					description: "validate".to_string(),
 					capabilities: Vec::new(),
+					join_policy: JoinPolicy::AllParents,
+					aggregation_mode: AggregationMode::CollectAll,
 				},
 			],
 			edges: vec![
@@ -266,7 +272,10 @@ fn validation_evidence_resolves_persisted_artifacts() {
 			.expect("task should exist")
 	};
 	let evidence_sets = service
-		.collect_validation_evidence(&task, &NodeId("validation-gate".to_string()))
+		.collect_validation_evidence(
+			&task,
+			&task.graph.as_ref().expect("graph should exist").nodes[2],
+		)
 		.expect("validation evidence should load");
 
 	assert_eq!(evidence_sets.len(), 1);
@@ -275,4 +284,170 @@ fn validation_evidence_resolves_persisted_artifacts() {
 			.iter()
 			.all(|evidence_set| !evidence_set.artifacts.is_empty())
 	);
+}
+
+#[test]
+fn node_result_set_applies_highest_confidence_aggregation() {
+	let service = RuntimeService::default();
+	let task = Task {
+		task_id: TaskId("task-aggregation".to_string()),
+		request_id: RequestId("req-aggregation".to_string()),
+		state: TaskState::Executing,
+		attempts: 0,
+		completed_nodes: vec![
+			NodeId("branch-a".to_string()),
+			NodeId("branch-b".to_string()),
+		],
+		next_node_index: 2,
+		pending_approval_id: None,
+		last_result: None,
+		graph: Some(TaskGraph {
+			task_id: TaskId("task-aggregation".to_string()),
+			nodes: vec![
+				TaskNode {
+					node_id: NodeId("branch-a".to_string()),
+					kind: TaskNodeKind::Execution,
+					description: "branch a".to_string(),
+					capabilities: Vec::new(),
+					join_policy: JoinPolicy::AllParents,
+					aggregation_mode: AggregationMode::CollectAll,
+				},
+				TaskNode {
+					node_id: NodeId("branch-b".to_string()),
+					kind: TaskNodeKind::Execution,
+					description: "branch b".to_string(),
+					capabilities: Vec::new(),
+					join_policy: JoinPolicy::AllParents,
+					aggregation_mode: AggregationMode::CollectAll,
+				},
+				TaskNode {
+					node_id: NodeId("aggregate".to_string()),
+					kind: TaskNodeKind::Aggregation,
+					description: "aggregate".to_string(),
+					capabilities: Vec::new(),
+					join_policy: JoinPolicy::AllParents,
+					aggregation_mode: AggregationMode::HighestConfidence,
+				},
+			],
+			edges: vec![
+				TaskEdge {
+					from: NodeId("branch-a".to_string()),
+					to: NodeId("aggregate".to_string()),
+				},
+				TaskEdge {
+					from: NodeId("branch-b".to_string()),
+					to: NodeId("aggregate".to_string()),
+				},
+			],
+		}),
+	};
+	service
+		.save_result(ResultEnvelope {
+			task_id: TaskId("task-aggregation".to_string()),
+			node_id: NodeId("branch-a".to_string()),
+			producer: "agent-a".to_string(),
+			schema_version: "result.v1".to_string(),
+			status: ResultStatus::Ok,
+			payload: "low".to_string(),
+			evidence: Vec::new(),
+			confidence: 0.4,
+		})
+		.expect("branch a result should persist");
+	service
+		.save_result(ResultEnvelope {
+			task_id: TaskId("task-aggregation".to_string()),
+			node_id: NodeId("branch-b".to_string()),
+			producer: "agent-b".to_string(),
+			schema_version: "result.v1".to_string(),
+			status: ResultStatus::Ok,
+			payload: "high".to_string(),
+			evidence: Vec::new(),
+			confidence: 0.9,
+		})
+		.expect("branch b result should persist");
+
+	let result_set = service
+		.collect_node_result_set(
+			&task,
+			&task.graph.as_ref().expect("graph should exist").nodes[2],
+		)
+		.expect("result set should collect");
+
+	assert_eq!(result_set.source_node_ids.len(), 2);
+	assert_eq!(result_set.results.len(), 1);
+	assert_eq!(result_set.results[0].node_id.0, "branch-b");
+}
+
+#[test]
+fn node_result_set_enforces_quorum_policy() {
+	let service = RuntimeService::default();
+	let task = Task {
+		task_id: TaskId("task-quorum".to_string()),
+		request_id: RequestId("req-quorum".to_string()),
+		state: TaskState::Executing,
+		attempts: 0,
+		completed_nodes: vec![NodeId("branch-a".to_string())],
+		next_node_index: 1,
+		pending_approval_id: None,
+		last_result: None,
+		graph: Some(TaskGraph {
+			task_id: TaskId("task-quorum".to_string()),
+			nodes: vec![
+				TaskNode {
+					node_id: NodeId("branch-a".to_string()),
+					kind: TaskNodeKind::Execution,
+					description: "branch a".to_string(),
+					capabilities: Vec::new(),
+					join_policy: JoinPolicy::AllParents,
+					aggregation_mode: AggregationMode::CollectAll,
+				},
+				TaskNode {
+					node_id: NodeId("branch-b".to_string()),
+					kind: TaskNodeKind::Execution,
+					description: "branch b".to_string(),
+					capabilities: Vec::new(),
+					join_policy: JoinPolicy::AllParents,
+					aggregation_mode: AggregationMode::CollectAll,
+				},
+				TaskNode {
+					node_id: NodeId("aggregate".to_string()),
+					kind: TaskNodeKind::Aggregation,
+					description: "aggregate".to_string(),
+					capabilities: Vec::new(),
+					join_policy: JoinPolicy::Quorum(2),
+					aggregation_mode: AggregationMode::CollectAll,
+				},
+			],
+			edges: vec![
+				TaskEdge {
+					from: NodeId("branch-a".to_string()),
+					to: NodeId("aggregate".to_string()),
+				},
+				TaskEdge {
+					from: NodeId("branch-b".to_string()),
+					to: NodeId("aggregate".to_string()),
+				},
+			],
+		}),
+	};
+	service
+		.save_result(ResultEnvelope {
+			task_id: TaskId("task-quorum".to_string()),
+			node_id: NodeId("branch-a".to_string()),
+			producer: "agent-a".to_string(),
+			schema_version: "result.v1".to_string(),
+			status: ResultStatus::Ok,
+			payload: "only branch".to_string(),
+			evidence: Vec::new(),
+			confidence: 0.8,
+		})
+		.expect("branch a result should persist");
+
+	let error = service
+		.collect_node_result_set(
+			&task,
+			&task.graph.as_ref().expect("graph should exist").nodes[2],
+		)
+		.expect_err("quorum should reject incomplete branches");
+	assert!(error.message.contains("join policy"));
 }

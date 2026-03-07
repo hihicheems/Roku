@@ -52,7 +52,7 @@ impl RuntimeService {
 						}
 					}
 					TaskNodeKind::Aggregation => {
-						self.mark_node_completed(task, &node);
+						self.process_aggregation_node(task, &node)?;
 					}
 				}
 			}
@@ -181,7 +181,7 @@ impl RuntimeService {
 		node: &TaskNode,
 		mode: RunMode,
 	) -> Result<Option<ResponseEnvelope>, RuntimeError> {
-		let evidence_sets = self.collect_validation_evidence(task, &node.node_id)?;
+		let evidence_sets = self.collect_validation_evidence(task, node)?;
 		if evidence_sets.is_empty() {
 			return Err(RuntimeError::new(
 				"validation node reached before upstream execution results",
@@ -227,5 +227,21 @@ impl RuntimeService {
 		self.mark_node_completed(task, node);
 
 		Ok(None)
+	}
+
+	pub(super) fn process_aggregation_node(
+		&self,
+		task: &mut Task,
+		node: &TaskNode,
+	) -> Result<(), RuntimeError> {
+		let result_set = self.collect_node_result_set(task, node)?;
+		if result_set.results.is_empty() {
+			return Err(RuntimeError::new(format!(
+				"aggregation node {} has no upstream results",
+				node.node_id.0
+			)));
+		}
+		self.mark_node_completed(task, node);
+		Ok(())
 	}
 }
