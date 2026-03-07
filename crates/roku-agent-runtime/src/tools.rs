@@ -11,6 +11,7 @@ pub(crate) const RESEARCH_TOOL_NAME: &str = "research.synthesize";
 pub(crate) const DATA_TOOL_NAME: &str = "data.execute";
 pub(crate) const REVIEW_TOOL_NAME: &str = "review.assess";
 pub(crate) const GENERAL_TOOL_NAME: &str = "general.execute";
+const LLM_TOOL_TIMEOUT_MS: u64 = 45_000;
 
 pub(crate) fn build_builtin_tool_runtime() -> ToolRuntime {
 	let mut runtime = ToolRuntime::default();
@@ -163,7 +164,12 @@ impl PromptedLlmTool {
 		router: Arc<LlmRouter>,
 	) -> Self {
 		Self {
-			descriptor: tool_descriptor(name, required_capabilities, sandbox_profile, 20_000),
+			descriptor: tool_descriptor(
+				name,
+				required_capabilities,
+				sandbox_profile,
+				LLM_TOOL_TIMEOUT_MS,
+			),
 			worker_id,
 			system_prompt,
 			risk_tier,

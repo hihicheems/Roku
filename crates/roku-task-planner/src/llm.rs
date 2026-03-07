@@ -42,6 +42,10 @@ impl LlmTaskPlanner {
 
 impl TaskPlanner for LlmTaskPlanner {
 	fn build_outline(&self, request: &RequestEnvelope, decision: &PlanningDecision) -> PlanOutline {
+		if matches!(decision.mode, PlanningMode::ReAct) {
+			return self.fallback.build_outline(request, decision);
+		}
+
 		self.generate_outline(request, decision)
 			.unwrap_or_else(|| self.fallback.build_outline(request, decision))
 	}
@@ -284,5 +288,23 @@ mod tests {
 				.iter()
 				.any(|step| step.step_id == "decompose-goal")
 		);
+	}
+
+	#[test]
+	fn llm_planner_uses_deterministic_fast_path_for_react_mode() {
+		let planner = planner_with_output("this should never be used");
+		let outline = planner.build_outline(
+			&request(),
+			&PlanningDecision {
+				mode: PlanningMode::ReAct,
+				max_iterations: 4,
+				max_branches: 1,
+				hooks: Vec::new(),
+			},
+		);
+
+		assert_eq!(outline.steps.len(), 2);
+		assert_eq!(outline.steps[0].step_id, "observe-context");
+		assert_eq!(outline.steps[1].step_id, "act-primary");
 	}
 }
