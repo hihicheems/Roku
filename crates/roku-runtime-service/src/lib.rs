@@ -152,8 +152,24 @@ impl RuntimeService {
 
 		self.record_transition(&mut task, TaskState::GraphBuilding, "build graph")?;
 		let graph =
-			self.builder
-				.compile(task.task_id.clone(), &outline, &GraphBuildConfig::default());
+			match self
+				.builder
+				.compile(task.task_id.clone(), &outline, &GraphBuildConfig::default())
+			{
+				Ok(graph) => graph,
+				Err(error) => {
+					self.metrics.inc_failures();
+					let terminal_state =
+						self.fail_task(&mut task, "graph build failed", ErrorClass::Dependency)?;
+					self.save_task(task)?;
+					return Ok(ResponseEnvelope {
+						request_id: request.request_id,
+						status: ResponseStatus::Failed,
+						message: failure_message(&error.to_string(), terminal_state),
+						artifacts: Vec::new(),
+					});
+				}
+			};
 		task.graph = Some(graph);
 		task.completed_nodes = Vec::new();
 		task.next_node_index = 0;

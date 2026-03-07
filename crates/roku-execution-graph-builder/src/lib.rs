@@ -3,5 +3,5 @@
 mod builder;
 mod scheduler;
 
-pub use builder::{ExecutionGraphBuilder, GraphBuildConfig};
+pub use builder::{ExecutionGraphBuilder, GraphBuildConfig, GraphBuildError};
 pub use scheduler::{GraphScheduleError, TaskGraphScheduler};

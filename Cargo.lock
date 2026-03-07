@@ -1014,6 +1014,8 @@ name = "roku-connectors-telegram"
 version = "0.1.0"
 dependencies = [
  "roku-common-types",
+ "serde",
+ "thiserror",
 ]
 
 [[package]]
@@ -1033,6 +1035,7 @@ name = "roku-execution-graph-builder"
 version = "0.1.0"
 dependencies = [
  "roku-common-types",
+ "thiserror",
 ]
 
 [[package]]
