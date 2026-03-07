@@ -486,3 +486,39 @@
 1. Integrate `roku-tool-runtime` into `roku-agent-runtime` / `roku-runtime-service` node execution flow.
 2. Extend schema checks from required fields to versioned schema validation contracts.
 3. Add adapter layer for real sandbox executors (WASI/container) behind the current runtime constraints.
+
+## 2026-03-07 - Session Milestone (Phase 14)
+
+### Completed Modules
+
+- `roku-agent-instance-factory`
+  - Upgraded from fixed role wiring to capability profile assembly.
+  - Added `CapabilityProfile` registry with default profiles (`research` / `data` / `review` / `general`) and dynamic profile registration.
+  - Added profile inference by capability prefixes and fallback profile strategy.
+  - Added merged capability set generation (`profile defaults + node-required capabilities`).
+  - Added policy binding derivation by profile baseline and node capability complexity.
+- `roku-agent-runtime`
+  - Upgraded runtime into capability-dispatched worker registry.
+  - Added built-in workers (`research-worker`, `data-worker`, `review-worker`, `generic-worker`) with priority-based dispatch.
+  - Added policy guardrails: reject execution when budget/time policy is exhausted.
+  - Added runtime extension API to register custom workers dynamically.
+- `roku-runtime-service`
+  - Updated construction path to use the new non-unit `AgentInstanceFactory` / `GenericAgentRuntime` default initialization.
+
+### Verification Status
+
+- `cargo test -p roku-agent-instance-factory -p roku-agent-runtime -p roku-runtime-service`: passed
+- `cargo fmt --all`: passed
+- `cargo check --workspace`: passed
+
+### Remaining Work
+
+- Runtime dispatch currently uses capability prefixes only; no workload-aware or cost-aware worker routing model exists yet.
+- Profile inference does not yet consume historical success/failure signals or policy feedback loops.
+- Agent runtime still uses synthetic worker outputs and has not been wired to tool-runtime descriptors for real tool execution contracts.
+
+### Next Recommended Steps
+
+1. Wire `roku-agent-runtime` worker execution to `roku-tool-runtime` so profile-dispatched workers run descriptor-governed tools.
+2. Add profile routing feedback loop using observability metrics (success rate, validation failures, timeout distribution).
+3. Introduce profile-level approval/capability attenuation templates to tighten high-risk worker operations.
