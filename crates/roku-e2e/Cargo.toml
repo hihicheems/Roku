@@ -7,5 +7,9 @@ authors.workspace = true
 publish = false
 
 [dev-dependencies]
+actix-web = "4"
+roku-api-gateway = { path = "../roku-api-gateway" }
 roku-cmd = { path = "../roku-cmd" }
 roku-common-types = { path = "../roku-common-types" }
+roku-runtime-service = { path = "../roku-runtime-service" }
+serde = { version = "1", features = ["derive"] }

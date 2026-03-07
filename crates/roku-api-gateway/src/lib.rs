@@ -8,6 +8,7 @@ use actix_web::{HttpResponse, Responder, web};
 use roku_common_types::{
 	RequestEnvelope, RequestId, ResponseEnvelope, ResponseStatus, RuntimeError,
 };
+use roku_runtime_service::RuntimeService;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
@@ -44,6 +45,22 @@ impl RequestExecutor for NoopExecutor {
 			message: "accepted".to_string(),
 			artifacts: Vec::new(),
 		})
+	}
+}
+
+pub struct RuntimeServiceExecutor {
+	service: Arc<RuntimeService>,
+}
+
+impl RuntimeServiceExecutor {
+	pub fn new(service: Arc<RuntimeService>) -> Self {
+		Self { service }
+	}
+}
+
+impl RequestExecutor for RuntimeServiceExecutor {
+	fn execute(&self, request: RequestEnvelope) -> Result<ResponseEnvelope, RuntimeError> {
+		self.service.execute(request)
 	}
 }
 
