@@ -143,7 +143,7 @@ impl RuntimeService {
 			risk_level: RiskLevel::Low,
 			budget_tokens: 10_000,
 		});
-		let mut outline = self.planner.build_outline(&request, decision.mode);
+		let mut outline = self.planner.build_outline(&request, &decision);
 		if matches!(mode, RunMode::ApprovalRequired)
 			&& let Some(step) = outline.steps.last_mut()
 		{
