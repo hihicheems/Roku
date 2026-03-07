@@ -59,6 +59,13 @@ pub struct ArtifactResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactContentResponse {
+	pub artifact_id: String,
+	pub task_id: String,
+	pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExperimentMetricResponse {
 	pub name: String,
 	pub value: f64,

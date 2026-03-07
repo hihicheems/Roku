@@ -2,14 +2,14 @@ use std::sync::Arc;
 
 use actix_web::{App, web};
 use roku_api_gateway::{
-	ApprovalDecisionRequest, ApprovalExecutor, ApprovalTicketResponse, ArtifactResponse,
-	ExperimentResponse, GatewayAppState, RequestExecutor, RuntimeServiceExecutor, SubmitRequest,
-	SubmitResponse, TaskDataExecutor, configure_routes,
+	ApprovalDecisionRequest, ApprovalExecutor, ApprovalTicketResponse, ArtifactContentResponse,
+	ArtifactResponse, ExperimentResponse, GatewayAppState, RequestExecutor, RuntimeServiceExecutor,
+	SubmitRequest, SubmitResponse, TaskDataExecutor, configure_routes,
 };
 use roku_cmd::{RunMode, run_once, run_with_mode};
 use roku_common_types::{
-	ApprovalDecision, ApprovalId, Artifact, ExperimentRun, RequestEnvelope, ResponseStatus,
-	RuntimeError, TaskId,
+	ApprovalDecision, ApprovalId, Artifact, ArtifactId, ExperimentRun, RequestEnvelope,
+	ResponseStatus, RuntimeError, TaskId,
 };
 use roku_runtime_service::RuntimeService;
 
@@ -115,6 +115,29 @@ async fn http_gateway_exposes_task_artifacts_and_experiment() {
 			.iter()
 			.all(|artifact| artifact.uri.starts_with("artifact://"))
 	);
+	let artifact_id = artifacts
+		.first()
+		.expect("artifact should exist")
+		.artifact_id
+		.clone();
+
+	let content_request = actix_web::test::TestRequest::get()
+		.uri(&format!(
+			"/v1/tasks/{task_id}/artifacts/{artifact_id}/content"
+		))
+		.to_request();
+	let content_response: ArtifactContentResponse =
+		actix_web::test::call_and_read_body_json(&app, content_request).await;
+	assert_eq!(content_response.artifact_id, artifact_id);
+	assert!(!content_response.content.is_empty());
+
+	let download_request = actix_web::test::TestRequest::get()
+		.uri(&format!(
+			"/v1/tasks/{task_id}/artifacts/{artifact_id}/download"
+		))
+		.to_request();
+	let download_body = actix_web::test::call_and_read_body(&app, download_request).await;
+	assert!(!download_body.is_empty());
 
 	let experiment_request = actix_web::test::TestRequest::get()
 		.uri(&format!("/v1/tasks/{task_id}/experiment"))
@@ -163,6 +186,14 @@ impl TaskDataExecutor for FixedModeExecutor {
 
 	fn get_experiment_run(&self, task_id: &TaskId) -> Result<Option<ExperimentRun>, RuntimeError> {
 		self.service.get_experiment_run(task_id)
+	}
+
+	fn get_artifact_content(
+		&self,
+		task_id: &TaskId,
+		artifact_id: &ArtifactId,
+	) -> Result<Option<String>, RuntimeError> {
+		self.service.get_artifact_content(task_id, artifact_id)
 	}
 }
 

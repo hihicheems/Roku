@@ -48,6 +48,8 @@ impl ArtifactStore {
 			],
 		};
 		self.repository.save_artifact(artifact.clone())?;
+		self.repository
+			.save_content(&artifact.uri, result.payload.clone())?;
 		Ok(artifact)
 	}
 
@@ -64,6 +66,10 @@ impl ArtifactStore {
 
 	pub fn list_by_task(&self, task_id: &TaskId) -> Result<Vec<Artifact>, ArtifactStoreError> {
 		self.repository.list_by_task(task_id)
+	}
+
+	pub fn load_content_by_uri(&self, uri: &str) -> Result<Option<String>, ArtifactStoreError> {
+		self.repository.load_content_by_uri(uri)
 	}
 }
 
@@ -126,6 +132,11 @@ mod tests {
 			.expect("artifact should exist");
 		assert_eq!(loaded.artifact_id, artifact.artifact_id);
 		assert_eq!(loaded.checksum, "bytes:7");
+		let content = store
+			.load_content_by_uri(&artifact.uri)
+			.expect("artifact content should load")
+			.expect("artifact content should exist");
+		assert_eq!(content, "payload");
 	}
 
 	#[test]
@@ -142,6 +153,11 @@ mod tests {
 			.expect("artifact load should succeed")
 			.expect("artifact should exist");
 		assert_eq!(loaded.uri, artifact.uri);
+		let content = reloaded
+			.load_content_by_uri(&artifact.uri)
+			.expect("artifact content should load")
+			.expect("artifact content should exist");
+		assert_eq!(content, "payload");
 
 		let _ = std::fs::remove_file(path);
 	}

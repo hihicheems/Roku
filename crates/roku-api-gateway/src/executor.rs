@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use roku_common_types::{
-	ApprovalDecision, ApprovalId, ApprovalTicket, Artifact, ExperimentRun, RequestEnvelope,
-	RequestId, ResponseEnvelope, ResponseStatus, RuntimeError, TaskId,
+	ApprovalDecision, ApprovalId, ApprovalTicket, Artifact, ArtifactId, ExperimentRun,
+	RequestEnvelope, RequestId, ResponseEnvelope, ResponseStatus, RuntimeError, TaskId,
 };
 use roku_runtime_service::RuntimeService;
 
@@ -45,6 +45,11 @@ pub trait ApprovalExecutor: Send + Sync {
 pub trait TaskDataExecutor: Send + Sync {
 	fn list_artifacts(&self, task_id: &TaskId) -> Result<Vec<Artifact>, RuntimeError>;
 	fn get_experiment_run(&self, task_id: &TaskId) -> Result<Option<ExperimentRun>, RuntimeError>;
+	fn get_artifact_content(
+		&self,
+		task_id: &TaskId,
+		artifact_id: &ArtifactId,
+	) -> Result<Option<String>, RuntimeError>;
 }
 
 pub trait GatewayExecutor: RequestExecutor + ApprovalExecutor + TaskDataExecutor {}
@@ -90,6 +95,14 @@ impl TaskDataExecutor for NoopExecutor {
 	fn get_experiment_run(&self, _task_id: &TaskId) -> Result<Option<ExperimentRun>, RuntimeError> {
 		Ok(None)
 	}
+
+	fn get_artifact_content(
+		&self,
+		_task_id: &TaskId,
+		_artifact_id: &ArtifactId,
+	) -> Result<Option<String>, RuntimeError> {
+		Ok(None)
+	}
 }
 
 pub struct RuntimeServiceExecutor {
@@ -132,6 +145,14 @@ impl TaskDataExecutor for RuntimeServiceExecutor {
 
 	fn get_experiment_run(&self, task_id: &TaskId) -> Result<Option<ExperimentRun>, RuntimeError> {
 		self.service.get_experiment_run(task_id)
+	}
+
+	fn get_artifact_content(
+		&self,
+		task_id: &TaskId,
+		artifact_id: &ArtifactId,
+	) -> Result<Option<String>, RuntimeError> {
+		self.service.get_artifact_content(task_id, artifact_id)
 	}
 }
 

@@ -562,3 +562,43 @@
 1. Add runtime propagation of trace context from gateway ingress to all audit and tool execution events.
 2. Add OTEL/Prometheus exporters on top of current in-memory counters.
 3. Track planning stop reasons and loop depth histograms for strategy quality diagnosis.
+
+## 2026-03-07 - Session Milestone (Phase 16)
+
+### Completed Modules
+
+- `roku-artifact-store`
+  - Added artifact content persistence APIs in repository contracts (`save_content`, `load_content_by_uri`).
+  - Added content storage for both in-memory and file-backed repositories.
+  - Added backward-compatible file snapshot format upgrade to carry both metadata and content.
+  - Persisted node result payload as artifact content during artifact creation.
+- `roku-runtime-service`
+  - Added `get_artifact_content(task_id, artifact_id)` data-plane API.
+  - Added cross-task protection: reject artifact content access when artifact does not belong to task.
+  - Added tests for artifact content retrieval and cross-task rejection.
+- `roku-api-gateway`
+  - Added new artifact data endpoints:
+    - `GET /v1/tasks/{task_id}/artifacts/{artifact_id}/content`
+    - `GET /v1/tasks/{task_id}/artifacts/{artifact_id}/download`
+  - Added finer-grained artifact error mapping (`404` not found, `403` task mismatch, `400` fallback).
+  - Added response model `ArtifactContentResponse`.
+- `roku-e2e`
+  - Extended HTTP e2e flow to validate artifact content and download endpoints end-to-end.
+
+### Verification Status
+
+- `cargo test -p roku-artifact-store -p roku-runtime-service -p roku-api-gateway -p roku-e2e`: passed
+- `cargo fmt --all`: passed
+- `cargo check --workspace`: passed
+
+### Remaining Work
+
+- Artifact content is currently plain string payload storage; no binary/blob abstraction or media-type catalog exists yet.
+- Download endpoint serves text/plain only; no signed URL / streaming / range support.
+- Artifact retention and content encryption policies are not yet implemented.
+
+### Next Recommended Steps
+
+1. Introduce artifact blob abstraction (`bytes + media_type + size`) and object-store adapters.
+2. Add content retention and lifecycle policies (TTL, archival, GC).
+3. Add authenticated download policies and optional signed URL mode for external clients.

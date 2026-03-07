@@ -2,12 +2,13 @@ use std::sync::atomic::Ordering;
 
 use actix_web::http::StatusCode;
 use actix_web::{HttpResponse, Responder, web};
-use roku_common_types::{ApprovalDecision, ApprovalId, RuntimeError, TaskId};
+use roku_common_types::{ApprovalDecision, ApprovalId, ArtifactId, RuntimeError, TaskId};
 
 use crate::executor::{GatewayAppState, RawRequest};
 use crate::models::{
-	ApprovalDecisionRequest, ErrorResponse, HealthResponse, SubmitRequest, SubmitResponse,
-	approval_ticket_response, artifact_response, experiment_response, response_status_label,
+	ApprovalDecisionRequest, ArtifactContentResponse, ErrorResponse, HealthResponse, SubmitRequest,
+	SubmitResponse, approval_ticket_response, artifact_response, experiment_response,
+	response_status_label,
 };
 
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
@@ -16,6 +17,14 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
 	cfg.route(
 		"/v1/tasks/{task_id}/artifacts",
 		web::get().to(get_task_artifacts_handler),
+	);
+	cfg.route(
+		"/v1/tasks/{task_id}/artifacts/{artifact_id}/content",
+		web::get().to(get_artifact_content_handler),
+	);
+	cfg.route(
+		"/v1/tasks/{task_id}/artifacts/{artifact_id}/download",
+		web::get().to(download_artifact_handler),
 	);
 	cfg.route(
 		"/v1/tasks/{task_id}/experiment",
@@ -77,6 +86,48 @@ pub async fn get_task_artifacts_handler(
 				.collect::<Vec<_>>(),
 		),
 		Err(error) => HttpResponse::BadRequest().json(ErrorResponse {
+			message: error.to_string(),
+		}),
+	}
+}
+
+pub async fn get_artifact_content_handler(
+	state: web::Data<GatewayAppState>,
+	path: web::Path<(String, String)>,
+) -> impl Responder {
+	let (task_id, artifact_id) = path.into_inner();
+	let task_id = TaskId(task_id);
+	let artifact_id = ArtifactId(artifact_id);
+	match state.executor.get_artifact_content(&task_id, &artifact_id) {
+		Ok(Some(content)) => HttpResponse::Ok().json(ArtifactContentResponse {
+			artifact_id: artifact_id.0,
+			task_id: task_id.0,
+			content,
+		}),
+		Ok(None) => HttpResponse::NotFound().json(ErrorResponse {
+			message: "artifact content not found".to_string(),
+		}),
+		Err(error) => HttpResponse::build(artifact_error_status(&error)).json(ErrorResponse {
+			message: error.to_string(),
+		}),
+	}
+}
+
+pub async fn download_artifact_handler(
+	state: web::Data<GatewayAppState>,
+	path: web::Path<(String, String)>,
+) -> impl Responder {
+	let (task_id, artifact_id) = path.into_inner();
+	let task_id = TaskId(task_id);
+	let artifact_id = ArtifactId(artifact_id);
+	match state.executor.get_artifact_content(&task_id, &artifact_id) {
+		Ok(Some(content)) => HttpResponse::Ok()
+			.content_type("text/plain; charset=utf-8")
+			.body(content),
+		Ok(None) => HttpResponse::NotFound().json(ErrorResponse {
+			message: "artifact content not found".to_string(),
+		}),
+		Err(error) => HttpResponse::build(artifact_error_status(&error)).json(ErrorResponse {
 			message: error.to_string(),
 		}),
 	}
@@ -152,6 +203,16 @@ fn approval_error_status(error: &RuntimeError) -> StatusCode {
 	}
 }
 
+fn artifact_error_status(error: &RuntimeError) -> StatusCode {
+	if error.message.contains("not found") {
+		StatusCode::NOT_FOUND
+	} else if error.message.contains("does not belong") {
+		StatusCode::FORBIDDEN
+	} else {
+		StatusCode::BAD_REQUEST
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use std::sync::Arc;
@@ -212,6 +273,18 @@ mod tests {
 		let artifact_response: Vec<ArtifactResponse> =
 			test::call_and_read_body_json(&app, artifact_request).await;
 		assert!(artifact_response.is_empty());
+
+		let artifact_content_request = test::TestRequest::get()
+			.uri("/v1/tasks/task-1/artifacts/artifact-1/content")
+			.to_request();
+		let artifact_content_response = test::call_service(&app, artifact_content_request).await;
+		assert_eq!(artifact_content_response.status(), StatusCode::NOT_FOUND);
+
+		let artifact_download_request = test::TestRequest::get()
+			.uri("/v1/tasks/task-1/artifacts/artifact-1/download")
+			.to_request();
+		let artifact_download_response = test::call_service(&app, artifact_download_request).await;
+		assert_eq!(artifact_download_response.status(), StatusCode::NOT_FOUND);
 
 		let experiment_request = test::TestRequest::get()
 			.uri("/v1/tasks/task-1/experiment")
