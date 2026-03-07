@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use roku_common_types::{Artifact, ArtifactId, TaskId};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -21,11 +22,14 @@ pub trait ArtifactRepository {
 	) -> Result<Option<Artifact>, ArtifactStoreError>;
 	fn load_by_uri(&self, uri: &str) -> Result<Option<Artifact>, ArtifactStoreError>;
 	fn list_by_task(&self, task_id: &TaskId) -> Result<Vec<Artifact>, ArtifactStoreError>;
+	fn save_content(&mut self, uri: &str, content: String) -> Result<(), ArtifactStoreError>;
+	fn load_content_by_uri(&self, uri: &str) -> Result<Option<String>, ArtifactStoreError>;
 }
 
 #[derive(Debug, Default)]
 pub struct InMemoryArtifactRepository {
 	artifacts: HashMap<String, Artifact>,
+	contents: HashMap<String, String>,
 }
 
 impl ArtifactRepository for InMemoryArtifactRepository {
@@ -58,6 +62,15 @@ impl ArtifactRepository for InMemoryArtifactRepository {
 			.cloned()
 			.collect())
 	}
+
+	fn save_content(&mut self, uri: &str, content: String) -> Result<(), ArtifactStoreError> {
+		self.contents.insert(uri.to_string(), content);
+		Ok(())
+	}
+
+	fn load_content_by_uri(&self, uri: &str) -> Result<Option<String>, ArtifactStoreError> {
+		Ok(self.contents.get(uri).cloned())
+	}
 }
 
 #[derive(Debug, Clone)]
@@ -70,55 +83,87 @@ impl FileArtifactRepository {
 		Self { path: path.into() }
 	}
 
-	fn read_all(&self) -> Result<HashMap<String, Artifact>, ArtifactStoreError> {
+	fn read_all(&self) -> Result<FileArtifactSnapshot, ArtifactStoreError> {
 		if !self.path.exists() {
-			return Ok(HashMap::new());
+			return Ok(FileArtifactSnapshot::default());
 		}
 		let data = fs::read_to_string(&self.path)?;
 		if data.trim().is_empty() {
-			return Ok(HashMap::new());
+			return Ok(FileArtifactSnapshot::default());
 		}
-		Ok(serde_json::from_str(&data)?)
+		if let Ok(snapshot) = serde_json::from_str::<FileArtifactSnapshot>(&data) {
+			return Ok(snapshot);
+		}
+
+		// Backward compatibility: previous format stored only artifact map.
+		let artifacts = serde_json::from_str::<HashMap<String, Artifact>>(&data)?;
+		Ok(FileArtifactSnapshot {
+			artifacts,
+			contents: HashMap::new(),
+		})
 	}
 
-	fn write_all(&self, artifacts: &HashMap<String, Artifact>) -> Result<(), ArtifactStoreError> {
+	fn write_all(&self, snapshot: &FileArtifactSnapshot) -> Result<(), ArtifactStoreError> {
 		ensure_parent_dir(&self.path)?;
-		let encoded = serde_json::to_string_pretty(artifacts)?;
+		let encoded = serde_json::to_string_pretty(snapshot)?;
 		fs::write(&self.path, encoded)?;
 		Ok(())
 	}
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct FileArtifactSnapshot {
+	#[serde(default)]
+	artifacts: HashMap<String, Artifact>,
+	#[serde(default)]
+	contents: HashMap<String, String>,
+}
+
 impl ArtifactRepository for FileArtifactRepository {
 	fn save_artifact(&mut self, artifact: Artifact) -> Result<(), ArtifactStoreError> {
-		let mut artifacts = self.read_all()?;
-		artifacts.insert(artifact.artifact_id.0.clone(), artifact);
-		self.write_all(&artifacts)
+		let mut snapshot = self.read_all()?;
+		snapshot
+			.artifacts
+			.insert(artifact.artifact_id.0.clone(), artifact);
+		self.write_all(&snapshot)
 	}
 
 	fn load_artifact(
 		&self,
 		artifact_id: &ArtifactId,
 	) -> Result<Option<Artifact>, ArtifactStoreError> {
-		let artifacts = self.read_all()?;
-		Ok(artifacts.get(&artifact_id.0).cloned())
+		let snapshot = self.read_all()?;
+		Ok(snapshot.artifacts.get(&artifact_id.0).cloned())
 	}
 
 	fn load_by_uri(&self, uri: &str) -> Result<Option<Artifact>, ArtifactStoreError> {
-		let artifacts = self.read_all()?;
-		Ok(artifacts
+		let snapshot = self.read_all()?;
+		Ok(snapshot
+			.artifacts
 			.values()
 			.find(|artifact| artifact.uri == uri)
 			.cloned())
 	}
 
 	fn list_by_task(&self, task_id: &TaskId) -> Result<Vec<Artifact>, ArtifactStoreError> {
-		let artifacts = self.read_all()?;
-		Ok(artifacts
+		let snapshot = self.read_all()?;
+		Ok(snapshot
+			.artifacts
 			.values()
 			.filter(|artifact| artifact.task_id == *task_id)
 			.cloned()
 			.collect())
+	}
+
+	fn save_content(&mut self, uri: &str, content: String) -> Result<(), ArtifactStoreError> {
+		let mut snapshot = self.read_all()?;
+		snapshot.contents.insert(uri.to_string(), content);
+		self.write_all(&snapshot)
+	}
+
+	fn load_content_by_uri(&self, uri: &str) -> Result<Option<String>, ArtifactStoreError> {
+		let snapshot = self.read_all()?;
+		Ok(snapshot.contents.get(uri).cloned())
 	}
 }
 

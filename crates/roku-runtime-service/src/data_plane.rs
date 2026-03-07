@@ -26,6 +26,30 @@ impl RuntimeService {
 			.map_err(|error| RuntimeError::new(error.to_string()))
 	}
 
+	pub fn get_artifact_content(
+		&self,
+		task_id: &TaskId,
+		artifact_id: &ArtifactId,
+	) -> Result<Option<String>, RuntimeError> {
+		let state = self.lock_state()?;
+		let Some(artifact) = state
+			.artifact_store
+			.load_artifact(artifact_id)
+			.map_err(|error| RuntimeError::new(error.to_string()))?
+		else {
+			return Ok(None);
+		};
+
+		if artifact.task_id != *task_id {
+			return Err(RuntimeError::new("artifact does not belong to task"));
+		}
+
+		state
+			.artifact_store
+			.load_content_by_uri(&artifact.uri)
+			.map_err(|error| RuntimeError::new(error.to_string()))
+	}
+
 	pub(super) fn record_transition(
 		&self,
 		task: &mut Task,

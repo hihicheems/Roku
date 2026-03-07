@@ -36,6 +36,43 @@ fn service_succeeds_for_happy_path() {
 }
 
 #[test]
+fn service_exposes_artifact_content_by_task_and_artifact() {
+	let service = RuntimeService::default();
+	let response = service
+		.execute(sample_request())
+		.expect("runtime service should succeed");
+	assert_eq!(response.status, ResponseStatus::Succeeded);
+	let task_id = TaskId("task-req-1".to_string());
+	let artifacts = service
+		.list_artifacts(&task_id)
+		.expect("artifacts should load");
+	let artifact = artifacts.first().expect("artifact should exist");
+	let content = service
+		.get_artifact_content(&task_id, &artifact.artifact_id)
+		.expect("artifact content lookup should succeed")
+		.expect("artifact content should exist");
+	assert!(!content.is_empty());
+}
+
+#[test]
+fn service_rejects_cross_task_artifact_content_access() {
+	let service = RuntimeService::default();
+	service
+		.execute(sample_request())
+		.expect("runtime service should succeed");
+	let task_id = TaskId("task-req-1".to_string());
+	let artifacts = service
+		.list_artifacts(&task_id)
+		.expect("artifacts should load");
+	let artifact = artifacts.first().expect("artifact should exist");
+
+	let error = service
+		.get_artifact_content(&TaskId("task-other".to_string()), &artifact.artifact_id)
+		.expect_err("cross-task artifact content should be rejected");
+	assert!(error.message.contains("does not belong to task"));
+}
+
+#[test]
 fn service_reports_validation_failure() {
 	let service = RuntimeService::default();
 	let response = service
