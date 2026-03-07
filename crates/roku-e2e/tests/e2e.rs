@@ -2,11 +2,13 @@ use std::sync::Arc;
 
 use actix_web::{App, web};
 use roku_api_gateway::{
-	GatewayAppState, RequestExecutor, RuntimeServiceExecutor, SubmitRequest, SubmitResponse,
-	configure_routes,
+	ApprovalDecisionRequest, ApprovalExecutor, ApprovalTicketResponse, GatewayAppState,
+	RequestExecutor, RuntimeServiceExecutor, SubmitRequest, SubmitResponse, configure_routes,
 };
 use roku_cmd::{RunMode, run_once, run_with_mode};
-use roku_common_types::{RequestEnvelope, ResponseStatus, RuntimeError};
+use roku_common_types::{
+	ApprovalDecision, ApprovalId, RequestEnvelope, ResponseStatus, RuntimeError,
+};
 use roku_runtime_service::RuntimeService;
 
 #[test]
@@ -76,7 +78,7 @@ async fn http_gateway_executes_runtime_service() {
 }
 
 struct FixedModeExecutor {
-	service: RuntimeService,
+	service: Arc<RuntimeService>,
 	mode: RunMode,
 }
 
@@ -89,10 +91,27 @@ impl RequestExecutor for FixedModeExecutor {
 	}
 }
 
+impl ApprovalExecutor for FixedModeExecutor {
+	fn get_approval(
+		&self,
+		approval_id: &ApprovalId,
+	) -> Result<Option<roku_common_types::ApprovalTicket>, RuntimeError> {
+		self.service.get_approval(approval_id)
+	}
+
+	fn decide_approval(
+		&self,
+		approval_id: &ApprovalId,
+		decision: ApprovalDecision,
+	) -> Result<roku_common_types::ResponseEnvelope, RuntimeError> {
+		self.service.decide_approval(approval_id, decision)
+	}
+}
+
 #[actix_web::test]
 async fn http_gateway_reports_validation_failure() {
 	let executor = Arc::new(FixedModeExecutor {
-		service: RuntimeService::default(),
+		service: Arc::new(RuntimeService::default()),
 		mode: RunMode::MissingEvidence,
 	});
 	let state = web::Data::new(GatewayAppState::new(executor));
@@ -120,7 +139,7 @@ async fn http_gateway_reports_validation_failure() {
 #[actix_web::test]
 async fn http_gateway_reports_pending_approval() {
 	let executor = Arc::new(FixedModeExecutor {
-		service: RuntimeService::default(),
+		service: Arc::new(RuntimeService::default()),
 		mode: RunMode::ApprovalRequired,
 	});
 	let state = web::Data::new(GatewayAppState::new(executor));
@@ -143,4 +162,63 @@ async fn http_gateway_reports_pending_approval() {
 	let response: SubmitResponse = actix_web::test::call_and_read_body_json(&app, request).await;
 	assert_eq!(response.status, "pending_approval");
 	assert!(response.message.contains("approval required"));
+}
+
+#[actix_web::test]
+async fn http_gateway_approval_roundtrip_resumes_task() {
+	let service = Arc::new(RuntimeService::default());
+	let executor = Arc::new(FixedModeExecutor {
+		service: service.clone(),
+		mode: RunMode::ApprovalRequired,
+	});
+	let state = web::Data::new(GatewayAppState::new(executor));
+	let app = actix_web::test::init_service(
+		App::new()
+			.app_data(state)
+			.app_data(web::JsonConfig::default().limit(8 * 1024))
+			.configure(configure_routes),
+	)
+	.await;
+
+	let submit_request = actix_web::test::TestRequest::post()
+		.uri("/v1/requests")
+		.set_json(&SubmitRequest {
+			session_id: "http-session".to_string(),
+			goal: "build execution graph".to_string(),
+		})
+		.to_request();
+
+	let pending: SubmitResponse =
+		actix_web::test::call_and_read_body_json(&app, submit_request).await;
+	assert_eq!(pending.status, "pending_approval");
+	let approval_id = pending.artifacts[0]
+		.trim_start_matches("approval://")
+		.to_string();
+
+	let get_request = actix_web::test::TestRequest::get()
+		.uri(&format!("/v1/approvals/{approval_id}"))
+		.to_request();
+	let ticket: ApprovalTicketResponse =
+		actix_web::test::call_and_read_body_json(&app, get_request).await;
+	assert_eq!(ticket.status, "pending");
+
+	let decision_request = actix_web::test::TestRequest::post()
+		.uri(&format!("/v1/approvals/{approval_id}/decision"))
+		.set_json(&ApprovalDecisionRequest {
+			actor: "reviewer".to_string(),
+			approved: true,
+			comment: Some("ship it".to_string()),
+		})
+		.to_request();
+	let resumed: SubmitResponse =
+		actix_web::test::call_and_read_body_json(&app, decision_request).await;
+	assert_eq!(resumed.status, "succeeded");
+
+	let get_request = actix_web::test::TestRequest::get()
+		.uri(&format!("/v1/approvals/{approval_id}"))
+		.to_request();
+	let ticket: ApprovalTicketResponse =
+		actix_web::test::call_and_read_body_json(&app, get_request).await;
+	assert_eq!(ticket.status, "approved");
+	assert_eq!(ticket.decided_by.as_deref(), Some("reviewer"));
 }
