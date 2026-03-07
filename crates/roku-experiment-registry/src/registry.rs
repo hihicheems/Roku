@@ -57,7 +57,11 @@ impl ExperimentRegistry {
 			.repository
 			.load_by_task(task_id)?
 			.ok_or_else(|| ExperimentRegistryError::RunNotFound(task_id.0.clone()))?;
-		if run.artifact_ids.iter().all(|existing| existing != &artifact_id) {
+		if run
+			.artifact_ids
+			.iter()
+			.all(|existing| existing != &artifact_id)
+		{
 			run.artifact_ids.push(artifact_id);
 		}
 		self.repository.save_run(run.clone())?;

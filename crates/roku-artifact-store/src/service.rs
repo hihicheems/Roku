@@ -1,6 +1,4 @@
-use roku_common_types::{
-	Artifact, ArtifactId, ArtifactMetadataEntry, ResultEnvelope, TaskId,
-};
+use roku_common_types::{Artifact, ArtifactId, ArtifactMetadataEntry, ResultEnvelope, TaskId};
 
 use crate::repository::{
 	ArtifactRepository, ArtifactStoreError, FileArtifactRepository, InMemoryArtifactRepository,
@@ -28,7 +26,10 @@ impl ArtifactStore {
 		result: &ResultEnvelope,
 	) -> Result<Artifact, ArtifactStoreError> {
 		let artifact = Artifact {
-			artifact_id: ArtifactId(format!("artifact-{}-{}", result.task_id.0, result.node_id.0)),
+			artifact_id: ArtifactId(format!(
+				"artifact-{}-{}",
+				result.task_id.0, result.node_id.0
+			)),
 			task_id: result.task_id.clone(),
 			node_id: result.node_id.clone(),
 			kind: "node_result".to_string(),
