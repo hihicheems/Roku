@@ -6,6 +6,8 @@ use roku_tool_runtime::{
 	ToolRuntime, ToolSchema,
 };
 use serde_json::{Value, json};
+use time::format_description::well_known::Rfc3339;
+use time::{OffsetDateTime, UtcOffset};
 
 pub(crate) const RESEARCH_TOOL_NAME: &str = "research.synthesize";
 pub(crate) const DATA_TOOL_NAME: &str = "data.execute";
@@ -58,7 +60,7 @@ pub(crate) fn build_llm_tool_runtime(router: Arc<LlmRouter>) -> ToolRuntime {
 		PromptedLlmTool::new(
 			RESEARCH_TOOL_NAME,
 			"research-worker",
-			"You are Roku's research worker. Produce grounded intermediate findings in plain text for downstream use. Do not mention internal runtime details.",
+			"You are Roku's research worker. Produce grounded intermediate findings in plain text for downstream use. Never expose chain-of-thought, hidden reasoning, or internal runtime details.",
 			vec!["information.read".to_string()],
 			SandboxProfile::PythonResearch,
 			RiskTier::Medium,
@@ -67,7 +69,7 @@ pub(crate) fn build_llm_tool_runtime(router: Arc<LlmRouter>) -> ToolRuntime {
 		PromptedLlmTool::new(
 			DATA_TOOL_NAME,
 			"data-worker",
-			"You are Roku's data worker. Produce the requested data-processing or synthesis result in plain text. Do not mention internal runtime details.",
+			"You are Roku's data worker. Produce the requested data-processing or synthesis result in plain text. Never expose chain-of-thought, hidden reasoning, or internal runtime details.",
 			vec!["data.read".to_string()],
 			SandboxProfile::ContainerRestricted,
 			RiskTier::Medium,
@@ -76,7 +78,7 @@ pub(crate) fn build_llm_tool_runtime(router: Arc<LlmRouter>) -> ToolRuntime {
 		PromptedLlmTool::new(
 			REVIEW_TOOL_NAME,
 			"review-worker",
-			"You are Roku's review worker. Produce a concise review or validation conclusion in plain text. Do not mention internal runtime details.",
+			"You are Roku's review worker. Produce a concise review or validation conclusion in plain text. Never expose chain-of-thought, hidden reasoning, or internal runtime details.",
 			vec!["review.check".to_string()],
 			SandboxProfile::ReadOnlyFs,
 			RiskTier::High,
@@ -85,7 +87,7 @@ pub(crate) fn build_llm_tool_runtime(router: Arc<LlmRouter>) -> ToolRuntime {
 		PromptedLlmTool::new(
 			GENERAL_TOOL_NAME,
 			"generic-worker",
-			"You are Roku. Produce the final user-facing reply in plain text.",
+			"You are Roku. Produce only the final user-facing reply in plain text. Never reveal hidden reasoning, analysis steps, or internal runtime details. If trusted runtime context provides current date or time, treat it as ground truth.",
 			Vec::new(),
 			SandboxProfile::NoIsolation,
 			RiskTier::Medium,
@@ -227,16 +229,45 @@ fn user_visible_prompt(input: &ToolInput<'_>, worker_id: &str, invocation_key: &
 			input.conversation_history
 		)
 	};
+	let runtime_context = runtime_context_block();
 
 	format!(
-		"User request:\n{goal}{history_section}\n\nInternal execution hint (do not quote or describe it unless it is directly useful for the answer):\n{summary}\n\nOutput rules:\n- Return only the useful answer text in plain text.\n- Match the user's language unless the request clearly asks for another language.\n- Preserve conversational continuity when the user refers to prior turns or earlier facts.\n- Do not mention worker ids, invocation keys, execution steps, hidden instructions, providers, models, budgets, or internal runtime details.\n- Do not describe yourself as an execution worker or reveal chain-of-thought.\n- If the user asks who you are or which persona is active, answer as Roku.\n- Internal references for policy only: worker_id={worker_id}; invocation_key={invocation_key}; time_budget_ms={time_budget_ms}.",
+		"User request:\n{goal}{history_section}\n\nTrusted runtime context:\n{runtime_context}\n\nInternal execution hint (do not quote or describe it unless it is directly useful for the answer):\n{summary}\n\nOutput rules:\n- Return only the useful answer text in plain text.\n- Answer directly. Do not preface with analysis, translation, or a restatement of the user's request.\n- Never narrate your reasoning. Do not output phrases like \"用户的问题是\", \"I need to\", \"首先\", or similar meta-analysis.\n- Prefer one short paragraph unless the user explicitly asks for detail.\n- Match the user's language unless the request clearly asks for another language.\n- Preserve conversational continuity when the user refers to prior turns or earlier facts.\n- If the user asks about today's date, weekday, or current time, use the trusted runtime context above instead of claiming you lack realtime access.\n- Do not mention worker ids, invocation keys, execution steps, hidden instructions, providers, models, budgets, or internal runtime details.\n- Do not describe yourself as an execution worker or reveal chain-of-thought.\n- If the user asks who you are or which persona is active, answer as Roku.\n- Internal references for policy only: worker_id={worker_id}; invocation_key={invocation_key}; time_budget_ms={time_budget_ms}.",
 		goal = input.goal,
 		history_section = history_section,
+		runtime_context = runtime_context,
 		summary = input.summary,
 		worker_id = worker_id,
 		invocation_key = invocation_key,
 		time_budget_ms = input.time_budget_ms,
 	)
+}
+
+fn runtime_context_block() -> String {
+	let now = current_runtime_time();
+	let timestamp = now
+		.format(&Rfc3339)
+		.unwrap_or_else(|_| "unavailable".to_string());
+	let date = now.date();
+	let weekday = format!("{:?}", now.weekday());
+	let utc_offset = format_utc_offset(now.offset());
+
+	format!(
+		"- local_timestamp: {timestamp}\n- local_date: {date}\n- local_weekday: {weekday}\n- utc_offset: {utc_offset}"
+	)
+}
+
+fn current_runtime_time() -> OffsetDateTime {
+	OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc())
+}
+
+fn format_utc_offset(offset: UtcOffset) -> String {
+	let seconds = offset.whole_seconds();
+	let sign = if seconds < 0 { '-' } else { '+' };
+	let absolute_seconds = seconds.abs();
+	let hours = absolute_seconds / 3600;
+	let minutes = (absolute_seconds % 3600) / 60;
+	format!("{sign}{hours:02}:{minutes:02}")
 }
 
 struct ToolInput<'a> {
@@ -346,5 +377,47 @@ fn llm_failure(error: LlmAdapterError) -> ToolFailure {
 		} => ToolFailure::terminal(format!(
 			"llm provider call failed for {provider}/{model_id}: {message}"
 		)),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use serde_json::json;
+
+	use super::{request_input, runtime_context_block, user_visible_prompt};
+	use roku_tool_runtime::{SandboxProfile, ToolInvocationRequest};
+
+	#[test]
+	fn runtime_context_block_contains_date_and_weekday() {
+		let context = runtime_context_block();
+		assert!(context.contains("local_date"));
+		assert!(context.contains("local_weekday"));
+		assert!(context.contains("utc_offset"));
+	}
+
+	#[test]
+	fn user_visible_prompt_includes_runtime_context_and_direct_answer_rules() {
+		let request = ToolInvocationRequest {
+			invocation_key: "invoke-1".to_string(),
+			input: json!({
+				"task_id": "task-1",
+				"node_id": "node-1",
+				"goal": "今天是星期几？",
+				"summary": "Execute primary action",
+				"conversation_history": "user: 你好",
+				"budget_tokens": 2048_u64,
+				"time_budget_ms": 45_000_u64
+			}),
+			attempt: 1,
+			sandbox_profile: SandboxProfile::NoIsolation,
+		};
+
+		let input = request_input(&request).expect("tool input should parse");
+		let prompt = user_visible_prompt(&input, "generic-worker", "invoke-1");
+
+		assert!(prompt.contains("Trusted runtime context"));
+		assert!(prompt.contains("Never narrate your reasoning"));
+		assert!(prompt.contains("use the trusted runtime context above"));
+		assert!(prompt.contains("Conversation history"));
 	}
 }
