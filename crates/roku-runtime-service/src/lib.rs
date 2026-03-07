@@ -13,13 +13,14 @@ use roku_agent_runtime::GenericAgentRuntime;
 use roku_artifact_store::ArtifactStore;
 use roku_capability_auth::CapabilityAuthority;
 use roku_common_types::{
-	ApprovalDecision, ApprovalId, ApprovalStatus, ApprovalTicket, ErrorClass, RequestEnvelope,
-	ResponseEnvelope, ResponseStatus, RuntimeError, Task, TaskNode, TaskState,
+	ApprovalDecision, ApprovalId, ApprovalStatus, ApprovalTicket, ErrorClass, PlanningModeHint,
+	RequestEnvelope, ResponseEnvelope, ResponseStatus, RuntimeError, Task, TaskNode, TaskState,
 };
 use roku_execution_graph_builder::{ExecutionGraphBuilder, GraphBuildConfig};
 use roku_experiment_registry::ExperimentRegistry;
 use roku_observability::{
-	AuditCorrelation, AuditRecord, AuditSink, InMemoryAuditSink, Metrics, MetricsSnapshot,
+	AuditCorrelation, AuditRecord, AuditSink, InMemoryAuditSink, LogLevel, LogRecord, Metrics,
+	MetricsSnapshot, emit_global_log,
 };
 use roku_orchestrator::Orchestrator;
 use roku_planning_engine::{DefaultPlanningEngine, PlanningInput, RiskLevel, StrategySelector};
@@ -234,36 +235,57 @@ impl RuntimeService {
 		mode: RunMode,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		self.metrics.inc_requests();
-		eprintln!(
-			"[runtime] request_id={} session_id={} mode={:?} goal={}",
-			request.request_id.0,
-			request.session_id,
-			mode,
-			truncate_for_log(&request.goal, 200),
+		log_runtime(
+			LogLevel::Info,
+			"received runtime request",
+			[
+				("request_id", request.request_id.0.clone()),
+				("session_id", request.session_id.clone()),
+				("mode", format!("{mode:?}")),
+				("goal", truncate_for_log(&request.goal, 200)),
+			],
 		);
 		let mut task = self.orchestrator.create_task(&request);
 
 		self.record_transition(&mut task, TaskState::Planning, "start planning")?;
 
 		let planning_input = planning_input_for_request(&request);
-		let decision = self.planning_engine.select(&planning_input);
+		let decision = request
+			.planning_mode_hint
+			.map(|hint| {
+				self.planning_engine
+					.decision_for_mode(planning_mode_from_hint(hint), &planning_input)
+			})
+			.unwrap_or_else(|| self.planning_engine.select(&planning_input));
 		let planning_mode_label = format!("{:?}", decision.mode);
-		eprintln!(
-			"[runtime] request_id={} planning_mode={} complexity_score={} uncertainty_score={} risk_level={:?} budget_tokens={}",
-			request.request_id.0,
-			planning_mode_label,
-			planning_input.complexity_score,
-			planning_input.uncertainty_score,
-			planning_input.risk_level,
-			planning_input.budget_tokens,
+		log_runtime(
+			LogLevel::Info,
+			"selected planning mode",
+			[
+				("request_id", request.request_id.0.clone()),
+				("planning_mode", planning_mode_label.clone()),
+				(
+					"complexity_score",
+					planning_input.complexity_score.to_string(),
+				),
+				(
+					"uncertainty_score",
+					planning_input.uncertainty_score.to_string(),
+				),
+				("risk_level", format!("{:?}", planning_input.risk_level)),
+				("budget_tokens", planning_input.budget_tokens.to_string()),
+			],
 		);
 		self.metrics.inc_planning_run();
 		self.metrics.inc_planning_strategy(&planning_mode_label);
 		let mut outline = self.planner.build_outline(&request, &decision);
-		eprintln!(
-			"[runtime] request_id={} outline_steps={}",
-			request.request_id.0,
-			outline.steps.len(),
+		log_runtime(
+			LogLevel::Info,
+			"built plan outline",
+			[
+				("request_id", request.request_id.0.clone()),
+				("outline_steps", outline.steps.len().to_string()),
+			],
 		);
 		if matches!(mode, RunMode::ApprovalRequired)
 			&& let Some(step) = outline.steps.last_mut()
@@ -508,6 +530,19 @@ pub(crate) fn planning_input_for_request(request: &RequestEnvelope) -> PlanningI
 	}
 }
 
+fn planning_mode_from_hint(hint: PlanningModeHint) -> roku_planning_engine::PlanningMode {
+	match hint {
+		PlanningModeHint::ReAct => roku_planning_engine::PlanningMode::ReAct,
+		PlanningModeHint::TaskDecomposition => {
+			roku_planning_engine::PlanningMode::TaskDecomposition
+		}
+		PlanningModeHint::TreeSearch => roku_planning_engine::PlanningMode::TreeSearch,
+		PlanningModeHint::IterativeRefinement => {
+			roku_planning_engine::PlanningMode::IterativeRefinement
+		}
+	}
+}
+
 fn keyword_hits(goal: &str, keywords: &[&str]) -> u8 {
 	let hits = keywords
 		.iter()
@@ -536,6 +571,18 @@ fn truncate_for_log(value: &str, max_chars: usize) -> String {
 	} else {
 		truncated
 	}
+}
+
+fn log_runtime(
+	level: LogLevel,
+	message: &str,
+	fields: impl IntoIterator<Item = (&'static str, String)>,
+) {
+	let record = fields.into_iter().fold(
+		LogRecord::new("roku-runtime-service", level, message),
+		|record, (key, value)| record.with_field(key, value),
+	);
+	let _ = emit_global_log(record);
 }
 
 pub(crate) fn compact_approval_id(task_id: &str, node_id: &str) -> String {

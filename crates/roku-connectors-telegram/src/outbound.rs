@@ -1,6 +1,8 @@
 use serde::Serialize;
 
-use roku_common_types::{ApprovalId, RequestEnvelope, ResponseEnvelope, ResponseStatus};
+use roku_common_types::{
+	ApprovalId, PlanningModeHint, RequestEnvelope, ResponseEnvelope, ResponseStatus,
+};
 
 use crate::inbound::approval_callback_data;
 
@@ -107,6 +109,37 @@ impl TelegramOutboundMessage {
 			chat_id,
 			text: format!("Status: failed\nMessage: {message}"),
 			parse_mode: TelegramParseMode::PlainText,
+			disable_web_page_preview: true,
+			reply_markup: None,
+		}
+	}
+
+	pub fn session_mode_updated(chat_id: i64, planning_mode: Option<PlanningModeHint>) -> Self {
+		let strategy_label = planning_mode
+			.map(|mode| mode.to_string())
+			.unwrap_or_else(|| "Auto".to_string());
+		let detail = planning_mode
+			.map(|_| {
+				"Subsequent messages in this chat will use the selected planning strategy."
+					.to_string()
+			})
+			.unwrap_or_else(|| {
+				"Subsequent messages in this chat will return to automatic planning selection."
+					.to_string()
+			});
+
+		Self {
+			chat_id,
+			text: [
+				"*Session Mode Updated*".to_string(),
+				format!(
+					"*Planning Strategy:* {}",
+					escape_markdown_v2(&strategy_label)
+				),
+				escape_markdown_v2(&detail),
+			]
+			.join("\n"),
+			parse_mode: TelegramParseMode::MarkdownV2,
 			disable_web_page_preview: true,
 			reply_markup: None,
 		}
@@ -245,6 +278,8 @@ mod tests {
 				request_id: RequestId("req-9".to_string()),
 				session_id: "chat-1".to_string(),
 				goal: "analyze the latest artifacts".to_string(),
+				planning_mode_hint: None,
+				conversation_history: Vec::new(),
 			},
 		);
 
@@ -317,5 +352,16 @@ mod tests {
 		assert!(message.text.contains("run\\-7 \\(experiment://run\\-7\\)"));
 		assert!(message.text.contains("*References:*"));
 		assert!(message.text.contains("https://example\\.com/report"));
+	}
+
+	#[test]
+	fn outbound_message_formats_session_mode_update() {
+		let message =
+			TelegramOutboundMessage::session_mode_updated(1001, Some(PlanningModeHint::TreeSearch));
+
+		assert_eq!(message.chat_id, 1001);
+		assert_eq!(message.parse_mode, TelegramParseMode::MarkdownV2);
+		assert!(message.text.contains("Session Mode Updated"));
+		assert!(message.text.contains("TreeSearch"));
 	}
 }

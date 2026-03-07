@@ -105,7 +105,11 @@ impl RuntimeService {
 		node: &TaskNode,
 		mode: RunMode,
 	) -> Result<Option<ResponseEnvelope>, RuntimeError> {
-		let spec = self.factory.build_for_node(&task.task_id, node);
+		let spec = self.factory.build_for_node_with_history(
+			&task.task_id,
+			node,
+			&task.conversation_history,
+		);
 		let capability_allowed = {
 			let mut state = self.lock_state()?;
 			let token = state

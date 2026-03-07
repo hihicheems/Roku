@@ -2,8 +2,9 @@ use std::thread;
 use std::time::Duration;
 
 use roku_common_types::{
-	ApprovalDecision, ApprovalId, RequestEnvelope, ResponseEnvelope, RuntimeError,
+	ApprovalDecision, ApprovalId, PlanningModeHint, RequestEnvelope, ResponseEnvelope, RuntimeError,
 };
+use roku_observability::{LogLevel, LogRecord, emit_global_log};
 
 use crate::{
 	TelegramBotClient, TelegramBotConfig, TelegramConnector, TelegramConnectorError,
@@ -12,6 +13,12 @@ use crate::{
 
 pub trait TelegramInteractionHandler: Send + Sync {
 	fn handle_request(&self, request: RequestEnvelope) -> Result<ResponseEnvelope, RuntimeError>;
+
+	fn update_session_planning_mode(
+		&self,
+		session_id: &str,
+		planning_mode: Option<PlanningModeHint>,
+	) -> Result<(), RuntimeError>;
 
 	fn handle_approval_decision(
 		&self,
@@ -61,9 +68,16 @@ impl TelegramPollingRunner {
 						consecutive_poll_failures,
 						self.poll_error_log_threshold,
 					) {
-						eprintln!(
-							"[telegram] poll_error consecutive_failures={} error={}",
-							consecutive_poll_failures, error,
+						log_telegram(
+							LogLevel::Warn,
+							"poll error threshold reached",
+							[
+								(
+									"consecutive_failures",
+									consecutive_poll_failures.to_string(),
+								),
+								("error", error.to_string()),
+							],
 						);
 					}
 					thread::sleep(Duration::from_millis(self.idle_backoff_ms));
@@ -78,7 +92,11 @@ impl TelegramPollingRunner {
 			for update in updates {
 				next_offset = Some(update.update_id.saturating_add(1));
 				if let Err(error) = self.process_update(&handler, update) {
-					eprintln!("[telegram] process_error={error}");
+					log_telegram(
+						LogLevel::Error,
+						"failed to process telegram update",
+						[("error", error.to_string())],
+					);
 					thread::sleep(Duration::from_millis(self.idle_backoff_ms));
 				}
 			}
@@ -107,30 +125,73 @@ impl TelegramPollingRunner {
 
 		match self.connector.interaction_from_update(update) {
 			Ok(TelegramInteraction::Request { chat_id, request }) => {
-				eprintln!(
-					"[telegram] update_type=request chat_id={} request_id={} goal={}",
-					chat_id,
-					request.request_id.0,
-					truncate_for_log(&request.goal, 160),
+				log_telegram(
+					LogLevel::Info,
+					"received request update",
+					[
+						("update_type", "request".to_string()),
+						("chat_id", chat_id.to_string()),
+						("request_id", request.request_id.0.clone()),
+						("goal", truncate_for_log(&request.goal, 160)),
+					],
 				);
 				if let Err(error) = self
 					.client
 					.send_message(&TelegramOutboundMessage::progress_notice(chat_id, &request))
 				{
-					eprintln!(
-						"[telegram] progress_notice_error chat_id={} request_id={} error={}",
-						chat_id, request.request_id.0, error,
+					log_telegram(
+						LogLevel::Warn,
+						"failed to send progress notice",
+						[
+							("chat_id", chat_id.to_string()),
+							("request_id", request.request_id.0.clone()),
+							("error", error.to_string()),
+						],
 					);
 				}
 				self.dispatch_response(chat_id, handler.handle_request(request))
 			}
+			Ok(TelegramInteraction::SessionCommand(command)) => {
+				log_telegram(
+					LogLevel::Info,
+					"received session command",
+					[
+						("update_type", "session_command".to_string()),
+						("chat_id", command.chat_id.to_string()),
+						(
+							"planning_mode",
+							command
+								.planning_mode
+								.map(|mode| mode.to_string())
+								.unwrap_or_else(|| "Auto".to_string()),
+						),
+					],
+				);
+				handler
+					.update_session_planning_mode(&command.session_id, command.planning_mode)
+					.map_err(|error| {
+						TelegramTransportError::Api(format!(
+							"failed to persist telegram session command: {}",
+							error.message
+						))
+					})?;
+				self.client
+					.send_message(&TelegramOutboundMessage::session_mode_updated(
+						command.chat_id,
+						command.planning_mode,
+					))
+			}
 			Ok(TelegramInteraction::ApprovalDecision(action)) => {
-				eprintln!(
-					"[telegram] update_type=approval chat_id={} approval_id={} actor={} approved={}",
-					action.chat_id,
-					action.approval_id.0,
-					action.decision.actor,
-					action.decision.approved,
+				log_telegram(
+					LogLevel::Info,
+					"received approval decision",
+					[
+						("update_type", "approval".to_string()),
+						("chat_id", action.chat_id.to_string()),
+						("approval_id", action.approval_id.0.clone()),
+						("actor", action.decision.actor.clone()),
+						("approved", action.decision.approved.to_string()),
+					],
 				);
 				let response =
 					handler.handle_approval_decision(action.approval_id, action.decision);
@@ -141,11 +202,19 @@ impl TelegramPollingRunner {
 				self.dispatch_response(action.chat_id, response)
 			}
 			Err(TelegramConnectorError::BotOriginIgnored) => {
-				eprintln!("[telegram] ignored bot-originated update");
+				log_telegram(
+					LogLevel::Debug,
+					"ignored bot-originated update",
+					std::iter::empty(),
+				);
 				Ok(())
 			}
 			Err(error) => {
-				eprintln!("[telegram] update_error={error}");
+				log_telegram(
+					LogLevel::Warn,
+					"failed to normalize telegram update",
+					[("error", error.to_string())],
+				);
 				if let Some(chat_id) = chat_id {
 					self.client
 						.send_message(&TelegramOutboundMessage::from_error(
@@ -166,21 +235,28 @@ impl TelegramPollingRunner {
 	) -> Result<(), TelegramTransportError> {
 		match response {
 			Ok(response) => {
-				eprintln!(
-					"[telegram] response chat_id={} request_id={} status={:?} message={}",
-					chat_id,
-					response.request_id.0,
-					response.status,
-					truncate_for_log(&response.message, 200),
+				log_telegram(
+					LogLevel::Info,
+					"dispatching telegram response",
+					[
+						("chat_id", chat_id.to_string()),
+						("request_id", response.request_id.0.clone()),
+						("status", format!("{:?}", response.status)),
+						("message", truncate_for_log(&response.message, 200)),
+					],
 				);
 				self.client
 					.send_message(&TelegramOutboundMessage::from_response(chat_id, &response))
 			}
 			Err(error) => {
-				eprintln!(
-					"[telegram] response chat_id={} status=error message={}",
-					chat_id,
-					truncate_for_log(&error.message, 200),
+				log_telegram(
+					LogLevel::Error,
+					"dispatching telegram error response",
+					[
+						("chat_id", chat_id.to_string()),
+						("status", "error".to_string()),
+						("message", truncate_for_log(&error.message, 200)),
+					],
 				);
 				self.client
 					.send_message(&TelegramOutboundMessage::from_error(
@@ -219,6 +295,18 @@ fn should_log_poll_error(consecutive_failures: u32, threshold: u32) -> bool {
 	}
 
 	consecutive_failures >= threshold && consecutive_failures.is_multiple_of(threshold)
+}
+
+fn log_telegram(
+	level: LogLevel,
+	message: &str,
+	fields: impl IntoIterator<Item = (&'static str, String)>,
+) {
+	let record = fields.into_iter().fold(
+		LogRecord::new("roku-connectors-telegram", level, message),
+		|record: LogRecord, (key, value)| record.with_field(key, value),
+	);
+	let _ = emit_global_log(record);
 }
 
 #[cfg(test)]

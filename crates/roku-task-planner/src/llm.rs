@@ -56,6 +56,8 @@ impl TaskPlanner for LlmTaskPlanner {
 }
 
 fn planning_prompt(request: &RequestEnvelope, decision: &PlanningDecision) -> String {
+	let history_block = render_conversation_history(&request.conversation_history);
+
 	format!(
 		r#"Return only JSON. Build a plan outline for the user goal.
 
@@ -86,11 +88,15 @@ Rules:
 - max_branches={max_branches}
 
 User goal:
-{goal}"#,
+{goal}
+
+Conversation history:
+{history_block}"#,
 		mode = decision.mode,
 		max_iterations = decision.max_iterations,
 		max_branches = decision.max_branches,
 		goal = request.goal,
+		history_block = history_block,
 	)
 }
 
@@ -178,6 +184,18 @@ fn normalize_outline(outline: PlanOutline, goal: &str) -> Option<PlanOutline> {
 	})
 }
 
+fn render_conversation_history(history: &[roku_common_types::ConversationTurn]) -> String {
+	if history.is_empty() {
+		return "none".to_string();
+	}
+
+	history
+		.iter()
+		.map(|turn| format!("{:?}: {}", turn.role, turn.content))
+		.collect::<Vec<_>>()
+		.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
 	use roku_common_types::RequestId;
@@ -215,6 +233,8 @@ mod tests {
 			request_id: RequestId("req-1".to_string()),
 			session_id: "s1".to_string(),
 			goal: "ship a telegram-connected research assistant".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
 		}
 	}
 

@@ -177,6 +177,8 @@ mod tests {
 			request_id: RequestId("req-1".to_string()),
 			session_id: "s1".to_string(),
 			goal: "g".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
 		}
 	}
 

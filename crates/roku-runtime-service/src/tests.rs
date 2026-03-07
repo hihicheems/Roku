@@ -1,8 +1,8 @@
 use roku_agent_runtime::{GenericAgentRuntime, RuntimeWorker};
 use roku_common_types::{
 	AggregationMode, ApprovalDecision, ApprovalId, EvidenceItem, JoinPolicy, NodeId,
-	RequestEnvelope, RequestId, ResponseStatus, ResultEnvelope, ResultStatus, Task, TaskEdge,
-	TaskGraph, TaskId, TaskNode, TaskNodeKind, TaskState,
+	PlanningModeHint, RequestEnvelope, RequestId, ResponseStatus, ResultEnvelope, ResultStatus,
+	Task, TaskEdge, TaskGraph, TaskId, TaskNode, TaskNodeKind, TaskState,
 };
 
 use crate::{RunMode, RuntimeService, compact_approval_id, planning_input_for_request};
@@ -12,6 +12,8 @@ fn sample_request() -> RequestEnvelope {
 		request_id: RequestId("req-1".to_string()),
 		session_id: "session-1".to_string(),
 		goal: "analyze market".to_string(),
+		planning_mode_hint: None,
+		conversation_history: Vec::new(),
 	}
 }
 
@@ -21,6 +23,8 @@ fn planning_input_scales_for_complex_goal() {
 		request_id: RequestId("req-complex".to_string()),
 		session_id: "session-1".to_string(),
 		goal: "build and integrate a workflow to research alternatives, compare options, and deploy a production-ready bot".to_string(),
+		planning_mode_hint: None,
+		conversation_history: Vec::new(),
 	});
 
 	assert!(input.complexity_score >= 6);
@@ -33,6 +37,8 @@ fn planning_input_marks_high_risk_requests() {
 		request_id: RequestId("req-risk".to_string()),
 		session_id: "session-1".to_string(),
 		goal: "delete the production secret and approve the mutation".to_string(),
+		planning_mode_hint: None,
+		conversation_history: Vec::new(),
 	});
 
 	assert!(matches!(
@@ -231,6 +237,51 @@ fn service_tracks_planning_metrics() {
 }
 
 #[test]
+fn planning_input_override_selects_task_decomposition_mode() {
+	let service = RuntimeService::default();
+	let mut request = sample_request();
+	request.planning_mode_hint = Some(PlanningModeHint::TaskDecomposition);
+
+	let response = service
+		.execute(request)
+		.expect("runtime service should succeed");
+
+	assert_eq!(response.status, ResponseStatus::Succeeded);
+	let metrics = service.metrics_snapshot();
+	assert_eq!(metrics.planning_task_decomposition_total, 1);
+}
+
+#[test]
+fn planning_input_override_selects_tree_search_mode() {
+	let service = RuntimeService::default();
+	let mut request = sample_request();
+	request.planning_mode_hint = Some(PlanningModeHint::TreeSearch);
+
+	let response = service
+		.execute(request)
+		.expect("runtime service should succeed");
+
+	assert_eq!(response.status, ResponseStatus::Succeeded);
+	let metrics = service.metrics_snapshot();
+	assert_eq!(metrics.planning_tree_search_total, 1);
+}
+
+#[test]
+fn planning_input_override_selects_iterative_refinement_mode() {
+	let service = RuntimeService::default();
+	let mut request = sample_request();
+	request.planning_mode_hint = Some(PlanningModeHint::IterativeRefinement);
+
+	let response = service
+		.execute_with_mode(request, RunMode::ApprovalRequired)
+		.expect("runtime service should reach approval path");
+
+	assert_eq!(response.status, ResponseStatus::PendingApproval);
+	let metrics = service.metrics_snapshot();
+	assert_eq!(metrics.planning_iterative_refinement_total, 1);
+}
+
+#[test]
 fn service_returns_pending_approval_when_graph_contains_approval_gate() {
 	let service = RuntimeService::default();
 	let response = service
@@ -346,8 +397,12 @@ fn validation_collects_results_through_approval_nodes() {
 	let task = Task {
 		task_id: TaskId("task-1".to_string()),
 		request_id: RequestId("req-1".to_string()),
+		session_id: "session-1".to_string(),
+		goal: "validate approval edge".to_string(),
 		state: TaskState::Executing,
 		attempts: 0,
+		planning_mode_hint: None,
+		conversation_history: Vec::new(),
 		completed_nodes: vec![NodeId("extract".to_string())],
 		next_node_index: 1,
 		pending_approval_id: None,
@@ -453,8 +508,12 @@ fn node_result_set_applies_highest_confidence_aggregation() {
 	let task = Task {
 		task_id: TaskId("task-aggregation".to_string()),
 		request_id: RequestId("req-aggregation".to_string()),
+		session_id: "session-aggregation".to_string(),
+		goal: "aggregate branches".to_string(),
 		state: TaskState::Executing,
 		attempts: 0,
+		planning_mode_hint: None,
+		conversation_history: Vec::new(),
 		completed_nodes: vec![
 			NodeId("branch-a".to_string()),
 			NodeId("branch-b".to_string()),
@@ -545,8 +604,12 @@ fn node_result_set_enforces_quorum_policy() {
 	let task = Task {
 		task_id: TaskId("task-quorum".to_string()),
 		request_id: RequestId("req-quorum".to_string()),
+		session_id: "session-quorum".to_string(),
+		goal: "quorum aggregation".to_string(),
 		state: TaskState::Executing,
 		attempts: 0,
+		planning_mode_hint: None,
+		conversation_history: Vec::new(),
 		completed_nodes: vec![NodeId("branch-a".to_string())],
 		next_node_index: 1,
 		pending_approval_id: None,

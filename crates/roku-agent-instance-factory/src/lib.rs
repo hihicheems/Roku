@@ -3,8 +3,8 @@
 use std::collections::{HashMap, HashSet};
 
 use roku_common_types::{
-	AgentContext, AgentInstanceSpec, AggregationMode, JoinPolicy, NodeId, PolicyBindings, TaskId,
-	TaskNode, TaskNodeKind,
+	AgentContext, AgentInstanceSpec, AggregationMode, ConversationTurn, JoinPolicy, NodeId,
+	PolicyBindings, TaskId, TaskNode, TaskNodeKind,
 };
 
 const PROFILE_RESEARCH: &str = "research";
@@ -81,8 +81,17 @@ impl AgentInstanceFactory {
 	}
 
 	pub fn build_for_node(&self, task_id: &TaskId, node: &TaskNode) -> AgentInstanceSpec {
+		self.build_for_node_with_history(task_id, node, &[])
+	}
+
+	pub fn build_for_node_with_history(
+		&self,
+		task_id: &TaskId,
+		node: &TaskNode,
+		history: &[ConversationTurn],
+	) -> AgentInstanceSpec {
 		let profile = self.select_profile_for_node(node);
-		self.build_instance(task_id, node, profile)
+		self.build_instance(task_id, node, profile, history)
 	}
 
 	pub fn build_from_profile(
@@ -105,7 +114,7 @@ impl AgentInstanceFactory {
 			join_policy: JoinPolicy::default(),
 			aggregation_mode: AggregationMode::default(),
 		};
-		self.build_instance(task_id, &node, profile)
+		self.build_instance(task_id, &node, profile, &[])
 	}
 
 	pub fn inferred_profile_id(&self, node: &TaskNode) -> String {
@@ -137,6 +146,7 @@ impl AgentInstanceFactory {
 		task_id: &TaskId,
 		node: &TaskNode,
 		profile: &CapabilityProfile,
+		history: &[ConversationTurn],
 	) -> AgentInstanceSpec {
 		let merged_capabilities =
 			merge_capabilities(&profile.default_capabilities, &node.capabilities);
@@ -148,6 +158,7 @@ impl AgentInstanceFactory {
 				task_id: task_id.clone(),
 				node_id: NodeId(node.node_id.0.clone()),
 				summary: node.description.clone(),
+				conversation_history: history.to_vec(),
 			},
 			capabilities: merged_capabilities,
 			policy_bindings,
