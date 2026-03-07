@@ -70,8 +70,12 @@ pub async fn get_task_artifacts_handler(
 ) -> impl Responder {
 	let task_id = TaskId(task_id.into_inner());
 	match state.executor.list_artifacts(&task_id) {
-		Ok(artifacts) => HttpResponse::Ok()
-			.json(artifacts.into_iter().map(artifact_response).collect::<Vec<_>>()),
+		Ok(artifacts) => HttpResponse::Ok().json(
+			artifacts
+				.into_iter()
+				.map(artifact_response)
+				.collect::<Vec<_>>(),
+		),
 		Err(error) => HttpResponse::BadRequest().json(ErrorResponse {
 			message: error.to_string(),
 		}),

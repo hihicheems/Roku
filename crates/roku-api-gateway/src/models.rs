@@ -121,7 +121,11 @@ pub(crate) fn experiment_response(run: ExperimentRun) -> ExperimentResponse {
 		status: experiment_status_label(run.status).to_string(),
 		summary: run.summary,
 		metrics: run.metrics.into_iter().map(metric_response).collect(),
-		artifact_ids: run.artifact_ids.into_iter().map(|artifact_id| artifact_id.0).collect(),
+		artifact_ids: run
+			.artifact_ids
+			.into_iter()
+			.map(|artifact_id| artifact_id.0)
+			.collect(),
 		failure_reason: run.failure_reason,
 	}
 }
