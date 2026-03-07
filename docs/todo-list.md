@@ -21,6 +21,7 @@
 | WS-04 | 增加统一的 lint / test / fmt 自动化入口（如 `just` / CI） | §20 测试与验收 | TODO |
 | WS-05 | 增加 release profile、bench profile 与 workspace 级构建优化策略 | §5 非功能基线 | TODO |
 | WS-06 | 增加 deploy / docker / k8s 工程骨架，与设计文档的部署结构对齐 | §19 Rust 工程结构 | TODO |
+| WS-07 | 增加开发态 service orchestration 入口（`start-all` / `stop-all` / `doctor`）并为后续常驻组件扩展保留 registry | §19 Rust 工程结构 / 运行治理 | DONE |
 
 ## roku-common-types
 
@@ -133,6 +134,7 @@
 | AR-06 | 将复杂 reasoning worker 接入 `roku-llm-adapter` | §3 规划与执行分离 / §7 | DONE |
 | AR-07 | 按 profile / task type 选择输出 schema 和 evidence 模板 | §11 结果合同 | TODO |
 | AR-08 | 将 timeout / retry / budget 消耗下放到 worker 执行层 | §14 预算与超时 | TODO |
+| AR-09 | 在 live worker prompt 中注入可信 runtime date/time context，并显式抑制 meta-reasoning 泄漏 | §7 Agent Instance / §16 可观测与运行治理 | DONE |
 
 ## roku-llm-adapter
 
@@ -259,6 +261,8 @@
 | TG-09 | 为 polling transport 增加抑制式错误日志，隐藏 routine `getUpdates` 噪声并保留连续失败告警 | §16 可观测性 / Connector 运行治理 | DONE |
 | TG-10 | 增加大小写无关的 `/react` `/taskdecomposition` `/treesearch` `/iterativerefinement` `/auto` 会话级策略命令 | §7.3 Planning Strategy 模式 / Telegram 交互 | DONE |
 | TG-11 | 让 Telegram 请求携带 session-level planning override 与 recent conversation history | §9 请求生命周期 / §12 Memory | DONE |
+| TG-12 | 默认仅向 Telegram 用户展示最终 answer 文本；request/status/artifact 元信息改为可配置扩展输出 | §4.1 Connector / Telegram 交互体验 | DONE |
+| TG-13 | 将 progress notice 默认降到日志侧，通过环境变量显式开启用户可见进度提示 | §4.1 Connector / 长任务体验 | DONE |
 
 ## roku-state-store
 
@@ -356,6 +360,8 @@
 | CMD-06 | 增加 `live-once` / `telegram-bot` 命令，打通 live model 与 Telegram 入口 | §4.1 Connector / CLI | DONE |
 | CMD-07 | 增加日志目录、滚动策略、stderr 开关等环境变量配置并安装全局 logger | §16 可观测性 / 工程化 | DONE |
 | CMD-08 | 增加 CLI 级 planning mode override 参数，便于本地验证四种 planning 策略 | §7.3 / 测试与演练辅助 | DONE |
+| CMD-09 | 增加 `scripts/dev-services.sh`，统一管理开发态常驻服务的 pid、stdout log 与运行目录 | §19 Rust 工程结构 / 工程化 | DONE |
+| CMD-10 | 在 `justfile` 中增加 `start-all` / `stop-all` / `doctor` / `start` / `stop` / `status` recipe | §19 Rust 工程结构 / 运维诊断 | DONE |
 
 ## roku-agent-directory (planned)
 
