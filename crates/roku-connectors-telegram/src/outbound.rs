@@ -153,11 +153,11 @@ mod tests {
 		assert_eq!(markup.inline_keyboard[0].len(), 2);
 		assert_eq!(
 			markup.inline_keyboard[0][0].callback_data,
-			"approval:approve:approval-42"
+			"ap:a:approval-42"
 		);
 		assert_eq!(
 			markup.inline_keyboard[0][1].callback_data,
-			"approval:reject:approval-42"
+			"ap:r:approval-42"
 		);
 	}
 

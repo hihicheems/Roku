@@ -5,7 +5,7 @@ use roku_common_types::{
 	TaskGraph, TaskId, TaskNode, TaskNodeKind, TaskState,
 };
 
-use crate::{RunMode, RuntimeService, planning_input_for_request};
+use crate::{RunMode, RuntimeService, compact_approval_id, planning_input_for_request};
 
 fn sample_request() -> RequestEnvelope {
 	RequestEnvelope {
@@ -40,6 +40,14 @@ fn planning_input_marks_high_risk_requests() {
 		roku_planning_engine::RiskLevel::High
 	));
 	assert!(input.budget_tokens >= 8_000);
+}
+
+#[test]
+fn compact_approval_id_stays_short_for_telegram_callbacks() {
+	let approval_id = compact_approval_id("task-tg-919471825", "request_clarification-approval");
+
+	assert!(approval_id.len() <= 19);
+	assert!(format!("ap:a:{approval_id}").len() <= 64);
 }
 
 #[test]

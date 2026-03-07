@@ -409,7 +409,7 @@ impl RuntimeService {
 		task: &mut Task,
 		node: &TaskNode,
 	) -> Result<ResponseEnvelope, RuntimeError> {
-		let approval_id = ApprovalId(format!("approval-{}-{}", task.task_id.0, node.node_id.0));
+		let approval_id = ApprovalId(compact_approval_id(&task.task_id.0, &node.node_id.0));
 		let ticket = ApprovalTicket {
 			approval_id: approval_id.clone(),
 			task_id: task.task_id.clone(),
@@ -536,4 +536,14 @@ fn truncate_for_log(value: &str, max_chars: usize) -> String {
 	} else {
 		truncated
 	}
+}
+
+pub(crate) fn compact_approval_id(task_id: &str, node_id: &str) -> String {
+	let mut hash = 0xcbf29ce484222325u64;
+	for byte in task_id.bytes().chain(node_id.bytes()) {
+		hash ^= u64::from(byte);
+		hash = hash.wrapping_mul(0x100000001b3);
+	}
+
+	format!("ap-{hash:016x}")
 }
