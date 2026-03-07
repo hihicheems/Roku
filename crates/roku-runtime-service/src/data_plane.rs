@@ -1,6 +1,7 @@
 use roku_common_types::{
-	ApprovalTicket, Artifact, ArtifactId, ExperimentMetric, ExperimentRun, NodeId, ResultEnvelope,
-	RuntimeError, Task, TaskId, TaskNode, TaskState, ValidationEvidenceSet,
+	AggregationMode, ApprovalTicket, Artifact, ArtifactId, ExperimentMetric, ExperimentRun,
+	JoinPolicy, NodeId, NodeResultSet, ResultEnvelope, RuntimeError, Task, TaskId, TaskNode,
+	TaskState, ValidationEvidenceSet,
 };
 
 use crate::RuntimeService;
@@ -154,6 +155,7 @@ impl RuntimeService {
 		Ok(())
 	}
 
+	#[cfg(test)]
 	pub(super) fn collect_upstream_results(
 		&self,
 		task: &Task,
@@ -199,6 +201,58 @@ impl RuntimeService {
 		Ok(results)
 	}
 
+	pub(super) fn collect_node_result_set(
+		&self,
+		task: &Task,
+		node: &TaskNode,
+	) -> Result<NodeResultSet, RuntimeError> {
+		let graph = task
+			.graph
+			.as_ref()
+			.ok_or_else(|| RuntimeError::new("task graph is missing"))?;
+		let branch_sources = graph
+			.edges
+			.iter()
+			.filter(|edge| edge.to == node.node_id)
+			.map(|edge| edge.from.clone())
+			.collect::<Vec<_>>();
+		let mut source_node_ids = Vec::new();
+		let mut missing_source_nodes = Vec::new();
+		let mut results = Vec::new();
+
+		for branch_root in &branch_sources {
+			let branch_results = self.resolve_branch_results(task, branch_root)?;
+			if branch_results.is_empty() {
+				missing_source_nodes.push(branch_root.clone());
+				continue;
+			}
+
+			source_node_ids.push(branch_root.clone());
+			results.extend(branch_results);
+		}
+
+		let results = apply_aggregation_mode(results, node.aggregation_mode);
+		if !join_policy_satisfied(
+			node.join_policy,
+			branch_sources.len(),
+			source_node_ids.len(),
+		) {
+			return Err(RuntimeError::new(format!(
+				"join policy {:?} is not satisfied for node {}",
+				node.join_policy, node.node_id.0
+			)));
+		}
+
+		Ok(NodeResultSet {
+			node_id: node.node_id.clone(),
+			join_policy: node.join_policy,
+			aggregation_mode: node.aggregation_mode,
+			source_node_ids,
+			missing_source_nodes,
+			results,
+		})
+	}
+
 	pub(super) fn load_artifacts_for_result(
 		&self,
 		result: &ResultEnvelope,
@@ -226,11 +280,11 @@ impl RuntimeService {
 	pub(super) fn collect_validation_evidence(
 		&self,
 		task: &Task,
-		node_id: &NodeId,
+		node: &TaskNode,
 	) -> Result<Vec<ValidationEvidenceSet>, RuntimeError> {
-		let results = self.collect_upstream_results(task, node_id)?;
-		let mut evidence_sets = Vec::with_capacity(results.len());
-		for result in results {
+		let result_set = self.collect_node_result_set(task, node)?;
+		let mut evidence_sets = Vec::with_capacity(result_set.results.len());
+		for result in result_set.results {
 			let artifacts = self.load_artifacts_for_result(&result)?;
 			evidence_sets.push(ValidationEvidenceSet { result, artifacts });
 		}
@@ -258,5 +312,65 @@ impl RuntimeService {
 		self.state
 			.lock()
 			.map_err(|_| RuntimeError::new("runtime state lock poisoned"))
+	}
+
+	fn resolve_branch_results(
+		&self,
+		task: &Task,
+		node_id: &NodeId,
+	) -> Result<Vec<ResultEnvelope>, RuntimeError> {
+		let graph = task
+			.graph
+			.as_ref()
+			.ok_or_else(|| RuntimeError::new("task graph is missing"))?;
+		let state = self.lock_state()?;
+
+		if let Some(result) = state
+			.result_repo
+			.load_result(&task.task_id, node_id)
+			.map_err(|error| RuntimeError::new(error.to_string()))?
+		{
+			return Ok(vec![result]);
+		}
+
+		drop(state);
+
+		let mut results = Vec::new();
+		for parent in graph
+			.edges
+			.iter()
+			.filter(|edge| edge.to == *node_id)
+			.map(|edge| edge.from.clone())
+		{
+			results.extend(self.resolve_branch_results(task, &parent)?);
+		}
+		Ok(results)
+	}
+}
+
+fn join_policy_satisfied(policy: JoinPolicy, branch_count: usize, resolved_count: usize) -> bool {
+	match policy {
+		JoinPolicy::AllParents => resolved_count == branch_count,
+		JoinPolicy::AnyParent => resolved_count >= 1,
+		JoinPolicy::Quorum(required) => resolved_count >= usize::from(required),
+	}
+}
+
+fn apply_aggregation_mode(
+	mut results: Vec<ResultEnvelope>,
+	mode: AggregationMode,
+) -> Vec<ResultEnvelope> {
+	match mode {
+		AggregationMode::CollectAll => results,
+		AggregationMode::HighestConfidence => {
+			if let Some(best) = results
+				.drain(..)
+				.max_by(|left, right| left.confidence.total_cmp(&right.confidence))
+			{
+				vec![best]
+			} else {
+				Vec::new()
+			}
+		}
 	}
 }

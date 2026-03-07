@@ -1,4 +1,7 @@
-use roku_common_types::{NodeId, PlanOutline, TaskEdge, TaskGraph, TaskId, TaskNode, TaskNodeKind};
+use roku_common_types::{
+	AggregationMode, JoinPolicy, NodeId, PlanOutline, TaskEdge, TaskGraph, TaskId, TaskNode,
+	TaskNodeKind,
+};
 
 #[derive(Debug, Clone)]
 pub struct GraphBuildConfig {
@@ -36,6 +39,8 @@ impl ExecutionGraphBuilder {
 				kind: TaskNodeKind::Execution,
 				description: step.summary.clone(),
 				capabilities: step.required_capabilities.clone(),
+				join_policy: JoinPolicy::AllParents,
+				aggregation_mode: AggregationMode::CollectAll,
 			});
 
 			if let Some(previous_node_id) = previous_node {
@@ -53,6 +58,8 @@ impl ExecutionGraphBuilder {
 					kind: TaskNodeKind::Approval,
 					description: "Approval gate".to_string(),
 					capabilities: vec!["approve.action".to_string()],
+					join_policy: JoinPolicy::AllParents,
+					aggregation_mode: AggregationMode::CollectAll,
 				});
 				edges.push(TaskEdge {
 					from: node_id,
@@ -69,6 +76,8 @@ impl ExecutionGraphBuilder {
 				kind: TaskNodeKind::Validation,
 				description: "Validation gate".to_string(),
 				capabilities: vec!["validate.result".to_string()],
+				join_policy: JoinPolicy::AllParents,
+				aggregation_mode: AggregationMode::CollectAll,
 			});
 			if let Some(previous_node_id) = previous_node {
 				edges.push(TaskEdge {

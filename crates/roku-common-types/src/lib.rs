@@ -125,12 +125,31 @@ pub enum TaskNodeKind {
 	Aggregation,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum JoinPolicy {
+	#[default]
+	AllParents,
+	AnyParent,
+	Quorum(u8),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AggregationMode {
+	#[default]
+	CollectAll,
+	HighestConfidence,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskNode {
 	pub node_id: NodeId,
 	pub kind: TaskNodeKind,
 	pub description: String,
 	pub capabilities: Vec<String>,
+	#[serde(default)]
+	pub join_policy: JoinPolicy,
+	#[serde(default)]
+	pub aggregation_mode: AggregationMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,6 +261,16 @@ pub struct ExperimentRun {
 pub struct ValidationEvidenceSet {
 	pub result: ResultEnvelope,
 	pub artifacts: Vec<Artifact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeResultSet {
+	pub node_id: NodeId,
+	pub join_policy: JoinPolicy,
+	pub aggregation_mode: AggregationMode,
+	pub source_node_ids: Vec<NodeId>,
+	pub missing_source_nodes: Vec<NodeId>,
+	pub results: Vec<ResultEnvelope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
