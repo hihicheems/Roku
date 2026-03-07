@@ -19,6 +19,9 @@ pub struct Metrics {
 	pub requests_total: AtomicU64,
 	pub failures_total: AtomicU64,
 	pub validation_failures_total: AtomicU64,
+	pub approvals_created_total: AtomicU64,
+	pub approvals_resolved_total: AtomicU64,
+	pub dead_letters_total: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -27,6 +30,9 @@ impl Default for Metrics {
 			requests_total: AtomicU64::new(0),
 			failures_total: AtomicU64::new(0),
 			validation_failures_total: AtomicU64::new(0),
+			approvals_created_total: AtomicU64::new(0),
+			approvals_resolved_total: AtomicU64::new(0),
+			dead_letters_total: AtomicU64::new(0),
 		}
 	}
 }
@@ -36,6 +42,9 @@ pub struct MetricsSnapshot {
 	pub requests_total: u64,
 	pub failures_total: u64,
 	pub validation_failures_total: u64,
+	pub approvals_created_total: u64,
+	pub approvals_resolved_total: u64,
+	pub dead_letters_total: u64,
 }
 
 impl Metrics {
@@ -52,11 +61,27 @@ impl Metrics {
 			.fetch_add(1, Ordering::Relaxed);
 	}
 
+	pub fn inc_approvals_created(&self) {
+		self.approvals_created_total.fetch_add(1, Ordering::Relaxed);
+	}
+
+	pub fn inc_approvals_resolved(&self) {
+		self.approvals_resolved_total
+			.fetch_add(1, Ordering::Relaxed);
+	}
+
+	pub fn inc_dead_letters(&self) {
+		self.dead_letters_total.fetch_add(1, Ordering::Relaxed);
+	}
+
 	pub fn snapshot(&self) -> MetricsSnapshot {
 		MetricsSnapshot {
 			requests_total: self.requests_total.load(Ordering::Relaxed),
 			failures_total: self.failures_total.load(Ordering::Relaxed),
 			validation_failures_total: self.validation_failures_total.load(Ordering::Relaxed),
+			approvals_created_total: self.approvals_created_total.load(Ordering::Relaxed),
+			approvals_resolved_total: self.approvals_resolved_total.load(Ordering::Relaxed),
+			dead_letters_total: self.dead_letters_total.load(Ordering::Relaxed),
 		}
 	}
 }
@@ -139,11 +164,17 @@ mod tests {
 		metrics.inc_requests();
 		metrics.inc_failures();
 		metrics.inc_validation_failures();
+		metrics.inc_approvals_created();
+		metrics.inc_approvals_resolved();
+		metrics.inc_dead_letters();
 
 		let snapshot = metrics.snapshot();
 		assert_eq!(snapshot.requests_total, 1);
 		assert_eq!(snapshot.failures_total, 1);
 		assert_eq!(snapshot.validation_failures_total, 1);
+		assert_eq!(snapshot.approvals_created_total, 1);
+		assert_eq!(snapshot.approvals_resolved_total, 1);
+		assert_eq!(snapshot.dead_letters_total, 1);
 	}
 
 	#[test]
