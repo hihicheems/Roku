@@ -32,6 +32,12 @@ pub struct TelegramInlineKeyboardButton {
 	pub callback_data: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct TelegramRenderOptions {
+	pub include_request_metadata: bool,
+	pub show_attachments: bool,
+}
+
 impl TelegramOutboundMessage {
 	pub fn progress_notice(chat_id: i64, request: &RequestEnvelope) -> Self {
 		Self {
@@ -51,63 +57,54 @@ impl TelegramOutboundMessage {
 	}
 
 	pub fn from_response(chat_id: i64, response: &ResponseEnvelope) -> Self {
-		let attachments = classify_attachments(response);
-		let mut lines = vec![
-			format!(
-				"*Status:* {}",
-				escape_markdown_v2(status_label(response.status))
-			),
-			format!("*Request:* {}", escape_markdown_v2(&response.request_id.0)),
-			format!("*Message:* {}", escape_markdown_v2(&response.message)),
-		];
-		if let Some(approval_id) = attachments.approval_id.as_ref() {
-			lines.push(format!(
-				"*Approval:* {}",
-				escape_markdown_v2(&approval_id.0)
-			));
-			lines.push("_Choose Approve or Reject below\\._".to_string());
-		}
-		if !attachments.artifacts.is_empty() {
-			lines.push("*Artifacts:*".to_string());
-			lines.extend(
-				attachments
-					.artifacts
-					.iter()
-					.map(|artifact| attachment_line("artifact", artifact)),
-			);
-		}
-		if !attachments.experiments.is_empty() {
-			lines.push("*Experiments:*".to_string());
-			lines.extend(
-				attachments
-					.experiments
-					.iter()
-					.map(|experiment| attachment_line("experiment", experiment)),
-			);
-		}
-		if !attachments.references.is_empty() {
-			lines.push("*References:*".to_string());
-			lines.extend(
-				attachments
-					.references
-					.iter()
-					.map(|reference| attachment_line("reference", reference)),
-			);
-		}
+		Self::from_response_with_options(chat_id, response, TelegramRenderOptions::default())
+	}
 
-		Self {
-			chat_id,
-			text: lines.join("\n"),
-			parse_mode: TelegramParseMode::MarkdownV2,
-			disable_web_page_preview: true,
-			reply_markup: attachments.approval_id.as_ref().map(approval_markup),
+	pub(crate) fn from_response_with_options(
+		chat_id: i64,
+		response: &ResponseEnvelope,
+		options: TelegramRenderOptions,
+	) -> Self {
+		let attachments = classify_attachments(response);
+		match response.status {
+			ResponseStatus::Succeeded => plain_response_message(
+				chat_id,
+				&response.request_id.0,
+				&response.message,
+				options,
+				Some(&attachments),
+			),
+			ResponseStatus::Failed => plain_response_message(
+				chat_id,
+				&response.request_id.0,
+				&response.message,
+				options,
+				Some(&attachments),
+			),
+			ResponseStatus::PendingApproval => {
+				let mut lines = vec!["Approval required.".to_string(), response.message.clone()];
+				if options.include_request_metadata {
+					lines.insert(0, format!("Request: {}", response.request_id.0));
+				}
+				if options.show_attachments {
+					append_attachment_lines(&mut lines, &attachments);
+				}
+
+				Self {
+					chat_id,
+					text: lines.join("\n"),
+					parse_mode: TelegramParseMode::PlainText,
+					disable_web_page_preview: true,
+					reply_markup: attachments.approval_id.as_ref().map(approval_markup),
+				}
+			}
 		}
 	}
 
 	pub fn from_error(chat_id: i64, message: &str) -> Self {
 		Self {
 			chat_id,
-			text: format!("Status: failed\nMessage: {message}"),
+			text: message.to_string(),
 			parse_mode: TelegramParseMode::PlainText,
 			disable_web_page_preview: true,
 			reply_markup: None,
@@ -195,11 +192,7 @@ fn classify_attachments(response: &ResponseEnvelope) -> ResponseAttachments {
 
 fn attachment_line(kind: &str, value: &str) -> String {
 	let label = display_label(value);
-	format!(
-		"• *{}* {}",
-		escape_markdown_v2(kind),
-		escape_markdown_v2(&format!("{label} ({value})")),
-	)
+	format!("• {kind} {label} ({value})")
 }
 
 fn display_label(value: &str) -> String {
@@ -236,11 +229,60 @@ fn escape_markdown_v2(value: &str) -> String {
 	escaped
 }
 
-fn status_label(status: ResponseStatus) -> &'static str {
-	match status {
-		ResponseStatus::Succeeded => "succeeded",
-		ResponseStatus::PendingApproval => "pending_approval",
-		ResponseStatus::Failed => "failed",
+fn plain_response_message(
+	chat_id: i64,
+	request_id: &str,
+	message: &str,
+	options: TelegramRenderOptions,
+	attachments: Option<&ResponseAttachments>,
+) -> TelegramOutboundMessage {
+	let mut lines = Vec::new();
+	if options.include_request_metadata {
+		lines.push(format!("Request: {request_id}"));
+	}
+	lines.push(message.to_string());
+	if options.show_attachments
+		&& let Some(attachments) = attachments
+	{
+		append_attachment_lines(&mut lines, attachments);
+	}
+
+	TelegramOutboundMessage {
+		chat_id,
+		text: lines.join("\n"),
+		parse_mode: TelegramParseMode::PlainText,
+		disable_web_page_preview: true,
+		reply_markup: None,
+	}
+}
+
+fn append_attachment_lines(lines: &mut Vec<String>, attachments: &ResponseAttachments) {
+	if !attachments.artifacts.is_empty() {
+		lines.push("Artifacts:".to_string());
+		lines.extend(
+			attachments
+				.artifacts
+				.iter()
+				.map(|artifact| attachment_line("artifact", artifact)),
+		);
+	}
+	if !attachments.experiments.is_empty() {
+		lines.push("Experiments:".to_string());
+		lines.extend(
+			attachments
+				.experiments
+				.iter()
+				.map(|experiment| attachment_line("experiment", experiment)),
+		);
+	}
+	if !attachments.references.is_empty() {
+		lines.push("References:".to_string());
+		lines.extend(
+			attachments
+				.references
+				.iter()
+				.map(|reference| attachment_line("reference", reference)),
+		);
 	}
 }
 
@@ -263,11 +305,10 @@ mod tests {
 		);
 
 		assert_eq!(message.chat_id, 1001);
-		assert!(message.text.contains("*Status:* succeeded"));
-		assert!(message.text.contains("*Artifacts:*"));
-		assert!(message.text.contains("result \\(artifact://task/result\\)"));
-		assert_eq!(message.parse_mode, TelegramParseMode::MarkdownV2);
+		assert_eq!(message.text, "task succeeded");
+		assert_eq!(message.parse_mode, TelegramParseMode::PlainText);
 		assert!(message.reply_markup.is_none());
+		assert!(!message.text.contains("artifact://"));
 	}
 
 	#[test]
@@ -307,7 +348,7 @@ mod tests {
 			},
 		);
 
-		assert!(message.text.contains("*Approval:* approval\\-42"));
+		assert!(message.text.contains("Approval required."));
 		let markup = message
 			.reply_markup
 			.expect("pending approval should render inline keyboard");
@@ -327,15 +368,14 @@ mod tests {
 	fn outbound_message_formats_error_as_plain_text() {
 		let message = TelegramOutboundMessage::from_error(1001, "runtime exploded");
 		assert_eq!(message.chat_id, 1001);
-		assert!(message.text.contains("Status: failed"));
-		assert!(message.text.contains("runtime exploded"));
+		assert_eq!(message.text, "runtime exploded");
 		assert_eq!(message.parse_mode, TelegramParseMode::PlainText);
 		assert!(message.reply_markup.is_none());
 	}
 
 	#[test]
 	fn outbound_message_groups_experiments_and_references() {
-		let message = TelegramOutboundMessage::from_response(
+		let message = TelegramOutboundMessage::from_response_with_options(
 			1001,
 			&ResponseEnvelope {
 				request_id: RequestId("req-2".to_string()),
@@ -346,12 +386,35 @@ mod tests {
 					"https://example.com/report".to_string(),
 				],
 			},
+			TelegramRenderOptions {
+				include_request_metadata: false,
+				show_attachments: true,
+			},
 		);
 
-		assert!(message.text.contains("*Experiments:*"));
-		assert!(message.text.contains("run\\-7 \\(experiment://run\\-7\\)"));
-		assert!(message.text.contains("*References:*"));
-		assert!(message.text.contains("https://example\\.com/report"));
+		assert!(message.text.contains("Experiments:"));
+		assert!(message.text.contains("run-7 (experiment://run-7)"));
+		assert!(message.text.contains("References:"));
+		assert!(message.text.contains("https://example.com/report"));
+	}
+
+	#[test]
+	fn outbound_message_can_include_request_metadata_when_enabled() {
+		let message = TelegramOutboundMessage::from_response_with_options(
+			1001,
+			&ResponseEnvelope {
+				request_id: RequestId("req-3".to_string()),
+				status: ResponseStatus::Succeeded,
+				message: "done".to_string(),
+				artifacts: Vec::new(),
+			},
+			TelegramRenderOptions {
+				include_request_metadata: true,
+				show_attachments: false,
+			},
+		);
+
+		assert_eq!(message.text, "Request: req-3\ndone");
 	}
 
 	#[test]
