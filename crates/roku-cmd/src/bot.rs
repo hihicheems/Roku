@@ -8,6 +8,7 @@ use roku_common_types::{
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_state_store::{
 	ConversationRepository, InMemoryConversationRepository, InMemorySessionPreferenceRepository,
+	PostgresConversationRepository, PostgresSessionPreferenceRepository, PostgresStoreConfig,
 	SessionPreferenceRepository, StoreError,
 };
 
@@ -16,7 +17,7 @@ use crate::runtime::build_live_runtime_service_from_env;
 
 pub fn run_telegram_bot_from_env() -> Result<(), CommandError> {
 	let service = Arc::new(build_live_runtime_service_from_env()?);
-	let session_state = Arc::new(TelegramSessionState::default());
+	let session_state = Arc::new(TelegramSessionState::from_env()?);
 	let runner = roku_connectors_telegram::TelegramPollingRunner::from_env()?;
 	let _ = emit_global_log(LogRecord::new(
 		"roku-cmd",
@@ -100,13 +101,54 @@ impl roku_connectors_telegram::TelegramInteractionHandler for RuntimeServiceTele
 	}
 }
 
-#[derive(Debug, Default)]
 struct TelegramSessionState {
-	preferences: Mutex<InMemorySessionPreferenceRepository>,
-	conversation: Mutex<InMemoryConversationRepository>,
+	preferences: Mutex<Box<dyn SessionPreferenceRepository + Send>>,
+	conversation: Mutex<Box<dyn ConversationRepository + Send>>,
 }
 
 impl TelegramSessionState {
+	fn from_env() -> Result<Self, CommandError> {
+		if let Some(config) = PostgresStoreConfig::from_env()
+			.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?
+		{
+			let _ = emit_global_log(
+				LogRecord::new(
+					"roku-cmd",
+					LogLevel::Info,
+					"using postgres-backed telegram session state",
+				)
+				.with_field("schema", config.schema.clone()),
+			);
+			return Ok(Self::new(
+				Box::new(
+					PostgresSessionPreferenceRepository::connect(config.clone()).map_err(|error| {
+						CommandError::StateStoreBootstrap(error.to_string())
+					})?,
+				),
+				Box::new(PostgresConversationRepository::connect(config).map_err(|error| {
+					CommandError::StateStoreBootstrap(error.to_string())
+				})?),
+			));
+		}
+
+		let _ = emit_global_log(LogRecord::new(
+			"roku-cmd",
+			LogLevel::Info,
+			"using in-memory telegram session state",
+		));
+		Ok(Self::default())
+	}
+
+	fn new(
+		preferences: Box<dyn SessionPreferenceRepository + Send>,
+		conversation: Box<dyn ConversationRepository + Send>,
+	) -> Self {
+		Self {
+			preferences: Mutex::new(preferences),
+			conversation: Mutex::new(conversation),
+		}
+	}
+
 	fn save_preferences(
 		&self,
 		session_id: &str,
@@ -148,7 +190,10 @@ impl TelegramSessionState {
 
 	fn lock_preferences(
 		&self,
-	) -> Result<std::sync::MutexGuard<'_, InMemorySessionPreferenceRepository>, RuntimeError> {
+	) -> Result<
+		std::sync::MutexGuard<'_, Box<dyn SessionPreferenceRepository + Send>>,
+		RuntimeError,
+	> {
 		self.preferences
 			.lock()
 			.map_err(|_| RuntimeError::new("session preference store is poisoned"))
@@ -156,10 +201,22 @@ impl TelegramSessionState {
 
 	fn lock_conversation(
 		&self,
-	) -> Result<std::sync::MutexGuard<'_, InMemoryConversationRepository>, RuntimeError> {
+	) -> Result<
+		std::sync::MutexGuard<'_, Box<dyn ConversationRepository + Send>>,
+		RuntimeError,
+	> {
 		self.conversation
 			.lock()
 			.map_err(|_| RuntimeError::new("conversation store is poisoned"))
+	}
+}
+
+impl Default for TelegramSessionState {
+	fn default() -> Self {
+		Self::new(
+			Box::new(InMemorySessionPreferenceRepository::default()),
+			Box::new(InMemoryConversationRepository::default()),
+		)
 	}
 }
 

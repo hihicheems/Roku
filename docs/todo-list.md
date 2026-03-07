@@ -272,7 +272,7 @@
 | SS-04B | 增加 session preference / conversation history 的 file-backed adapter | §12 Memory / 原型持久化基线 | DONE |
 | SS-05 | 增加 PostgreSQL task backend | §6.1 PostgreSQL / §21 Phase 4+ | TODO |
 | SS-06 | 增加 PostgreSQL event / approval / result backend | §6.1 PostgreSQL | TODO |
-| SS-06A | 增加 PostgreSQL session preference / conversation memory backend | §6.1 PostgreSQL / §12 Memory | TODO |
+| SS-06A | 增加 PostgreSQL session preference / conversation memory backend | §6.1 PostgreSQL / §12 Memory | DONE |
 | SS-07 | 增加 migration / bootstrap / repository index 设计 | 生产级持久化边界 | TODO |
 | SS-08 | 增加 Redis / NATS / JetStream 风格 dispatch 抽象 | §6.1 NATS JetStream / §14.3 | TODO |
 | SS-09 | 增加 ack、lease、backpressure、retry claim 语义 | §14.3 背压与资源隔离 | TODO |
