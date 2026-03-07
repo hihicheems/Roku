@@ -22,6 +22,17 @@ fn service_succeeds_for_happy_path() {
 		.expect("runtime service should succeed");
 
 	assert_eq!(response.status, ResponseStatus::Succeeded);
+	assert_eq!(response.artifacts.len(), 2);
+	let artifacts = service
+		.list_artifacts(&TaskId("task-req-1".to_string()))
+		.expect("artifacts should load");
+	assert_eq!(artifacts.len(), 2);
+	let experiment = service
+		.get_experiment_run(&TaskId("task-req-1".to_string()))
+		.expect("experiment load should succeed")
+		.expect("experiment should exist");
+	assert_eq!(experiment.summary.as_deref(), Some("task succeeded"));
+	assert_eq!(experiment.artifact_ids.len(), 2);
 }
 
 #[test]
@@ -33,6 +44,16 @@ fn service_reports_validation_failure() {
 
 	assert_eq!(response.status, ResponseStatus::Failed);
 	assert!(response.message.contains("evidence is required"));
+	let experiment = service
+		.get_experiment_run(&TaskId("task-req-1".to_string()))
+		.expect("experiment load should succeed")
+		.expect("experiment should exist");
+	assert!(
+		experiment
+			.failure_reason
+			.as_deref()
+			.is_some_and(|reason| reason.contains("evidence is required"))
+	);
 }
 
 #[test]
@@ -44,6 +65,8 @@ fn service_reports_capability_denied() {
 
 	assert_eq!(response.status, ResponseStatus::Failed);
 	assert!(response.message.contains("capability denied"));
+	let metrics = service.metrics_snapshot();
+	assert_eq!(metrics.experiments_failed_total, 1);
 }
 
 #[test]
@@ -224,4 +247,32 @@ fn validation_collects_results_through_approval_nodes() {
 
 	assert_eq!(results.len(), 1);
 	assert_eq!(results[0].node_id.0, "extract");
+}
+
+#[test]
+fn validation_evidence_resolves_persisted_artifacts() {
+	let service = RuntimeService::default();
+	service
+		.execute(sample_request())
+		.expect("runtime service should succeed");
+
+	let task_id = TaskId("task-req-1".to_string());
+	let task = {
+		let state = service.lock_state().expect("state lock should succeed");
+		state
+			.task_repo
+			.load_task(&task_id)
+			.expect("task load should succeed")
+			.expect("task should exist")
+	};
+	let evidence_sets = service
+		.collect_validation_evidence(&task, &NodeId("validation-gate".to_string()))
+		.expect("validation evidence should load");
+
+	assert_eq!(evidence_sets.len(), 1);
+	assert!(
+		evidence_sets
+			.iter()
+			.all(|evidence_set| !evidence_set.artifacts.is_empty())
+	);
 }
