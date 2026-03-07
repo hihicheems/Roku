@@ -4,6 +4,7 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::outbound::TelegramRenderOptions;
 use crate::{TelegramOutboundMessage, TelegramParseMode, TelegramReplyMarkup, TelegramUpdate};
 
 const DEFAULT_TELEGRAM_BASE_URL: &str = "https://api.telegram.org";
@@ -15,6 +16,9 @@ pub struct TelegramBotConfig {
 	pub poll_timeout_seconds: u16,
 	pub idle_backoff_ms: u64,
 	pub poll_error_log_threshold: u32,
+	pub progress_notices_enabled: bool,
+	pub include_request_metadata: bool,
+	pub show_attachments: bool,
 }
 
 impl TelegramBotConfig {
@@ -37,6 +41,10 @@ impl TelegramBotConfig {
 		let idle_backoff_ms = env_var_u64("TELEGRAM_IDLE_BACKOFF_MS")?.unwrap_or(500);
 		let poll_error_log_threshold =
 			env_var_u32("TELEGRAM_POLL_ERROR_LOG_THRESHOLD")?.unwrap_or(5);
+		let progress_notices_enabled = env_var_bool("TELEGRAM_PROGRESS_NOTICES")?.unwrap_or(false);
+		let include_request_metadata =
+			env_var_bool("TELEGRAM_INCLUDE_REQUEST_METADATA")?.unwrap_or(false);
+		let show_attachments = env_var_bool("TELEGRAM_SHOW_ATTACHMENTS")?.unwrap_or(false);
 
 		Ok(Self {
 			token,
@@ -44,7 +52,17 @@ impl TelegramBotConfig {
 			poll_timeout_seconds,
 			idle_backoff_ms,
 			poll_error_log_threshold,
+			progress_notices_enabled,
+			include_request_metadata,
+			show_attachments,
 		})
+	}
+
+	pub(crate) fn render_options(&self) -> TelegramRenderOptions {
+		TelegramRenderOptions {
+			include_request_metadata: self.include_request_metadata,
+			show_attachments: self.show_attachments,
+		}
 	}
 }
 
@@ -263,5 +281,74 @@ fn env_var_u32(key: &'static str) -> Result<Option<u32>, TelegramTransportError>
 			key,
 			message: error.to_string(),
 		}),
+	}
+}
+
+fn env_var_bool(key: &'static str) -> Result<Option<bool>, TelegramTransportError> {
+	match env::var(key) {
+		Ok(value) if !value.trim().is_empty() => parse_bool_env_value(key, &value).map(Some),
+		Ok(_) | Err(env::VarError::NotPresent) => Ok(None),
+		Err(error) => Err(TelegramTransportError::InvalidEnv {
+			key,
+			message: error.to_string(),
+		}),
+	}
+}
+
+fn parse_bool_env_value(key: &'static str, value: &str) -> Result<bool, TelegramTransportError> {
+	match value.trim().to_ascii_lowercase().as_str() {
+		"1" | "true" | "yes" | "on" => Ok(true),
+		"0" | "false" | "no" | "off" => Ok(false),
+		_ => Err(TelegramTransportError::InvalidEnv {
+			key,
+			message: "expected one of true/false/1/0/yes/no/on/off".to_string(),
+		}),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{TelegramBotConfig, parse_bool_env_value};
+
+	#[test]
+	fn parse_bool_env_value_accepts_truthy_values() {
+		assert!(parse_bool_env_value("KEY", "true").expect("truthy value should parse"));
+		assert!(parse_bool_env_value("KEY", "YES").expect("truthy value should parse"));
+		assert!(parse_bool_env_value("KEY", "1").expect("truthy value should parse"));
+	}
+
+	#[test]
+	fn parse_bool_env_value_accepts_falsy_values() {
+		assert!(!parse_bool_env_value("KEY", "false").expect("falsy value should parse"));
+		assert!(!parse_bool_env_value("KEY", "Off").expect("falsy value should parse"));
+		assert!(!parse_bool_env_value("KEY", "0").expect("falsy value should parse"));
+	}
+
+	#[test]
+	fn parse_bool_env_value_rejects_unknown_values() {
+		let error = parse_bool_env_value("KEY", "maybe").expect_err("invalid value should fail");
+		assert!(
+			error
+				.to_string()
+				.contains("expected one of true/false/1/0/yes/no/on/off")
+		);
+	}
+
+	#[test]
+	fn render_options_follow_config_flags() {
+		let config = TelegramBotConfig {
+			token: "token".to_string(),
+			api_base_url: "https://api.telegram.org".to_string(),
+			poll_timeout_seconds: 30,
+			idle_backoff_ms: 500,
+			poll_error_log_threshold: 5,
+			progress_notices_enabled: false,
+			include_request_metadata: true,
+			show_attachments: true,
+		};
+
+		let options = config.render_options();
+		assert!(options.include_request_metadata);
+		assert!(options.show_attachments);
 	}
 }
