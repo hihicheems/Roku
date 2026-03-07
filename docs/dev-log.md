@@ -449,3 +449,40 @@
 1. Implement `roku-tool-runtime` descriptor contracts with sandbox profile, timeout, retry, and deterministic hook APIs.
 2. Feed runtime execution telemetry into planning feedback so replan and stop decisions can use observed failure patterns.
 3. Add planner quality metrics (branch acceptance rate, critique-loop convergence) into observability exports.
+
+## 2026-03-07 - Session Milestone (Phase 13)
+
+### Completed Modules
+
+- `roku-tool-runtime`
+  - Replaced string-only echo runtime with descriptor-based tool registry.
+  - Added `ToolDescriptor`, `ToolSchema`, `RuntimeConstraints`, and `SandboxProfile` contracts.
+  - Added execution policy enforcement:
+    - required capability checks
+    - required input-field schema checks
+    - timeout guard
+    - bounded retry with optional backoff
+  - Added deterministic execution hook stream:
+    - `ExecutionEventKind` lifecycle events
+    - stable `trace_id` generation (`invocation_key:attempt:event`)
+    - optional output fingerprint emission for deterministic tracing
+  - Added structured error model with explicit failure classes (`ToolNotFound`, `CapabilityDenied`, `Timeout`, `ExecutionFailed`).
+  - Added unit tests for success path, capability denial, retriable failure recovery, timeout behavior, and deterministic hook ordering.
+
+### Verification Status
+
+- `cargo test -p roku-tool-runtime`: passed
+- `cargo fmt --all`: passed
+- `cargo check --workspace`: passed
+
+### Remaining Work
+
+- Runtime service still executes a generic worker path and has not yet routed node execution through `roku-tool-runtime`.
+- Descriptor input checking currently validates required fields only; full schema registry integration is still missing.
+- Sandbox profile is declared and enforced at policy level, but actual OS/container isolation adapters are not yet wired.
+
+### Next Recommended Steps
+
+1. Integrate `roku-tool-runtime` into `roku-agent-runtime` / `roku-runtime-service` node execution flow.
+2. Extend schema checks from required fields to versioned schema validation contracts.
+3. Add adapter layer for real sandbox executors (WASI/container) behind the current runtime constraints.
