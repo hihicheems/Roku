@@ -326,7 +326,7 @@
 | RS-09 | 对外暴露 artifact / experiment / artifact-content 查询 API | §12 / §19.1 | DONE |
 | RS-10 | 将 planning metrics 与 correlated audit 接入 observability | §16 指标 / Trace | DONE |
 | RS-11 | 将 node execution 真正下放到 `roku-tool-runtime`，形成受 descriptor 约束的执行链 | §9 请求生命周期 / §13 | DONE |
-| RS-12 | 将 planning / reasoning 接入 `roku-llm-adapter`，消除硬编码 planning 输入 | §7 Planning Architecture / §14 | TODO |
+| RS-12 | 将 planning / reasoning 接入 `roku-llm-adapter`，消除硬编码 planning 输入 | §7 Planning Architecture / §14 | DONE |
 | RS-13 | 将 `Supervisor Agent` 逻辑从 `runtime-service` 中进一步显式分离 | §4.1 / §7.2 | TODO |
 | RS-14 | 增加组织级审批规则、风险动作 gating 与 capability/approval 联动 | §15.3 / §17 OrgPolicy | TODO |
 | RS-15 | 增加基于持久化事件的 replay / recovery / partial rerun 主链路 | §8 ResumePoint / §20 replay | TODO |

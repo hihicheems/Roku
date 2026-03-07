@@ -1293,6 +1293,7 @@ dependencies = [
  "roku-llm-adapter",
  "roku-observability",
  "roku-runtime-service",
+ "roku-task-planner",
  "thiserror",
 ]
 
@@ -1426,7 +1427,9 @@ name = "roku-task-planner"
 version = "0.1.0"
 dependencies = [
  "roku-common-types",
+ "roku-llm-adapter",
  "roku-planning-engine",
+ "serde_json",
 ]
 
 [[package]]

@@ -7,6 +7,7 @@ use roku_llm_adapter::{OpenRouterConfig, build_openrouter_router_with_metrics};
 use roku_observability::Metrics;
 pub use roku_runtime_service::RunMode;
 use roku_runtime_service::RuntimeService;
+use roku_task_planner::llm::LlmTaskPlanner;
 
 use crate::CommandError;
 
@@ -44,9 +45,9 @@ pub fn run_live_once_from_env(goal: &str) -> Result<ResponseEnvelope, CommandErr
 pub(crate) fn build_live_runtime_service_from_env() -> Result<RuntimeService, CommandError> {
 	let config = OpenRouterConfig::from_env()?;
 	let metrics = Arc::new(Metrics::default());
-	let router = build_openrouter_router_with_metrics(config, metrics.clone())?;
-	let runtime = GenericAgentRuntime::with_llm_router(router);
-	Ok(RuntimeService::in_memory_with_agent_runtime_and_metrics(
-		runtime, metrics,
-	))
+	let runtime_router = build_openrouter_router_with_metrics(config.clone(), metrics.clone())?;
+	let planner_router = build_openrouter_router_with_metrics(config, metrics.clone())?;
+	let runtime = GenericAgentRuntime::with_llm_router(runtime_router);
+	let planner = Box::new(LlmTaskPlanner::new(planner_router));
+	Ok(RuntimeService::in_memory_with_agent_runtime_planner_and_metrics(runtime, planner, metrics))
 }

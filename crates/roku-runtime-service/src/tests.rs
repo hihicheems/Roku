@@ -5,7 +5,7 @@ use roku_common_types::{
 	TaskGraph, TaskId, TaskNode, TaskNodeKind, TaskState,
 };
 
-use crate::{RunMode, RuntimeService};
+use crate::{RunMode, RuntimeService, planning_input_for_request};
 
 fn sample_request() -> RequestEnvelope {
 	RequestEnvelope {
@@ -13,6 +13,33 @@ fn sample_request() -> RequestEnvelope {
 		session_id: "session-1".to_string(),
 		goal: "analyze market".to_string(),
 	}
+}
+
+#[test]
+fn planning_input_scales_for_complex_goal() {
+	let input = planning_input_for_request(&RequestEnvelope {
+		request_id: RequestId("req-complex".to_string()),
+		session_id: "session-1".to_string(),
+		goal: "build and integrate a workflow to research alternatives, compare options, and deploy a production-ready bot".to_string(),
+	});
+
+	assert!(input.complexity_score >= 6);
+	assert!(input.budget_tokens >= 6_000);
+}
+
+#[test]
+fn planning_input_marks_high_risk_requests() {
+	let input = planning_input_for_request(&RequestEnvelope {
+		request_id: RequestId("req-risk".to_string()),
+		session_id: "session-1".to_string(),
+		goal: "delete the production secret and approve the mutation".to_string(),
+	});
+
+	assert!(matches!(
+		input.risk_level,
+		roku_planning_engine::RiskLevel::High
+	));
+	assert!(input.budget_tokens >= 8_000);
 }
 
 #[test]
