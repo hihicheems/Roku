@@ -766,3 +766,39 @@
 1. Deepen `roku-agent-runtime` so workers execute through `roku-tool-runtime` instead of returning synthetic output.
 2. Add structured validation reason codes and schema-registry-driven compatibility checks.
 3. Extend validation failure handling toward reviewer escalation and quarantined `untrusted result` states.
+
+## 2026-03-07 - Session Milestone (Phase 21)
+
+### Completed Modules
+
+- `roku-agent-runtime`
+  - Split the crate into explicit modules:
+    - `runtime.rs`
+    - `workers.rs`
+    - `tools.rs`
+    - `result.rs`
+  - Replaced the built-in worker path that directly assembled synthetic `ResultEnvelope` values.
+  - Added descriptor-governed built-in tools for research, data, review, and generic execution paths.
+  - Routed the default worker registry through `roku-tool-runtime`, including capability checks, sandbox metadata, deterministic invocation keys, and output fingerprint propagation.
+  - Normalized tool execution success and failure into structured `ResultEnvelope` payloads.
+- `roku-runtime-service`
+  - Added a regression test proving persisted execution results now carry tool-runtime evidence and JSON payloads.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test -p roku-agent-runtime -p roku-runtime-service -p roku-e2e`: passed
+- `cargo check --workspace`: passed
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed
+
+### Remaining Work
+
+- `roku-agent-runtime` still does not route higher-complexity reasoning workers through `roku-llm-adapter`.
+- Custom runtime workers can still bypass `roku-tool-runtime` if they return envelopes directly; only the built-in worker path is now tool-governed.
+- `roku-tool-runtime` still lacks output-schema enforcement, artifact persistence, and sandbox backends.
+
+### Next Recommended Steps
+
+1. Push `roku-agent-runtime` deeper into `roku-llm-adapter` and provider-routing policy for nontrivial reasoning nodes.
+2. Add output-schema enforcement and artifact/audit persistence to `roku-tool-runtime`.
+3. Start the next infrastructure increment in `roku-state-store` or dispatch/backpressure plane.

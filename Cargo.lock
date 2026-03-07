@@ -957,6 +957,8 @@ name = "roku-agent-runtime"
 version = "0.1.0"
 dependencies = [
  "roku-common-types",
+ "roku-tool-runtime",
+ "serde_json",
 ]
 
 [[package]]
@@ -1103,6 +1105,7 @@ dependencies = [
  "roku-state-store",
  "roku-task-planner",
  "roku-validation-plane",
+ "serde_json",
 ]
 
 [[package]]

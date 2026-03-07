@@ -1,0 +1,120 @@
+use std::sync::Arc;
+
+use roku_common_types::{AgentInstanceSpec, ResultEnvelope, TaskNode};
+use roku_tool_runtime::{ToolInvocation, ToolRuntime};
+use serde_json::json;
+
+use crate::result::{tool_failure_result, tool_success_result};
+use crate::runtime::RuntimeWorker;
+use crate::tools::{DATA_TOOL_NAME, GENERAL_TOOL_NAME, RESEARCH_TOOL_NAME, REVIEW_TOOL_NAME};
+
+pub(crate) struct ToolBackedWorker {
+	worker_id: &'static str,
+	tool_name: &'static str,
+	capability_prefixes: &'static [&'static str],
+	tool_runtime: Arc<ToolRuntime>,
+	confidence: f32,
+}
+
+impl ToolBackedWorker {
+	fn new(
+		worker_id: &'static str,
+		tool_name: &'static str,
+		capability_prefixes: &'static [&'static str],
+		tool_runtime: Arc<ToolRuntime>,
+		confidence: f32,
+	) -> Self {
+		Self {
+			worker_id,
+			tool_name,
+			capability_prefixes,
+			tool_runtime,
+			confidence,
+		}
+	}
+
+	fn invocation(&self, spec: &AgentInstanceSpec, node: &TaskNode) -> ToolInvocation {
+		ToolInvocation {
+			tool_name: self.tool_name.to_string(),
+			input: json!({
+				"task_id": spec.context.task_id.0,
+				"node_id": node.node_id.0,
+				"summary": node.description,
+				"budget_tokens": spec.policy_bindings.budget_tokens,
+				"time_budget_ms": spec.policy_bindings.time_budget_ms,
+				"worker_id": self.worker_id,
+			}),
+			granted_capabilities: spec.capabilities.clone(),
+			invocation_key: Some(format!(
+				"{}:{}:{}",
+				spec.context.task_id.0, node.node_id.0, self.worker_id
+			)),
+		}
+	}
+}
+
+impl RuntimeWorker for ToolBackedWorker {
+	fn worker_id(&self) -> &'static str {
+		self.worker_id
+	}
+
+	fn supports(&self, capabilities: &[String]) -> bool {
+		if self.capability_prefixes.is_empty() {
+			return true;
+		}
+
+		capabilities.iter().any(|capability| {
+			self.capability_prefixes
+				.iter()
+				.any(|prefix| capability.starts_with(prefix))
+		})
+	}
+
+	fn execute(&self, spec: &AgentInstanceSpec, node: &TaskNode) -> ResultEnvelope {
+		match self.tool_runtime.invoke(self.invocation(spec, node)) {
+			Ok(execution) => tool_success_result(
+				spec,
+				node,
+				self.worker_id,
+				self.tool_name,
+				execution,
+				self.confidence,
+			),
+			Err(error) => tool_failure_result(spec, node, self.worker_id, self.tool_name, error),
+		}
+	}
+}
+
+pub(crate) fn research_worker(tool_runtime: Arc<ToolRuntime>) -> ToolBackedWorker {
+	ToolBackedWorker::new(
+		"research-worker",
+		RESEARCH_TOOL_NAME,
+		&["information.", "research."],
+		tool_runtime,
+		0.86,
+	)
+}
+
+pub(crate) fn data_worker(tool_runtime: Arc<ToolRuntime>) -> ToolBackedWorker {
+	ToolBackedWorker::new(
+		"data-worker",
+		DATA_TOOL_NAME,
+		&["data."],
+		tool_runtime,
+		0.88,
+	)
+}
+
+pub(crate) fn review_worker(tool_runtime: Arc<ToolRuntime>) -> ToolBackedWorker {
+	ToolBackedWorker::new(
+		"review-worker",
+		REVIEW_TOOL_NAME,
+		&["review.", "validation."],
+		tool_runtime,
+		0.92,
+	)
+}
+
+pub(crate) fn generic_worker(tool_runtime: Arc<ToolRuntime>) -> ToolBackedWorker {
+	ToolBackedWorker::new("generic-worker", GENERAL_TOOL_NAME, &[], tool_runtime, 0.75)
+}

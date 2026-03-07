@@ -36,6 +36,36 @@ fn service_succeeds_for_happy_path() {
 }
 
 #[test]
+fn service_persists_tool_runtime_evidence_for_execution_nodes() {
+	let service = RuntimeService::default();
+	service
+		.execute(sample_request())
+		.expect("runtime service should succeed");
+
+	let results = service
+		.list_results(&TaskId("task-req-1".to_string()))
+		.expect("results should load");
+	assert!(!results.is_empty());
+	assert!(results.iter().all(|result| {
+		result
+			.evidence
+			.iter()
+			.any(|item| item.kind == "tool" && !item.value.is_empty())
+	}));
+	assert!(results.iter().all(|result| {
+		result
+			.evidence
+			.iter()
+			.any(|item| item.kind == "output_fingerprint" && !item.value.is_empty())
+	}));
+	assert!(
+		results
+			.iter()
+			.all(|result| { serde_json::from_str::<serde_json::Value>(&result.payload).is_ok() })
+	);
+}
+
+#[test]
 fn service_exposes_artifact_content_by_task_and_artifact() {
 	let service = RuntimeService::default();
 	let response = service
