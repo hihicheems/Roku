@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use roku_common_types::{AgentInstanceSpec, ResultEnvelope, TaskNode};
+use roku_common_types::{
+	AgentInstanceSpec, ConversationRole, ConversationTurn, ResultEnvelope, TaskNode,
+};
 use roku_tool_runtime::{ToolInvocation, ToolRuntime};
 use serde_json::json;
 
@@ -42,6 +44,7 @@ impl ToolBackedWorker {
 				"node_id": node.node_id.0,
 				"goal": goal,
 				"summary": step_summary,
+				"conversation_history": render_conversation_history(&spec.context.conversation_history),
 				"budget_tokens": spec.policy_bindings.budget_tokens,
 				"time_budget_ms": spec.policy_bindings.time_budget_ms,
 				"worker_id": self.worker_id,
@@ -129,4 +132,20 @@ fn goal_and_step(description: &str) -> (String, String) {
 	}
 
 	(String::new(), description.to_string())
+}
+
+fn render_conversation_history(history: &[ConversationTurn]) -> String {
+	history
+		.iter()
+		.map(|turn| format!("{}: {}", role_label(turn.role), turn.content))
+		.collect::<Vec<_>>()
+		.join("\n")
+}
+
+fn role_label(role: ConversationRole) -> &'static str {
+	match role {
+		ConversationRole::User => "user",
+		ConversationRole::Assistant => "assistant",
+		ConversationRole::System => "system",
+	}
 }

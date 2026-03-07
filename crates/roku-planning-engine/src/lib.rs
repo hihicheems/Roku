@@ -88,18 +88,8 @@ pub trait StrategySelector {
 #[derive(Debug, Default)]
 pub struct DefaultPlanningEngine;
 
-impl StrategySelector for DefaultPlanningEngine {
-	fn select(&self, input: &PlanningInput) -> PlanningDecision {
-		let mode = if input.uncertainty_score >= 8 {
-			PlanningMode::TreeSearch
-		} else if input.complexity_score >= 7 {
-			PlanningMode::TaskDecomposition
-		} else if matches!(input.risk_level, RiskLevel::High) {
-			PlanningMode::IterativeRefinement
-		} else {
-			PlanningMode::ReAct
-		};
-
+impl DefaultPlanningEngine {
+	pub fn decision_for_mode(&self, mode: PlanningMode, input: &PlanningInput) -> PlanningDecision {
 		let max_iterations = if input.budget_tokens < 2_000 {
 			2
 		} else if input.budget_tokens < 8_000 {
@@ -137,6 +127,22 @@ impl StrategySelector for DefaultPlanningEngine {
 	}
 }
 
+impl StrategySelector for DefaultPlanningEngine {
+	fn select(&self, input: &PlanningInput) -> PlanningDecision {
+		let mode = if input.uncertainty_score >= 8 {
+			PlanningMode::TreeSearch
+		} else if input.complexity_score >= 7 {
+			PlanningMode::TaskDecomposition
+		} else if matches!(input.risk_level, RiskLevel::High) {
+			PlanningMode::IterativeRefinement
+		} else {
+			PlanningMode::ReAct
+		};
+
+		self.decision_for_mode(mode, input)
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -156,6 +162,37 @@ mod tests {
 	}
 
 	#[test]
+	fn choose_task_decomposition_for_high_complexity() {
+		let engine = DefaultPlanningEngine;
+		let result = engine.select(&PlanningInput {
+			complexity_score: 8,
+			uncertainty_score: 3,
+			risk_level: RiskLevel::Low,
+			budget_tokens: 9_000,
+		});
+
+		assert_eq!(result.mode, PlanningMode::TaskDecomposition);
+		assert_eq!(result.max_branches, 2);
+		assert!(result.hooks.contains(&PlanningHook::ObserveAction));
+	}
+
+	#[test]
+	fn choose_react_for_low_risk_low_complexity_goal() {
+		let engine = DefaultPlanningEngine;
+		let result = engine.select(&PlanningInput {
+			complexity_score: 2,
+			uncertainty_score: 2,
+			risk_level: RiskLevel::Low,
+			budget_tokens: 1_500,
+		});
+
+		assert_eq!(result.mode, PlanningMode::ReAct);
+		assert_eq!(result.max_iterations, 2);
+		assert_eq!(result.max_branches, 1);
+		assert_eq!(result.hooks, vec![PlanningHook::ObserveAction]);
+	}
+
+	#[test]
 	fn choose_iterative_refinement_for_high_risk_simple_task() {
 		let engine = DefaultPlanningEngine;
 		let result = engine.select(&PlanningInput {
@@ -168,6 +205,24 @@ mod tests {
 		assert_eq!(result.mode, PlanningMode::IterativeRefinement);
 		assert_eq!(result.max_branches, 1);
 		assert!(result.hooks.contains(&PlanningHook::CritiqueRevise));
+	}
+
+	#[test]
+	fn forced_mode_preserves_tree_search_budget_rules() {
+		let engine = DefaultPlanningEngine;
+		let result = engine.decision_for_mode(
+			PlanningMode::TreeSearch,
+			&PlanningInput {
+				complexity_score: 1,
+				uncertainty_score: 1,
+				risk_level: RiskLevel::Low,
+				budget_tokens: 3_000,
+			},
+		);
+
+		assert_eq!(result.mode, PlanningMode::TreeSearch);
+		assert_eq!(result.max_branches, 2);
+		assert!(result.hooks.contains(&PlanningHook::BranchExpand));
 	}
 
 	#[test]

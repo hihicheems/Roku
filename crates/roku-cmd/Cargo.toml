@@ -14,5 +14,6 @@ roku-connectors-telegram = { path = "../roku-connectors-telegram" }
 roku-llm-adapter = { path = "../roku-llm-adapter" }
 roku-observability = { path = "../roku-observability" }
 roku-runtime-service = { path = "../roku-runtime-service" }
+roku-state-store = { path = "../roku-state-store" }
 roku-task-planner = { path = "../roku-task-planner" }
 thiserror = "2"

@@ -1,6 +1,6 @@
 # Roku Agent Implementation Todo List
 
-更新时间：2026-03-07
+更新时间：2026-03-08
 
 ## 文档定位
 
@@ -41,6 +41,7 @@
 | CT-13 | 引入 schema descriptor / version compatibility DTO，避免 schema 逻辑散落在各 crate | §11.2 Schema Validation | TODO |
 | CT-14 | 增加 A2A 所需的 `AgentIdentity` / `CapabilityCard` / `WorkContract` / `DelegationTicket` DTO | §17 组织层抽象 | TODO |
 | CT-15 | 增加组织级策略、审批规则、预算快照、模型路由等跨 crate 通用契约 | §14 / §15 / §17 | TODO |
+| CT-16 | 增加 `PlanningModeHint` / `SessionPreferences` / `ConversationTurn` 等会话级策略与记忆契约 | §7 Planning Architecture / §12 Memory | DONE |
 
 ## roku-orchestrator
 
@@ -256,6 +257,8 @@
 | TG-07 | 增加 artifact / experiment / approval 的富消息渲染 | §12 Artifact / §16 诊断 | DONE |
 | TG-08 | 增加长任务状态推送与结果回执能力 | 长任务体验 | DONE |
 | TG-09 | 为 polling transport 增加抑制式错误日志，隐藏 routine `getUpdates` 噪声并保留连续失败告警 | §16 可观测性 / Connector 运行治理 | DONE |
+| TG-10 | 增加大小写无关的 `/react` `/taskdecomposition` `/treesearch` `/iterativerefinement` `/auto` 会话级策略命令 | §7.3 Planning Strategy 模式 / Telegram 交互 | DONE |
+| TG-11 | 让 Telegram 请求携带 session-level planning override 与 recent conversation history | §9 请求生命周期 / §12 Memory | DONE |
 
 ## roku-state-store
 
@@ -265,8 +268,11 @@
 | SS-02 | 提供 task / event / approval / result 的 in-memory adapter | §21 Phase 0-1 基础骨架 | DONE |
 | SS-03 | 提供 task / event / approval / result 的 file-backed adapter | 原型持久化基线 | DONE |
 | SS-04 | 为 task / approval / result 增加 roundtrip 测试 | §20 测试策略 | DONE |
+| SS-04A | 增加 `SessionPreferenceRepository` / `ConversationRepository` trait 与 in-memory adapter | §12 Memory / §19 state-store | DONE |
+| SS-04B | 增加 session preference / conversation history 的 file-backed adapter | §12 Memory / 原型持久化基线 | DONE |
 | SS-05 | 增加 PostgreSQL task backend | §6.1 PostgreSQL / §21 Phase 4+ | TODO |
 | SS-06 | 增加 PostgreSQL event / approval / result backend | §6.1 PostgreSQL | TODO |
+| SS-06A | 增加 PostgreSQL session preference / conversation memory backend | §6.1 PostgreSQL / §12 Memory | TODO |
 | SS-07 | 增加 migration / bootstrap / repository index 设计 | 生产级持久化边界 | TODO |
 | SS-08 | 增加 Redis / NATS / JetStream 风格 dispatch 抽象 | §6.1 NATS JetStream / §14.3 | TODO |
 | SS-09 | 增加 ack、lease、backpressure、retry claim 语义 | §14.3 背压与资源隔离 | TODO |
@@ -312,6 +318,8 @@
 | OB-08 | 增加 planning stop reason、loop depth、branch count 直方图 | §16 Planning 指标 | TODO |
 | OB-09 | 增加 tool / provider cost、latency、timeout、deny-rate 指标 | §16 Tool / Budget / Validation 指标 | TODO |
 | OB-10 | 增加外部 SIEM / audit sink 对接 | §15.2 审计模型 | TODO |
+| OB-11 | 增加可配置的全局 `LogSink` 抽象与 fanout 组合 | §16 Trace 与日志 / 工程化 | DONE |
+| OB-12 | 增加异步滚动文件日志 sink，默认按 `logs/<component>/current.log` 落盘 | §16 Trace 与日志 / Connector 运行治理 | DONE |
 
 ## roku-runtime-service
 
@@ -329,6 +337,8 @@
 | RS-10 | 将 planning metrics 与 correlated audit 接入 observability | §16 指标 / Trace | DONE |
 | RS-11 | 将 node execution 真正下放到 `roku-tool-runtime`，形成受 descriptor 约束的执行链 | §9 请求生命周期 / §13 | DONE |
 | RS-12 | 将 planning / reasoning 接入 `roku-llm-adapter`，消除硬编码 planning 输入 | §7 Planning Architecture / §14 | DONE |
+| RS-12A | 支持 request-level / session-level planning mode override，并补齐四种 planning mode 测试覆盖 | §7.3 Planning Strategy 模式 | DONE |
+| RS-12B | 将 recent conversation history 注入 planner 与 worker prompt 构建链路 | §12 Memory / §7 Planning Architecture | DONE |
 | RS-13 | 将 `Supervisor Agent` 逻辑从 `runtime-service` 中进一步显式分离 | §4.1 / §7.2 | TODO |
 | RS-14 | 增加组织级审批规则、风险动作 gating 与 capability/approval 联动 | §15.3 / §17 OrgPolicy | TODO |
 | RS-15 | 增加基于持久化事件的 replay / recovery / partial rerun 主链路 | §8 ResumePoint / §20 replay | TODO |
@@ -344,6 +354,8 @@
 | CMD-04 | 增加 artifact download / approval decision / resume 等运维命令 | 运行期治理 | TODO |
 | CMD-05 | 增加配置文件 / 环境变量 / profile 加载能力 | 工程化 | DONE |
 | CMD-06 | 增加 `live-once` / `telegram-bot` 命令，打通 live model 与 Telegram 入口 | §4.1 Connector / CLI | DONE |
+| CMD-07 | 增加日志目录、滚动策略、stderr 开关等环境变量配置并安装全局 logger | §16 可观测性 / 工程化 | DONE |
+| CMD-08 | 增加 CLI 级 planning mode override 参数，便于本地验证四种 planning 策略 | §7.3 / 测试与演练辅助 | TODO |
 
 ## roku-agent-directory (planned)
 

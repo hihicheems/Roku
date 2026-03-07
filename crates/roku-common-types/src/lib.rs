@@ -22,11 +22,56 @@ pub struct ArtifactId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ExperimentRunId(pub String);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlanningModeHint {
+	ReAct,
+	TaskDecomposition,
+	TreeSearch,
+	IterativeRefinement,
+}
+
+impl fmt::Display for PlanningModeHint {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		let label = match self {
+			Self::ReAct => "ReAct",
+			Self::TaskDecomposition => "TaskDecomposition",
+			Self::TreeSearch => "TreeSearch",
+			Self::IterativeRefinement => "IterativeRefinement",
+		};
+		write!(f, "{label}")
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConversationRole {
+	User,
+	Assistant,
+	System,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationTurn {
+	pub role: ConversationRole,
+	pub content: String,
+	#[serde(default)]
+	pub created_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPreferences {
+	#[serde(default)]
+	pub planning_mode: Option<PlanningModeHint>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestEnvelope {
 	pub request_id: RequestId,
 	pub session_id: String,
 	pub goal: String,
+	#[serde(default)]
+	pub planning_mode_hint: Option<PlanningModeHint>,
+	#[serde(default)]
+	pub conversation_history: Vec<ConversationTurn>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,8 +128,14 @@ pub struct TaskEvent {
 pub struct Task {
 	pub task_id: TaskId,
 	pub request_id: RequestId,
+	pub session_id: String,
+	pub goal: String,
 	pub state: TaskState,
 	pub attempts: u32,
+	#[serde(default)]
+	pub planning_mode_hint: Option<PlanningModeHint>,
+	#[serde(default)]
+	pub conversation_history: Vec<ConversationTurn>,
 	#[serde(default)]
 	pub completed_nodes: Vec<NodeId>,
 	#[serde(default)]
@@ -165,6 +216,8 @@ pub struct AgentContext {
 	pub task_id: TaskId,
 	pub node_id: NodeId,
 	pub summary: String,
+	#[serde(default)]
+	pub conversation_history: Vec<ConversationTurn>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

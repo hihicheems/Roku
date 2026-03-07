@@ -1300,6 +1300,7 @@ dependencies = [
  "roku-llm-adapter",
  "roku-observability",
  "roku-runtime-service",
+ "roku-state-store",
  "roku-task-planner",
  "thiserror",
 ]
@@ -1328,6 +1329,7 @@ version = "0.1.0"
 dependencies = [
  "reqwest",
  "roku-common-types",
+ "roku-observability",
  "serde",
  "serde_json",
  "thiserror",

@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use roku_observability::Metrics;
+use roku_observability::{LogLevel, LogRecord, Metrics, emit_global_log};
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
@@ -184,37 +184,47 @@ impl LlmProvider for OpenRouterProvider {
 			}
 		})?;
 		if !status.is_success() {
-			eprintln!(
-				"[openrouter] provider={} model={} status={} body={}",
-				OPENROUTER_PROVIDER,
-				model.model_id,
-				status,
-				truncate_for_log(&response_body, 800),
+			log_openrouter(
+				LogLevel::Warn,
+				"provider returned non-success status",
+				[
+					("provider", OPENROUTER_PROVIDER.to_string()),
+					("model", model.model_id.clone()),
+					("status", status.to_string()),
+					("body", truncate_for_log(&response_body, 800)),
+				],
 			);
 			return Err(classify_status_error(status.as_u16(), response_body));
 		}
 
 		let parsed = parse_response(&response_body)
 			.inspect_err(|error| {
-				eprintln!(
-					"[openrouter] provider={} model={} parse_error={} body={}",
-					OPENROUTER_PROVIDER,
-					model.model_id,
-					error,
-					truncate_for_log(&response_body, 800),
+				log_openrouter(
+					LogLevel::Warn,
+					"failed to parse provider response",
+					[
+						("provider", OPENROUTER_PROVIDER.to_string()),
+						("model", model.model_id.clone()),
+						("parse_error", error.to_string()),
+						("body", truncate_for_log(&response_body, 800)),
+					],
 				);
 			})
 			.map_err(ProviderCallError::non_retryable)?;
 		let latency_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
 		let served_model = parsed.served_model_id.as_deref().unwrap_or(&model.model_id);
-		eprintln!(
-			"[openrouter] provider={} requested_model={} served_model={} status=ok latency_ms={} prompt_tokens={} output_tokens={}",
-			OPENROUTER_PROVIDER,
-			model.model_id,
-			served_model,
-			latency_ms,
-			parsed.prompt_tokens,
-			parsed.output_tokens,
+		log_openrouter(
+			LogLevel::Info,
+			"provider request completed",
+			[
+				("provider", OPENROUTER_PROVIDER.to_string()),
+				("requested_model", model.model_id.clone()),
+				("served_model", served_model.to_string()),
+				("status", "ok".to_string()),
+				("latency_ms", latency_ms.to_string()),
+				("prompt_tokens", parsed.prompt_tokens.to_string()),
+				("output_tokens", parsed.output_tokens.to_string()),
+			],
 		);
 		Ok(ProviderResponse {
 			output: parsed.output,
@@ -393,6 +403,18 @@ fn truncate_for_log(value: &str, max_chars: usize) -> String {
 	} else {
 		truncated
 	}
+}
+
+fn log_openrouter(
+	level: LogLevel,
+	message: &str,
+	fields: impl IntoIterator<Item = (&'static str, String)>,
+) {
+	let record = fields.into_iter().fold(
+		LogRecord::new("roku-llm-adapter", level, message),
+		|record, (key, value)| record.with_field(key, value),
+	);
+	let _ = emit_global_log(record);
 }
 
 fn default_fallback_models() -> Vec<String> {

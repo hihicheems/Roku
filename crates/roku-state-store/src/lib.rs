@@ -5,7 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use roku_common_types::{
-	ApprovalId, ApprovalTicket, NodeId, ResultEnvelope, Task, TaskEvent, TaskId,
+	ApprovalId, ApprovalTicket, ConversationTurn, NodeId, ResultEnvelope, SessionPreferences, Task,
+	TaskEvent, TaskId,
 };
 use thiserror::Error;
 
@@ -40,6 +41,24 @@ pub trait ResultRepository {
 		node_id: &NodeId,
 	) -> Result<Option<ResultEnvelope>, StoreError>;
 	fn list_results(&self, task_id: &TaskId) -> Result<Vec<ResultEnvelope>, StoreError>;
+}
+
+pub trait SessionPreferenceRepository {
+	fn save_preferences(
+		&mut self,
+		session_id: &str,
+		preferences: SessionPreferences,
+	) -> Result<(), StoreError>;
+	fn load_preferences(&self, session_id: &str) -> Result<Option<SessionPreferences>, StoreError>;
+}
+
+pub trait ConversationRepository {
+	fn append_turn(&mut self, session_id: &str, turn: ConversationTurn) -> Result<(), StoreError>;
+	fn load_recent_turns(
+		&self,
+		session_id: &str,
+		limit: usize,
+	) -> Result<Vec<ConversationTurn>, StoreError>;
 }
 
 #[derive(Debug, Default)]
@@ -122,6 +141,53 @@ impl ResultRepository for InMemoryResultRepository {
 			.filter(|result| result.task_id == *task_id)
 			.cloned()
 			.collect())
+	}
+}
+
+#[derive(Debug, Default)]
+pub struct InMemorySessionPreferenceRepository {
+	preferences: HashMap<String, SessionPreferences>,
+}
+
+impl SessionPreferenceRepository for InMemorySessionPreferenceRepository {
+	fn save_preferences(
+		&mut self,
+		session_id: &str,
+		preferences: SessionPreferences,
+	) -> Result<(), StoreError> {
+		self.preferences.insert(session_id.to_string(), preferences);
+		Ok(())
+	}
+
+	fn load_preferences(&self, session_id: &str) -> Result<Option<SessionPreferences>, StoreError> {
+		Ok(self.preferences.get(session_id).cloned())
+	}
+}
+
+#[derive(Debug, Default)]
+pub struct InMemoryConversationRepository {
+	turns_by_session: HashMap<String, Vec<ConversationTurn>>,
+}
+
+impl ConversationRepository for InMemoryConversationRepository {
+	fn append_turn(&mut self, session_id: &str, turn: ConversationTurn) -> Result<(), StoreError> {
+		self.turns_by_session
+			.entry(session_id.to_string())
+			.or_default()
+			.push(turn);
+		Ok(())
+	}
+
+	fn load_recent_turns(
+		&self,
+		session_id: &str,
+		limit: usize,
+	) -> Result<Vec<ConversationTurn>, StoreError> {
+		let Some(turns) = self.turns_by_session.get(session_id) else {
+			return Ok(Vec::new());
+		};
+		let start = turns.len().saturating_sub(limit);
+		Ok(turns[start..].to_vec())
 	}
 }
 
@@ -267,6 +333,111 @@ impl FileResultRepository {
 	}
 }
 
+#[derive(Debug, Clone)]
+pub struct FileSessionPreferenceRepository {
+	path: PathBuf,
+}
+
+impl FileSessionPreferenceRepository {
+	pub fn new(path: impl Into<PathBuf>) -> Self {
+		Self { path: path.into() }
+	}
+
+	fn read_all(&self) -> Result<HashMap<String, SessionPreferences>, StoreError> {
+		if !self.path.exists() {
+			return Ok(HashMap::new());
+		}
+		let data = fs::read_to_string(&self.path)?;
+		if data.trim().is_empty() {
+			return Ok(HashMap::new());
+		}
+		Ok(serde_json::from_str(&data)?)
+	}
+
+	fn write_all(
+		&self,
+		preferences: &HashMap<String, SessionPreferences>,
+	) -> Result<(), StoreError> {
+		ensure_parent_dir(&self.path)?;
+		let encoded = serde_json::to_string_pretty(preferences)?;
+		fs::write(&self.path, encoded)?;
+		Ok(())
+	}
+}
+
+impl SessionPreferenceRepository for FileSessionPreferenceRepository {
+	fn save_preferences(
+		&mut self,
+		session_id: &str,
+		preferences: SessionPreferences,
+	) -> Result<(), StoreError> {
+		let mut all_preferences = self.read_all()?;
+		all_preferences.insert(session_id.to_string(), preferences);
+		self.write_all(&all_preferences)
+	}
+
+	fn load_preferences(&self, session_id: &str) -> Result<Option<SessionPreferences>, StoreError> {
+		let all_preferences = self.read_all()?;
+		Ok(all_preferences.get(session_id).cloned())
+	}
+}
+
+#[derive(Debug, Clone)]
+pub struct FileConversationRepository {
+	path: PathBuf,
+}
+
+impl FileConversationRepository {
+	pub fn new(path: impl Into<PathBuf>) -> Self {
+		Self { path: path.into() }
+	}
+
+	fn read_all(&self) -> Result<HashMap<String, Vec<ConversationTurn>>, StoreError> {
+		if !self.path.exists() {
+			return Ok(HashMap::new());
+		}
+		let data = fs::read_to_string(&self.path)?;
+		if data.trim().is_empty() {
+			return Ok(HashMap::new());
+		}
+		Ok(serde_json::from_str(&data)?)
+	}
+
+	fn write_all(
+		&self,
+		conversations: &HashMap<String, Vec<ConversationTurn>>,
+	) -> Result<(), StoreError> {
+		ensure_parent_dir(&self.path)?;
+		let encoded = serde_json::to_string_pretty(conversations)?;
+		fs::write(&self.path, encoded)?;
+		Ok(())
+	}
+}
+
+impl ConversationRepository for FileConversationRepository {
+	fn append_turn(&mut self, session_id: &str, turn: ConversationTurn) -> Result<(), StoreError> {
+		let mut conversations = self.read_all()?;
+		conversations
+			.entry(session_id.to_string())
+			.or_default()
+			.push(turn);
+		self.write_all(&conversations)
+	}
+
+	fn load_recent_turns(
+		&self,
+		session_id: &str,
+		limit: usize,
+	) -> Result<Vec<ConversationTurn>, StoreError> {
+		let conversations = self.read_all()?;
+		let Some(turns) = conversations.get(session_id) else {
+			return Ok(Vec::new());
+		};
+		let start = turns.len().saturating_sub(limit);
+		Ok(turns[start..].to_vec())
+	}
+}
+
 impl ResultRepository for FileResultRepository {
 	fn save_result(&mut self, result: ResultEnvelope) -> Result<(), StoreError> {
 		let mut results = self.read_all()?;
@@ -322,7 +493,10 @@ fn result_key(task_id: &TaskId, node_id: &NodeId) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use roku_common_types::{EvidenceItem, RequestId, ResultStatus, TaskState};
+	use roku_common_types::{
+		ConversationRole, ConversationTurn, EvidenceItem, PlanningModeHint, RequestId,
+		ResultStatus, TaskState,
+	};
 	use std::time::{SystemTime, UNIX_EPOCH};
 
 	fn unique_path(suffix: &str) -> PathBuf {
@@ -337,8 +511,12 @@ mod tests {
 		Task {
 			task_id: TaskId("task-1".to_string()),
 			request_id: RequestId("req-1".to_string()),
+			session_id: "session-1".to_string(),
+			goal: "analyze market".to_string(),
 			state: TaskState::Queued,
 			attempts: 0,
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
 			completed_nodes: Vec::new(),
 			next_node_index: 0,
 			pending_approval_id: None,
@@ -392,6 +570,8 @@ mod tests {
 		let mut event_repo = InMemoryEventRepository::default();
 		let mut approval_repo = InMemoryApprovalRepository::default();
 		let mut result_repo = InMemoryResultRepository::default();
+		let mut session_repo = InMemorySessionPreferenceRepository::default();
+		let mut conversation_repo = InMemoryConversationRepository::default();
 
 		task_repo
 			.save_task(sample_task())
@@ -405,6 +585,24 @@ mod tests {
 		result_repo
 			.save_result(sample_result())
 			.expect("save result should succeed");
+		session_repo
+			.save_preferences(
+				"session-1",
+				SessionPreferences {
+					planning_mode: Some(PlanningModeHint::TreeSearch),
+				},
+			)
+			.expect("save session preferences should succeed");
+		conversation_repo
+			.append_turn(
+				"session-1",
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: "hello".to_string(),
+					created_at_unix_ms: 1,
+				},
+			)
+			.expect("append conversation turn should succeed");
 
 		let loaded_task = task_repo
 			.load_task(&TaskId("task-1".to_string()))
@@ -418,11 +616,22 @@ mod tests {
 		let loaded_result = result_repo
 			.load_result(&TaskId("task-1".to_string()), &NodeId("node-1".to_string()))
 			.expect("load result should succeed");
+		let loaded_preferences = session_repo
+			.load_preferences("session-1")
+			.expect("load session preferences should succeed");
+		let loaded_turns = conversation_repo
+			.load_recent_turns("session-1", 8)
+			.expect("load conversation turns should succeed");
 
 		assert!(loaded_task.is_some());
 		assert_eq!(loaded_events.len(), 1);
 		assert!(loaded_ticket.is_some());
 		assert!(loaded_result.is_some());
+		assert_eq!(
+			loaded_preferences.and_then(|preferences| preferences.planning_mode),
+			Some(PlanningModeHint::TreeSearch)
+		);
+		assert_eq!(loaded_turns.len(), 1);
 	}
 
 	#[test]
@@ -436,6 +645,10 @@ mod tests {
 		let mut event_repo = FileEventRepository::new(event_path.clone());
 		let mut approval_repo = FileApprovalRepository::new(approval_path.clone());
 		let mut result_repo = FileResultRepository::new(result_path.clone());
+		let session_path = unique_path("session");
+		let conversation_path = unique_path("conversation");
+		let mut session_repo = FileSessionPreferenceRepository::new(session_path.clone());
+		let mut conversation_repo = FileConversationRepository::new(conversation_path.clone());
 
 		task_repo
 			.save_task(sample_task())
@@ -449,6 +662,24 @@ mod tests {
 		result_repo
 			.save_result(sample_result())
 			.expect("save result should succeed");
+		session_repo
+			.save_preferences(
+				"session-1",
+				SessionPreferences {
+					planning_mode: Some(PlanningModeHint::ReAct),
+				},
+			)
+			.expect("save session preferences should succeed");
+		conversation_repo
+			.append_turn(
+				"session-1",
+				ConversationTurn {
+					role: ConversationRole::Assistant,
+					content: "hi".to_string(),
+					created_at_unix_ms: 2,
+				},
+			)
+			.expect("append conversation turn should succeed");
 
 		let loaded_task = task_repo
 			.load_task(&TaskId("task-1".to_string()))
@@ -462,15 +693,28 @@ mod tests {
 		let loaded_result = result_repo
 			.load_result(&TaskId("task-1".to_string()), &NodeId("node-1".to_string()))
 			.expect("load result should succeed");
+		let loaded_preferences = session_repo
+			.load_preferences("session-1")
+			.expect("load session preferences should succeed");
+		let loaded_turns = conversation_repo
+			.load_recent_turns("session-1", 8)
+			.expect("load conversation turns should succeed");
 
 		assert!(loaded_task.is_some());
 		assert_eq!(loaded_events.len(), 1);
 		assert!(loaded_ticket.is_some());
 		assert!(loaded_result.is_some());
+		assert_eq!(
+			loaded_preferences.and_then(|preferences| preferences.planning_mode),
+			Some(PlanningModeHint::ReAct)
+		);
+		assert_eq!(loaded_turns.len(), 1);
 
 		let _ = fs::remove_file(task_path);
 		let _ = fs::remove_file(event_path);
 		let _ = fs::remove_file(approval_path);
 		let _ = fs::remove_file(result_path);
+		let _ = fs::remove_file(session_path);
+		let _ = fs::remove_file(conversation_path);
 	}
 }

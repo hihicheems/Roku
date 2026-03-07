@@ -120,6 +120,7 @@ mod tests {
 				task_id: TaskId("task-1".to_string()),
 				node_id: NodeId("node-1".to_string()),
 				summary: "summary".to_string(),
+				conversation_history: Vec::new(),
 			},
 			capabilities: capabilities
 				.into_iter()

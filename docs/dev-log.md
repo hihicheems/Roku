@@ -1,5 +1,52 @@
 # Roku Agent Dev Log
 
+## 2026-03-08 - Session Milestone (Phase 18)
+
+### Completed Modules
+
+- `roku-common-types`
+  - Added session-aware runtime contracts: `PlanningModeHint`, `SessionPreferences`, and `ConversationTurn`.
+  - Extended `RequestEnvelope`, `Task`, and `AgentContext` so planning override and conversation history become first-class runtime data.
+- `roku-planning-engine`
+  - Added explicit forced-mode decision path so runtime can honor request/session planning overrides without bypassing budget logic.
+  - Completed unit coverage for all four planning strategies: `ReAct`, `TaskDecomposition`, `TreeSearch`, and `IterativeRefinement`.
+- `roku-connectors-telegram`
+  - Added case-insensitive session commands: `/react`, `/taskdecomposition`, `/treesearch`, `/iterativerefinement`, and `/auto`.
+  - Preserved approval and request flows while allowing Telegram chat sessions to persist a planning strategy preference.
+- `roku-state-store`
+  - Added `SessionPreferenceRepository` and `ConversationRepository`.
+  - Added in-memory and file-backed adapters for planning preferences and conversation history.
+- `roku-cmd`
+  - Added session state handling for Telegram: load recent conversation history, apply session planning override, and persist user/assistant turns.
+  - Installed environment-configurable global logging with async rotating file sinks.
+- `roku-agent-instance-factory` / `roku-agent-runtime` / `roku-task-planner` / `roku-runtime-service`
+  - Propagated recent conversation history into planner prompts and worker prompts.
+  - Added runtime-level planning override tests to confirm strategy metrics and execution outcomes for all four modes.
+- `roku-observability`
+  - Added `LogSink`, `FanoutLogSink`, and `AsyncRotatingFileLogSink`.
+  - Default log layout is now `logs/<component>/current.log`, with rolling backups and optional stderr mirroring.
+- `roku-llm-adapter`
+  - Routed OpenRouter diagnostics through the shared observability logging interface instead of direct `eprintln!`.
+
+### Verification Status
+
+- `cargo test -p roku-planning-engine -p roku-connectors-telegram -p roku-state-store -p roku-agent-runtime -p roku-runtime-service -p roku-cmd`: passed
+- `cargo test -p roku-observability -p roku-cmd -p roku-connectors-telegram -p roku-runtime-service -p roku-llm-adapter`: passed
+- `cargo check --workspace`: passed
+
+### Remaining Work
+
+- Add PostgreSQL-backed session preference and conversation memory repositories, then wire them into the live Telegram path.
+- Add CLI-level planning override flags to make manual validation of each planning mode easier outside Telegram.
+- Extend validation-plane with complex multi-agent cross-check scenarios and explicit four-layer result reporting.
+- Improve Telegram final-result readability further by introducing user-facing sections for answer, artifacts, approvals, and trace references.
+
+### Next Recommended Steps
+
+1. Implement PostgreSQL-backed session memory and planning preference repositories, then allow `roku-cmd` to prefer PostgreSQL when `DATABASE_URL` is configured.
+2. Add `live-once --planning-mode <mode>` support and smoke-test each planning strategy against the live OpenRouter path.
+3. Add complex DAG validation tests that assert schema / semantic / provenance / policy results independently.
+
 ## 2026-03-07 - Session Milestone
 
 ### Completed Modules

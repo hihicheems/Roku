@@ -8,7 +8,8 @@ mod runner;
 pub use client::{TelegramBotClient, TelegramBotConfig, TelegramTransportError};
 pub use inbound::{
 	TelegramApprovalAction, TelegramCallbackQuery, TelegramChat, TelegramConnector,
-	TelegramConnectorError, TelegramInteraction, TelegramMessage, TelegramUpdate, TelegramUser,
+	TelegramConnectorError, TelegramInteraction, TelegramMessage, TelegramSessionCommand,
+	TelegramUpdate, TelegramUser,
 };
 pub use outbound::{
 	TelegramInlineKeyboardButton, TelegramOutboundMessage, TelegramParseMode, TelegramReplyMarkup,

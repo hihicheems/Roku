@@ -1,4 +1,6 @@
-use roku_common_types::{ApprovalDecision, ApprovalId, RequestEnvelope, RequestId};
+use roku_common_types::{
+	ApprovalDecision, ApprovalId, PlanningModeHint, RequestEnvelope, RequestId,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -53,6 +55,7 @@ pub enum TelegramInteraction {
 		chat_id: i64,
 		request: RequestEnvelope,
 	},
+	SessionCommand(TelegramSessionCommand),
 	ApprovalDecision(TelegramApprovalAction),
 }
 
@@ -62,6 +65,13 @@ pub struct TelegramApprovalAction {
 	pub callback_query_id: String,
 	pub approval_id: ApprovalId,
 	pub decision: ApprovalDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramSessionCommand {
+	pub chat_id: i64,
+	pub session_id: String,
+	pub planning_mode: Option<PlanningModeHint>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -94,6 +104,10 @@ impl TelegramConnector {
 			return self.approval_action_from_callback(callback_query);
 		}
 
+		if let Some(command) = self.session_command_from_message(&update)? {
+			return Ok(TelegramInteraction::SessionCommand(command));
+		}
+
 		let chat_id = update.message.as_ref().map(|message| message.chat.id);
 		let request = self.request_from_update(update)?;
 		let chat_id = chat_id.ok_or(TelegramConnectorError::MissingMessage)?;
@@ -117,7 +131,28 @@ impl TelegramConnector {
 			request_id: RequestId(format!("tg-{}", update.update_id)),
 			session_id: message.chat.id.to_string(),
 			goal: text,
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
 		})
+	}
+
+	fn session_command_from_message(
+		&self,
+		update: &TelegramUpdate,
+	) -> Result<Option<TelegramSessionCommand>, TelegramConnectorError> {
+		let message = update
+			.message
+			.as_ref()
+			.ok_or(TelegramConnectorError::MissingMessage)?;
+		if message.from.as_ref().is_some_and(|user| user.is_bot) {
+			return Err(TelegramConnectorError::BotOriginIgnored);
+		}
+		let text = message
+			.text
+			.as_deref()
+			.ok_or(TelegramConnectorError::MissingText)?;
+
+		Ok(session_command_from_text(message.chat.id, text))
 	}
 
 	fn approval_action_from_callback(
@@ -189,6 +224,37 @@ fn callback_actor(user: &TelegramUser) -> String {
 	format!("telegram-user-{}", user.id)
 }
 
+fn session_command_from_text(chat_id: i64, text: &str) -> Option<TelegramSessionCommand> {
+	let trimmed = text.trim();
+	let command = trimmed.split_whitespace().next()?;
+	let command = command.strip_prefix('/')?;
+	let normalized = normalize_command(command);
+	let planning_mode = match normalized.as_str() {
+		"react" => Some(PlanningModeHint::ReAct),
+		"taskdecomposition" | "decomposition" => Some(PlanningModeHint::TaskDecomposition),
+		"treesearch" | "tree" => Some(PlanningModeHint::TreeSearch),
+		"iterativerefinement" | "refinement" | "refine" => {
+			Some(PlanningModeHint::IterativeRefinement)
+		}
+		"auto" => None,
+		_ => return None,
+	};
+
+	Some(TelegramSessionCommand {
+		chat_id,
+		session_id: chat_id.to_string(),
+		planning_mode,
+	})
+}
+
+fn normalize_command(command: &str) -> String {
+	command
+		.chars()
+		.filter(|character| character.is_ascii_alphanumeric())
+		.collect::<String>()
+		.to_ascii_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -220,6 +286,8 @@ mod tests {
 		assert_eq!(request.request_id.0, "tg-42");
 		assert_eq!(request.session_id, "1001");
 		assert_eq!(request.goal, "run research");
+		assert_eq!(request.planning_mode_hint, None);
+		assert!(request.conversation_history.is_empty());
 	}
 
 	#[test]
@@ -294,6 +362,9 @@ mod tests {
 			TelegramInteraction::Request { .. } => {
 				panic!("callback query should not become a request")
 			}
+			TelegramInteraction::SessionCommand(_) => {
+				panic!("callback query should not become a session command")
+			}
 		}
 	}
 
@@ -327,5 +398,71 @@ mod tests {
 			.expect_err("invalid callback action should fail");
 
 		assert_eq!(error, TelegramConnectorError::UnsupportedCallbackAction);
+	}
+
+	#[test]
+	fn into_interaction_maps_case_insensitive_session_command() {
+		let connector = TelegramConnector;
+		let interaction = connector
+			.interaction_from_update(TelegramUpdate {
+				update_id: 43,
+				message: Some(TelegramMessage {
+					message_id: 8,
+					chat: TelegramChat {
+						id: 1001,
+						title: None,
+						kind: "private".to_string(),
+					},
+					from: Some(TelegramUser {
+						id: 10,
+						is_bot: false,
+						username: Some("jojo".to_string()),
+					}),
+					text: Some("/ReAcT".to_string()),
+				}),
+				callback_query: None,
+			})
+			.expect("session command should be recognized");
+
+		match interaction {
+			TelegramInteraction::SessionCommand(command) => {
+				assert_eq!(command.chat_id, 1001);
+				assert_eq!(command.session_id, "1001");
+				assert_eq!(command.planning_mode, Some(PlanningModeHint::ReAct));
+			}
+			other => panic!("expected session command, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn into_interaction_maps_auto_command_to_cleared_override() {
+		let connector = TelegramConnector;
+		let interaction = connector
+			.interaction_from_update(TelegramUpdate {
+				update_id: 44,
+				message: Some(TelegramMessage {
+					message_id: 9,
+					chat: TelegramChat {
+						id: 1002,
+						title: None,
+						kind: "private".to_string(),
+					},
+					from: Some(TelegramUser {
+						id: 11,
+						is_bot: false,
+						username: None,
+					}),
+					text: Some("/auto".to_string()),
+				}),
+				callback_query: None,
+			})
+			.expect("auto command should be recognized");
+
+		match interaction {
+			TelegramInteraction::SessionCommand(command) => {
+				assert_eq!(command.planning_mode, None);
+			}
+			other => panic!("expected session command, got {other:?}"),
+		}
 	}
 }

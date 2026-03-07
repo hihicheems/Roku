@@ -22,6 +22,8 @@ impl Gateway {
 			request_id: RequestId(format!("req-{seq}")),
 			session_id: raw.session_id,
 			goal: raw.goal,
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
 		}
 	}
 }

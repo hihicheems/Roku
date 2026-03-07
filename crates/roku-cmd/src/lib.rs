@@ -3,6 +3,14 @@
 mod bot;
 mod runtime;
 
+use std::env;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use roku_observability::{
+	AsyncRotatingFileLogSink, FanoutLogSink, FileLogConfig, LogSink, StderrLogSink,
+	install_global_log_sink,
+};
 use thiserror::Error;
 
 pub use runtime::{RunMode, run_live_once_from_env, run_once, run_with_mode};
@@ -13,6 +21,8 @@ use crate::bot::run_telegram_bot_from_env;
 pub enum CommandError {
 	#[error("{0}")]
 	Usage(String),
+	#[error("invalid logging configuration: {0}")]
+	LoggingConfiguration(String),
 	#[error(transparent)]
 	Runtime(#[from] roku_common_types::RuntimeError),
 	#[error(transparent)]
@@ -27,6 +37,7 @@ where
 	S: Into<String>,
 {
 	let _ = dotenvy::dotenv();
+	configure_logging_from_env()?;
 	let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
 	match args.first().map(String::as_str) {
 		None => {
@@ -67,6 +78,71 @@ fn join_goal(parts: &[String]) -> Result<String, CommandError> {
 		)));
 	}
 	Ok(parts.join(" "))
+}
+
+fn configure_logging_from_env() -> Result<(), CommandError> {
+	let base_dir = env::var("ROKU_LOG_DIR")
+		.ok()
+		.filter(|value| !value.trim().is_empty())
+		.map(PathBuf::from)
+		.unwrap_or_else(|| PathBuf::from("logs"));
+	let max_file_bytes = env_var_u64("ROKU_LOG_MAX_FILE_BYTES")?.unwrap_or(8_u64 * 1024 * 1024);
+	let max_backup_files = env_var_usize("ROKU_LOG_MAX_BACKUP_FILES")?.unwrap_or(5);
+	let stderr_enabled = env_var_bool("ROKU_LOG_STDERR")?.unwrap_or(true);
+
+	let mut sinks: Vec<Arc<dyn LogSink>> =
+		vec![Arc::new(AsyncRotatingFileLogSink::new(FileLogConfig {
+			base_dir,
+			max_file_bytes,
+			max_backup_files,
+		}))];
+	if stderr_enabled {
+		sinks.push(Arc::new(StderrLogSink));
+	}
+	install_global_log_sink(Arc::new(FanoutLogSink::new(sinks)));
+	Ok(())
+}
+
+fn env_var_u64(key: &'static str) -> Result<Option<u64>, CommandError> {
+	match env::var(key) {
+		Ok(value) if !value.trim().is_empty() => value
+			.parse::<u64>()
+			.map(Some)
+			.map_err(|error| CommandError::LoggingConfiguration(format!("{key}: {error}"))),
+		Ok(_) | Err(env::VarError::NotPresent) => Ok(None),
+		Err(error) => Err(CommandError::LoggingConfiguration(format!(
+			"{key}: {error}"
+		))),
+	}
+}
+
+fn env_var_usize(key: &'static str) -> Result<Option<usize>, CommandError> {
+	match env::var(key) {
+		Ok(value) if !value.trim().is_empty() => value
+			.parse::<usize>()
+			.map(Some)
+			.map_err(|error| CommandError::LoggingConfiguration(format!("{key}: {error}"))),
+		Ok(_) | Err(env::VarError::NotPresent) => Ok(None),
+		Err(error) => Err(CommandError::LoggingConfiguration(format!(
+			"{key}: {error}"
+		))),
+	}
+}
+
+fn env_var_bool(key: &'static str) -> Result<Option<bool>, CommandError> {
+	match env::var(key) {
+		Ok(value) if !value.trim().is_empty() => match value.to_ascii_lowercase().as_str() {
+			"1" | "true" | "yes" | "on" => Ok(Some(true)),
+			"0" | "false" | "no" | "off" => Ok(Some(false)),
+			_ => Err(CommandError::LoggingConfiguration(format!(
+				"{key}: expected one of true/false/1/0/yes/no/on/off"
+			))),
+		},
+		Ok(_) | Err(env::VarError::NotPresent) => Ok(None),
+		Err(error) => Err(CommandError::LoggingConfiguration(format!(
+			"{key}: {error}"
+		))),
+	}
 }
 
 #[cfg(test)]

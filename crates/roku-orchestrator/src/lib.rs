@@ -35,8 +35,12 @@ impl Orchestrator {
 		Task {
 			task_id: TaskId(format!("task-{}", request.request_id.0)),
 			request_id: request.request_id.clone(),
+			session_id: request.session_id.clone(),
+			goal: request.goal.clone(),
 			state: TaskState::Queued,
 			attempts: 0,
+			planning_mode_hint: request.planning_mode_hint,
+			conversation_history: request.conversation_history.clone(),
 			completed_nodes: Vec::new(),
 			next_node_index: 0,
 			pending_approval_id: None,
@@ -144,6 +148,8 @@ mod tests {
 			request_id: RequestId("req-1".to_string()),
 			session_id: "s1".to_string(),
 			goal: "g".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
 		};
 		let mut task = orchestrator.create_task(&request);
 
@@ -161,6 +167,8 @@ mod tests {
 			request_id: RequestId("req-1".to_string()),
 			session_id: "s1".to_string(),
 			goal: "g".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
 		};
 		let mut task = orchestrator.create_task(&request);
 
@@ -178,6 +186,8 @@ mod tests {
 			request_id: RequestId("req-1".to_string()),
 			session_id: "s1".to_string(),
 			goal: "g".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
 		};
 		let mut task = orchestrator.create_task(&request);
 		orchestrator

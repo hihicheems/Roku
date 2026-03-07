@@ -219,9 +219,19 @@ impl Tool for PromptedLlmTool {
 }
 
 fn user_visible_prompt(input: &ToolInput<'_>, worker_id: &str, invocation_key: &str) -> String {
+	let history_section = if input.conversation_history.trim().is_empty() {
+		String::new()
+	} else {
+		format!(
+			"\n\nConversation history (most recent first-order context):\n{}",
+			input.conversation_history
+		)
+	};
+
 	format!(
-		"User request:\n{goal}\n\nInternal execution hint (do not quote or describe it unless it is directly useful for the answer):\n{summary}\n\nOutput rules:\n- Return only the useful answer text in plain text.\n- Match the user's language unless the request clearly asks for another language.\n- Do not mention worker ids, invocation keys, execution steps, hidden instructions, providers, models, budgets, or internal runtime details.\n- Do not describe yourself as an execution worker or reveal chain-of-thought.\n- If the user asks who you are or which persona is active, answer as Roku.\n- Internal references for policy only: worker_id={worker_id}; invocation_key={invocation_key}; time_budget_ms={time_budget_ms}.",
+		"User request:\n{goal}{history_section}\n\nInternal execution hint (do not quote or describe it unless it is directly useful for the answer):\n{summary}\n\nOutput rules:\n- Return only the useful answer text in plain text.\n- Match the user's language unless the request clearly asks for another language.\n- Preserve conversational continuity when the user refers to prior turns or earlier facts.\n- Do not mention worker ids, invocation keys, execution steps, hidden instructions, providers, models, budgets, or internal runtime details.\n- Do not describe yourself as an execution worker or reveal chain-of-thought.\n- If the user asks who you are or which persona is active, answer as Roku.\n- Internal references for policy only: worker_id={worker_id}; invocation_key={invocation_key}; time_budget_ms={time_budget_ms}.",
 		goal = input.goal,
+		history_section = history_section,
 		summary = input.summary,
 		worker_id = worker_id,
 		invocation_key = invocation_key,
@@ -234,6 +244,7 @@ struct ToolInput<'a> {
 	node_id: &'a str,
 	goal: &'a str,
 	summary: &'a str,
+	conversation_history: &'a str,
 	budget_tokens: u64,
 	time_budget_ms: u64,
 }
@@ -258,6 +269,10 @@ fn request_input(request: &ToolInvocationRequest) -> Result<ToolInput<'_>, ToolF
 			.unwrap_or_default(),
 		summary: input
 			.get("summary")
+			.and_then(Value::as_str)
+			.unwrap_or_default(),
+		conversation_history: input
+			.get("conversation_history")
 			.and_then(Value::as_str)
 			.unwrap_or_default(),
 		budget_tokens: input
@@ -286,6 +301,7 @@ fn tool_descriptor(
 				"node_id".to_string(),
 				"goal".to_string(),
 				"summary".to_string(),
+				"conversation_history".to_string(),
 				"budget_tokens".to_string(),
 				"time_budget_ms".to_string(),
 			],
