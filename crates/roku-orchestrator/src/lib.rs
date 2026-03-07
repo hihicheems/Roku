@@ -20,6 +20,12 @@ pub struct Orchestrator {
 	pub config: OrchestratorConfig,
 }
 
+#[derive(Debug, Clone)]
+pub struct FailureDisposition {
+	pub terminal_state: TaskState,
+	pub events: Vec<TaskEvent>,
+}
+
 impl Orchestrator {
 	pub fn with_config(config: OrchestratorConfig) -> Self {
 		Self { config }
@@ -69,6 +75,31 @@ impl Orchestrator {
 		}
 		task.state
 	}
+
+	pub fn register_failure(
+		&self,
+		task: &mut Task,
+		reason: impl Into<String>,
+		error_class: Option<ErrorClass>,
+	) -> Result<FailureDisposition, RuntimeError> {
+		let reason = reason.into();
+		task.attempts = task.attempts.saturating_add(1);
+
+		let mut events = vec![self.transition(task, TaskState::Failed, reason, error_class)?];
+		if task.attempts >= self.config.max_attempts {
+			events.push(self.transition(
+				task,
+				TaskState::DeadLetter,
+				"retry budget exhausted",
+				Some(ErrorClass::BudgetExhausted),
+			)?);
+		}
+
+		Ok(FailureDisposition {
+			terminal_state: task.state,
+			events,
+		})
+	}
 }
 
 pub fn build_idempotency_key(task_id: &TaskId, node_id: &str, attempt: u32) -> String {
@@ -82,6 +113,7 @@ pub fn is_valid_transition(from: TaskState, to: TaskState) -> bool {
 			| (TaskState::Planning, TaskState::GraphBuilding)
 			| (TaskState::GraphBuilding, TaskState::Delegating)
 			| (TaskState::Delegating, TaskState::Executing)
+			| (TaskState::Executing, TaskState::WaitingApproval)
 			| (TaskState::Executing, TaskState::Validating)
 			| (TaskState::Validating, TaskState::Executing)
 			| (TaskState::Validating, TaskState::Aggregating)
@@ -89,6 +121,7 @@ pub fn is_valid_transition(from: TaskState, to: TaskState) -> bool {
 			| (TaskState::WaitingApproval, TaskState::Executing)
 			| (TaskState::Executing, TaskState::Aggregating)
 			| (TaskState::Aggregating, TaskState::Succeeded)
+			| (TaskState::Failed, TaskState::Planning)
 			| (_, TaskState::Failed)
 			| (TaskState::Failed, TaskState::DeadLetter)
 			| (_, TaskState::Cancelled)
@@ -132,5 +165,34 @@ mod tests {
 
 		let second = orchestrator.mark_failed_or_dead_letter(&mut task);
 		assert_eq!(second, TaskState::DeadLetter);
+	}
+
+	#[test]
+	fn register_failure_transitions_to_dead_letter_after_budget_exhaustion() {
+		let orchestrator = Orchestrator::with_config(OrchestratorConfig { max_attempts: 2 });
+		let request = RequestEnvelope {
+			request_id: RequestId("req-1".to_string()),
+			session_id: "s1".to_string(),
+			goal: "g".to_string(),
+		};
+		let mut task = orchestrator.create_task(&request);
+		orchestrator
+			.transition(&mut task, TaskState::Planning, "plan", None)
+			.expect("planning transition should succeed");
+
+		let first = orchestrator
+			.register_failure(&mut task, "failed once", Some(ErrorClass::Validation))
+			.expect("failure registration should succeed");
+		assert_eq!(first.terminal_state, TaskState::Failed);
+		assert_eq!(first.events.len(), 1);
+
+		orchestrator
+			.transition(&mut task, TaskState::Planning, "retry", None)
+			.expect("retry transition should succeed");
+		let second = orchestrator
+			.register_failure(&mut task, "failed twice", Some(ErrorClass::Validation))
+			.expect("dead-letter registration should succeed");
+		assert_eq!(second.terminal_state, TaskState::DeadLetter);
+		assert_eq!(second.events.len(), 2);
 	}
 }

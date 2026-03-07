@@ -31,6 +31,22 @@ fn e2e_capability_denied_path_is_reported() {
 	assert!(response.message.contains("capability denied"));
 }
 
+#[test]
+fn e2e_pending_approval_path_is_reported() {
+	let response = run_with_mode("build execution graph", RunMode::ApprovalRequired)
+		.expect("pipeline should return pending approval response");
+	assert!(matches!(response.status, ResponseStatus::PendingApproval));
+	assert!(response.message.contains("approval required"));
+}
+
+#[test]
+fn e2e_dead_letter_path_is_reported() {
+	let response = run_with_mode("build execution graph", RunMode::RetryExhausted)
+		.expect("pipeline should return dead-letter response");
+	assert!(matches!(response.status, ResponseStatus::Failed));
+	assert!(response.message.contains("dead-lettered"));
+}
+
 #[actix_web::test]
 async fn http_gateway_executes_runtime_service() {
 	let service = Arc::new(RuntimeService::default());
@@ -99,4 +115,32 @@ async fn http_gateway_reports_validation_failure() {
 	let response: SubmitResponse = actix_web::test::call_and_read_body_json(&app, request).await;
 	assert_eq!(response.status, "failed");
 	assert!(response.message.contains("evidence is required"));
+}
+
+#[actix_web::test]
+async fn http_gateway_reports_pending_approval() {
+	let executor = Arc::new(FixedModeExecutor {
+		service: RuntimeService::default(),
+		mode: RunMode::ApprovalRequired,
+	});
+	let state = web::Data::new(GatewayAppState::new(executor));
+	let app = actix_web::test::init_service(
+		App::new()
+			.app_data(state)
+			.app_data(web::JsonConfig::default().limit(8 * 1024))
+			.configure(configure_routes),
+	)
+	.await;
+
+	let request = actix_web::test::TestRequest::post()
+		.uri("/v1/requests")
+		.set_json(&SubmitRequest {
+			session_id: "http-session".to_string(),
+			goal: "build execution graph".to_string(),
+		})
+		.to_request();
+
+	let response: SubmitResponse = actix_web::test::call_and_read_body_json(&app, request).await;
+	assert_eq!(response.status, "pending_approval");
+	assert!(response.message.contains("approval required"));
 }

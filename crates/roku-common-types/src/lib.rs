@@ -23,6 +23,7 @@ pub struct RequestEnvelope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResponseStatus {
 	Succeeded,
+	PendingApproval,
 	Failed,
 }
 
