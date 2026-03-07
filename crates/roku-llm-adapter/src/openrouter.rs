@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::router::{LlmProvider, LlmRouter};
 use crate::types::{
-	GenerationRequest, ModelProfile, ProviderResponse, RiskTier, RoutingPolicy,
+	GenerationRequest, ModelProfile, ProviderCallError, ProviderResponse, RiskTier, RoutingPolicy,
 	estimate_prompt_tokens,
 };
 
@@ -133,13 +133,14 @@ impl LlmProvider for OpenRouterProvider {
 		&self,
 		model: &ModelProfile,
 		request: &GenerationRequest,
-	) -> Result<ProviderResponse, String> {
+	) -> Result<ProviderResponse, ProviderCallError> {
 		let body = build_request_body(&self.config, model, request);
 		let mut headers = HeaderMap::new();
 		headers.insert(
 			reqwest::header::AUTHORIZATION,
-			HeaderValue::from_str(&format!("Bearer {}", self.config.api_key))
-				.map_err(|error| format!("invalid authorization header: {error}"))?,
+			HeaderValue::from_str(&format!("Bearer {}", self.config.api_key)).map_err(|error| {
+				ProviderCallError::non_retryable(format!("invalid authorization header: {error}"))
+			})?,
 		);
 		headers.insert(
 			reqwest::header::CONTENT_TYPE,
@@ -148,15 +149,21 @@ impl LlmProvider for OpenRouterProvider {
 		if let Some(site_url) = &self.config.site_url {
 			headers.insert(
 				HeaderName::from_static("http-referer"),
-				HeaderValue::from_str(site_url)
-					.map_err(|error| format!("invalid HTTP-Referer header: {error}"))?,
+				HeaderValue::from_str(site_url).map_err(|error| {
+					ProviderCallError::non_retryable(format!(
+						"invalid HTTP-Referer header: {error}"
+					))
+				})?,
 			);
 		}
 		if let Some(app_name) = &self.config.app_name {
 			headers.insert(
 				HeaderName::from_static("x-openrouter-title"),
-				HeaderValue::from_str(app_name)
-					.map_err(|error| format!("invalid X-OpenRouter-Title header: {error}"))?,
+				HeaderValue::from_str(app_name).map_err(|error| {
+					ProviderCallError::non_retryable(format!(
+						"invalid X-OpenRouter-Title header: {error}"
+					))
+				})?,
 			);
 		}
 
@@ -167,11 +174,15 @@ impl LlmProvider for OpenRouterProvider {
 			.headers(headers)
 			.json(&body)
 			.send()
-			.map_err(|error| format!("request failed: {error}"))?;
+			.map_err(classify_request_error)?;
 		let status = response.status();
-		let response_body = response
-			.text()
-			.map_err(|error| format!("failed to read response body: {error}"))?;
+		let response_body = response.text().map_err(|error| {
+			if error.is_timeout() || error.is_connect() {
+				ProviderCallError::retryable(format!("failed to read response body: {error}"))
+			} else {
+				ProviderCallError::non_retryable(format!("failed to read response body: {error}"))
+			}
+		})?;
 		if !status.is_success() {
 			eprintln!(
 				"[openrouter] provider={} model={} status={} body={}",
@@ -180,20 +191,20 @@ impl LlmProvider for OpenRouterProvider {
 				status,
 				truncate_for_log(&response_body, 800),
 			);
-			return Err(format!(
-				"openrouter returned status {status}: {response_body}"
-			));
+			return Err(classify_status_error(status.as_u16(), response_body));
 		}
 
-		let parsed = parse_response(&response_body).inspect_err(|error| {
-			eprintln!(
-				"[openrouter] provider={} model={} parse_error={} body={}",
-				OPENROUTER_PROVIDER,
-				model.model_id,
-				error,
-				truncate_for_log(&response_body, 800),
-			);
-		})?;
+		let parsed = parse_response(&response_body)
+			.inspect_err(|error| {
+				eprintln!(
+					"[openrouter] provider={} model={} parse_error={} body={}",
+					OPENROUTER_PROVIDER,
+					model.model_id,
+					error,
+					truncate_for_log(&response_body, 800),
+				);
+			})
+			.map_err(ProviderCallError::non_retryable)?;
 		let latency_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
 		let served_model = parsed.served_model_id.as_deref().unwrap_or(&model.model_id);
 		eprintln!(
@@ -211,6 +222,22 @@ impl LlmProvider for OpenRouterProvider {
 			output_tokens: parsed.output_tokens,
 			latency_ms,
 		})
+	}
+}
+
+fn classify_request_error(error: reqwest::Error) -> ProviderCallError {
+	if error.is_timeout() || error.is_connect() {
+		ProviderCallError::retryable(format!("request failed: {error}"))
+	} else {
+		ProviderCallError::non_retryable(format!("request failed: {error}"))
+	}
+}
+
+fn classify_status_error(status_code: u16, response_body: String) -> ProviderCallError {
+	let message = format!("openrouter returned status {status_code}: {response_body}");
+	match status_code {
+		408 | 409 | 429 | 500..=599 => ProviderCallError::retryable(message),
+		_ => ProviderCallError::non_retryable(message),
 	}
 }
 

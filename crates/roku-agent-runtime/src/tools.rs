@@ -311,6 +311,12 @@ fn llm_failure(error: LlmAdapterError) -> ToolFailure {
 		} => ToolFailure::terminal(format!(
 			"llm latency exceeded policy: latency={latency_ms}ms max={max_latency_ms}ms"
 		)),
+		LlmAdapterError::CircuitOpen {
+			provider,
+			retry_after_ms,
+		} => ToolFailure::terminal(format!(
+			"llm provider circuit is open for {provider}; retry after {retry_after_ms}ms"
+		)),
 		LlmAdapterError::NoEligibleModel => {
 			ToolFailure::terminal("no eligible llm model for request")
 		}

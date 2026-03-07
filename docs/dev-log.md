@@ -1144,13 +1144,46 @@
 
 ### Remaining Work
 
-- `roku-llm-adapter` still lacks provider-level retry / backoff / circuit-breaker behavior.
 - Coding-provider routing still does not use the unified llm-adapter selection path.
 - Telegram still lacks rich artifact / experiment rendering and long-task progress push.
 - Structured logging/export sinks are still not in place; current diagnostics remain stderr-first.
 
 ### Next Recommended Steps
 
-1. Close `LLM-06` with provider retry / backoff / circuit-breaker semantics around OpenRouter and future providers.
-2. Close `LLM-08` by routing coding-provider model selection through `roku-llm-adapter`.
-3. Implement `TG-07` and `TG-08` so Telegram can render artifacts and stream long-task progress instead of only final status text.
+1. Close `LLM-08` by routing coding-provider model selection through `roku-llm-adapter`.
+2. Implement `TG-07` and `TG-08` so Telegram can render artifacts and stream long-task progress instead of only final status text.
+3. Revisit structured logging/export sinks once the Telegram artifact/progress path is in place.
+
+## 2026-03-08 - Session Milestone (Phase 32)
+
+### Completed Modules
+
+- `roku-llm-adapter`
+  - Added explicit `ProviderCallError` typing so provider failures are no longer opaque strings.
+  - Added router-level `ProviderResiliencePolicy` with bounded retry, exponential backoff, and circuit-breaker state tracking.
+  - Centralized provider resilience in `LlmRouter`, so future providers inherit the same retry/backoff/circuit-open behavior without duplicating logic.
+  - Added regression coverage for retryable recovery, non-retryable short-circuiting, breaker opening, and cooldown probing.
+- `roku-agent-runtime`
+  - Surfaced `LlmAdapterError::CircuitOpen` as a clear tool failure so runtime errors remain understandable upstream.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test -p roku-llm-adapter -p roku-task-planner -p roku-agent-runtime -p roku-runtime-service -p roku-cmd`: passed
+- `cargo check --workspace`: passed
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed
+- Live smoke:
+  - `cargo run -p roku-cmd -- live-once '所以你现在到底是 roku 还是 kiki'`
+  - Result: `我是Roku。`
+
+### Remaining Work
+
+- Coding-provider routing still does not use the unified llm-adapter selection path.
+- Telegram still lacks rich artifact / experiment rendering and long-task progress push.
+- Structured logging/export sinks are still not in place; current diagnostics remain stderr-first.
+
+### Next Recommended Steps
+
+1. Close `LLM-08` by routing coding-provider model selection through `roku-llm-adapter`.
+2. Implement `TG-07` and `TG-08` so Telegram can render artifacts and stream long-task progress instead of only final status text.
+3. Revisit structured logging/export sinks once the Telegram artifact/progress path is in place.

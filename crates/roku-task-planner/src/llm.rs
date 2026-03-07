@@ -181,7 +181,9 @@ fn normalize_outline(outline: PlanOutline, goal: &str) -> Option<PlanOutline> {
 #[cfg(test)]
 mod tests {
 	use roku_common_types::RequestId;
-	use roku_llm_adapter::{LlmProvider, ModelProfile, ProviderResponse, RoutingPolicy};
+	use roku_llm_adapter::{
+		LlmProvider, ModelProfile, ProviderCallError, ProviderResponse, RoutingPolicy,
+	};
 
 	use super::*;
 
@@ -198,7 +200,7 @@ mod tests {
 			&self,
 			_model: &ModelProfile,
 			_request: &GenerationRequest,
-		) -> Result<ProviderResponse, String> {
+		) -> Result<ProviderResponse, ProviderCallError> {
 			Ok(ProviderResponse {
 				output: self.output.to_string(),
 				prompt_tokens: 60,

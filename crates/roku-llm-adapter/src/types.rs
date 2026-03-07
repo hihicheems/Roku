@@ -61,6 +61,27 @@ impl Default for RoutingPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderResiliencePolicy {
+	pub max_retries: u8,
+	pub initial_backoff_ms: u64,
+	pub max_backoff_ms: u64,
+	pub circuit_breaker_failure_threshold: u32,
+	pub circuit_breaker_cooldown_ms: u64,
+}
+
+impl Default for ProviderResiliencePolicy {
+	fn default() -> Self {
+		Self {
+			max_retries: 2,
+			initial_backoff_ms: 200,
+			max_backoff_ms: 1_000,
+			circuit_breaker_failure_threshold: 4,
+			circuit_breaker_cooldown_ms: 30_000,
+		}
+	}
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenerationRequest {
 	pub system_prompt: Option<String>,
 	pub prompt: String,
@@ -92,6 +113,32 @@ pub struct ProviderResponse {
 }
 
 #[derive(Debug, Error, Clone, PartialEq)]
+pub enum ProviderCallError {
+	#[error("{message}")]
+	Retryable { message: String },
+	#[error("{message}")]
+	NonRetryable { message: String },
+}
+
+impl ProviderCallError {
+	pub fn retryable(message: impl Into<String>) -> Self {
+		Self::Retryable {
+			message: message.into(),
+		}
+	}
+
+	pub fn non_retryable(message: impl Into<String>) -> Self {
+		Self::NonRetryable {
+			message: message.into(),
+		}
+	}
+
+	pub fn is_retryable(&self) -> bool {
+		matches!(self, Self::Retryable { .. })
+	}
+}
+
+#[derive(Debug, Error, Clone, PartialEq)]
 pub enum LlmAdapterError {
 	#[error("no model eligible for request")]
 	NoEligibleModel,
@@ -103,6 +150,11 @@ pub enum LlmAdapterError {
 	LatencyExceeded {
 		latency_ms: u64,
 		max_latency_ms: u64,
+	},
+	#[error("provider circuit is open for {provider}; retry after {retry_after_ms}ms")]
+	CircuitOpen {
+		provider: String,
+		retry_after_ms: u64,
 	},
 	#[error("provider call failed for {provider}/{model_id}: {message}")]
 	ProviderCallFailed {
