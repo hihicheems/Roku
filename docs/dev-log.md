@@ -1077,3 +1077,35 @@
 1. Add Telegram rich artifact / experiment rendering and long-task progress callbacks.
 2. Move stderr-first diagnostics onto structured logging/exporters while keeping local usability.
 3. Extend `roku-llm-adapter` into coding-provider selection to close `LLM-08`.
+
+## 2026-03-07 - Session Milestone (Phase 30)
+
+### Completed Modules
+
+- `roku-task-planner`
+  - Added a deterministic fast-path for `ReAct` mode so short conversational Telegram requests no longer spend an extra live LLM call generating a plan outline.
+- `roku-agent-runtime`
+  - Raised the live LLM tool timeout budget from the previous 20s default to 45s, which better matches the observed latency variance of free OpenRouter models.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test -p roku-task-planner -p roku-agent-runtime -p roku-runtime-service -p roku-cmd`: passed
+- `cargo check --workspace`: passed
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed
+- Live smoke:
+  - `cargo run -p roku-cmd -- live-once '所以你现在到底是 roku 还是 kiki'`
+  - Result: `I am Roku.`
+  - Only execution-path LLM calls remained; the extra live planning call for `ReAct` mode was removed.
+
+### Remaining Work
+
+- Telegram long-task progress push and richer artifact / experiment rendering remain open.
+- Logging is still stderr-first and should eventually move onto a structured sink/exporter path.
+- Coding-provider routing still does not use the unified llm-adapter path.
+
+### Next Recommended Steps
+
+1. Add Telegram rich artifact / experiment rendering and long-task progress callbacks.
+2. Move stderr-first diagnostics onto structured logging/exporters while keeping local usability.
+3. Extend `roku-llm-adapter` into coding-provider selection to close `LLM-08`.
