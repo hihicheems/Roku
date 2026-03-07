@@ -16,6 +16,12 @@ pub struct RequestId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ApprovalId(pub String);
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ArtifactId(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ExperimentRunId(pub String);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestEnvelope {
 	pub request_id: RequestId,
@@ -185,6 +191,57 @@ pub struct ResultEnvelope {
 	pub payload: String,
 	pub evidence: Vec<EvidenceItem>,
 	pub confidence: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactMetadataEntry {
+	pub key: String,
+	pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Artifact {
+	pub artifact_id: ArtifactId,
+	pub task_id: TaskId,
+	pub node_id: NodeId,
+	pub kind: String,
+	pub uri: String,
+	pub schema_version: String,
+	pub checksum: String,
+	pub metadata: Vec<ArtifactMetadataEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExperimentStatus {
+	Running,
+	Succeeded,
+	Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExperimentMetric {
+	pub name: String,
+	pub value: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExperimentRun {
+	pub run_id: ExperimentRunId,
+	pub task_id: TaskId,
+	pub request_id: RequestId,
+	pub goal: String,
+	pub strategy: String,
+	pub status: ExperimentStatus,
+	pub summary: Option<String>,
+	pub metrics: Vec<ExperimentMetric>,
+	pub artifact_ids: Vec<ArtifactId>,
+	pub failure_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationEvidenceSet {
+	pub result: ResultEnvelope,
+	pub artifacts: Vec<Artifact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
