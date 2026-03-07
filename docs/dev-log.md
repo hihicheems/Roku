@@ -219,3 +219,37 @@
 1. Add node-scoped result checkpoint storage and aggregation semantics for multi-branch DAG execution.
 2. Refactor `roku-runtime-service` into modules (`service`, `execution`, `approval`, `tests`) without changing behavior.
 3. Start implementing artifact and experiment persistence so the runtime no longer relies on task-local result snapshots alone.
+
+## 2026-03-07 - Session Milestone (Phase 6)
+
+### Completed Modules
+
+- `roku-state-store`
+  - Added `ResultRepository` abstraction for node-scoped execution results.
+  - Added `InMemoryResultRepository` and `FileResultRepository`.
+  - Extended repository tests to cover persisted results.
+- `roku-runtime-service`
+  - Switched validation input lookup from single `last_result` fallback to repository-backed upstream result traversal.
+  - Added a unit test to ensure validation can resolve execution evidence through approval nodes.
+  - Split helper functions and tests out of the main `lib.rs` into dedicated module files.
+- `roku-e2e`
+  - Re-ran approval and failure-path e2e coverage against the new result repository integration.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test -p roku-state-store -p roku-runtime-service`: passed
+- `cargo test -p roku-runtime-service -p roku-e2e`: passed
+
+### Remaining Work
+
+- Replace the current ad-hoc upstream result traversal with explicit node result/aggregation semantics for true multi-parent validation nodes.
+- Continue splitting `roku-runtime-service`; the main service file is still too large and mixes construction, orchestration, and execution details.
+- Add artifact and experiment persistence so node-scoped results can graduate from transient runtime storage to formal data-plane objects.
+- Add production persistence and queue backends.
+
+### Next Recommended Steps
+
+1. Introduce explicit node result aggregation types instead of relying on raw `ResultEnvelope` lists for validation joins.
+2. Continue splitting `roku-runtime-service` into `service`, `execution`, and `approval` modules.
+3. Start the `Artifact Store` / `Experiment Registry` implementation and route validation evidence through that layer.
