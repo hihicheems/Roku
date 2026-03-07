@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use roku_common_types::{ApprovalId, ApprovalTicket, Task, TaskEvent, TaskId};
+use roku_common_types::{
+	ApprovalId, ApprovalTicket, NodeId, ResultEnvelope, Task, TaskEvent, TaskId,
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -28,6 +30,16 @@ pub trait EventRepository {
 pub trait ApprovalRepository {
 	fn save_ticket(&mut self, ticket: ApprovalTicket) -> Result<(), StoreError>;
 	fn load_ticket(&self, approval_id: &ApprovalId) -> Result<Option<ApprovalTicket>, StoreError>;
+}
+
+pub trait ResultRepository {
+	fn save_result(&mut self, result: ResultEnvelope) -> Result<(), StoreError>;
+	fn load_result(
+		&self,
+		task_id: &TaskId,
+		node_id: &NodeId,
+	) -> Result<Option<ResultEnvelope>, StoreError>;
+	fn list_results(&self, task_id: &TaskId) -> Result<Vec<ResultEnvelope>, StoreError>;
 }
 
 #[derive(Debug, Default)]
@@ -80,6 +92,36 @@ impl ApprovalRepository for InMemoryApprovalRepository {
 
 	fn load_ticket(&self, approval_id: &ApprovalId) -> Result<Option<ApprovalTicket>, StoreError> {
 		Ok(self.tickets.get(&approval_id.0).cloned())
+	}
+}
+
+#[derive(Debug, Default)]
+pub struct InMemoryResultRepository {
+	results: HashMap<String, ResultEnvelope>,
+}
+
+impl ResultRepository for InMemoryResultRepository {
+	fn save_result(&mut self, result: ResultEnvelope) -> Result<(), StoreError> {
+		self.results
+			.insert(result_key(&result.task_id, &result.node_id), result);
+		Ok(())
+	}
+
+	fn load_result(
+		&self,
+		task_id: &TaskId,
+		node_id: &NodeId,
+	) -> Result<Option<ResultEnvelope>, StoreError> {
+		Ok(self.results.get(&result_key(task_id, node_id)).cloned())
+	}
+
+	fn list_results(&self, task_id: &TaskId) -> Result<Vec<ResultEnvelope>, StoreError> {
+		Ok(self
+			.results
+			.values()
+			.filter(|result| result.task_id == *task_id)
+			.cloned()
+			.collect())
 	}
 }
 
@@ -196,6 +238,60 @@ impl ApprovalRepository for FileApprovalRepository {
 	}
 }
 
+#[derive(Debug, Clone)]
+pub struct FileResultRepository {
+	path: PathBuf,
+}
+
+impl FileResultRepository {
+	pub fn new(path: impl Into<PathBuf>) -> Self {
+		Self { path: path.into() }
+	}
+
+	fn read_all(&self) -> Result<HashMap<String, ResultEnvelope>, StoreError> {
+		if !self.path.exists() {
+			return Ok(HashMap::new());
+		}
+		let data = fs::read_to_string(&self.path)?;
+		if data.trim().is_empty() {
+			return Ok(HashMap::new());
+		}
+		Ok(serde_json::from_str(&data)?)
+	}
+
+	fn write_all(&self, results: &HashMap<String, ResultEnvelope>) -> Result<(), StoreError> {
+		ensure_parent_dir(&self.path)?;
+		let encoded = serde_json::to_string_pretty(results)?;
+		fs::write(&self.path, encoded)?;
+		Ok(())
+	}
+}
+
+impl ResultRepository for FileResultRepository {
+	fn save_result(&mut self, result: ResultEnvelope) -> Result<(), StoreError> {
+		let mut results = self.read_all()?;
+		results.insert(result_key(&result.task_id, &result.node_id), result);
+		self.write_all(&results)
+	}
+
+	fn load_result(
+		&self,
+		task_id: &TaskId,
+		node_id: &NodeId,
+	) -> Result<Option<ResultEnvelope>, StoreError> {
+		let results = self.read_all()?;
+		Ok(results.get(&result_key(task_id, node_id)).cloned())
+	}
+
+	fn list_results(&self, task_id: &TaskId) -> Result<Vec<ResultEnvelope>, StoreError> {
+		let results = self.read_all()?;
+		Ok(results
+			.into_values()
+			.filter(|result| result.task_id == *task_id)
+			.collect())
+	}
+}
+
 impl EventRepository for FileEventRepository {
 	fn append_event(&mut self, event: TaskEvent) -> Result<(), StoreError> {
 		let mut events = self.read_all()?;
@@ -219,10 +315,14 @@ fn ensure_parent_dir(path: &Path) -> Result<(), StoreError> {
 	Ok(())
 }
 
+fn result_key(task_id: &TaskId, node_id: &NodeId) -> String {
+	format!("{}:{}", task_id.0, node_id.0)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use roku_common_types::{RequestId, TaskState};
+	use roku_common_types::{EvidenceItem, RequestId, ResultStatus, TaskState};
 	use std::time::{SystemTime, UNIX_EPOCH};
 
 	fn unique_path(suffix: &str) -> PathBuf {
@@ -270,11 +370,28 @@ mod tests {
 		}
 	}
 
+	fn sample_result() -> ResultEnvelope {
+		ResultEnvelope {
+			task_id: TaskId("task-1".to_string()),
+			node_id: NodeId("node-1".to_string()),
+			producer: "agent-1".to_string(),
+			schema_version: "result.v1".to_string(),
+			status: ResultStatus::Ok,
+			payload: "payload".to_string(),
+			evidence: vec![EvidenceItem {
+				kind: "artifact_ref".to_string(),
+				value: "artifact://1".to_string(),
+			}],
+			confidence: 0.9,
+		}
+	}
+
 	#[test]
 	fn in_memory_repositories_roundtrip() {
 		let mut task_repo = InMemoryTaskRepository::default();
 		let mut event_repo = InMemoryEventRepository::default();
 		let mut approval_repo = InMemoryApprovalRepository::default();
+		let mut result_repo = InMemoryResultRepository::default();
 
 		task_repo
 			.save_task(sample_task())
@@ -285,6 +402,9 @@ mod tests {
 		approval_repo
 			.save_ticket(sample_ticket())
 			.expect("save approval ticket should succeed");
+		result_repo
+			.save_result(sample_result())
+			.expect("save result should succeed");
 
 		let loaded_task = task_repo
 			.load_task(&TaskId("task-1".to_string()))
@@ -295,10 +415,14 @@ mod tests {
 		let loaded_ticket = approval_repo
 			.load_ticket(&ApprovalId("approval-1".to_string()))
 			.expect("load approval ticket should succeed");
+		let loaded_result = result_repo
+			.load_result(&TaskId("task-1".to_string()), &NodeId("node-1".to_string()))
+			.expect("load result should succeed");
 
 		assert!(loaded_task.is_some());
 		assert_eq!(loaded_events.len(), 1);
 		assert!(loaded_ticket.is_some());
+		assert!(loaded_result.is_some());
 	}
 
 	#[test]
@@ -306,10 +430,12 @@ mod tests {
 		let task_path = unique_path("task");
 		let event_path = unique_path("event");
 		let approval_path = unique_path("approval");
+		let result_path = unique_path("result");
 
 		let mut task_repo = FileTaskRepository::new(task_path.clone());
 		let mut event_repo = FileEventRepository::new(event_path.clone());
 		let mut approval_repo = FileApprovalRepository::new(approval_path.clone());
+		let mut result_repo = FileResultRepository::new(result_path.clone());
 
 		task_repo
 			.save_task(sample_task())
@@ -320,6 +446,9 @@ mod tests {
 		approval_repo
 			.save_ticket(sample_ticket())
 			.expect("save approval ticket should succeed");
+		result_repo
+			.save_result(sample_result())
+			.expect("save result should succeed");
 
 		let loaded_task = task_repo
 			.load_task(&TaskId("task-1".to_string()))
@@ -330,13 +459,18 @@ mod tests {
 		let loaded_ticket = approval_repo
 			.load_ticket(&ApprovalId("approval-1".to_string()))
 			.expect("load approval ticket should succeed");
+		let loaded_result = result_repo
+			.load_result(&TaskId("task-1".to_string()), &NodeId("node-1".to_string()))
+			.expect("load result should succeed");
 
 		assert!(loaded_task.is_some());
 		assert_eq!(loaded_events.len(), 1);
 		assert!(loaded_ticket.is_some());
+		assert!(loaded_result.is_some());
 
 		let _ = fs::remove_file(task_path);
 		let _ = fs::remove_file(event_path);
 		let _ = fs::remove_file(approval_path);
+		let _ = fs::remove_file(result_path);
 	}
 }
