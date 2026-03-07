@@ -80,6 +80,8 @@ pub struct Task {
 	pub state: TaskState,
 	pub attempts: u32,
 	#[serde(default)]
+	pub completed_nodes: Vec<NodeId>,
+	#[serde(default)]
 	pub next_node_index: usize,
 	#[serde(default)]
 	pub pending_approval_id: Option<ApprovalId>,
