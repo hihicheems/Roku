@@ -358,3 +358,36 @@
 1. Extend `PlanStep` and `ExecutionGraphBuilder` so dependency sketches from the planner become real branch/join graphs.
 2. Emit aggregation-specific artifacts or summaries for aggregation nodes instead of only marking the node complete.
 3. Revisit scheduler and retry behavior once multi-parent graphs are emitted by the builder.
+
+## 2026-03-07 - Session Milestone (Phase 10)
+
+### Completed Modules
+
+- `roku-common-types`
+  - Added `depends_on` to `PlanStep`, allowing the planner to emit dependency sketches instead of only implicit step order.
+- `roku-task-planner`
+  - Updated the default planner to output explicit linear dependency metadata.
+- `roku-execution-graph-builder`
+  - Reworked `compile` into a fallible graph compiler with `GraphBuildError`.
+  - Added duplicate-step and missing-dependency detection.
+  - Switched graph compilation from "previous node -> next node" to dependency-driven edge generation.
+  - Changed validation-gate wiring to depend on terminal steps instead of only the last step, enabling branch/join style graphs.
+  - Added builder tests for branch validation joins and missing dependency rejection.
+- `roku-runtime-service`
+  - Added graph-build failure handling so invalid plan outlines return structured failed responses instead of silently building broken graphs.
+
+### Verification Status
+
+- `cargo test -p roku-task-planner -p roku-execution-graph-builder -p roku-runtime-service`: passed
+
+### Remaining Work
+
+- Task planner still emits only a trivial two-step outline; it now supports dependency metadata, but it does not yet synthesize richer branch plans from planning mode.
+- Validation join behavior is now supported by the builder, but no planner strategy currently emits multi-branch outlines in production flow.
+- Graph compilation still does not inject recovery metadata or explicit partial rerun markers.
+
+### Next Recommended Steps
+
+1. Teach the planner to emit branch candidates and dependency sketches for non-trivial modes such as `TaskDecomposition` or `TreeSearch`.
+2. Add aggregation-node artifact generation now that join semantics and branch compilation exist.
+3. Extend graph compilation with recovery metadata and partial rerun anchors.
