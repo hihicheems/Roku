@@ -1,24 +1,23 @@
 use std::thread;
 use std::time::Duration;
 
-use roku_common_types::{RequestEnvelope, ResponseEnvelope, RuntimeError};
+use roku_common_types::{
+	ApprovalDecision, ApprovalId, RequestEnvelope, ResponseEnvelope, RuntimeError,
+};
 
 use crate::{
 	TelegramBotClient, TelegramBotConfig, TelegramConnector, TelegramConnectorError,
-	TelegramOutboundMessage, TelegramTransportError, TelegramUpdate,
+	TelegramInteraction, TelegramOutboundMessage, TelegramTransportError, TelegramUpdate,
 };
 
-pub trait TelegramRequestHandler: Send + Sync {
-	fn handle(&self, request: RequestEnvelope) -> Result<ResponseEnvelope, RuntimeError>;
-}
+pub trait TelegramInteractionHandler: Send + Sync {
+	fn handle_request(&self, request: RequestEnvelope) -> Result<ResponseEnvelope, RuntimeError>;
 
-impl<F> TelegramRequestHandler for F
-where
-	F: Fn(RequestEnvelope) -> Result<ResponseEnvelope, RuntimeError> + Send + Sync,
-{
-	fn handle(&self, request: RequestEnvelope) -> Result<ResponseEnvelope, RuntimeError> {
-		self(request)
-	}
+	fn handle_approval_decision(
+		&self,
+		approval_id: ApprovalId,
+		decision: ApprovalDecision,
+	) -> Result<ResponseEnvelope, RuntimeError>;
 }
 
 pub struct TelegramPollingRunner {
@@ -43,7 +42,7 @@ impl TelegramPollingRunner {
 
 	pub fn run<H>(&self, handler: H) -> Result<(), TelegramTransportError>
 	where
-		H: TelegramRequestHandler,
+		H: TelegramInteractionHandler,
 	{
 		let mut next_offset = None;
 		loop {
@@ -66,27 +65,34 @@ impl TelegramPollingRunner {
 		update: TelegramUpdate,
 	) -> Result<(), TelegramTransportError>
 	where
-		H: TelegramRequestHandler,
+		H: TelegramInteractionHandler,
 	{
-		let chat_id = update.message.as_ref().map(|message| message.chat.id);
-		match self.connector.into_request(update) {
-			Ok(request) => {
-				let Some(chat_id) = chat_id else {
-					return Ok(());
-				};
-				match handler.handle(request) {
-					Ok(response) => self
-						.client
-						.send_message(&TelegramOutboundMessage::from_response(chat_id, &response)),
-					Err(error) => self
-						.client
-						.send_message(&TelegramOutboundMessage::from_error(
-							chat_id,
-							&error.message,
-						)),
-				}
+		let chat_id = update
+			.message
+			.as_ref()
+			.map(|message| message.chat.id)
+			.or_else(|| {
+				update
+					.callback_query
+					.as_ref()
+					.and_then(|callback_query| callback_query.message.as_ref())
+					.map(|message| message.chat.id)
+			});
+
+		match self.connector.into_interaction(update) {
+			Ok(TelegramInteraction::Request { chat_id, request }) => {
+				self.dispatch_response(chat_id, handler.handle_request(request))
 			}
-			Err(TelegramConnectorError::BotMessageIgnored) => Ok(()),
+			Ok(TelegramInteraction::ApprovalDecision(action)) => {
+				let response =
+					handler.handle_approval_decision(action.approval_id, action.decision);
+				self.client.answer_callback_query(
+					&action.callback_query_id,
+					callback_acknowledgement(&response),
+				)?;
+				self.dispatch_response(action.chat_id, response)
+			}
+			Err(TelegramConnectorError::BotOriginIgnored) => Ok(()),
 			Err(error) => {
 				if let Some(chat_id) = chat_id {
 					self.client
@@ -99,5 +105,34 @@ impl TelegramPollingRunner {
 				}
 			}
 		}
+	}
+
+	fn dispatch_response(
+		&self,
+		chat_id: i64,
+		response: Result<ResponseEnvelope, RuntimeError>,
+	) -> Result<(), TelegramTransportError> {
+		match response {
+			Ok(response) => self
+				.client
+				.send_message(&TelegramOutboundMessage::from_response(chat_id, &response)),
+			Err(error) => self
+				.client
+				.send_message(&TelegramOutboundMessage::from_error(
+					chat_id,
+					&error.message,
+				)),
+		}
+	}
+}
+
+fn callback_acknowledgement(response: &Result<ResponseEnvelope, RuntimeError>) -> &str {
+	match response {
+		Ok(response) => match response.status {
+			roku_common_types::ResponseStatus::Succeeded => "Approval recorded",
+			roku_common_types::ResponseStatus::PendingApproval => "Still waiting on approval",
+			roku_common_types::ResponseStatus::Failed => "Decision processed with failure",
+		},
+		Err(_) => "Approval decision failed",
 	}
 }

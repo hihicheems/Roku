@@ -251,7 +251,7 @@
 | TG-03 | 实现 outbound message formatting，将 runtime 响应映射为 Telegram 文本 | §4.1 Connector | DONE |
 | TG-04 | 显式拒绝 bot-originated message 等不合法输入 | 边界治理 | DONE |
 | TG-05 | 增加真实 webhook / polling transport runner | §4.1 Connector | DONE |
-| TG-06 | 增加 approval callback query 支持 | §15.3 人审闸门 | TODO |
+| TG-06 | 增加 approval callback query 支持 | §15.3 人审闸门 | DONE |
 | TG-07 | 增加 artifact / experiment / approval 的富消息渲染 | §12 Artifact / §16 诊断 | TODO |
 | TG-08 | 增加长任务状态推送与结果回执能力 | 长任务体验 | TODO |
 

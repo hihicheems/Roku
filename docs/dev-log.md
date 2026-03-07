@@ -914,3 +914,33 @@
 1. Add `TR-08` and `TR-09` so live tool execution has output-schema validation and persisted audit/artifact records.
 2. Add Telegram approval callbacks and long-task status updates.
 3. Move planning inputs and richer reasoning paths onto the llm-adapter layer.
+
+## 2026-03-07 - Session Milestone (Phase 25)
+
+### Completed Modules
+
+- `roku-connectors-telegram`
+  - Extended inbound update parsing to support `callback_query` in addition to plain `message` updates.
+  - Added structured approval callback decoding so Telegram button clicks map into `ApprovalDecision` operations.
+  - Added inline approval keyboards on `pending_approval` responses, allowing approve/reject directly from Telegram.
+  - Added `answerCallbackQuery` handling so callback interactions receive immediate acknowledgement at the Telegram API layer.
+- `roku-cmd`
+  - Replaced the single closure-based Telegram handler with an explicit runtime-backed interaction handler that can execute requests and resolve approval decisions.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test -p roku-connectors-telegram -p roku-cmd -p roku-runtime-service -p roku-e2e`: passed
+- `cargo check --workspace`: passed
+
+### Remaining Work
+
+- Telegram rich rendering is still text-first; artifact and experiment results are not yet rendered as richer diagnostic cards.
+- Long-running task progress push is still missing from the Telegram transport.
+- LLM provider cost / latency observability and planning-time llm-adapter integration remain open.
+
+### Next Recommended Steps
+
+1. Add TG artifact / experiment rich rendering and long-task status push.
+2. Add LLM provider telemetry into `roku-observability` and surface it from the OpenRouter path.
+3. Move planning outline generation onto the llm-adapter path so the runtime matches the planning architecture in the design doc.
