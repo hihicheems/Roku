@@ -73,10 +73,10 @@ async fn http_gateway_executes_runtime_service() {
 		})
 		.to_request();
 
-let response: SubmitResponse = actix_web::test::call_and_read_body_json(&app, request).await;
-assert_eq!(response.status, "succeeded");
-assert_eq!(response.message, "task succeeded");
-assert!(response.request_id.starts_with("req-"));
+	let response: SubmitResponse = actix_web::test::call_and_read_body_json(&app, request).await;
+	assert_eq!(response.status, "succeeded");
+	assert_eq!(response.message, "task succeeded");
+	assert!(response.request_id.starts_with("req-"));
 }
 
 #[actix_web::test]
@@ -110,7 +110,11 @@ async fn http_gateway_exposes_task_artifacts_and_experiment() {
 	let artifacts: Vec<ArtifactResponse> =
 		actix_web::test::call_and_read_body_json(&app, artifacts_request).await;
 	assert_eq!(artifacts.len(), 2);
-	assert!(artifacts.iter().all(|artifact| artifact.uri.starts_with("artifact://")));
+	assert!(
+		artifacts
+			.iter()
+			.all(|artifact| artifact.uri.starts_with("artifact://"))
+	);
 
 	let experiment_request = actix_web::test::TestRequest::get()
 		.uri(&format!("/v1/tasks/{task_id}/experiment"))
