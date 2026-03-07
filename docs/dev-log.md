@@ -418,3 +418,34 @@
 1. Add callback-query and approval decision mapping so Telegram can drive approval workflows directly.
 2. Introduce a thin transport layer for webhook or polling execution outside the pure adapter crate.
 3. Reuse task artifact / experiment query endpoints to build richer Telegram responses for long-running tasks.
+
+## 2026-03-07 - Session Milestone (Phase 12)
+
+### Completed Modules
+
+- `roku-planning-engine`
+  - Added planning loop controls with explicit `PlanningLoopState` and `PlanningStopReason`.
+  - Extended strategy decision output with `max_branches` and mode-specific `PlanningHook` sets.
+  - Added stop-condition evaluation API to avoid unbounded planner loops.
+- `roku-task-planner`
+  - Switched planner interface to consume full `PlanningDecision` rather than only `PlanningMode`.
+  - Added mode-aware outline generation for `ReAct` / `TaskDecomposition` / `TreeSearch` / `IterativeRefinement`.
+  - Added dependency-aware branch merge and critique-loop step generation.
+- `roku-runtime-service`
+  - Updated runtime planning flow to pass strategy decisions directly into the task planner.
+
+### Verification Status
+
+- `cargo test -p roku-planning-engine -p roku-task-planner -p roku-runtime-service`: passed
+
+### Remaining Work
+
+- Planning loops are now explicit, but no runtime feedback channel from execution metrics into planner stop conditions exists yet.
+- `TaskPlanner` can emit richer branch outlines, but no heuristic score is applied yet when selecting among tree-search branches.
+- Tool runtime still lacks production-level descriptor/runtime constraints and deterministic execution hooks.
+
+### Next Recommended Steps
+
+1. Implement `roku-tool-runtime` descriptor contracts with sandbox profile, timeout, retry, and deterministic hook APIs.
+2. Feed runtime execution telemetry into planning feedback so replan and stop decisions can use observed failure patterns.
+3. Add planner quality metrics (branch acceptance rate, critique-loop convergence) into observability exports.
