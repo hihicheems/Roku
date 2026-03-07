@@ -2,29 +2,31 @@
 
 use std::fmt;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TaskId(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RequestId(pub String);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestEnvelope {
 	pub request_id: RequestId,
 	pub session_id: String,
 	pub goal: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResponseStatus {
 	Succeeded,
 	Failed,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponseEnvelope {
 	pub request_id: RequestId,
 	pub status: ResponseStatus,
@@ -32,7 +34,7 @@ pub struct ResponseEnvelope {
 	pub artifacts: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ErrorClass {
 	Validation,
 	Dependency,
@@ -42,7 +44,7 @@ pub enum ErrorClass {
 	NonRetriable,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskState {
 	Queued,
 	Planning,
@@ -58,7 +60,7 @@ pub enum TaskState {
 	Cancelled,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskEvent {
 	pub task_id: TaskId,
 	pub from: TaskState,
@@ -67,7 +69,7 @@ pub struct TaskEvent {
 	pub error_class: Option<ErrorClass>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
 	pub task_id: TaskId,
 	pub request_id: RequestId,
@@ -76,13 +78,13 @@ pub struct Task {
 	pub graph: Option<TaskGraph>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanOutline {
 	pub goal: String,
 	pub steps: Vec<PlanStep>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanStep {
 	pub step_id: String,
 	pub summary: String,
@@ -90,14 +92,14 @@ pub struct PlanStep {
 	pub requires_approval: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskGraph {
 	pub task_id: TaskId,
 	pub nodes: Vec<TaskNode>,
 	pub edges: Vec<TaskEdge>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskNodeKind {
 	Execution,
 	Validation,
@@ -105,7 +107,7 @@ pub enum TaskNodeKind {
 	Aggregation,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskNode {
 	pub node_id: NodeId,
 	pub kind: TaskNodeKind,
@@ -113,26 +115,26 @@ pub struct TaskNode {
 	pub capabilities: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskEdge {
 	pub from: NodeId,
 	pub to: NodeId,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentContext {
 	pub task_id: TaskId,
 	pub node_id: NodeId,
 	pub summary: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyBindings {
 	pub budget_tokens: u64,
 	pub time_budget_ms: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInstanceSpec {
 	pub instance_id: String,
 	pub context: AgentContext,
@@ -140,7 +142,7 @@ pub struct AgentInstanceSpec {
 	pub policy_bindings: PolicyBindings,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityToken {
 	pub token_id: String,
 	pub subject: String,
@@ -149,19 +151,19 @@ pub struct CapabilityToken {
 	pub expires_at_unix: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResultStatus {
 	Ok,
 	Error,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvidenceItem {
 	pub kind: String,
 	pub value: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResultEnvelope {
 	pub task_id: TaskId,
 	pub node_id: NodeId,
@@ -173,13 +175,13 @@ pub struct ResultEnvelope {
 	pub confidence: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationReport {
 	pub accepted: bool,
 	pub failures: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodingWorkContract {
 	pub repo_ref: String,
 	pub goal: String,
@@ -190,7 +192,7 @@ pub struct CodingWorkContract {
 	pub time_budget_ms: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeChangeReport {
 	pub modified_files: Vec<String>,
 	pub patch_summary: String,
@@ -200,7 +202,7 @@ pub struct CodeChangeReport {
 	pub residual_risks: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeError {
 	pub message: String,
 }
