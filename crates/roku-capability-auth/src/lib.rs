@@ -111,4 +111,32 @@ mod tests {
 
 		assert!(!auth.verify(&token, "invoke", 100));
 	}
+
+	#[test]
+	fn attenuation_drops_unlisted_actions() {
+		let mut auth = CapabilityAuthority::default();
+		let parent = auth.issue(CapabilityRequest {
+			subject: "agent-a".to_string(),
+			resource: "tool.echo".to_string(),
+			actions: vec!["invoke".to_string(), "read".to_string()],
+			expires_at_unix: 999,
+		});
+		let child = auth.attenuate(&parent, &[String::from("invoke")]);
+
+		assert!(auth.verify(&child, "invoke", 100));
+		assert!(!auth.verify(&child, "read", 100));
+	}
+
+	#[test]
+	fn expired_token_is_denied() {
+		let mut auth = CapabilityAuthority::default();
+		let token = auth.issue(CapabilityRequest {
+			subject: "agent-a".to_string(),
+			resource: "tool.echo".to_string(),
+			actions: vec!["invoke".to_string()],
+			expires_at_unix: 10,
+		});
+
+		assert!(!auth.verify(&token, "invoke", 11));
+	}
 }
