@@ -965,6 +965,7 @@ version = "0.1.0"
 dependencies = [
  "actix-web",
  "roku-common-types",
+ "roku-runtime-service",
  "serde",
 ]
 
@@ -1010,8 +1011,12 @@ dependencies = [
 name = "roku-e2e"
 version = "0.1.0"
 dependencies = [
+ "actix-web",
+ "roku-api-gateway",
  "roku-cmd",
  "roku-common-types",
+ "roku-runtime-service",
+ "serde",
 ]
 
 [[package]]
