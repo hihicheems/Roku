@@ -22,6 +22,10 @@ pub struct Metrics {
 	pub approvals_created_total: AtomicU64,
 	pub approvals_resolved_total: AtomicU64,
 	pub dead_letters_total: AtomicU64,
+	pub artifacts_total: AtomicU64,
+	pub experiments_started_total: AtomicU64,
+	pub experiments_succeeded_total: AtomicU64,
+	pub experiments_failed_total: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -33,6 +37,10 @@ impl Default for Metrics {
 			approvals_created_total: AtomicU64::new(0),
 			approvals_resolved_total: AtomicU64::new(0),
 			dead_letters_total: AtomicU64::new(0),
+			artifacts_total: AtomicU64::new(0),
+			experiments_started_total: AtomicU64::new(0),
+			experiments_succeeded_total: AtomicU64::new(0),
+			experiments_failed_total: AtomicU64::new(0),
 		}
 	}
 }
@@ -45,6 +53,10 @@ pub struct MetricsSnapshot {
 	pub approvals_created_total: u64,
 	pub approvals_resolved_total: u64,
 	pub dead_letters_total: u64,
+	pub artifacts_total: u64,
+	pub experiments_started_total: u64,
+	pub experiments_succeeded_total: u64,
+	pub experiments_failed_total: u64,
 }
 
 impl Metrics {
@@ -74,6 +86,25 @@ impl Metrics {
 		self.dead_letters_total.fetch_add(1, Ordering::Relaxed);
 	}
 
+	pub fn inc_artifacts(&self) {
+		self.artifacts_total.fetch_add(1, Ordering::Relaxed);
+	}
+
+	pub fn inc_experiments_started(&self) {
+		self.experiments_started_total
+			.fetch_add(1, Ordering::Relaxed);
+	}
+
+	pub fn inc_experiments_succeeded(&self) {
+		self.experiments_succeeded_total
+			.fetch_add(1, Ordering::Relaxed);
+	}
+
+	pub fn inc_experiments_failed(&self) {
+		self.experiments_failed_total
+			.fetch_add(1, Ordering::Relaxed);
+	}
+
 	pub fn snapshot(&self) -> MetricsSnapshot {
 		MetricsSnapshot {
 			requests_total: self.requests_total.load(Ordering::Relaxed),
@@ -82,6 +113,10 @@ impl Metrics {
 			approvals_created_total: self.approvals_created_total.load(Ordering::Relaxed),
 			approvals_resolved_total: self.approvals_resolved_total.load(Ordering::Relaxed),
 			dead_letters_total: self.dead_letters_total.load(Ordering::Relaxed),
+			artifacts_total: self.artifacts_total.load(Ordering::Relaxed),
+			experiments_started_total: self.experiments_started_total.load(Ordering::Relaxed),
+			experiments_succeeded_total: self.experiments_succeeded_total.load(Ordering::Relaxed),
+			experiments_failed_total: self.experiments_failed_total.load(Ordering::Relaxed),
 		}
 	}
 }
@@ -167,6 +202,10 @@ mod tests {
 		metrics.inc_approvals_created();
 		metrics.inc_approvals_resolved();
 		metrics.inc_dead_letters();
+		metrics.inc_artifacts();
+		metrics.inc_experiments_started();
+		metrics.inc_experiments_succeeded();
+		metrics.inc_experiments_failed();
 
 		let snapshot = metrics.snapshot();
 		assert_eq!(snapshot.requests_total, 1);
@@ -175,6 +214,10 @@ mod tests {
 		assert_eq!(snapshot.approvals_created_total, 1);
 		assert_eq!(snapshot.approvals_resolved_total, 1);
 		assert_eq!(snapshot.dead_letters_total, 1);
+		assert_eq!(snapshot.artifacts_total, 1);
+		assert_eq!(snapshot.experiments_started_total, 1);
+		assert_eq!(snapshot.experiments_succeeded_total, 1);
+		assert_eq!(snapshot.experiments_failed_total, 1);
 	}
 
 	#[test]
