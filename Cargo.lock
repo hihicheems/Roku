@@ -3,5 +3,124 @@
 version = 4
 
 [[package]]
-name = "cmd"
+name = "roku-agent-instance-factory"
 version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+]
+
+[[package]]
+name = "roku-agent-runtime"
+version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+]
+
+[[package]]
+name = "roku-api-gateway"
+version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+]
+
+[[package]]
+name = "roku-capability-auth"
+version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+]
+
+[[package]]
+name = "roku-cmd"
+version = "0.1.0"
+dependencies = [
+ "roku-agent-instance-factory",
+ "roku-agent-runtime",
+ "roku-api-gateway",
+ "roku-common-types",
+ "roku-execution-graph-builder",
+ "roku-orchestrator",
+ "roku-planning-engine",
+ "roku-state-store",
+ "roku-task-planner",
+ "roku-validation-plane",
+]
+
+[[package]]
+name = "roku-coding-provider-adapter"
+version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+ "roku-mcp-bridge",
+]
+
+[[package]]
+name = "roku-common-types"
+version = "0.1.0"
+
+[[package]]
+name = "roku-connectors-telegram"
+version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+]
+
+[[package]]
+name = "roku-e2e"
+version = "0.1.0"
+dependencies = [
+ "roku-cmd",
+ "roku-common-types",
+]
+
+[[package]]
+name = "roku-execution-graph-builder"
+version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+]
+
+[[package]]
+name = "roku-mcp-bridge"
+version = "0.1.0"
+
+[[package]]
+name = "roku-observability"
+version = "0.1.0"
+
+[[package]]
+name = "roku-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+]
+
+[[package]]
+name = "roku-planning-engine"
+version = "0.1.0"
+
+[[package]]
+name = "roku-state-store"
+version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+]
+
+[[package]]
+name = "roku-task-planner"
+version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+ "roku-planning-engine",
+]
+
+[[package]]
+name = "roku-tool-runtime"
+version = "0.1.0"
+
+[[package]]
+name = "roku-validation-plane"
+version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+]

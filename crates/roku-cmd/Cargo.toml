@@ -1,0 +1,18 @@
+[package]
+name = "roku-cmd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+roku-agent-instance-factory = { path = "../roku-agent-instance-factory" }
+roku-agent-runtime = { path = "../roku-agent-runtime" }
+roku-api-gateway = { path = "../roku-api-gateway" }
+roku-common-types = { path = "../roku-common-types" }
+roku-execution-graph-builder = { path = "../roku-execution-graph-builder" }
+roku-orchestrator = { path = "../roku-orchestrator" }
+roku-planning-engine = { path = "../roku-planning-engine" }
+roku-state-store = { path = "../roku-state-store" }
+roku-task-planner = { path = "../roku-task-planner" }
+roku-validation-plane = { path = "../roku-validation-plane" }

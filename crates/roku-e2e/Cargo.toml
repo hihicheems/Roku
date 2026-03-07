@@ -1,0 +1,11 @@
+[package]
+name = "roku-e2e"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dev-dependencies]
+roku-cmd = { path = "../roku-cmd" }
+roku-common-types = { path = "../roku-common-types" }
