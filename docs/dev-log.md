@@ -391,3 +391,30 @@
 1. Teach the planner to emit branch candidates and dependency sketches for non-trivial modes such as `TaskDecomposition` or `TreeSearch`.
 2. Add aggregation-node artifact generation now that join semantics and branch compilation exist.
 3. Extend graph compilation with recovery metadata and partial rerun anchors.
+
+## 2026-03-07 - Session Milestone (Phase 11)
+
+### Completed Modules
+
+- `roku-connectors-telegram`
+  - Split the connector into `inbound` and `outbound` modules.
+  - Added Telegram webhook/update models with serde support.
+  - Added inbound normalization with explicit error handling for missing message, missing text, and bot-originated messages.
+  - Added outbound message formatting that maps runtime responses into Telegram-ready text payloads.
+  - Added connector unit tests for inbound mapping, bot-message rejection, and outbound formatting.
+
+### Verification Status
+
+- `cargo test -p roku-connectors-telegram`: passed
+
+### Remaining Work
+
+- The Telegram connector still does not include actual long-polling or webhook transport integration.
+- No Telegram-specific approval interaction or callback-query workflow exists yet.
+- Connector output is plain text formatting only; no keyboard or richer interaction model is implemented.
+
+### Next Recommended Steps
+
+1. Add callback-query and approval decision mapping so Telegram can drive approval workflows directly.
+2. Introduce a thin transport layer for webhook or polling execution outside the pure adapter crate.
+3. Reuse task artifact / experiment query endpoints to build richer Telegram responses for long-running tasks.
