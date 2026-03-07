@@ -28,7 +28,7 @@
 | 17 | `roku-api-gateway` | 完成 task artifact / experiment 查询路由与响应模型 | `done` |
 | 18 | `roku-cmd` / `roku-runtime-service` | 完成 CLI 到 runtime service 的可复用执行入口 | `done` |
 | 19 | `roku-mcp-bridge` / `roku-coding-provider-adapter` | 完成外部 Coding MCP Provider 的基础契约和接入边界 | `done` |
-| 20 | `roku-connectors-telegram` | 将 Telegram connector 从空壳推进到真实 request/response adapter | `doing` |
+| 20 | `roku-connectors-telegram` | 将 Telegram connector 从空壳推进到真实 request/response adapter | `done` |
 | 21 | `roku-execution-graph-builder` / `roku-common-types` | 为 `PlanStep`、`TaskNode`、`TaskGraph` 增加 branch/join 语义与依赖元数据 | `done` |
 | 22 | `roku-runtime-service` / `roku-common-types` | 引入显式 `NodeResultSet`、`JoinPolicy`、`AggregationMode` 等聚合合同 | `done` |
 | 23 | `roku-runtime-service` | 在 aggregation / validation 节点中真正消费 join policy，而不是隐式遍历结果 | `done` |
