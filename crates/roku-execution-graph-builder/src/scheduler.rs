@@ -1,0 +1,304 @@
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
+
+use roku_common_types::{NodeId, TaskGraph, TaskNode};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphScheduleError {
+	UnknownNode(String),
+	CycleDetected,
+}
+
+impl fmt::Display for GraphScheduleError {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::UnknownNode(node_id) => write!(f, "graph references unknown node: {node_id}"),
+			Self::CycleDetected => write!(f, "graph contains a cycle"),
+		}
+	}
+}
+
+impl std::error::Error for GraphScheduleError {}
+
+#[derive(Debug, Default)]
+pub struct TaskGraphScheduler;
+
+impl TaskGraphScheduler {
+	pub fn ready_nodes(
+		&self,
+		graph: &TaskGraph,
+		completed: &[NodeId],
+	) -> Result<Vec<TaskNode>, GraphScheduleError> {
+		self.ensure_valid(graph)?;
+
+		let completed_ids = completed
+			.iter()
+			.map(|node_id| node_id.0.clone())
+			.collect::<HashSet<_>>();
+		let dependencies = dependency_map(graph)?;
+
+		Ok(graph
+			.nodes
+			.iter()
+			.filter(|node| !completed_ids.contains(&node.node_id.0))
+			.filter(|node| {
+				dependencies.get(&node.node_id.0).is_none_or(|parents| {
+					parents.iter().all(|parent| completed_ids.contains(parent))
+				})
+			})
+			.cloned()
+			.collect())
+	}
+
+	pub fn execution_layers(
+		&self,
+		graph: &TaskGraph,
+	) -> Result<Vec<Vec<NodeId>>, GraphScheduleError> {
+		self.validate_edges(graph)?;
+
+		let outgoing = outgoing_map(graph)?;
+		let mut indegree = graph
+			.nodes
+			.iter()
+			.map(|node| (node.node_id.0.clone(), 0usize))
+			.collect::<HashMap<_, _>>();
+
+		for edge in &graph.edges {
+			let target = indegree
+				.get_mut(&edge.to.0)
+				.ok_or_else(|| GraphScheduleError::UnknownNode(edge.to.0.clone()))?;
+			*target += 1;
+		}
+
+		let mut queue = graph
+			.nodes
+			.iter()
+			.filter(|node| indegree.get(&node.node_id.0) == Some(&0))
+			.map(|node| node.node_id.0.clone())
+			.collect::<VecDeque<_>>();
+		let mut processed = 0usize;
+		let mut layers = Vec::new();
+
+		while !queue.is_empty() {
+			let layer_size = queue.len();
+			let mut layer = Vec::with_capacity(layer_size);
+
+			for _ in 0..layer_size {
+				let node_id = queue
+					.pop_front()
+					.expect("queue length is checked before each layer iteration");
+				processed += 1;
+				layer.push(NodeId(node_id.clone()));
+
+				for next in outgoing.get(&node_id).into_iter().flatten() {
+					if let Some(indegree) = indegree.get_mut(next) {
+						*indegree = indegree.saturating_sub(1);
+						if *indegree == 0 {
+							queue.push_back(next.clone());
+						}
+					}
+				}
+			}
+
+			layers.push(layer);
+		}
+
+		if processed != graph.nodes.len() {
+			return Err(GraphScheduleError::CycleDetected);
+		}
+
+		Ok(layers)
+	}
+
+	pub fn is_complete(
+		&self,
+		graph: &TaskGraph,
+		completed: &[NodeId],
+	) -> Result<bool, GraphScheduleError> {
+		self.ensure_valid(graph)?;
+		let completed_ids = completed
+			.iter()
+			.map(|node_id| node_id.0.clone())
+			.collect::<HashSet<_>>();
+
+		Ok(graph
+			.nodes
+			.iter()
+			.all(|node| completed_ids.contains(&node.node_id.0)))
+	}
+
+	fn ensure_valid(&self, graph: &TaskGraph) -> Result<(), GraphScheduleError> {
+		self.validate_edges(graph)?;
+		let _ = self.execution_layers(graph)?;
+		Ok(())
+	}
+
+	fn validate_edges(&self, graph: &TaskGraph) -> Result<(), GraphScheduleError> {
+		for edge in &graph.edges {
+			let from_exists = graph.nodes.iter().any(|node| node.node_id == edge.from);
+			let to_exists = graph.nodes.iter().any(|node| node.node_id == edge.to);
+			if !from_exists {
+				return Err(GraphScheduleError::UnknownNode(edge.from.0.clone()));
+			}
+			if !to_exists {
+				return Err(GraphScheduleError::UnknownNode(edge.to.0.clone()));
+			}
+		}
+		Ok(())
+	}
+}
+
+fn dependency_map(graph: &TaskGraph) -> Result<HashMap<String, Vec<String>>, GraphScheduleError> {
+	let known_nodes = graph
+		.nodes
+		.iter()
+		.map(|node| node.node_id.0.clone())
+		.collect::<HashSet<_>>();
+	let mut dependencies = HashMap::<String, Vec<String>>::new();
+
+	for edge in &graph.edges {
+		if !known_nodes.contains(&edge.from.0) {
+			return Err(GraphScheduleError::UnknownNode(edge.from.0.clone()));
+		}
+		if !known_nodes.contains(&edge.to.0) {
+			return Err(GraphScheduleError::UnknownNode(edge.to.0.clone()));
+		}
+		dependencies
+			.entry(edge.to.0.clone())
+			.or_default()
+			.push(edge.from.0.clone());
+	}
+
+	Ok(dependencies)
+}
+
+fn outgoing_map(graph: &TaskGraph) -> Result<HashMap<String, Vec<String>>, GraphScheduleError> {
+	let known_nodes = graph
+		.nodes
+		.iter()
+		.map(|node| node.node_id.0.clone())
+		.collect::<HashSet<_>>();
+	let mut outgoing = HashMap::<String, Vec<String>>::new();
+
+	for edge in &graph.edges {
+		if !known_nodes.contains(&edge.from.0) {
+			return Err(GraphScheduleError::UnknownNode(edge.from.0.clone()));
+		}
+		if !known_nodes.contains(&edge.to.0) {
+			return Err(GraphScheduleError::UnknownNode(edge.to.0.clone()));
+		}
+		outgoing
+			.entry(edge.from.0.clone())
+			.or_default()
+			.push(edge.to.0.clone());
+	}
+
+	Ok(outgoing)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use roku_common_types::{TaskEdge, TaskGraph, TaskId, TaskNode, TaskNodeKind};
+
+	fn node(id: &str, kind: TaskNodeKind) -> TaskNode {
+		TaskNode {
+			node_id: NodeId(id.to_string()),
+			kind,
+			description: id.to_string(),
+			capabilities: Vec::new(),
+		}
+	}
+
+	#[test]
+	fn ready_nodes_respects_completed_dependencies() {
+		let scheduler = TaskGraphScheduler;
+		let graph = TaskGraph {
+			task_id: TaskId("task-1".to_string()),
+			nodes: vec![
+				node("extract", TaskNodeKind::Execution),
+				node("analyze", TaskNodeKind::Execution),
+				node("validate", TaskNodeKind::Validation),
+			],
+			edges: vec![
+				TaskEdge {
+					from: NodeId("extract".to_string()),
+					to: NodeId("analyze".to_string()),
+				},
+				TaskEdge {
+					from: NodeId("analyze".to_string()),
+					to: NodeId("validate".to_string()),
+				},
+			],
+		};
+
+		let first = scheduler
+			.ready_nodes(&graph, &[])
+			.expect("graph should be schedulable");
+		assert_eq!(first.len(), 1);
+		assert_eq!(first[0].node_id.0, "extract");
+
+		let second = scheduler
+			.ready_nodes(&graph, &[NodeId("extract".to_string())])
+			.expect("graph should be schedulable");
+		assert_eq!(second.len(), 1);
+		assert_eq!(second[0].node_id.0, "analyze");
+	}
+
+	#[test]
+	fn execution_layers_support_parallel_branches() {
+		let scheduler = TaskGraphScheduler;
+		let graph = TaskGraph {
+			task_id: TaskId("task-1".to_string()),
+			nodes: vec![
+				node("extract-a", TaskNodeKind::Execution),
+				node("extract-b", TaskNodeKind::Execution),
+				node("join", TaskNodeKind::Validation),
+			],
+			edges: vec![
+				TaskEdge {
+					from: NodeId("extract-a".to_string()),
+					to: NodeId("join".to_string()),
+				},
+				TaskEdge {
+					from: NodeId("extract-b".to_string()),
+					to: NodeId("join".to_string()),
+				},
+			],
+		};
+
+		let layers = scheduler
+			.execution_layers(&graph)
+			.expect("graph should be schedulable");
+		assert_eq!(layers.len(), 2);
+		assert_eq!(layers[0].len(), 2);
+		assert_eq!(layers[1], vec![NodeId("join".to_string())]);
+	}
+
+	#[test]
+	fn scheduler_rejects_cycles() {
+		let scheduler = TaskGraphScheduler;
+		let graph = TaskGraph {
+			task_id: TaskId("task-1".to_string()),
+			nodes: vec![
+				node("a", TaskNodeKind::Execution),
+				node("b", TaskNodeKind::Execution),
+			],
+			edges: vec![
+				TaskEdge {
+					from: NodeId("a".to_string()),
+					to: NodeId("b".to_string()),
+				},
+				TaskEdge {
+					from: NodeId("b".to_string()),
+					to: NodeId("a".to_string()),
+				},
+			],
+		};
+
+		let error = scheduler
+			.execution_layers(&graph)
+			.expect_err("cyclic graph should be rejected");
+		assert_eq!(error, GraphScheduleError::CycleDetected);
+	}
+}
