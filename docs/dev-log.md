@@ -136,3 +136,45 @@
 1. Introduce persisted approval tickets and a resume API for `WaitingApproval -> Executing`.
 2. Add PostgreSQL-backed task/event repositories and a Redis/NATS-backed dispatch layer.
 3. Extend `ExecutionGraphBuilder` and `roku-runtime-service` from linear node iteration to dependency-aware DAG scheduling.
+
+## 2026-03-07 - Session Milestone (Phase 4)
+
+### Completed Modules
+
+- `roku-common-types`
+  - Added approval contracts: `ApprovalId`, `ApprovalStatus`, `ApprovalDecision`, `ApprovalTicket`.
+  - Added task checkpoint fields: `next_node_index`, `pending_approval_id`, `last_result`.
+- `roku-state-store`
+  - Added `ApprovalRepository` abstraction.
+  - Added `InMemoryApprovalRepository` and `FileApprovalRepository`.
+  - Extended repository tests to cover approval ticket roundtrip.
+- `roku-runtime-service`
+  - Persisted approval tickets when execution reaches `WaitingApproval`.
+  - Added resumable execution from persisted task checkpoint and approval state.
+  - Added `get_approval` and `decide_approval` service APIs.
+  - Added runtime tests for approval grant, rejection, and duplicate decision protection.
+- `roku-api-gateway`
+  - Added `GET /v1/approvals/{approval_id}`.
+  - Added `POST /v1/approvals/{approval_id}/decision`.
+  - Extended gateway executor boundary from request-only to request + approval operations.
+- `roku-e2e`
+  - Added full HTTP approval roundtrip coverage: submit -> pending approval -> query -> approve -> succeeded.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test --workspace`: passed
+
+### Remaining Work
+
+- Add explicit approval rejection policy options (`Failed` vs `Cancelled`) and organization-level approval rules.
+- Add DAG-aware scheduling instead of current linear graph iteration.
+- Add PostgreSQL/Redis/NATS production backends behind repository and dispatch abstractions.
+- Add artifact store and experiment registry instead of keeping recovery context only in task state.
+- Add richer capability attenuation rules tied to approval-sensitive actions.
+
+### Next Recommended Steps
+
+1. Introduce dependency-aware node scheduling and checkpoint recovery beyond linear graphs.
+2. Add `StorageBackend`-style production adapters for PostgreSQL task/event state and Redis/NATS dispatch.
+3. Start implementing `Artifact Store` and `Experiment Registry` so validation and recovery stop depending on in-task ephemeral result snapshots.
