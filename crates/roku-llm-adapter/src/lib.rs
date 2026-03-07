@@ -10,6 +10,6 @@ pub use openrouter::{
 };
 pub use router::{LlmProvider, LlmRouter};
 pub use types::{
-	GenerationRequest, LlmAdapterError, LlmResponse, ModelProfile, ProviderResponse, RiskTier,
-	RoutingPolicy,
+	GenerationRequest, LlmAdapterError, LlmResponse, ModelProfile, ProviderCallError,
+	ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy,
 };

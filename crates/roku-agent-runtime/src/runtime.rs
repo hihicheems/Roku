@@ -96,8 +96,8 @@ mod tests {
 		ResultStatus, TaskId, TaskNode, TaskNodeKind,
 	};
 	use roku_llm_adapter::{
-		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderResponse, RiskTier,
-		RoutingPolicy,
+		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderCallError,
+		ProviderResponse, RiskTier, RoutingPolicy,
 	};
 
 	use super::*;
@@ -254,7 +254,7 @@ mod tests {
 			&self,
 			_model: &ModelProfile,
 			_request: &GenerationRequest,
-		) -> Result<ProviderResponse, String> {
+		) -> Result<ProviderResponse, ProviderCallError> {
 			Ok(ProviderResponse {
 				output: "live answer from llm".to_string(),
 				prompt_tokens: 32,

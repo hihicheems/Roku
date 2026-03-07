@@ -1,11 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use roku_observability::{LlmInvocationOutcome, Metrics};
 
 use crate::types::{
-	GenerationRequest, LlmAdapterError, LlmResponse, ModelProfile, ProviderResponse, RiskTier,
-	RoutingPolicy, estimate_cost_usd,
+	GenerationRequest, LlmAdapterError, LlmResponse, ModelProfile, ProviderCallError,
+	ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy, estimate_cost_usd,
 };
 
 pub trait LlmProvider: Send + Sync {
@@ -14,15 +17,21 @@ pub trait LlmProvider: Send + Sync {
 		&self,
 		model: &ModelProfile,
 		request: &GenerationRequest,
-	) -> Result<ProviderResponse, String>;
+	) -> Result<ProviderResponse, ProviderCallError>;
 }
 
-#[derive(Default)]
 pub struct LlmRouter {
 	policy: RoutingPolicy,
 	models: Vec<ModelProfile>,
-	providers: HashMap<String, Arc<dyn LlmProvider>>,
+	providers: HashMap<String, RegisteredProvider>,
 	metrics: Option<Arc<Metrics>>,
+	resilience_policy: ProviderResiliencePolicy,
+}
+
+impl Default for LlmRouter {
+	fn default() -> Self {
+		Self::new(RoutingPolicy::default())
+	}
 }
 
 impl LlmRouter {
@@ -32,11 +41,20 @@ impl LlmRouter {
 			models: Vec::new(),
 			providers: HashMap::new(),
 			metrics: None,
+			resilience_policy: ProviderResiliencePolicy::default(),
 		}
 	}
 
 	pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
 		self.metrics = Some(metrics);
+		self
+	}
+
+	pub fn with_provider_resilience_policy(
+		mut self,
+		resilience_policy: ProviderResiliencePolicy,
+	) -> Self {
+		self.resilience_policy = resilience_policy;
 		self
 	}
 
@@ -48,8 +66,10 @@ impl LlmRouter {
 	where
 		P: LlmProvider + 'static,
 	{
-		self.providers
-			.insert(provider.provider_name().to_string(), Arc::new(provider));
+		self.providers.insert(
+			provider.provider_name().to_string(),
+			RegisteredProvider::new(provider),
+		);
 	}
 
 	pub fn generate(&self, request: &GenerationRequest) -> Result<LlmResponse, LlmAdapterError> {
@@ -74,13 +94,7 @@ impl LlmRouter {
 			}
 		};
 
-		let provider_response = provider
-			.complete(selected_model, request)
-			.map_err(|message| LlmAdapterError::ProviderCallFailed {
-				provider: selected_model.provider.clone(),
-				model_id: selected_model.model_id.clone(),
-				message,
-			});
+		let provider_response = self.complete_with_resilience(provider, selected_model, request);
 		let provider_response = match provider_response {
 			Ok(provider_response) => provider_response,
 			Err(error) => {
@@ -162,6 +176,66 @@ impl LlmRouter {
 		})
 	}
 
+	fn complete_with_resilience(
+		&self,
+		provider: &RegisteredProvider,
+		model: &ModelProfile,
+		request: &GenerationRequest,
+	) -> Result<ProviderResponse, LlmAdapterError> {
+		provider
+			.allow_call(&self.resilience_policy)
+			.map_err(|retry_after_ms| LlmAdapterError::CircuitOpen {
+				provider: model.provider.clone(),
+				retry_after_ms,
+			})?;
+
+		let total_attempts = usize::from(self.resilience_policy.max_retries).saturating_add(1);
+		for attempt_index in 0..total_attempts {
+			match provider.provider.complete(model, request) {
+				Ok(response) => {
+					provider.record_success();
+					return Ok(response);
+				}
+				Err(error) => {
+					let attempts_used = attempt_index.saturating_add(1);
+					let opened_circuit = provider.record_failure(&self.resilience_policy);
+					if !error.is_retryable() {
+						return Err(LlmAdapterError::ProviderCallFailed {
+							provider: model.provider.clone(),
+							model_id: model.model_id.clone(),
+							message: format!("{error} after {attempts_used} attempts"),
+						});
+					}
+					if opened_circuit || attempts_used >= total_attempts {
+						let failure_reason = if opened_circuit {
+							format!(
+								"{error} after {attempts_used} attempts; provider circuit opened"
+							)
+						} else {
+							format!("{error} after {attempts_used} attempts")
+						};
+						return Err(LlmAdapterError::ProviderCallFailed {
+							provider: model.provider.clone(),
+							model_id: model.model_id.clone(),
+							message: failure_reason,
+						});
+					}
+
+					let backoff_ms = backoff_for_attempt(attempt_index, &self.resilience_policy);
+					if backoff_ms > 0 {
+						thread::sleep(Duration::from_millis(backoff_ms));
+					}
+				}
+			}
+		}
+
+		Err(LlmAdapterError::ProviderCallFailed {
+			provider: model.provider.clone(),
+			model_id: model.model_id.clone(),
+			message: "provider call exhausted attempts".to_string(),
+		})
+	}
+
 	fn record_success(
 		&self,
 		model: &ModelProfile,
@@ -240,14 +314,130 @@ impl LlmRouter {
 	}
 }
 
+struct RegisteredProvider {
+	provider: Arc<dyn LlmProvider>,
+	state: Mutex<CircuitBreakerState>,
+}
+
+impl RegisteredProvider {
+	fn new<P>(provider: P) -> Self
+	where
+		P: LlmProvider + 'static,
+	{
+		Self {
+			provider: Arc::new(provider),
+			state: Mutex::new(CircuitBreakerState::Closed {
+				consecutive_failures: 0,
+			}),
+		}
+	}
+
+	fn allow_call(&self, policy: &ProviderResiliencePolicy) -> Result<(), u64> {
+		let mut state = self
+			.state
+			.lock()
+			.expect("provider circuit breaker state lock must not be poisoned");
+		let now = Instant::now();
+		match *state {
+			CircuitBreakerState::Closed { .. } => Ok(()),
+			CircuitBreakerState::HalfOpen => Err(0),
+			CircuitBreakerState::Open { retry_at } => {
+				if now >= retry_at {
+					*state = CircuitBreakerState::HalfOpen;
+					Ok(())
+				} else {
+					let retry_after_ms = retry_at
+						.saturating_duration_since(now)
+						.as_millis()
+						.try_into()
+						.unwrap_or(u64::MAX);
+					if policy.circuit_breaker_cooldown_ms == 0 {
+						*state = CircuitBreakerState::HalfOpen;
+						Ok(())
+					} else {
+						Err(retry_after_ms)
+					}
+				}
+			}
+		}
+	}
+
+	fn record_success(&self) {
+		let mut state = self
+			.state
+			.lock()
+			.expect("provider circuit breaker state lock must not be poisoned");
+		*state = CircuitBreakerState::Closed {
+			consecutive_failures: 0,
+		};
+	}
+
+	fn record_failure(&self, policy: &ProviderResiliencePolicy) -> bool {
+		if policy.circuit_breaker_failure_threshold == 0 {
+			return false;
+		}
+
+		let mut state = self
+			.state
+			.lock()
+			.expect("provider circuit breaker state lock must not be poisoned");
+		let now = Instant::now();
+		match *state {
+			CircuitBreakerState::HalfOpen => {
+				*state = CircuitBreakerState::Open {
+					retry_at: now + Duration::from_millis(policy.circuit_breaker_cooldown_ms),
+				};
+				true
+			}
+			CircuitBreakerState::Open { .. } => true,
+			CircuitBreakerState::Closed {
+				ref mut consecutive_failures,
+			} => {
+				*consecutive_failures = consecutive_failures.saturating_add(1);
+				if *consecutive_failures >= policy.circuit_breaker_failure_threshold {
+					*state = CircuitBreakerState::Open {
+						retry_at: now + Duration::from_millis(policy.circuit_breaker_cooldown_ms),
+					};
+					true
+				} else {
+					false
+				}
+			}
+		}
+	}
+}
+
+#[derive(Clone, Copy)]
+enum CircuitBreakerState {
+	Closed { consecutive_failures: u32 },
+	Open { retry_at: Instant },
+	HalfOpen,
+}
+
+fn backoff_for_attempt(attempt_index: usize, policy: &ProviderResiliencePolicy) -> u64 {
+	if policy.initial_backoff_ms == 0 {
+		return 0;
+	}
+
+	let multiplier = 2_u64.saturating_pow(u32::try_from(attempt_index).unwrap_or(u32::MAX));
+	policy
+		.initial_backoff_ms
+		.saturating_mul(multiplier)
+		.min(policy.max_backoff_ms)
+}
+
 #[cfg(test)]
 mod tests {
+	use std::collections::VecDeque;
 	use std::sync::Arc;
+	use std::sync::Mutex;
+	use std::sync::atomic::{AtomicUsize, Ordering};
 
 	use roku_observability::Metrics;
 
 	use crate::types::{
-		GenerationRequest, ModelProfile, ProviderResponse, RiskTier, RoutingPolicy,
+		GenerationRequest, ModelProfile, ProviderCallError, ProviderResiliencePolicy,
+		ProviderResponse, RiskTier, RoutingPolicy,
 	};
 
 	use super::*;
@@ -269,7 +459,7 @@ mod tests {
 			&self,
 			_model: &ModelProfile,
 			_request: &GenerationRequest,
-		) -> Result<ProviderResponse, String> {
+		) -> Result<ProviderResponse, ProviderCallError> {
 			Ok(ProviderResponse {
 				output: self.output.to_string(),
 				prompt_tokens: self.prompt_tokens,
@@ -328,6 +518,63 @@ mod tests {
 			route_priority: 90,
 		});
 		router
+	}
+
+	struct SequenceProvider {
+		name: &'static str,
+		responses: Mutex<VecDeque<Result<ProviderResponse, ProviderCallError>>>,
+		invocations: AtomicUsize,
+	}
+
+	impl SequenceProvider {
+		fn new(
+			name: &'static str,
+			responses: Vec<Result<ProviderResponse, ProviderCallError>>,
+		) -> Self {
+			Self {
+				name,
+				responses: Mutex::new(responses.into()),
+				invocations: AtomicUsize::new(0),
+			}
+		}
+
+		fn invocations(&self) -> usize {
+			self.invocations.load(Ordering::SeqCst)
+		}
+	}
+
+	impl LlmProvider for Arc<SequenceProvider> {
+		fn provider_name(&self) -> &'static str {
+			self.name
+		}
+
+		fn complete(
+			&self,
+			_model: &ModelProfile,
+			_request: &GenerationRequest,
+		) -> Result<ProviderResponse, ProviderCallError> {
+			self.invocations.fetch_add(1, Ordering::SeqCst);
+			self.responses
+				.lock()
+				.expect("sequence provider responses lock must not be poisoned")
+				.pop_front()
+				.unwrap_or_else(|| {
+					Err(ProviderCallError::non_retryable(
+						"no more responses configured",
+					))
+				})
+		}
+	}
+
+	fn model_profile(provider: &str) -> ModelProfile {
+		ModelProfile {
+			model_id: format!("{provider}-model"),
+			provider: provider.to_string(),
+			max_context_tokens: 8_000,
+			cost_per_1k_tokens_usd: 0.01,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		}
 	}
 
 	#[test]
@@ -451,5 +698,143 @@ mod tests {
 		assert_eq!(snapshot.llm_failures_total, 1);
 		assert_eq!(snapshot.llm_routing_failures_total, 1);
 		assert!(metrics.llm_provider_metrics().is_empty());
+	}
+
+	#[test]
+	fn router_retries_retryable_provider_errors_before_succeeding() {
+		let provider = Arc::new(SequenceProvider::new(
+			"retrying-provider",
+			vec![
+				Err(ProviderCallError::retryable("transient upstream failure")),
+				Ok(ProviderResponse {
+					output: "recovered".to_string(),
+					prompt_tokens: 40,
+					output_tokens: 12,
+					latency_ms: 80,
+				}),
+			],
+		));
+		let mut router = LlmRouter::new(RoutingPolicy::default()).with_provider_resilience_policy(
+			ProviderResiliencePolicy {
+				max_retries: 2,
+				initial_backoff_ms: 0,
+				max_backoff_ms: 0,
+				circuit_breaker_failure_threshold: 4,
+				circuit_breaker_cooldown_ms: 0,
+			},
+		);
+		router.register_provider(Arc::clone(&provider));
+		router.register_model(model_profile("retrying-provider"));
+
+		let response = router
+			.generate(&sample_request(RiskTier::Low))
+			.expect("request should recover after retry");
+		assert_eq!(response.output, "recovered");
+		assert_eq!(provider.invocations(), 2);
+	}
+
+	#[test]
+	fn router_does_not_retry_non_retryable_provider_errors() {
+		let provider = Arc::new(SequenceProvider::new(
+			"non-retrying-provider",
+			vec![Err(ProviderCallError::non_retryable(
+				"invalid request payload",
+			))],
+		));
+		let mut router = LlmRouter::new(RoutingPolicy::default()).with_provider_resilience_policy(
+			ProviderResiliencePolicy {
+				max_retries: 2,
+				initial_backoff_ms: 0,
+				max_backoff_ms: 0,
+				circuit_breaker_failure_threshold: 4,
+				circuit_breaker_cooldown_ms: 0,
+			},
+		);
+		router.register_provider(Arc::clone(&provider));
+		router.register_model(model_profile("non-retrying-provider"));
+
+		let error = router
+			.generate(&sample_request(RiskTier::Low))
+			.expect_err("request should fail immediately");
+		assert!(matches!(error, LlmAdapterError::ProviderCallFailed { .. }));
+		assert_eq!(provider.invocations(), 1);
+	}
+
+	#[test]
+	fn router_opens_circuit_after_threshold_and_short_circuits_subsequent_calls() {
+		let provider = Arc::new(SequenceProvider::new(
+			"breaker-provider",
+			vec![
+				Err(ProviderCallError::retryable("temporary overload")),
+				Err(ProviderCallError::retryable("temporary overload")),
+			],
+		));
+		let mut router = LlmRouter::new(RoutingPolicy::default()).with_provider_resilience_policy(
+			ProviderResiliencePolicy {
+				max_retries: 0,
+				initial_backoff_ms: 0,
+				max_backoff_ms: 0,
+				circuit_breaker_failure_threshold: 2,
+				circuit_breaker_cooldown_ms: 60_000,
+			},
+		);
+		router.register_provider(Arc::clone(&provider));
+		router.register_model(model_profile("breaker-provider"));
+
+		router
+			.generate(&sample_request(RiskTier::Low))
+			.expect_err("first request should fail");
+		let second_error = router
+			.generate(&sample_request(RiskTier::Low))
+			.expect_err("second request should open the circuit");
+		assert!(matches!(
+			second_error,
+			LlmAdapterError::ProviderCallFailed { .. }
+		));
+
+		let third_error = router
+			.generate(&sample_request(RiskTier::Low))
+			.expect_err("third request should be short-circuited");
+		assert!(matches!(
+			third_error,
+			LlmAdapterError::CircuitOpen { provider, .. } if provider == "breaker-provider"
+		));
+		assert_eq!(provider.invocations(), 2);
+	}
+
+	#[test]
+	fn router_allows_probe_after_circuit_cooldown_and_closes_on_success() {
+		let provider = Arc::new(SequenceProvider::new(
+			"recovering-provider",
+			vec![
+				Err(ProviderCallError::retryable("temporary overload")),
+				Ok(ProviderResponse {
+					output: "healthy-again".to_string(),
+					prompt_tokens: 30,
+					output_tokens: 10,
+					latency_ms: 60,
+				}),
+			],
+		));
+		let mut router = LlmRouter::new(RoutingPolicy::default()).with_provider_resilience_policy(
+			ProviderResiliencePolicy {
+				max_retries: 0,
+				initial_backoff_ms: 0,
+				max_backoff_ms: 0,
+				circuit_breaker_failure_threshold: 1,
+				circuit_breaker_cooldown_ms: 0,
+			},
+		);
+		router.register_provider(Arc::clone(&provider));
+		router.register_model(model_profile("recovering-provider"));
+
+		router
+			.generate(&sample_request(RiskTier::Low))
+			.expect_err("first request should open the circuit");
+		let response = router
+			.generate(&sample_request(RiskTier::Low))
+			.expect("second request should probe and close the circuit");
+		assert_eq!(response.output, "healthy-again");
+		assert_eq!(provider.invocations(), 2);
 	}
 }
