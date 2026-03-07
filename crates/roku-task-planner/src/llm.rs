@@ -26,6 +26,10 @@ impl LlmTaskPlanner {
 		let response = self
 			.router
 			.generate(&GenerationRequest {
+				system_prompt: Some(
+					"You are Roku's planning engine. Return only valid JSON that matches the requested schema."
+						.to_string(),
+				),
 				prompt,
 				expected_output_tokens: 900,
 				risk_tier: planning_risk_tier(decision.mode),

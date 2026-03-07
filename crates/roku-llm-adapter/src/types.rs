@@ -27,7 +27,7 @@ impl ModelProfile {
 			return false;
 		}
 
-		let estimated_prompt_tokens = estimate_prompt_tokens(&request.prompt);
+		let estimated_prompt_tokens = estimate_request_input_tokens(request);
 		let estimated_total_tokens =
 			estimated_prompt_tokens.saturating_add(request.expected_output_tokens);
 		if estimated_total_tokens > self.max_context_tokens {
@@ -62,6 +62,7 @@ impl Default for RoutingPolicy {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenerationRequest {
+	pub system_prompt: Option<String>,
 	pub prompt: String,
 	pub expected_output_tokens: u64,
 	pub risk_tier: RiskTier,
@@ -115,6 +116,15 @@ pub(crate) fn estimate_prompt_tokens(prompt: &str) -> u64 {
 	u64::try_from(prompt.split_whitespace().count())
 		.unwrap_or(u64::MAX)
 		.max(1)
+}
+
+pub(crate) fn estimate_request_input_tokens(request: &GenerationRequest) -> u64 {
+	request
+		.system_prompt
+		.as_deref()
+		.map(estimate_prompt_tokens)
+		.unwrap_or(0)
+		.saturating_add(estimate_prompt_tokens(&request.prompt))
 }
 
 pub(crate) fn estimate_cost_usd(tokens: u64, cost_per_1k_tokens_usd: f64) -> f64 {

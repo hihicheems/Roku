@@ -5,7 +5,8 @@ use std::time::Instant;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use roku_observability::Metrics;
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::Value;
 use thiserror::Error;
 
 use crate::router::{LlmProvider, LlmRouter};
@@ -16,12 +17,14 @@ use crate::types::{
 
 const OPENROUTER_PROVIDER: &str = "openrouter";
 const DEFAULT_OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
+const DEFAULT_OPENROUTER_PRIMARY_MODEL: &str = "step-3.5-flash:free";
+const DEFAULT_OPENROUTER_FALLBACK_MODELS: [&str; 2] = ["deepseek-chat", "gemini-2.0-flash"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenRouterConfig {
 	pub api_key: String,
-	pub model: Option<String>,
+	pub primary_model: String,
+	pub fallback_models: Vec<String>,
 	pub app_name: Option<String>,
 	pub site_url: Option<String>,
 	pub base_url: String,
@@ -34,10 +37,20 @@ pub struct OpenRouterConfig {
 impl OpenRouterConfig {
 	pub fn from_env() -> Result<Self, OpenRouterBootstrapError> {
 		let api_key = env_var_required("OPENROUTER_API_KEY")?;
-		let model = env::var("OPENROUTER_MODEL")
+		let primary_model = env::var("OPENROUTER_PRIMARY_MODEL")
 			.ok()
 			.filter(|value| !value.trim().is_empty())
-			.or_else(|| Some(DEFAULT_OPENROUTER_MODEL.to_string()));
+			.or_else(|| {
+				env::var("OPENROUTER_MODEL")
+					.ok()
+					.filter(|value| !value.trim().is_empty())
+			})
+			.unwrap_or_else(|| DEFAULT_OPENROUTER_PRIMARY_MODEL.to_string());
+		let fallback_models = env::var("OPENROUTER_FALLBACK_MODELS")
+			.ok()
+			.map(|value| parse_model_list(&value))
+			.filter(|models| !models.is_empty())
+			.unwrap_or_else(default_fallback_models);
 		let app_name = env::var("OPENROUTER_APP_NAME")
 			.ok()
 			.filter(|value| !value.trim().is_empty());
@@ -54,9 +67,13 @@ impl OpenRouterConfig {
 		let max_request_cost_usd = env_var_f64("OPENROUTER_MAX_REQUEST_COST_USD")?.unwrap_or(1.0);
 		let max_latency_ms = env_var_u64("OPENROUTER_MAX_LATENCY_MS")?.unwrap_or(60_000);
 
+		let primary_model = normalize_model_id(&primary_model);
+		let fallback_models = dedupe_model_chain(&primary_model, fallback_models);
+
 		Ok(Self {
 			api_key,
-			model,
+			primary_model,
+			fallback_models,
 			app_name,
 			site_url,
 			base_url,
@@ -67,10 +84,21 @@ impl OpenRouterConfig {
 		})
 	}
 
-	fn model_id(&self) -> String {
-		self.model
-			.clone()
-			.unwrap_or_else(|| DEFAULT_OPENROUTER_MODEL.to_string())
+	fn request_fallback_chain(&self, selected_model: &str) -> Vec<String> {
+		let mut ordered_models = Vec::with_capacity(self.fallback_models.len().saturating_add(1));
+		ordered_models.push(self.primary_model.clone());
+		ordered_models.extend(self.fallback_models.iter().cloned());
+
+		let start_index = ordered_models
+			.iter()
+			.position(|model| model == selected_model)
+			.map(|index| index.saturating_add(1))
+			.unwrap_or_default();
+
+		dedupe_model_chain(
+			selected_model,
+			ordered_models.into_iter().skip(start_index).collect(),
+		)
 	}
 }
 
@@ -106,7 +134,7 @@ impl LlmProvider for OpenRouterProvider {
 		model: &ModelProfile,
 		request: &GenerationRequest,
 	) -> Result<ProviderResponse, String> {
-		let body = build_request_body(model, request);
+		let body = build_request_body(&self.config, model, request);
 		let mut headers = HeaderMap::new();
 		headers.insert(
 			reqwest::header::AUTHORIZATION,
@@ -126,9 +154,9 @@ impl LlmProvider for OpenRouterProvider {
 		}
 		if let Some(app_name) = &self.config.app_name {
 			headers.insert(
-				HeaderName::from_static("x-title"),
+				HeaderName::from_static("x-openrouter-title"),
 				HeaderValue::from_str(app_name)
-					.map_err(|error| format!("invalid X-Title header: {error}"))?,
+					.map_err(|error| format!("invalid X-OpenRouter-Title header: {error}"))?,
 			);
 		}
 
@@ -167,10 +195,12 @@ impl LlmProvider for OpenRouterProvider {
 			);
 		})?;
 		let latency_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+		let served_model = parsed.served_model_id.as_deref().unwrap_or(&model.model_id);
 		eprintln!(
-			"[openrouter] provider={} model={} status=ok latency_ms={} prompt_tokens={} output_tokens={}",
+			"[openrouter] provider={} requested_model={} served_model={} status=ok latency_ms={} prompt_tokens={} output_tokens={}",
 			OPENROUTER_PROVIDER,
 			model.model_id,
+			served_model,
 			latency_ms,
 			parsed.prompt_tokens,
 			parsed.output_tokens,
@@ -201,7 +231,7 @@ pub fn build_openrouter_router_with_metrics(
 	.with_metrics(metrics);
 	router.register_provider(OpenRouterProvider::new(config.clone())?);
 	router.register_model(ModelProfile {
-		model_id: config.model_id(),
+		model_id: config.primary_model.clone(),
 		provider: OPENROUTER_PROVIDER.to_string(),
 		max_context_tokens: config.max_context_tokens,
 		cost_per_1k_tokens_usd: config.cost_per_1k_tokens_usd,
@@ -211,23 +241,36 @@ pub fn build_openrouter_router_with_metrics(
 	Ok(router)
 }
 
-fn build_request_body(model: &ModelProfile, request: &GenerationRequest) -> Value {
-	json!({
-		"model": model.model_id,
-		"messages": [
-			{
-				"role": "user",
-				"content": request.prompt,
-			}
-		],
-		"max_tokens": request.expected_output_tokens,
-	})
+fn build_request_body<'a>(
+	config: &'a OpenRouterConfig,
+	model: &'a ModelProfile,
+	request: &'a GenerationRequest,
+) -> OpenAiChatCompletionRequest<'a> {
+	let mut messages = Vec::with_capacity(2);
+	if let Some(system_prompt) = request.system_prompt.as_deref() {
+		messages.push(OpenAiChatCompletionMessage {
+			role: "system",
+			content: system_prompt,
+		});
+	}
+	messages.push(OpenAiChatCompletionMessage {
+		role: "user",
+		content: &request.prompt,
+	});
+
+	OpenAiChatCompletionRequest {
+		model: &model.model_id,
+		models: config.request_fallback_chain(&model.model_id),
+		messages,
+		max_tokens: request.expected_output_tokens,
+	}
 }
 
 struct ParsedOpenRouterResponse {
 	output: String,
 	prompt_tokens: u64,
 	output_tokens: u64,
+	served_model_id: Option<String>,
 }
 
 fn parse_response(response_body: &str) -> Result<ParsedOpenRouterResponse, String> {
@@ -256,12 +299,32 @@ fn parse_response(response_body: &str) -> Result<ParsedOpenRouterResponse, Strin
 		.and_then(|usage| usage.get("completion_tokens"))
 		.and_then(Value::as_u64)
 		.unwrap_or_else(|| estimate_prompt_tokens(&output));
+	let served_model_id = response
+		.get("model")
+		.and_then(Value::as_str)
+		.map(str::to_string);
 
 	Ok(ParsedOpenRouterResponse {
 		output,
 		prompt_tokens,
 		output_tokens,
+		served_model_id,
 	})
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiChatCompletionRequest<'a> {
+	model: &'a str,
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	models: Vec<String>,
+	messages: Vec<OpenAiChatCompletionMessage<'a>>,
+	max_tokens: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiChatCompletionMessage<'a> {
+	role: &'static str,
+	content: &'a str,
 }
 
 fn extract_content_text(content: &Value) -> Option<String> {
@@ -302,6 +365,43 @@ fn truncate_for_log(value: &str, max_chars: usize) -> String {
 		format!("{truncated}...")
 	} else {
 		truncated
+	}
+}
+
+fn default_fallback_models() -> Vec<String> {
+	DEFAULT_OPENROUTER_FALLBACK_MODELS
+		.iter()
+		.map(|model| normalize_model_id(model))
+		.collect()
+}
+
+fn parse_model_list(value: &str) -> Vec<String> {
+	value
+		.split(',')
+		.map(str::trim)
+		.filter(|model| !model.is_empty())
+		.map(normalize_model_id)
+		.collect()
+}
+
+fn dedupe_model_chain(primary_model: &str, candidates: Vec<String>) -> Vec<String> {
+	let mut deduped = Vec::new();
+	for candidate in candidates {
+		if candidate == primary_model || deduped.iter().any(|model| model == &candidate) {
+			continue;
+		}
+		deduped.push(candidate);
+	}
+	deduped
+}
+
+fn normalize_model_id(model_id: &str) -> String {
+	match model_id.trim() {
+		"step-3.5-flash" => "stepfun/step-3.5-flash".to_string(),
+		"step-3.5-flash:free" => "stepfun/step-3.5-flash:free".to_string(),
+		"deepseek-chat" => "deepseek/deepseek-chat".to_string(),
+		"gemini-2.0-flash" => "google/gemini-2.0-flash-001".to_string(),
+		other => other.to_string(),
 	}
 }
 
@@ -353,12 +453,15 @@ fn env_var_f64(key: &'static str) -> Result<Option<f64>, OpenRouterBootstrapErro
 
 #[cfg(test)]
 mod tests {
+	use serde_json::json;
+
 	use crate::types::{GenerationRequest, RiskTier};
 
 	use super::*;
 
 	fn sample_request() -> GenerationRequest {
 		GenerationRequest {
+			system_prompt: None,
 			prompt: "reply with a short greeting".to_string(),
 			expected_output_tokens: 64,
 			risk_tier: RiskTier::Low,
@@ -369,10 +472,23 @@ mod tests {
 	}
 
 	#[test]
-	fn request_body_uses_free_router_by_default() {
-		let body = build_request_body(
+	fn request_body_uses_primary_model_and_fallback_chain_by_default() {
+		let config = OpenRouterConfig {
+			api_key: "test-key".to_string(),
+			primary_model: normalize_model_id(DEFAULT_OPENROUTER_PRIMARY_MODEL),
+			fallback_models: default_fallback_models(),
+			app_name: None,
+			site_url: None,
+			base_url: DEFAULT_OPENROUTER_URL.to_string(),
+			max_context_tokens: 128_000,
+			cost_per_1k_tokens_usd: 0.0,
+			max_request_cost_usd: 1.0,
+			max_latency_ms: 60_000,
+		};
+		let body = serde_json::to_value(build_request_body(
+			&config,
 			&ModelProfile {
-				model_id: DEFAULT_OPENROUTER_MODEL.to_string(),
+				model_id: config.primary_model.clone(),
 				provider: "openrouter".to_string(),
 				max_context_tokens: 128_000,
 				cost_per_1k_tokens_usd: 0.0,
@@ -380,10 +496,54 @@ mod tests {
 				route_priority: 100,
 			},
 			&sample_request(),
-		);
+		))
+		.expect("request body should serialize");
 
-		assert_eq!(body["model"], "openrouter/free");
+		assert_eq!(body["model"], "stepfun/step-3.5-flash:free");
+		assert_eq!(
+			body["models"],
+			json!(vec![
+				"deepseek/deepseek-chat",
+				"google/gemini-2.0-flash-001"
+			]),
+		);
 		assert_eq!(body["messages"][0]["role"], "user");
+	}
+
+	#[test]
+	fn request_body_includes_system_message_when_present() {
+		let config = OpenRouterConfig {
+			api_key: "test-key".to_string(),
+			primary_model: normalize_model_id(DEFAULT_OPENROUTER_PRIMARY_MODEL),
+			fallback_models: default_fallback_models(),
+			app_name: None,
+			site_url: None,
+			base_url: DEFAULT_OPENROUTER_URL.to_string(),
+			max_context_tokens: 128_000,
+			cost_per_1k_tokens_usd: 0.0,
+			max_request_cost_usd: 1.0,
+			max_latency_ms: 60_000,
+		};
+		let body = serde_json::to_value(build_request_body(
+			&config,
+			&ModelProfile {
+				model_id: config.primary_model.clone(),
+				provider: "openrouter".to_string(),
+				max_context_tokens: 128_000,
+				cost_per_1k_tokens_usd: 0.0,
+				max_risk_tier: RiskTier::Critical,
+				route_priority: 100,
+			},
+			&GenerationRequest {
+				system_prompt: Some("You are Roku.".to_string()),
+				..sample_request()
+			},
+		))
+		.expect("request body should serialize");
+
+		assert_eq!(body["messages"][0]["role"], "system");
+		assert_eq!(body["messages"][0]["content"], "You are Roku.");
+		assert_eq!(body["messages"][1]["role"], "user");
 	}
 
 	#[test]
@@ -435,6 +595,7 @@ mod tests {
 	fn parse_response_falls_back_to_reasoning_when_content_is_null() {
 		let parsed = parse_response(
 			r#"{
+				"model":"deepseek/deepseek-chat",
 				"choices":[{"message":{"role":"assistant","content":null,"reasoning":"hello from reasoning"}}],
 				"usage":{"prompt_tokens":9,"completion_tokens":3}
 			}"#,
@@ -444,5 +605,25 @@ mod tests {
 		assert_eq!(parsed.output, "hello from reasoning");
 		assert_eq!(parsed.prompt_tokens, 9);
 		assert_eq!(parsed.output_tokens, 3);
+		assert_eq!(
+			parsed.served_model_id.as_deref(),
+			Some("deepseek/deepseek-chat")
+		);
+	}
+
+	#[test]
+	fn normalize_model_id_maps_supported_aliases() {
+		assert_eq!(
+			normalize_model_id("step-3.5-flash:free"),
+			"stepfun/step-3.5-flash:free",
+		);
+		assert_eq!(
+			normalize_model_id("deepseek-chat"),
+			"deepseek/deepseek-chat"
+		);
+		assert_eq!(
+			normalize_model_id("gemini-2.0-flash"),
+			"google/gemini-2.0-flash-001",
+		);
 	}
 }

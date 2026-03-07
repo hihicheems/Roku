@@ -281,6 +281,7 @@ mod tests {
 
 	fn sample_request(risk_tier: RiskTier) -> GenerationRequest {
 		GenerationRequest {
+			system_prompt: None,
 			prompt: "summarize project risks".to_string(),
 			expected_output_tokens: 300,
 			risk_tier,
