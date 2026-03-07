@@ -1291,6 +1291,7 @@ dependencies = [
  "roku-common-types",
  "roku-connectors-telegram",
  "roku-llm-adapter",
+ "roku-observability",
  "roku-runtime-service",
  "thiserror",
 ]
@@ -1358,6 +1359,7 @@ name = "roku-llm-adapter"
 version = "0.1.0"
 dependencies = [
  "reqwest",
+ "roku-observability",
  "serde",
  "serde_json",
  "thiserror",

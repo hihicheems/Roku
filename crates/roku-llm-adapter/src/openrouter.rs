@@ -1,8 +1,10 @@
 use std::env;
+use std::sync::Arc;
 use std::time::Instant;
 
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use roku_observability::Metrics;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -163,10 +165,18 @@ impl LlmProvider for OpenRouterProvider {
 pub fn build_openrouter_router(
 	config: OpenRouterConfig,
 ) -> Result<LlmRouter, OpenRouterBootstrapError> {
+	build_openrouter_router_with_metrics(config, Arc::new(Metrics::default()))
+}
+
+pub fn build_openrouter_router_with_metrics(
+	config: OpenRouterConfig,
+	metrics: Arc<Metrics>,
+) -> Result<LlmRouter, OpenRouterBootstrapError> {
 	let mut router = LlmRouter::new(RoutingPolicy {
 		max_request_cost_usd: config.max_request_cost_usd,
 		max_latency_ms: config.max_latency_ms,
-	});
+	})
+	.with_metrics(metrics);
 	router.register_provider(OpenRouterProvider::new(config.clone())?);
 	router.register_model(ModelProfile {
 		model_id: config.model_id(),

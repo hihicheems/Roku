@@ -1,7 +1,10 @@
+use std::sync::Arc;
+
 use roku_agent_runtime::GenericAgentRuntime;
 use roku_api_gateway::{Gateway, RawRequest};
 use roku_common_types::{ResponseEnvelope, RuntimeError};
-use roku_llm_adapter::{OpenRouterConfig, build_openrouter_router};
+use roku_llm_adapter::{OpenRouterConfig, build_openrouter_router_with_metrics};
+use roku_observability::Metrics;
 pub use roku_runtime_service::RunMode;
 use roku_runtime_service::RuntimeService;
 
@@ -40,7 +43,10 @@ pub fn run_live_once_from_env(goal: &str) -> Result<ResponseEnvelope, CommandErr
 
 pub(crate) fn build_live_runtime_service_from_env() -> Result<RuntimeService, CommandError> {
 	let config = OpenRouterConfig::from_env()?;
-	let router = build_openrouter_router(config)?;
+	let metrics = Arc::new(Metrics::default());
+	let router = build_openrouter_router_with_metrics(config, metrics.clone())?;
 	let runtime = GenericAgentRuntime::with_llm_router(router);
-	Ok(RuntimeService::in_memory_with_agent_runtime(runtime))
+	Ok(RuntimeService::in_memory_with_agent_runtime_and_metrics(
+		runtime, metrics,
+	))
 }

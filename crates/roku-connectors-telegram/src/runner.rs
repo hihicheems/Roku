@@ -79,7 +79,7 @@ impl TelegramPollingRunner {
 					.map(|message| message.chat.id)
 			});
 
-		match self.connector.into_interaction(update) {
+		match self.connector.interaction_from_update(update) {
 			Ok(TelegramInteraction::Request { chat_id, request }) => {
 				self.dispatch_response(chat_id, handler.handle_request(request))
 			}

@@ -143,7 +143,7 @@
 | LLM-04 | 对高风险请求优先选择更强模型，对低风险请求优先低成本模型 | §7.4 / §22 风险缓解 | DONE |
 | LLM-05 | 对 provider 响应做 latency 与预算二次守卫 | §5 非功能基线 / §14 | DONE |
 | LLM-06 | 增加 provider 级 retry / backoff / circuit breaker | §22 风险与缓解 | TODO |
-| LLM-07 | 将 provider 选择、token / cost 消耗输出到 observability | §16 指标 | TODO |
+| LLM-07 | 将 provider 选择、token / cost 消耗输出到 observability | §16 指标 | DONE |
 | LLM-08 | 将 adapter 真正接入 planning / runtime / coding provider 选择链路 | §4.1 / §7.5 | TODO |
 | LLM-09 | 增加 deterministic request key / prompt cache / replay 支持 | §20 回归测试 / replay | TODO |
 | LLM-10 | 增加 OpenRouter provider、环境变量装配和默认 free router 模型 | §4.1 / §19 llm-adapter | DONE |
