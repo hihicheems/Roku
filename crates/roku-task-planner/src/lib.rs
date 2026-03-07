@@ -18,12 +18,14 @@ impl TaskPlanner for SimpleTaskPlanner {
 			summary: format!("Understand request using {:?}", mode),
 			required_capabilities: vec!["information.read".to_string()],
 			requires_approval: false,
+			depends_on: Vec::new(),
 		});
 		steps.push(PlanStep {
 			step_id: "step-2".to_string(),
 			summary: "Execute primary action".to_string(),
 			required_capabilities: vec!["tool.invoke".to_string()],
 			requires_approval: false,
+			depends_on: vec!["step-1".to_string()],
 		});
 
 		PlanOutline {

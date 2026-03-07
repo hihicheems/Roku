@@ -108,6 +108,8 @@ pub struct PlanStep {
 	pub summary: String,
 	pub required_capabilities: Vec<String>,
 	pub requires_approval: bool,
+	#[serde(default)]
+	pub depends_on: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
