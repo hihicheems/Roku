@@ -32,32 +32,56 @@ pub struct TelegramInlineKeyboardButton {
 
 impl TelegramOutboundMessage {
 	pub fn from_response(chat_id: i64, response: &ResponseEnvelope) -> Self {
+		let attachments = classify_attachments(response);
 		let mut lines = vec![
-			format!("Status: {}", status_label(response.status)),
-			format!("Request: {}", response.request_id.0),
-			format!("Message: {}", response.message),
+			format!(
+				"*Status:* {}",
+				escape_markdown_v2(status_label(response.status))
+			),
+			format!("*Request:* {}", escape_markdown_v2(&response.request_id.0)),
+			format!("*Message:* {}", escape_markdown_v2(&response.message)),
 		];
-		let approval_id = approval_id_from_response(response);
-		if let Some(approval_id) = approval_id.as_ref() {
-			lines.push(format!("Approval: {}", approval_id.0));
-			lines.push("Action: choose Approve or Reject below.".to_string());
+		if let Some(approval_id) = attachments.approval_id.as_ref() {
+			lines.push(format!(
+				"*Approval:* {}",
+				escape_markdown_v2(&approval_id.0)
+			));
+			lines.push("_Choose Approve or Reject below\\._".to_string());
 		}
-		if !response.artifacts.is_empty() {
-			lines.push("Artifacts:".to_string());
+		if !attachments.artifacts.is_empty() {
+			lines.push("*Artifacts:*".to_string());
 			lines.extend(
-				response
+				attachments
 					.artifacts
 					.iter()
-					.map(|artifact| format!("- {}", artifact)),
+					.map(|artifact| attachment_line("artifact", artifact)),
+			);
+		}
+		if !attachments.experiments.is_empty() {
+			lines.push("*Experiments:*".to_string());
+			lines.extend(
+				attachments
+					.experiments
+					.iter()
+					.map(|experiment| attachment_line("experiment", experiment)),
+			);
+		}
+		if !attachments.references.is_empty() {
+			lines.push("*References:*".to_string());
+			lines.extend(
+				attachments
+					.references
+					.iter()
+					.map(|reference| attachment_line("reference", reference)),
 			);
 		}
 
 		Self {
 			chat_id,
 			text: lines.join("\n"),
-			parse_mode: TelegramParseMode::PlainText,
+			parse_mode: TelegramParseMode::MarkdownV2,
 			disable_web_page_preview: true,
-			reply_markup: approval_id.map(|approval_id| approval_markup(&approval_id)),
+			reply_markup: attachments.approval_id.as_ref().map(approval_markup),
 		}
 	}
 
@@ -85,6 +109,53 @@ fn approval_id_from_response(response: &ResponseEnvelope) -> Option<ApprovalId> 
 		.map(|approval_id| ApprovalId(approval_id.to_string()))
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ResponseAttachments {
+	approval_id: Option<ApprovalId>,
+	artifacts: Vec<String>,
+	experiments: Vec<String>,
+	references: Vec<String>,
+}
+
+fn classify_attachments(response: &ResponseEnvelope) -> ResponseAttachments {
+	let approval_id = approval_id_from_response(response);
+	let mut attachments = ResponseAttachments {
+		approval_id,
+		artifacts: Vec::new(),
+		experiments: Vec::new(),
+		references: Vec::new(),
+	};
+	for artifact in &response.artifacts {
+		if artifact.starts_with("approval://") {
+			continue;
+		}
+		if artifact.starts_with("artifact://") {
+			attachments.artifacts.push(artifact.clone());
+			continue;
+		}
+		if artifact.starts_with("experiment://") {
+			attachments.experiments.push(artifact.clone());
+			continue;
+		}
+		attachments.references.push(artifact.clone());
+	}
+
+	attachments
+}
+
+fn attachment_line(kind: &str, value: &str) -> String {
+	let label = display_label(value);
+	format!(
+		"• *{}* {}",
+		escape_markdown_v2(kind),
+		escape_markdown_v2(&format!("{label} ({value})")),
+	)
+}
+
+fn display_label(value: &str) -> String {
+	value.rsplit('/').next().unwrap_or(value).to_string()
+}
+
 fn approval_markup(approval_id: &ApprovalId) -> TelegramReplyMarkup {
 	TelegramReplyMarkup {
 		inline_keyboard: vec![vec![
@@ -98,6 +169,21 @@ fn approval_markup(approval_id: &ApprovalId) -> TelegramReplyMarkup {
 			},
 		]],
 	}
+}
+
+fn escape_markdown_v2(value: &str) -> String {
+	let mut escaped = String::with_capacity(value.len());
+	for ch in value.chars() {
+		match ch {
+			'_' | '*' | '[' | ']' | '(' | ')' | '~' | '`' | '>' | '#' | '+' | '-' | '=' | '|'
+			| '{' | '}' | '.' | '!' | '\\' => {
+				escaped.push('\\');
+				escaped.push(ch);
+			}
+			_ => escaped.push(ch),
+		}
+	}
+	escaped
 }
 
 fn status_label(status: ResponseStatus) -> &'static str {
@@ -127,9 +213,10 @@ mod tests {
 		);
 
 		assert_eq!(message.chat_id, 1001);
-		assert!(message.text.contains("Status: succeeded"));
-		assert!(message.text.contains("artifact://task/result"));
-		assert_eq!(message.parse_mode, TelegramParseMode::PlainText);
+		assert!(message.text.contains("*Status:* succeeded"));
+		assert!(message.text.contains("*Artifacts:*"));
+		assert!(message.text.contains("result \\(artifact://task/result\\)"));
+		assert_eq!(message.parse_mode, TelegramParseMode::MarkdownV2);
 		assert!(message.reply_markup.is_none());
 	}
 
@@ -145,7 +232,7 @@ mod tests {
 			},
 		);
 
-		assert!(message.text.contains("Approval: approval-42"));
+		assert!(message.text.contains("*Approval:* approval\\-42"));
 		let markup = message
 			.reply_markup
 			.expect("pending approval should render inline keyboard");
@@ -169,5 +256,26 @@ mod tests {
 		assert!(message.text.contains("runtime exploded"));
 		assert_eq!(message.parse_mode, TelegramParseMode::PlainText);
 		assert!(message.reply_markup.is_none());
+	}
+
+	#[test]
+	fn outbound_message_groups_experiments_and_references() {
+		let message = TelegramOutboundMessage::from_response(
+			1001,
+			&ResponseEnvelope {
+				request_id: RequestId("req-2".to_string()),
+				status: ResponseStatus::Succeeded,
+				message: "experiment completed".to_string(),
+				artifacts: vec![
+					"experiment://run-7".to_string(),
+					"https://example.com/report".to_string(),
+				],
+			},
+		);
+
+		assert!(message.text.contains("*Experiments:*"));
+		assert!(message.text.contains("run\\-7 \\(experiment://run\\-7\\)"));
+		assert!(message.text.contains("*References:*"));
+		assert!(message.text.contains("https://example\\.com/report"));
 	}
 }
