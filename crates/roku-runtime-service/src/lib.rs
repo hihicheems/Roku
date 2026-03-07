@@ -27,7 +27,7 @@ use roku_state_store::{
 	ApprovalRepository, EventRepository, InMemoryApprovalRepository, InMemoryEventRepository,
 	InMemoryResultRepository, InMemoryTaskRepository, ResultRepository, TaskRepository,
 };
-use roku_task_planner::{SimpleTaskPlanner, TaskPlanner};
+use roku_task_planner::{AdaptiveTaskPlanner, TaskPlanner};
 use roku_validation_plane::ValidationPipeline;
 
 use crate::helpers::{approval_artifact, failure_message, ticket_status_label};
@@ -55,7 +55,7 @@ struct RuntimeState {
 pub struct RuntimeService {
 	orchestrator: Orchestrator,
 	planning_engine: DefaultPlanningEngine,
-	planner: SimpleTaskPlanner,
+	planner: AdaptiveTaskPlanner,
 	builder: ExecutionGraphBuilder,
 	factory: AgentInstanceFactory,
 	runtime: GenericAgentRuntime,
@@ -96,7 +96,7 @@ impl RuntimeService {
 		Self {
 			orchestrator: Orchestrator::default(),
 			planning_engine: DefaultPlanningEngine,
-			planner: SimpleTaskPlanner,
+			planner: AdaptiveTaskPlanner,
 			builder: ExecutionGraphBuilder,
 			factory: AgentInstanceFactory::default(),
 			runtime: GenericAgentRuntime::default(),

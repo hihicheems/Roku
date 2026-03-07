@@ -26,10 +26,10 @@ pub struct ModelProfile {
 
 impl ModelProfile {
 	fn supports(&self, request: &GenerationRequest) -> bool {
-		if let Some(preferred_provider) = &request.preferred_provider {
-			if preferred_provider != &self.provider {
-				return false;
-			}
+		if let Some(preferred_provider) = &request.preferred_provider
+			&& preferred_provider != &self.provider
+		{
+			return false;
 		}
 
 		let estimated_prompt_tokens = estimate_prompt_tokens(&request.prompt);
