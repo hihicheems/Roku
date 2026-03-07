@@ -178,3 +178,44 @@
 1. Introduce dependency-aware node scheduling and checkpoint recovery beyond linear graphs.
 2. Add `StorageBackend`-style production adapters for PostgreSQL task/event state and Redis/NATS dispatch.
 3. Start implementing `Artifact Store` and `Experiment Registry` so validation and recovery stop depending on in-task ephemeral result snapshots.
+
+## 2026-03-07 - Session Milestone (Phase 5)
+
+### Completed Modules
+
+- `roku-execution-graph-builder`
+  - Split the crate into dedicated modules instead of a single `lib.rs`.
+  - Added `TaskGraphScheduler` with ready-node selection, execution layering, completion checks, and cycle detection.
+  - Added scheduler tests for linear flow, parallel branches, and invalid cyclic graphs.
+- `roku-common-types`
+  - Added `completed_nodes` to persisted task checkpoint state for DAG-aware resume.
+- `roku-runtime-service`
+  - Switched task progression from linear index scanning to scheduler-driven execution based on completed node state.
+  - Kept approval resume compatible with the new checkpoint model.
+- `roku-api-gateway`
+  - Split the crate into `executor`, `models`, and `routes` modules instead of keeping all HTTP logic in a single `lib.rs`.
+  - Preserved HTTP and approval behavior while improving module boundaries.
+- `roku-observability`
+  - Added metrics for approval creation, approval resolution, and dead-letter outcomes.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test -p roku-execution-graph-builder`: passed
+- `cargo test -p roku-runtime-service -p roku-e2e`: passed
+- `cargo test -p roku-api-gateway -p roku-e2e`: passed
+- `cargo test -p roku-observability -p roku-runtime-service -p roku-e2e`: passed
+
+### Remaining Work
+
+- Replace the current single `last_result` checkpoint with node-scoped result storage so validation and aggregation work correctly for true multi-branch DAGs.
+- Split `roku-runtime-service` into multiple files; it is still too large for the responsibility it now carries.
+- Extend `ExecutionGraphBuilder` from linear compilation to dependency-aware plan compilation with explicit recovery metadata.
+- Add production storage and queue backends behind repository abstractions.
+- Start the `Artifact Store` and `Experiment Registry` implementation.
+
+### Next Recommended Steps
+
+1. Add node-scoped result checkpoint storage and aggregation semantics for multi-branch DAG execution.
+2. Refactor `roku-runtime-service` into modules (`service`, `execution`, `approval`, `tests`) without changing behavior.
+3. Start implementing artifact and experiment persistence so the runtime no longer relies on task-local result snapshots alone.
