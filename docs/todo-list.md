@@ -189,6 +189,7 @@
 | TR-08 | 对工具输出做 output schema validation 与结构化 observation 映射 | §11 / §13.1 | TODO |
 | TR-09 | 对工具调用做预算记账、artifact 化和审计事件持久化 | §14 / §15 / §16 | TODO |
 | TR-10 | 接入 skill registry / MCP discovery，支持 tool catalog 与版本治理 | §13.2 / §13.3 | TODO |
+| TR-11 | 将 `roku-tool-runtime` 拆分为 descriptor / error / event / runtime / tests 模块，降低单文件复杂度 | §13 Tool / Skill / MCP | DONE |
 
 ## roku-skill-registry (planned)
 
