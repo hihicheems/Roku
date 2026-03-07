@@ -978,3 +978,35 @@
 1. Move planning outline generation and reasoning selection onto `roku-llm-adapter`.
 2. Extend `roku-tool-runtime` and `roku-observability` with tool execution cost / timeout / deny-rate metrics.
 3. Add richer Telegram artifact / experiment rendering and task-progress push.
+
+## 2026-03-07 - Session Milestone (Phase 27)
+
+### Completed Modules
+
+- `roku-task-planner`
+  - Added `LlmTaskPlanner`, which requests a structured `PlanOutline` through `roku-llm-adapter`, normalizes the returned JSON, and falls back to the deterministic planner when the model output is invalid.
+  - Added parser coverage for both valid structured JSON and fallback behavior.
+- `roku-runtime-service`
+  - Replaced the fixed `PlanningInput` constants with request-derived planning input estimation, so planning mode selection now reacts to goal complexity, uncertainty, and risk cues.
+  - Generalized runtime-service planner injection from a concrete planner type to a trait-object boundary, which keeps planning-layer swaps outside the orchestration core.
+- `roku-cmd`
+  - Live runtime bootstrap now wires both a live execution router and a live LLM-backed planner into the same runtime service, sharing one metrics handle.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test -p roku-task-planner -p roku-runtime-service -p roku-cmd -p roku-e2e`: passed
+- `cargo check --workspace`: passed
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed
+
+### Remaining Work
+
+- Planning outline generation is now on the llm-adapter path for the live bootstrap, but coding-provider routing still does not use the same router abstraction.
+- Planning strategy selection is now request-derived, but tree-search / refinement branch scoring is still heuristic rather than feedback-driven.
+- Telegram rich rendering and long-task progress push remain open.
+
+### Next Recommended Steps
+
+1. Extend `roku-llm-adapter` into coding-provider selection so `LLM-08` is fully closed.
+2. Add tool-runtime timeout / deny-rate / cost telemetry to complete the remaining observability gap.
+3. Add richer Telegram artifact / experiment rendering and progress callbacks.

@@ -55,7 +55,7 @@ struct RuntimeState {
 pub struct RuntimeService {
 	orchestrator: Orchestrator,
 	planning_engine: DefaultPlanningEngine,
-	planner: AdaptiveTaskPlanner,
+	planner: Box<dyn TaskPlanner + Send + Sync>,
 	builder: ExecutionGraphBuilder,
 	factory: AgentInstanceFactory,
 	runtime: GenericAgentRuntime,
@@ -83,6 +83,7 @@ impl RuntimeService {
 			audit_sink,
 			GenericAgentRuntime::default(),
 			Arc::new(Metrics::default()),
+			Box::new(AdaptiveTaskPlanner),
 		)
 	}
 
@@ -105,6 +106,7 @@ impl RuntimeService {
 			audit_sink,
 			GenericAgentRuntime::default(),
 			Arc::new(Metrics::default()),
+			Box::new(AdaptiveTaskPlanner),
 		)
 	}
 
@@ -128,6 +130,7 @@ impl RuntimeService {
 			audit_sink,
 			runtime,
 			Arc::new(Metrics::default()),
+			Box::new(AdaptiveTaskPlanner),
 		)
 	}
 
@@ -141,11 +144,12 @@ impl RuntimeService {
 		audit_sink: Arc<dyn AuditSink>,
 		runtime: GenericAgentRuntime,
 		metrics: Arc<Metrics>,
+		planner: Box<dyn TaskPlanner + Send + Sync>,
 	) -> Self {
 		Self {
 			orchestrator: Orchestrator::default(),
 			planning_engine: DefaultPlanningEngine,
-			planner: AdaptiveTaskPlanner,
+			planner,
 			builder: ExecutionGraphBuilder,
 			factory: AgentInstanceFactory::default(),
 			runtime,
@@ -179,6 +183,7 @@ impl RuntimeService {
 			Arc::new(InMemoryAuditSink::default()),
 			runtime,
 			Arc::new(Metrics::default()),
+			Box::new(AdaptiveTaskPlanner),
 		)
 	}
 
@@ -196,6 +201,26 @@ impl RuntimeService {
 			Arc::new(InMemoryAuditSink::default()),
 			runtime,
 			metrics,
+			Box::new(AdaptiveTaskPlanner),
+		)
+	}
+
+	pub fn in_memory_with_agent_runtime_planner_and_metrics(
+		runtime: GenericAgentRuntime,
+		planner: Box<dyn TaskPlanner + Send + Sync>,
+		metrics: Arc<Metrics>,
+	) -> Self {
+		Self::new_with_data_plane_and_runtime_and_metrics(
+			Box::new(InMemoryTaskRepository::default()),
+			Box::new(InMemoryEventRepository::default()),
+			Box::new(InMemoryApprovalRepository::default()),
+			Box::new(InMemoryResultRepository::default()),
+			ArtifactStore::default(),
+			ExperimentRegistry::default(),
+			Arc::new(InMemoryAuditSink::default()),
+			runtime,
+			metrics,
+			planner,
 		)
 	}
 
@@ -213,12 +238,9 @@ impl RuntimeService {
 
 		self.record_transition(&mut task, TaskState::Planning, "start planning")?;
 
-		let decision = self.planning_engine.select(&PlanningInput {
-			complexity_score: 5,
-			uncertainty_score: 4,
-			risk_level: RiskLevel::Low,
-			budget_tokens: 10_000,
-		});
+		let decision = self
+			.planning_engine
+			.select(&planning_input_for_request(&request));
 		let planning_mode_label = format!("{:?}", decision.mode);
 		self.metrics.inc_planning_run();
 		self.metrics.inc_planning_strategy(&planning_mode_label);
@@ -398,4 +420,90 @@ impl Default for RuntimeService {
 	fn default() -> Self {
 		Self::in_memory()
 	}
+}
+
+pub(crate) fn planning_input_for_request(request: &RequestEnvelope) -> PlanningInput {
+	let goal = request.goal.to_ascii_lowercase();
+	let word_count = u64::try_from(goal.split_whitespace().count()).unwrap_or(u64::MAX);
+	let complexity_keywords = [
+		"and",
+		"then",
+		"compare",
+		"analyze",
+		"research",
+		"plan",
+		"build",
+		"integrate",
+		"deploy",
+		"workflow",
+	];
+	let uncertainty_keywords = [
+		"maybe",
+		"explore",
+		"option",
+		"alternatives",
+		"unknown",
+		"unclear",
+		"investigate",
+		"hypothesis",
+		"why",
+	];
+	let high_risk_keywords = [
+		"delete",
+		"production",
+		"payment",
+		"secret",
+		"credential",
+		"approve",
+	];
+	let medium_risk_keywords = ["write", "publish", "external", "notify", "mutation"];
+
+	let complexity_hits = keyword_hits(&goal, &complexity_keywords);
+	let uncertainty_hits = keyword_hits(&goal, &uncertainty_keywords);
+	let complexity_score = score_from_hits(word_count, complexity_hits, 6, 10);
+	let uncertainty_score = score_from_hits(word_count / 8, uncertainty_hits, 4, 10);
+	let risk_level = if contains_any_keyword(&goal, &high_risk_keywords) {
+		RiskLevel::High
+	} else if contains_any_keyword(&goal, &medium_risk_keywords) {
+		RiskLevel::Medium
+	} else {
+		RiskLevel::Low
+	};
+	let risk_budget = match risk_level {
+		RiskLevel::Low => 0,
+		RiskLevel::Medium => 2_000,
+		RiskLevel::High => 4_000,
+	};
+	let budget_tokens = 4_000u64
+		.saturating_add(word_count.saturating_mul(120))
+		.saturating_add(u64::from(complexity_score).saturating_mul(250))
+		.saturating_add(u64::from(uncertainty_score).saturating_mul(150))
+		.saturating_add(risk_budget);
+
+	PlanningInput {
+		complexity_score,
+		uncertainty_score,
+		risk_level,
+		budget_tokens,
+	}
+}
+
+fn keyword_hits(goal: &str, keywords: &[&str]) -> u8 {
+	let hits = keywords
+		.iter()
+		.filter(|keyword| goal.contains(**keyword))
+		.count();
+	u8::try_from(hits).unwrap_or(u8::MAX)
+}
+
+fn contains_any_keyword(goal: &str, keywords: &[&str]) -> bool {
+	keywords.iter().any(|keyword| goal.contains(keyword))
+}
+
+fn score_from_hits(base: u64, hits: u8, divisor: u64, max_score: u8) -> u8 {
+	let derived = 2u64
+		.saturating_add(base / divisor)
+		.saturating_add(u64::from(hits).saturating_mul(2));
+	let capped = derived.min(u64::from(max_score));
+	u8::try_from(capped).unwrap_or(max_score)
 }

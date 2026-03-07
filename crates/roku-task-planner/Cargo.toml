@@ -7,4 +7,6 @@ authors.workspace = true
 
 [dependencies]
 roku-common-types = { path = "../roku-common-types" }
+roku-llm-adapter = { path = "../roku-llm-adapter" }
 roku-planning-engine = { path = "../roku-planning-engine" }
+serde_json = "1"
