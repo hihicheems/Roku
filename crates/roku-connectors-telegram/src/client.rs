@@ -4,7 +4,7 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{TelegramOutboundMessage, TelegramParseMode, TelegramUpdate};
+use crate::{TelegramOutboundMessage, TelegramParseMode, TelegramReplyMarkup, TelegramUpdate};
 
 const DEFAULT_TELEGRAM_BASE_URL: &str = "https://api.telegram.org";
 
@@ -65,7 +65,7 @@ impl TelegramBotClient {
 			.json(&GetUpdatesRequest {
 				offset,
 				timeout: self.config.poll_timeout_seconds,
-				allowed_updates: vec!["message".to_string()],
+				allowed_updates: vec!["message".to_string(), "callback_query".to_string()],
 			})
 			.send()?;
 		parse_api_response::<Vec<TelegramUpdate>>(response)
@@ -83,6 +83,24 @@ impl TelegramBotClient {
 				text: message.text.clone(),
 				parse_mode: parse_mode_label(message.parse_mode).map(str::to_string),
 				disable_web_page_preview: message.disable_web_page_preview,
+				reply_markup: message.reply_markup.clone(),
+			})
+			.send()?;
+		let _: serde_json::Value = parse_api_response(response)?;
+		Ok(())
+	}
+
+	pub fn answer_callback_query(
+		&self,
+		callback_query_id: &str,
+		text: &str,
+	) -> Result<(), TelegramTransportError> {
+		let response = self
+			.client
+			.post(self.endpoint("answerCallbackQuery"))
+			.json(&AnswerCallbackQueryRequest {
+				callback_query_id: callback_query_id.to_string(),
+				text: Some(text.to_string()),
 			})
 			.send()?;
 		let _: serde_json::Value = parse_api_response(response)?;
@@ -126,6 +144,15 @@ struct SendMessageRequest {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	parse_mode: Option<String>,
 	disable_web_page_preview: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	reply_markup: Option<TelegramReplyMarkup>,
+}
+
+#[derive(Debug, Serialize)]
+struct AnswerCallbackQueryRequest {
+	callback_query_id: String,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	text: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
