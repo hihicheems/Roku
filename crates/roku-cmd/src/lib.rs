@@ -7,6 +7,7 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use roku_common_types::PlanningModeHint;
 use roku_observability::{
 	AsyncRotatingFileLogSink, FanoutLogSink, FileLogConfig, LogSink, StderrLogSink,
 	install_global_log_sink,
@@ -16,6 +17,7 @@ use thiserror::Error;
 pub use runtime::{RunMode, run_live_once_from_env, run_once, run_with_mode};
 
 use crate::bot::run_telegram_bot_from_env;
+use crate::runtime::{ExecutionRequestOptions, run_live_once_with_options_from_env, run_with_mode_and_options};
 
 #[derive(Debug, Error)]
 pub enum CommandError {
@@ -45,13 +47,13 @@ where
 			Ok(Some(response.message))
 		}
 		Some("once") => {
-			let goal = join_goal(&args[1..])?;
-			let response = run_once(&goal)?;
+			let options = parse_request_options(&args[1..])?;
+			let response = run_with_mode_and_options(options, RunMode::Normal)?;
 			Ok(Some(response.message))
 		}
 		Some("live-once") => {
-			let goal = join_goal(&args[1..])?;
-			let response = run_live_once_from_env(&goal)?;
+			let options = parse_request_options(&args[1..])?;
+			let response = run_live_once_with_options_from_env(options)?;
 			Ok(Some(response.message))
 		}
 		Some("telegram-bot") | Some("tg-bot") => {
@@ -67,7 +69,7 @@ where
 }
 
 pub fn help_text() -> &'static str {
-	"Usage:\n  roku-cmd once <goal>\n  roku-cmd live-once <goal>\n  roku-cmd telegram-bot\n\nCommands:\n  once         Run the deterministic in-process pipeline.\n  live-once    Run the OpenRouter-backed live pipeline from environment.\n  telegram-bot Start the Telegram polling bot using environment configuration."
+	"Usage:\n  roku-cmd once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd live-once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd telegram-bot\n\nCommands:\n  once         Run the deterministic in-process pipeline.\n  live-once    Run the OpenRouter-backed live pipeline from environment.\n  telegram-bot Start the Telegram polling bot using environment configuration.\n\nPlanning Modes:\n  react | taskdecomposition | treesearch | iterativerefinement"
 }
 
 fn join_goal(parts: &[String]) -> Result<String, CommandError> {
@@ -78,6 +80,80 @@ fn join_goal(parts: &[String]) -> Result<String, CommandError> {
 		)));
 	}
 	Ok(parts.join(" "))
+}
+
+fn parse_request_options(parts: &[String]) -> Result<ExecutionRequestOptions, CommandError> {
+	let mut session_id = "session-1".to_string();
+	let mut planning_mode_hint = None;
+	let mut goal_parts = Vec::new();
+	let mut index = 0usize;
+
+	while index < parts.len() {
+		let current = &parts[index];
+		if let Some(value) = current.strip_prefix("--session-id=") {
+			session_id = parse_non_empty_flag("--session-id", value)?;
+			index += 1;
+			continue;
+		}
+		if current == "--session-id" {
+			let value = parts
+				.get(index + 1)
+				.ok_or_else(|| CommandError::Usage("missing value for --session-id".to_string()))?;
+			session_id = parse_non_empty_flag("--session-id", value)?;
+			index += 2;
+			continue;
+		}
+		if let Some(value) = current.strip_prefix("--planning-mode=") {
+			planning_mode_hint = Some(parse_planning_mode_hint(value)?);
+			index += 1;
+			continue;
+		}
+		if current == "--planning-mode" {
+			let value = parts.get(index + 1).ok_or_else(|| {
+				CommandError::Usage("missing value for --planning-mode".to_string())
+			})?;
+			planning_mode_hint = Some(parse_planning_mode_hint(value)?);
+			index += 2;
+			continue;
+		}
+		goal_parts.push(current.clone());
+		index += 1;
+	}
+
+	Ok(ExecutionRequestOptions {
+		session_id,
+		goal: join_goal(&goal_parts)?,
+		planning_mode_hint,
+	})
+}
+
+fn parse_non_empty_flag(flag: &str, value: &str) -> Result<String, CommandError> {
+	let trimmed = value.trim();
+	if trimmed.is_empty() {
+		return Err(CommandError::Usage(format!("{flag} cannot be empty")));
+	}
+
+	Ok(trimmed.to_string())
+}
+
+fn parse_planning_mode_hint(value: &str) -> Result<PlanningModeHint, CommandError> {
+	let normalized = value
+		.chars()
+		.filter(|character| character.is_ascii_alphanumeric())
+		.collect::<String>()
+		.to_ascii_lowercase();
+	match normalized.as_str() {
+		"react" => Ok(PlanningModeHint::ReAct),
+		"taskdecomposition" | "decomposition" => Ok(PlanningModeHint::TaskDecomposition),
+		"treesearch" | "tree" => Ok(PlanningModeHint::TreeSearch),
+		"iterativerefinement" | "refinement" | "refine" => {
+			Ok(PlanningModeHint::IterativeRefinement)
+		}
+		_ => Err(CommandError::Usage(format!(
+			"unknown planning mode: {value}\n\n{}",
+			help_text()
+		))),
+	}
 }
 
 fn configure_logging_from_env() -> Result<(), CommandError> {
@@ -182,5 +258,34 @@ mod tests {
 				.expect("help output should exist")
 				.contains("telegram-bot")
 		);
+	}
+
+	#[test]
+	fn parse_request_options_supports_session_and_planning_mode_flags() {
+		let options = parse_request_options(&[
+			"--session-id".to_string(),
+			"chat-42".to_string(),
+			"--planning-mode".to_string(),
+			"TreeSearch".to_string(),
+			"investigate".to_string(),
+			"memory".to_string(),
+		])
+		.expect("request options should parse");
+
+		assert_eq!(options.session_id, "chat-42");
+		assert_eq!(options.planning_mode_hint, Some(PlanningModeHint::TreeSearch));
+		assert_eq!(options.goal, "investigate memory");
+	}
+
+	#[test]
+	fn parse_request_options_rejects_unknown_planning_mode() {
+		let error = parse_request_options(&[
+			"--planning-mode".to_string(),
+			"unknown".to_string(),
+			"hello".to_string(),
+		])
+		.expect_err("unknown mode should fail");
+
+		assert!(error.to_string().contains("unknown planning mode"));
 	}
 }

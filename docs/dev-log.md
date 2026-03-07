@@ -33,6 +33,9 @@
 - `cargo test -p roku-planning-engine -p roku-connectors-telegram -p roku-state-store -p roku-agent-runtime -p roku-runtime-service -p roku-cmd`: passed
 - `cargo test -p roku-observability -p roku-cmd -p roku-connectors-telegram -p roku-runtime-service -p roku-llm-adapter`: passed
 - `cargo check --workspace`: passed
+- `cargo run -p roku-cmd -- once --session-id chat-42 --planning-mode TreeSearch "compare fallback models and explain tradeoffs"`: passed
+  - selected `TreeSearch`
+  - emitted runtime logs to `logs/roku-runtime-service/current.log`
 
 ### Remaining Work
 

@@ -355,7 +355,7 @@
 | CMD-05 | 增加配置文件 / 环境变量 / profile 加载能力 | 工程化 | DONE |
 | CMD-06 | 增加 `live-once` / `telegram-bot` 命令，打通 live model 与 Telegram 入口 | §4.1 Connector / CLI | DONE |
 | CMD-07 | 增加日志目录、滚动策略、stderr 开关等环境变量配置并安装全局 logger | §16 可观测性 / 工程化 | DONE |
-| CMD-08 | 增加 CLI 级 planning mode override 参数，便于本地验证四种 planning 策略 | §7.3 / 测试与演练辅助 | TODO |
+| CMD-08 | 增加 CLI 级 planning mode override 参数，便于本地验证四种 planning 策略 | §7.3 / 测试与演练辅助 | DONE |
 
 ## roku-agent-directory (planned)
 
