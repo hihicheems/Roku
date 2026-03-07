@@ -73,7 +73,7 @@ impl RuntimeService {
 		result_repo: Box<dyn ResultRepository + Send>,
 		audit_sink: Arc<dyn AuditSink>,
 	) -> Self {
-		Self::new_with_data_plane(
+		Self::new_with_data_plane_and_runtime(
 			task_repo,
 			event_repo,
 			approval_repo,
@@ -81,6 +81,7 @@ impl RuntimeService {
 			ArtifactStore::default(),
 			ExperimentRegistry::default(),
 			audit_sink,
+			GenericAgentRuntime::default(),
 		)
 	}
 
@@ -93,13 +94,35 @@ impl RuntimeService {
 		experiment_registry: ExperimentRegistry,
 		audit_sink: Arc<dyn AuditSink>,
 	) -> Self {
+		Self::new_with_data_plane_and_runtime(
+			task_repo,
+			event_repo,
+			approval_repo,
+			result_repo,
+			artifact_store,
+			experiment_registry,
+			audit_sink,
+			GenericAgentRuntime::default(),
+		)
+	}
+
+	pub fn new_with_data_plane_and_runtime(
+		task_repo: Box<dyn TaskRepository + Send>,
+		event_repo: Box<dyn EventRepository + Send>,
+		approval_repo: Box<dyn ApprovalRepository + Send>,
+		result_repo: Box<dyn ResultRepository + Send>,
+		artifact_store: ArtifactStore,
+		experiment_registry: ExperimentRegistry,
+		audit_sink: Arc<dyn AuditSink>,
+		runtime: GenericAgentRuntime,
+	) -> Self {
 		Self {
 			orchestrator: Orchestrator::default(),
 			planning_engine: DefaultPlanningEngine,
 			planner: AdaptiveTaskPlanner,
 			builder: ExecutionGraphBuilder,
 			factory: AgentInstanceFactory::default(),
-			runtime: GenericAgentRuntime::default(),
+			runtime,
 			validator: ValidationPipeline::default(),
 			metrics: Metrics::default(),
 			audit_sink,
@@ -116,12 +139,19 @@ impl RuntimeService {
 	}
 
 	pub fn in_memory() -> Self {
-		Self::new(
+		Self::in_memory_with_agent_runtime(GenericAgentRuntime::default())
+	}
+
+	pub fn in_memory_with_agent_runtime(runtime: GenericAgentRuntime) -> Self {
+		Self::new_with_data_plane_and_runtime(
 			Box::new(InMemoryTaskRepository::default()),
 			Box::new(InMemoryEventRepository::default()),
 			Box::new(InMemoryApprovalRepository::default()),
 			Box::new(InMemoryResultRepository::default()),
+			ArtifactStore::default(),
+			ExperimentRegistry::default(),
 			Arc::new(InMemoryAuditSink::default()),
+			runtime,
 		)
 	}
 

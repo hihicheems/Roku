@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use crate::result::policy_rejection_result;
-use crate::tools::build_builtin_tool_runtime;
+use crate::tools::{build_builtin_tool_runtime, build_llm_tool_runtime};
 use crate::workers::{data_worker, generic_worker, research_worker, review_worker};
 use roku_common_types::{AgentInstanceSpec, ResultEnvelope, TaskNode};
+use roku_llm_adapter::LlmRouter;
 use roku_tool_runtime::ToolRuntime;
 
 pub trait AgentWorker {
@@ -38,6 +39,10 @@ impl GenericAgentRuntime {
 		runtime.register_worker(70, review_worker(Arc::clone(&shared_tool_runtime)));
 		runtime.register_worker(10, generic_worker(shared_tool_runtime));
 		runtime
+	}
+
+	pub fn with_llm_router(router: LlmRouter) -> Self {
+		Self::with_tool_runtime(build_llm_tool_runtime(Arc::new(router)))
 	}
 
 	pub fn register_worker<W>(&mut self, priority: u8, worker: W)
@@ -89,6 +94,10 @@ mod tests {
 	use roku_common_types::{
 		AgentContext, AggregationMode, EvidenceItem, JoinPolicy, NodeId, PolicyBindings,
 		ResultStatus, TaskId, TaskNode, TaskNodeKind,
+	};
+	use roku_llm_adapter::{
+		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderResponse, RiskTier,
+		RoutingPolicy,
 	};
 
 	use super::*;
@@ -232,5 +241,59 @@ mod tests {
 		assert_eq!(result.status, ResultStatus::Ok);
 		assert_eq!(result.evidence[0].value, "custom-worker");
 		assert_eq!(payload_value(&result)["worker_id"], "custom-worker");
+	}
+
+	struct FixedLlmProvider;
+
+	impl LlmProvider for FixedLlmProvider {
+		fn provider_name(&self) -> &'static str {
+			"test-provider"
+		}
+
+		fn complete(
+			&self,
+			_model: &ModelProfile,
+			_request: &GenerationRequest,
+		) -> Result<ProviderResponse, String> {
+			Ok(ProviderResponse {
+				output: "live answer from llm".to_string(),
+				prompt_tokens: 32,
+				output_tokens: 8,
+				latency_ms: 50,
+			})
+		}
+	}
+
+	#[test]
+	fn llm_router_runtime_returns_live_message() {
+		let mut router = LlmRouter::new(RoutingPolicy {
+			max_request_cost_usd: 1.0,
+			max_latency_ms: 5_000,
+		});
+		router.register_provider(FixedLlmProvider);
+		router.register_model(ModelProfile {
+			model_id: "test-model".to_string(),
+			provider: "test-provider".to_string(),
+			max_context_tokens: 16_000,
+			cost_per_1k_tokens_usd: 0.0,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		});
+
+		let runtime = GenericAgentRuntime::with_llm_router(router);
+		let node = TaskNode {
+			node_id: NodeId("node-llm".to_string()),
+			kind: TaskNodeKind::Execution,
+			description: "Goal: say hello\nStep: Execute primary action".to_string(),
+			capabilities: vec!["tool.invoke".to_string()],
+			join_policy: JoinPolicy::default(),
+			aggregation_mode: AggregationMode::default(),
+		};
+		let spec = spec_with_capabilities(vec!["tool.invoke"]);
+
+		let result = runtime.execute(&spec, &node);
+		assert_eq!(result.status, ResultStatus::Ok);
+		assert_eq!(payload_value(&result)["message"], "live answer from llm");
+		assert_eq!(result.evidence[1].value, "general.execute");
 	}
 }

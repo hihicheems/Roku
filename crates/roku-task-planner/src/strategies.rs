@@ -1,13 +1,16 @@
 use roku_common_types::PlanStep;
 use roku_planning_engine::PlanningDecision;
 
-pub(crate) fn build_react_steps(decision: &PlanningDecision) -> Vec<PlanStep> {
+pub(crate) fn build_react_steps(goal: &str, decision: &PlanningDecision) -> Vec<PlanStep> {
 	vec![
 		PlanStep {
 			step_id: "observe-context".to_string(),
-			summary: format!(
-				"Observe context with max {} iteration(s)",
-				decision.max_iterations
+			summary: step_summary(
+				goal,
+				&format!(
+					"Observe context with max {} iteration(s)",
+					decision.max_iterations
+				),
 			),
 			required_capabilities: vec!["information.read".to_string()],
 			requires_approval: false,
@@ -15,7 +18,7 @@ pub(crate) fn build_react_steps(decision: &PlanningDecision) -> Vec<PlanStep> {
 		},
 		PlanStep {
 			step_id: "act-primary".to_string(),
-			summary: "Execute primary action".to_string(),
+			summary: step_summary(goal, "Execute primary action"),
 			required_capabilities: vec!["tool.invoke".to_string()],
 			requires_approval: false,
 			depends_on: vec!["observe-context".to_string()],
@@ -23,13 +26,16 @@ pub(crate) fn build_react_steps(decision: &PlanningDecision) -> Vec<PlanStep> {
 	]
 }
 
-pub(crate) fn build_decomposition_steps(decision: &PlanningDecision) -> Vec<PlanStep> {
+pub(crate) fn build_decomposition_steps(goal: &str, decision: &PlanningDecision) -> Vec<PlanStep> {
 	let mut steps = vec![
 		PlanStep {
 			step_id: "decompose-goal".to_string(),
-			summary: format!(
-				"Decompose goal into branch tasks (max branches = {})",
-				decision.max_branches
+			summary: step_summary(
+				goal,
+				&format!(
+					"Decompose goal into branch tasks (max branches = {})",
+					decision.max_branches
+				),
 			),
 			required_capabilities: vec!["information.read".to_string()],
 			requires_approval: false,
@@ -37,14 +43,14 @@ pub(crate) fn build_decomposition_steps(decision: &PlanningDecision) -> Vec<Plan
 		},
 		PlanStep {
 			step_id: "branch-data".to_string(),
-			summary: "Run data branch".to_string(),
+			summary: step_summary(goal, "Run data branch"),
 			required_capabilities: vec!["data.read".to_string(), "tool.invoke".to_string()],
 			requires_approval: false,
 			depends_on: vec!["decompose-goal".to_string()],
 		},
 		PlanStep {
 			step_id: "branch-analysis".to_string(),
-			summary: "Run analysis branch".to_string(),
+			summary: step_summary(goal, "Run analysis branch"),
 			required_capabilities: vec!["research.analyze".to_string(), "tool.invoke".to_string()],
 			requires_approval: false,
 			depends_on: vec!["decompose-goal".to_string()],
@@ -53,7 +59,7 @@ pub(crate) fn build_decomposition_steps(decision: &PlanningDecision) -> Vec<Plan
 	if decision.max_branches >= 3 {
 		steps.push(PlanStep {
 			step_id: "branch-risk".to_string(),
-			summary: "Run risk review branch".to_string(),
+			summary: step_summary(goal, "Run risk review branch"),
 			required_capabilities: vec!["risk.review".to_string()],
 			requires_approval: false,
 			depends_on: vec!["decompose-goal".to_string()],
@@ -66,7 +72,7 @@ pub(crate) fn build_decomposition_steps(decision: &PlanningDecision) -> Vec<Plan
 	}
 	steps.push(PlanStep {
 		step_id: "merge-branches".to_string(),
-		summary: "Merge decomposition branch results".to_string(),
+		summary: step_summary(goal, "Merge decomposition branch results"),
 		required_capabilities: vec!["result.merge".to_string()],
 		requires_approval: false,
 		depends_on: merge_dependencies,
@@ -74,10 +80,10 @@ pub(crate) fn build_decomposition_steps(decision: &PlanningDecision) -> Vec<Plan
 	steps
 }
 
-pub(crate) fn build_tree_search_steps(decision: &PlanningDecision) -> Vec<PlanStep> {
+pub(crate) fn build_tree_search_steps(goal: &str, decision: &PlanningDecision) -> Vec<PlanStep> {
 	let mut steps = vec![PlanStep {
 		step_id: "search-root".to_string(),
-		summary: "Generate tree-search seed hypotheses".to_string(),
+		summary: step_summary(goal, "Generate tree-search seed hypotheses"),
 		required_capabilities: vec!["information.read".to_string()],
 		requires_approval: false,
 		depends_on: Vec::new(),
@@ -88,7 +94,7 @@ pub(crate) fn build_tree_search_steps(decision: &PlanningDecision) -> Vec<PlanSt
 		let branch_id = format!("search-branch-{branch}");
 		steps.push(PlanStep {
 			step_id: branch_id.clone(),
-			summary: format!("Explore tree branch {branch}"),
+			summary: step_summary(goal, &format!("Explore tree branch {branch}")),
 			required_capabilities: vec!["research.search".to_string(), "tool.invoke".to_string()],
 			requires_approval: false,
 			depends_on: vec!["search-root".to_string()],
@@ -97,7 +103,7 @@ pub(crate) fn build_tree_search_steps(decision: &PlanningDecision) -> Vec<PlanSt
 	}
 	steps.push(PlanStep {
 		step_id: "search-evaluate".to_string(),
-		summary: "Evaluate candidate branches".to_string(),
+		summary: step_summary(goal, "Evaluate candidate branches"),
 		required_capabilities: vec!["research.evaluate".to_string()],
 		requires_approval: false,
 		depends_on: branch_ids,
@@ -105,11 +111,11 @@ pub(crate) fn build_tree_search_steps(decision: &PlanningDecision) -> Vec<PlanSt
 	steps
 }
 
-pub(crate) fn build_refinement_steps(decision: &PlanningDecision) -> Vec<PlanStep> {
+pub(crate) fn build_refinement_steps(goal: &str, decision: &PlanningDecision) -> Vec<PlanStep> {
 	let draft_id = "draft-v1".to_string();
 	let mut steps = vec![PlanStep {
 		step_id: draft_id.clone(),
-		summary: "Generate initial draft".to_string(),
+		summary: step_summary(goal, "Generate initial draft"),
 		required_capabilities: vec!["research.draft".to_string()],
 		requires_approval: false,
 		depends_on: Vec::new(),
@@ -120,14 +126,14 @@ pub(crate) fn build_refinement_steps(decision: &PlanningDecision) -> Vec<PlanSte
 		let improve_id = format!("improve-{iteration}");
 		steps.push(PlanStep {
 			step_id: critique_id.clone(),
-			summary: format!("Critique iteration {iteration}"),
+			summary: step_summary(goal, &format!("Critique iteration {iteration}")),
 			required_capabilities: vec!["review.critique".to_string()],
 			requires_approval: false,
 			depends_on: vec![previous_step_id.clone()],
 		});
 		steps.push(PlanStep {
 			step_id: improve_id.clone(),
-			summary: format!("Improve draft from critique {iteration}"),
+			summary: step_summary(goal, &format!("Improve draft from critique {iteration}")),
 			required_capabilities: vec!["research.improve".to_string()],
 			requires_approval: false,
 			depends_on: vec![critique_id],
@@ -137,12 +143,16 @@ pub(crate) fn build_refinement_steps(decision: &PlanningDecision) -> Vec<PlanSte
 
 	steps.push(PlanStep {
 		step_id: "final-review".to_string(),
-		summary: "Produce refinement final answer".to_string(),
+		summary: step_summary(goal, "Produce refinement final answer"),
 		required_capabilities: vec!["review.finalize".to_string()],
 		requires_approval: true,
 		depends_on: vec![previous_step_id],
 	});
 	steps
+}
+
+fn step_summary(goal: &str, action: &str) -> String {
+	format!("Goal: {goal}\nStep: {action}")
 }
 
 #[cfg(test)]

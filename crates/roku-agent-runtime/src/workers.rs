@@ -34,12 +34,14 @@ impl ToolBackedWorker {
 	}
 
 	fn invocation(&self, spec: &AgentInstanceSpec, node: &TaskNode) -> ToolInvocation {
+		let (goal, step_summary) = goal_and_step(&node.description);
 		ToolInvocation {
 			tool_name: self.tool_name.to_string(),
 			input: json!({
 				"task_id": spec.context.task_id.0,
 				"node_id": node.node_id.0,
-				"summary": node.description,
+				"goal": goal,
+				"summary": step_summary,
 				"budget_tokens": spec.policy_bindings.budget_tokens,
 				"time_budget_ms": spec.policy_bindings.time_budget_ms,
 				"worker_id": self.worker_id,
@@ -117,4 +119,14 @@ pub(crate) fn review_worker(tool_runtime: Arc<ToolRuntime>) -> ToolBackedWorker 
 
 pub(crate) fn generic_worker(tool_runtime: Arc<ToolRuntime>) -> ToolBackedWorker {
 	ToolBackedWorker::new("generic-worker", GENERAL_TOOL_NAME, &[], tool_runtime, 0.75)
+}
+
+fn goal_and_step(description: &str) -> (String, String) {
+	if let Some(stripped) = description.strip_prefix("Goal: ")
+		&& let Some((goal, step)) = stripped.split_once("\nStep: ")
+	{
+		return (goal.to_string(), step.to_string());
+	}
+
+	(String::new(), description.to_string())
 }

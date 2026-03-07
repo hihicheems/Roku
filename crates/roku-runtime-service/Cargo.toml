@@ -19,6 +19,7 @@ roku-planning-engine = { path = "../roku-planning-engine" }
 roku-state-store = { path = "../roku-state-store" }
 roku-task-planner = { path = "../roku-task-planner" }
 roku-validation-plane = { path = "../roku-validation-plane" }
+serde_json = "1"
 
 [dev-dependencies]
 serde_json = "1"
