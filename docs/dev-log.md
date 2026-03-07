@@ -1,5 +1,43 @@
 # Roku Agent Dev Log
 
+## 2026-03-08 - Session Milestone (Phase 19)
+
+### Completed Modules
+
+- `roku-connectors-telegram`
+  - Simplified default Telegram user-facing rendering so ordinary requests now return only the final answer text.
+  - Added connector-level render toggles for request metadata, attachments, and progress notices via environment variables.
+  - Kept approval callback and detailed rendering paths intact behind explicit flags.
+- `roku-agent-runtime`
+  - Hardened live worker prompts to suppress meta-reasoning leakage.
+  - Injected trusted runtime date/time context into live prompts so realtime questions like weekday/date no longer fall back to "I do not know today's date".
+- `roku-cmd` / workspace tooling
+  - Added `scripts/dev-services.sh` to manage long-running dev services with pid files, stdout logs, and a `doctor` table.
+  - Extended `justfile` with `start-all`, `stop-all`, `doctor`, `start`, `stop`, and `status` recipes.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test -p roku-connectors-telegram -p roku-agent-runtime -p roku-cmd`: passed
+- `cargo check --workspace`: passed
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed
+- `./scripts/dev-services.sh start telegram-bot && sleep 2 && ./scripts/dev-services.sh doctor && ./scripts/dev-services.sh stop telegram-bot`: passed
+  - `doctor` reported `telegram-bot` as `1/1 Running`
+- `source .env && cargo run -p roku-cmd -- live-once --planning-mode ReAct '今天是星期几啊？'`: passed
+  - live response: `今天是星期日。`
+
+### Remaining Work
+
+- Add a richer Telegram user-facing mode that can selectively surface artifacts, approvals, and references as structured sections instead of raw URI lists.
+- Expand `doctor` from a single-service registry to multi-service orchestration once an HTTP/API long-running binary is introduced.
+- Continue the validation-plane matrix for complex multi-agent tasks so schema / semantic / provenance / policy outcomes are visible independently.
+
+### Next Recommended Steps
+
+1. Add Telegram command support for inline strategy+goal forms such as `/react 你好`.
+2. Implement `roku-state-store` PostgreSQL backends for task/event/result so dev services can restart from persisted orchestration state.
+3. Extend `roku-validation-plane` with multi-branch verification reports and failure-focused e2e coverage.
+
 ## 2026-03-08 - Session Milestone (Phase 18)
 
 ### Completed Modules
