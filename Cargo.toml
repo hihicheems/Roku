@@ -23,6 +23,8 @@ members = [
     "crates/roku-api-gateway",
     "crates/roku-connectors-telegram",
     "crates/roku-state-store",
+    "crates/roku-artifact-store",
+    "crates/roku-experiment-registry",
     "crates/roku-observability",
     "crates/roku-runtime-service",
     "crates/roku-e2e",
