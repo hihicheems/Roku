@@ -1286,9 +1286,13 @@ dependencies = [
 name = "roku-cmd"
 version = "0.1.0"
 dependencies = [
+ "roku-agent-runtime",
  "roku-api-gateway",
  "roku-common-types",
+ "roku-connectors-telegram",
+ "roku-llm-adapter",
  "roku-runtime-service",
+ "thiserror",
 ]
 
 [[package]]
@@ -1313,8 +1317,10 @@ dependencies = [
 name = "roku-connectors-telegram"
 version = "0.1.0"
 dependencies = [
+ "reqwest",
  "roku-common-types",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

@@ -146,7 +146,7 @@
 | LLM-07 | 将 provider 选择、token / cost 消耗输出到 observability | §16 指标 | TODO |
 | LLM-08 | 将 adapter 真正接入 planning / runtime / coding provider 选择链路 | §4.1 / §7.5 | TODO |
 | LLM-09 | 增加 deterministic request key / prompt cache / replay 支持 | §20 回归测试 / replay | TODO |
-| LLM-10 | 增加 OpenRouter provider、环境变量装配和 account-default model 回退 | §4.1 / §19 llm-adapter | DONE |
+| LLM-10 | 增加 OpenRouter provider、环境变量装配和默认 free router 模型 | §4.1 / §19 llm-adapter | DONE |
 
 ## roku-capability-auth
 
@@ -250,7 +250,7 @@
 | TG-02 | 实现 inbound normalization，将 Telegram 消息转为 runtime 请求 | §9 请求生命周期 | DONE |
 | TG-03 | 实现 outbound message formatting，将 runtime 响应映射为 Telegram 文本 | §4.1 Connector | DONE |
 | TG-04 | 显式拒绝 bot-originated message 等不合法输入 | 边界治理 | DONE |
-| TG-05 | 增加真实 webhook / polling transport runner | §4.1 Connector | TODO |
+| TG-05 | 增加真实 webhook / polling transport runner | §4.1 Connector | DONE |
 | TG-06 | 增加 approval callback query 支持 | §15.3 人审闸门 | TODO |
 | TG-07 | 增加 artifact / experiment / approval 的富消息渲染 | §12 Artifact / §16 诊断 | TODO |
 | TG-08 | 增加长任务状态推送与结果回执能力 | 长任务体验 | TODO |
@@ -325,7 +325,7 @@
 | RS-08 | 接入 experiment registry 与 artifact store | §12 Artifact / Experiment | DONE |
 | RS-09 | 对外暴露 artifact / experiment / artifact-content 查询 API | §12 / §19.1 | DONE |
 | RS-10 | 将 planning metrics 与 correlated audit 接入 observability | §16 指标 / Trace | DONE |
-| RS-11 | 将 node execution 真正下放到 `roku-tool-runtime`，形成受 descriptor 约束的执行链 | §9 请求生命周期 / §13 | TODO |
+| RS-11 | 将 node execution 真正下放到 `roku-tool-runtime`，形成受 descriptor 约束的执行链 | §9 请求生命周期 / §13 | DONE |
 | RS-12 | 将 planning / reasoning 接入 `roku-llm-adapter`，消除硬编码 planning 输入 | §7 Planning Architecture / §14 | TODO |
 | RS-13 | 将 `Supervisor Agent` 逻辑从 `runtime-service` 中进一步显式分离 | §4.1 / §7.2 | TODO |
 | RS-14 | 增加组织级审批规则、风险动作 gating 与 capability/approval 联动 | §15.3 / §17 OrgPolicy | TODO |
@@ -340,7 +340,8 @@
 | CMD-02 | 提供 `Normal` / `MissingEvidence` / `CapabilityDenied` / `ApprovalRequired` / `RetryExhausted` 等 run mode | 测试与演练辅助 | DONE |
 | CMD-03 | 增加查询 task / approval / artifact / experiment 的 CLI 子命令 | 运维与诊断 | TODO |
 | CMD-04 | 增加 artifact download / approval decision / resume 等运维命令 | 运行期治理 | TODO |
-| CMD-05 | 增加配置文件 / 环境变量 / profile 加载能力 | 工程化 | TODO |
+| CMD-05 | 增加配置文件 / 环境变量 / profile 加载能力 | 工程化 | DONE |
+| CMD-06 | 增加 `live-once` / `telegram-bot` 命令，打通 live model 与 Telegram 入口 | §4.1 Connector / CLI | DONE |
 
 ## roku-agent-directory (planned)
 

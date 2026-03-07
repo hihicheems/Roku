@@ -1,32 +1,78 @@
 //! Roku command runtime bootstrap.
 
-use roku_api_gateway::{Gateway, RawRequest};
-use roku_common_types::{ResponseEnvelope, RuntimeError};
-pub use roku_runtime_service::RunMode;
-use roku_runtime_service::RuntimeService;
+mod bot;
+mod runtime;
 
-pub fn run_once(goal: &str) -> Result<ResponseEnvelope, RuntimeError> {
-	run_with_mode(goal, RunMode::Normal)
+use thiserror::Error;
+
+pub use runtime::{RunMode, run_live_once_from_env, run_once, run_with_mode};
+
+use crate::bot::run_telegram_bot_from_env;
+
+#[derive(Debug, Error)]
+pub enum CommandError {
+	#[error("{0}")]
+	Usage(String),
+	#[error(transparent)]
+	Runtime(#[from] roku_common_types::RuntimeError),
+	#[error(transparent)]
+	OpenRouterBootstrap(#[from] roku_llm_adapter::OpenRouterBootstrapError),
+	#[error(transparent)]
+	TelegramTransport(#[from] roku_connectors_telegram::TelegramTransportError),
 }
 
-pub fn run_with_mode(goal: &str, mode: RunMode) -> Result<ResponseEnvelope, RuntimeError> {
-	let gateway = Gateway;
-	let service = RuntimeService::default();
-	let request = gateway.normalize(
-		RawRequest {
-			session_id: "session-1".to_string(),
-			goal: goal.to_string(),
-		},
-		1,
-	);
+pub fn execute_cli<I, S>(args: I) -> Result<Option<String>, CommandError>
+where
+	I: IntoIterator<Item = S>,
+	S: Into<String>,
+{
+	let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
+	match args.first().map(String::as_str) {
+		None => {
+			let response = run_once("bootstrap request")?;
+			Ok(Some(response.message))
+		}
+		Some("once") => {
+			let goal = join_goal(&args[1..])?;
+			let response = run_once(&goal)?;
+			Ok(Some(response.message))
+		}
+		Some("live-once") => {
+			let goal = join_goal(&args[1..])?;
+			let response = run_live_once_from_env(&goal)?;
+			Ok(Some(response.message))
+		}
+		Some("telegram-bot") | Some("tg-bot") => {
+			run_telegram_bot_from_env()?;
+			Ok(None)
+		}
+		Some("--help") | Some("-h") | Some("help") => Ok(Some(help_text().to_string())),
+		Some(command) => Err(CommandError::Usage(format!(
+			"unknown command: {command}\n\n{}",
+			help_text()
+		))),
+	}
+}
 
-	service.execute_with_mode(request, mode)
+pub fn help_text() -> &'static str {
+	"Usage:\n  roku-cmd once <goal>\n  roku-cmd live-once <goal>\n  roku-cmd telegram-bot\n\nCommands:\n  once         Run the deterministic in-process pipeline.\n  live-once    Run the OpenRouter-backed live pipeline from environment.\n  telegram-bot Start the Telegram polling bot using environment configuration."
+}
+
+fn join_goal(parts: &[String]) -> Result<String, CommandError> {
+	if parts.is_empty() {
+		return Err(CommandError::Usage(format!(
+			"missing goal argument\n\n{}",
+			help_text()
+		)));
+	}
+	Ok(parts.join(" "))
 }
 
 #[cfg(test)]
 mod tests {
-	use super::*;
 	use roku_common_types::ResponseStatus;
+
+	use super::*;
 
 	#[test]
 	fn run_once_returns_success() {
@@ -48,5 +94,16 @@ mod tests {
 			.expect("pipeline should execute and fail with capability denial");
 		assert!(matches!(response.status, ResponseStatus::Failed));
 		assert!(response.message.contains("capability denied"));
+	}
+
+	#[test]
+	fn execute_cli_help_renders_usage() {
+		let output = execute_cli(["help"]).expect("help should succeed");
+		assert!(output.is_some());
+		assert!(
+			output
+				.expect("help output should exist")
+				.contains("telegram-bot")
+		);
 	}
 }

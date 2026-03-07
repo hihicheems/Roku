@@ -15,7 +15,7 @@ use crate::types::{
 
 const OPENROUTER_PROVIDER: &str = "openrouter";
 const DEFAULT_OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-const MODEL_FROM_ACCOUNT_DEFAULT: &str = "__openrouter_account_default__";
+const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenRouterConfig {
@@ -35,7 +35,8 @@ impl OpenRouterConfig {
 		let api_key = env_var_required("OPENROUTER_API_KEY")?;
 		let model = env::var("OPENROUTER_MODEL")
 			.ok()
-			.filter(|value| !value.trim().is_empty());
+			.filter(|value| !value.trim().is_empty())
+			.or_else(|| Some(DEFAULT_OPENROUTER_MODEL.to_string()));
 		let app_name = env::var("OPENROUTER_APP_NAME")
 			.ok()
 			.filter(|value| !value.trim().is_empty());
@@ -68,7 +69,7 @@ impl OpenRouterConfig {
 	fn model_id(&self) -> String {
 		self.model
 			.clone()
-			.unwrap_or_else(|| MODEL_FROM_ACCOUNT_DEFAULT.to_string())
+			.unwrap_or_else(|| DEFAULT_OPENROUTER_MODEL.to_string())
 	}
 }
 
@@ -179,7 +180,8 @@ pub fn build_openrouter_router(
 }
 
 fn build_request_body(model: &ModelProfile, request: &GenerationRequest) -> Value {
-	let mut body = json!({
+	json!({
+		"model": model.model_id,
 		"messages": [
 			{
 				"role": "user",
@@ -187,11 +189,7 @@ fn build_request_body(model: &ModelProfile, request: &GenerationRequest) -> Valu
 			}
 		],
 		"max_tokens": request.expected_output_tokens,
-	});
-	if model.model_id != MODEL_FROM_ACCOUNT_DEFAULT {
-		body["model"] = Value::String(model.model_id.clone());
-	}
-	body
+	})
 }
 
 struct ParsedOpenRouterResponse {
@@ -343,10 +341,10 @@ mod tests {
 	}
 
 	#[test]
-	fn request_body_omits_model_when_account_default_should_be_used() {
+	fn request_body_uses_free_router_by_default() {
 		let body = build_request_body(
 			&ModelProfile {
-				model_id: MODEL_FROM_ACCOUNT_DEFAULT.to_string(),
+				model_id: DEFAULT_OPENROUTER_MODEL.to_string(),
 				provider: "openrouter".to_string(),
 				max_context_tokens: 128_000,
 				cost_per_1k_tokens_usd: 0.0,
@@ -356,7 +354,7 @@ mod tests {
 			&sample_request(),
 		);
 
-		assert!(body.get("model").is_none());
+		assert_eq!(body["model"], "openrouter/free");
 		assert_eq!(body["messages"][0]["role"], "user");
 	}
 
