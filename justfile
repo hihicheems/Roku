@@ -34,3 +34,27 @@ alias t := test
 @test:
     # This command runs all tests in the workspace using nextest.
     cargo nextest run --locked --workspace
+
+# Start all registered long-running dev services
+@start-all:
+    ./scripts/dev-services.sh start-all
+
+# Stop all registered long-running dev services
+@stop-all:
+    ./scripts/dev-services.sh stop-all
+
+# Show current dev service health in a table
+@doctor:
+    ./scripts/dev-services.sh doctor
+
+# Start one named dev service
+@start service="telegram-bot":
+    ./scripts/dev-services.sh start {{service}}
+
+# Stop one named dev service
+@stop service="telegram-bot":
+    ./scripts/dev-services.sh stop {{service}}
+
+# Show one named dev service status
+@status service="telegram-bot":
+    ./scripts/dev-services.sh status {{service}}
