@@ -14,6 +14,7 @@ pub struct TelegramBotConfig {
 	pub api_base_url: String,
 	pub poll_timeout_seconds: u16,
 	pub idle_backoff_ms: u64,
+	pub poll_error_log_threshold: u32,
 }
 
 impl TelegramBotConfig {
@@ -34,12 +35,15 @@ impl TelegramBotConfig {
 			.unwrap_or_else(|| DEFAULT_TELEGRAM_BASE_URL.to_string());
 		let poll_timeout_seconds = env_var_u16("TELEGRAM_POLL_TIMEOUT_SECONDS")?.unwrap_or(30);
 		let idle_backoff_ms = env_var_u64("TELEGRAM_IDLE_BACKOFF_MS")?.unwrap_or(500);
+		let poll_error_log_threshold =
+			env_var_u32("TELEGRAM_POLL_ERROR_LOG_THRESHOLD")?.unwrap_or(5);
 
 		Ok(Self {
 			token,
 			api_base_url,
 			poll_timeout_seconds,
 			idle_backoff_ms,
+			poll_error_log_threshold,
 		})
 	}
 }
@@ -229,6 +233,25 @@ fn env_var_u64(key: &'static str) -> Result<Option<u64>, TelegramTransportError>
 		Ok(value) if !value.trim().is_empty() => {
 			value
 				.parse::<u64>()
+				.map(Some)
+				.map_err(|error| TelegramTransportError::InvalidEnv {
+					key,
+					message: error.to_string(),
+				})
+		}
+		Ok(_) | Err(env::VarError::NotPresent) => Ok(None),
+		Err(error) => Err(TelegramTransportError::InvalidEnv {
+			key,
+			message: error.to_string(),
+		}),
+	}
+}
+
+fn env_var_u32(key: &'static str) -> Result<Option<u32>, TelegramTransportError> {
+	match env::var(key) {
+		Ok(value) if !value.trim().is_empty() => {
+			value
+				.parse::<u32>()
 				.map(Some)
 				.map_err(|error| TelegramTransportError::InvalidEnv {
 					key,

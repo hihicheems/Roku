@@ -146,7 +146,8 @@
 | LLM-07 | 将 provider 选择、token / cost 消耗输出到 observability | §16 指标 | DONE |
 | LLM-08 | 将 adapter 真正接入 planning / runtime / coding provider 选择链路 | §4.1 / §7.5 | TODO |
 | LLM-09 | 增加 deterministic request key / prompt cache / replay 支持 | §20 回归测试 / replay | TODO |
-| LLM-10 | 增加 OpenRouter provider、环境变量装配和默认 free router 模型 | §4.1 / §19 llm-adapter | DONE |
+| LLM-10 | 增加 OpenRouter provider、环境变量装配、默认主模型链与兼容头部 | §4.1 / §19 llm-adapter | DONE |
+| LLM-11 | 将 `system/user` 消息显式映射到 OpenAI-compatible chat completions schema，并支持 OpenRouter `models[]` fallback chain | §4.1 / §19 llm-adapter | DONE |
 
 ## roku-capability-auth
 
@@ -254,6 +255,7 @@
 | TG-06 | 增加 approval callback query 支持 | §15.3 人审闸门 | DONE |
 | TG-07 | 增加 artifact / experiment / approval 的富消息渲染 | §12 Artifact / §16 诊断 | TODO |
 | TG-08 | 增加长任务状态推送与结果回执能力 | 长任务体验 | TODO |
+| TG-09 | 为 polling transport 增加抑制式错误日志，隐藏 routine `getUpdates` 噪声并保留连续失败告警 | §16 可观测性 / Connector 运行治理 | DONE |
 
 ## roku-state-store
 
