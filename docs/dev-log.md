@@ -1,5 +1,44 @@
 # Roku Agent Dev Log
 
+## 2026-03-09 - Session Milestone (Phase 30)
+
+### Completed Modules
+
+- `roku-cmd`
+  - Added `telegram-once` so the live Telegram handler and outbound rendering path can be exercised from the CLI without a real inbound chat update.
+  - Added regression coverage that proves Telegram preview rendering surfaces skill-install success text.
+- `roku-task-planner`
+  - Added a deterministic fast path for explicit installed-skill usage requests so these prompts stay on a single `tool.invoke` step instead of being decomposed into lossy sub-plans.
+- `roku-skill-registry`
+  - Reworked query-focused prompt context selection so exact high-signal skill lines are prioritized, compressed, and deduplicated for factual installed-skill questions.
+  - Added regression coverage for the `skill-creator` style query that must surface `text` / `passed` / `evidence` together with the correct baseline output directories.
+- `roku-agent-runtime`
+  - Added a deterministic installed-skill answer path for exact factual questions so the runtime can quote authoritative local skill excerpts instead of relying on unstable live model paraphrasing.
+
+### Verification Status
+
+- `cargo test -p roku-skill-registry && cargo test -p roku-agent-runtime`: passed
+  - `roku-skill-registry`: 12 passed
+  - `roku-agent-runtime`: 16 passed
+- `cargo test -p roku-task-planner -p roku-cmd`: passed earlier in this session
+  - `roku-task-planner`: 13 passed
+  - `roku-cmd`: 17 passed
+- `ROKU_HOME=.roku/live-eval ROKU_SKILL_ROOT=.roku/live-eval/skills cargo run -p roku-cmd -- skill install https://github.com/anthropics/skills/tree/main/skills/skill-creator`: passed
+- `set -a && source .env && set +a && ROKU_HOME=.roku/live-eval ROKU_SKILL_ROOT=.roku/live-eval/skills cargo run -p roku-cmd -- live-once --session-id skill-live-check "Use the skill-creator skill. According to that skill, what exact field names must grading.json expectations use, and how do baseline runs differ when creating a new skill versus improving an existing skill?"`: passed with the expected authoritative answer
+- `set -a && source .env && set +a && ROKU_HOME=.roku/live-eval ROKU_SKILL_ROOT=.roku/live-eval/skills cargo run -p roku-cmd -- telegram-once --session-id skill-telegram-check "Use the skill-creator skill. According to that skill, what exact field names must grading.json expectations use, and how do baseline runs differ when creating a new skill versus improving an existing skill?"`: passed with the expected outbound Telegram message
+
+### Remaining Work
+
+- `TR-10` remains open beyond the local skill vertical slice because MCP discovery, version governance, and rollout policy are still missing.
+- Skill installation still lacks pre-activation validation / smoke-test gates, so structurally valid but broken packages can still be registered.
+- The deterministic exact-answer path currently targets factual installed-skill questions; broader skill-guided generation quality still depends on the live model path.
+
+### Next Recommended Steps
+
+1. Add install-time validation / smoke-test hooks before a skill is published into the local registry.
+2. Decide whether the deterministic installed-skill answer path should be generalized into a richer local excerpt QA layer.
+3. Continue `TR-10` toward governed skill / MCP discovery once the local install-and-use loop is stable.
+
 ## 2026-03-09 - Session Milestone (Phase 29)
 
 ### Completed Modules

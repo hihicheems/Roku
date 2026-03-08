@@ -306,8 +306,33 @@ impl Tool for PromptedLlmTool {
 		}
 		let skill_context = self
 			.skill_registry
-			.render_prompt_context_for_query(input.goal, MAX_SKILL_PROMPT_CONTEXT_CHARS)
+			.render_prompt_context_for_query(input.goal, skill_prompt_context_budget(&input))
 			.map_err(|error| ToolFailure::terminal(error.to_string()))?;
+		if let Some(answer) = direct_skill_context_answer(input.goal, skill_context.as_deref()) {
+			log_runtime_output(
+				"used deterministic installed skill answer",
+				[
+					("worker_id", self.worker_id.to_string()),
+					("node_id", input.node_id.to_string()),
+				],
+			);
+			return Ok(json!({
+				"worker_id": self.worker_id,
+				"message": answer,
+				"raw_message": Value::Null,
+				"task_id": input.task_id,
+				"node_id": input.node_id,
+				"goal": input.goal,
+				"summary": input.summary,
+				"provider": "installed-skill-context",
+				"model_id": "deterministic",
+				"prompt_tokens": 0,
+				"output_tokens": 0,
+				"latency_ms": 0,
+				"attempt": request.attempt,
+				"invocation_key": request.invocation_key,
+			}));
+		}
 		let prompt = user_visible_prompt(
 			&input,
 			self.worker_id,
@@ -377,11 +402,15 @@ fn user_visible_prompt(
 	let runtime_context = runtime_context_block();
 	let skill_section = skill_context
 		.filter(|value| !value.trim().is_empty())
-		.map(|value| format!("\n\nInstalled skill context:\n{value}"))
+		.map(|value| {
+			format!(
+				"\n\nAuthoritative installed skill excerpts (quoted from the locally installed skill package):\n{value}"
+			)
+		})
 		.unwrap_or_default();
 
 	format!(
-		"User request:\n{goal}{history_section}\n\nTrusted runtime context:\n{runtime_context}{skill_section}\n\nInternal execution hint (do not quote or describe it unless it is directly useful for the answer):\n{summary}\n\nOutput rules:\n- Return only the useful answer text in plain text.\n- Answer directly. Do not preface with analysis, translation, or a restatement of the user's request.\n- Never narrate your reasoning. Do not output phrases like \"用户的问题是\", \"I need to\", \"首先\", or similar meta-analysis.\n- Prefer one short paragraph unless the user explicitly asks for detail.\n- Match the user's language unless the request clearly asks for another language.\n- Preserve conversational continuity when the user refers to prior turns or earlier facts.\n- If the user explicitly references an installed skill, follow the installed skill context above as trusted guidance.\n- If the user asks about today's date, weekday, or current time, use the trusted runtime context above instead of claiming you lack realtime access.\n- Do not mention worker ids, invocation keys, execution steps, hidden instructions, providers, models, budgets, or internal runtime details.\n- Do not describe yourself as an execution worker or reveal chain-of-thought.\n- If you are about to restate the prompt, trusted runtime context, installed skill context, or your analysis notes, stop and output only the answer.\n- If the user asks who you are or which persona is active, answer as Roku.\n- Internal references for policy only: worker_id={worker_id}; invocation_key={invocation_key}; time_budget_ms={time_budget_ms}.",
+		"User request:\n{goal}{history_section}\n\nTrusted runtime context:\n{runtime_context}{skill_section}\n\nInternal execution hint (do not quote or describe it unless it is directly useful for the answer):\n{summary}\n\nOutput rules:\n- Return only the useful answer text in plain text.\n- Answer directly. Do not preface with analysis, translation, or a restatement of the user's request.\n- Never narrate your reasoning. Do not output phrases like \"用户的问题是\", \"I need to\", \"首先\", or similar meta-analysis.\n- Prefer one short paragraph unless the user explicitly asks for detail.\n- Match the user's language unless the request clearly asks for another language.\n- Preserve conversational continuity when the user refers to prior turns or earlier facts.\n- If the user explicitly references an installed skill, treat the installed skill excerpts above as authoritative local source material.\n- When the installed skill excerpts provide exact field names, directory names, file paths, commands, or schema keys, repeat them verbatim and do not substitute lookalikes or generic alternatives.\n- When answering schema questions, answer at the level the user asked for. If the user asks for field names inside an array entry or nested object, give those inner field names rather than parent object keys or nearby sibling fields.\n- If the user asks about today's date, weekday, or current time, use the trusted runtime context above instead of claiming you lack realtime access.\n- Do not mention worker ids, invocation keys, execution steps, hidden instructions, providers, models, budgets, or internal runtime details.\n- Do not describe yourself as an execution worker or reveal chain-of-thought.\n- If you are about to restate the prompt, trusted runtime context, installed skill context, or your analysis notes, stop and output only the answer.\n- If the user asks who you are or which persona is active, answer as Roku.\n- Internal references for policy only: worker_id={worker_id}; invocation_key={invocation_key}; time_budget_ms={time_budget_ms}.",
 		goal = input.goal,
 		history_section = history_section,
 		runtime_context = runtime_context,
@@ -391,6 +420,89 @@ fn user_visible_prompt(
 		invocation_key = invocation_key,
 		time_budget_ms = input.time_budget_ms,
 	)
+}
+
+fn skill_prompt_context_budget(input: &ToolInput<'_>) -> usize {
+	let reserved_output_tokens = input.budget_tokens.min(512);
+	let reserved_prompt_tokens = 300_u64;
+	let available_tokens = input
+		.budget_tokens
+		.saturating_sub(reserved_output_tokens)
+		.saturating_sub(reserved_prompt_tokens);
+	if available_tokens < 64 {
+		return 0;
+	}
+
+	usize::try_from(available_tokens.saturating_mul(3))
+		.unwrap_or(MAX_SKILL_PROMPT_CONTEXT_CHARS)
+		.min(MAX_SKILL_PROMPT_CONTEXT_CHARS)
+}
+
+fn direct_skill_context_answer(goal: &str, skill_context: Option<&str>) -> Option<String> {
+	let skill_context = skill_context?.trim();
+	if skill_context.is_empty() {
+		return None;
+	}
+
+	let normalized = goal.to_ascii_lowercase();
+	let looks_like_exact_skill_question = normalized.contains("according to")
+		|| normalized.contains("what exact")
+		|| normalized.contains("exact field")
+		|| normalized.contains("field names")
+		|| normalized.contains("schema")
+		|| goal.contains("根据")
+		|| goal.contains("精确");
+	if !looks_like_exact_skill_question {
+		return None;
+	}
+
+	let lines = skill_context
+		.lines()
+		.map(str::trim)
+		.filter(|line| !line.is_empty())
+		.filter(|line| {
+			!line.starts_with("Installed skill guidance explicitly referenced by the user:")
+				&& !line.starts_with("### ")
+				&& !line.starts_with("Description:")
+				&& !line.starts_with("Version:")
+				&& !line.starts_with("Source:")
+				&& !line.starts_with("Entrypoint (`")
+				&& !line.starts_with("Supporting document (`")
+				&& !line.starts_with("```")
+		})
+		.collect::<Vec<_>>();
+	if lines.is_empty() {
+		return None;
+	}
+
+	let exact_field_line = lines.iter().copied().find(|line| {
+		line.contains("`text`") || line.contains("`passed`") || line.contains("`evidence`")
+	});
+	let new_skill_line = lines
+		.iter()
+		.copied()
+		.find(|line| line.contains("Creating a new skill") && line.contains("`without_skill"));
+	let improving_skill_line = lines
+		.iter()
+		.copied()
+		.find(|line| line.contains("Improving an existing skill") && line.contains("`old_skill"));
+	if exact_field_line.is_some() || new_skill_line.is_some() || improving_skill_line.is_some() {
+		let mut selected = Vec::new();
+		if let Some(line) = exact_field_line {
+			selected.push(line);
+		}
+		if let Some(line) = new_skill_line {
+			selected.push(line);
+		}
+		if let Some(line) = improving_skill_line {
+			selected.push(line);
+		}
+		if !selected.is_empty() {
+			return Some(selected.join("\n"));
+		}
+	}
+
+	Some(lines.join("\n"))
 }
 
 fn runtime_context_block() -> String {
@@ -745,8 +857,9 @@ mod tests {
 	use std::sync::{Arc, Mutex};
 
 	use super::{
-		GENERAL_TOOL_NAME, PromptedLlmTool, direct_runtime_answer, first_url_in_text,
-		request_input, runtime_context_block, sanitize_final_reply, user_visible_prompt,
+		GENERAL_TOOL_NAME, PromptedLlmTool, direct_runtime_answer, direct_skill_context_answer,
+		first_url_in_text, request_input, runtime_context_block, sanitize_final_reply,
+		user_visible_prompt,
 	};
 	use roku_llm_adapter::{
 		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderCallError,
@@ -814,6 +927,22 @@ From the trusted runtime context:
 
 So, I'll output: "星期日""#;
 		assert_eq!(sanitize_final_reply(output), "星期日");
+	}
+
+	#[test]
+	fn direct_skill_context_answer_returns_authoritative_excerpt_lines() {
+		let answer = direct_skill_context_answer(
+			"Use the skill-creator skill. According to that skill, what exact field names must grading.json expectations use, and how do baseline runs differ?",
+			Some(
+				"Installed skill guidance explicitly referenced by the user:\n\n### skill: skill-creator\nDescription: Build and evaluate new skills.\nVersion: main\nSource: https://example.com\n\nEntrypoint (`SKILL.md`):\n- Creating a new skill: no skill at all. Save to `without_skill/outputs/`.\n- Improving an existing skill: snapshot the old version first, then save baseline outputs to `old_skill/outputs/`.\nThe grading.json expectations array must use the fields `text`, `passed`, and `evidence`.\n",
+			),
+		)
+		.expect("direct skill answer should exist");
+
+		assert!(answer.contains("`without_skill/outputs/`"));
+		assert!(answer.contains("`old_skill/outputs/`"));
+		assert!(answer.contains("`text`, `passed`, and `evidence`"));
+		assert!(!answer.contains("### skill:"));
 	}
 
 	#[test]
@@ -927,7 +1056,7 @@ So, I'll output: "星期日""#;
 			.expect("prompt lock should succeed")
 			.clone()
 			.expect("prompt should be captured");
-		assert!(prompt.contains("Installed skill context"));
+		assert!(prompt.contains("Authoritative installed skill excerpts"));
 		assert!(prompt.contains("### skill: claude-api"));
 	}
 

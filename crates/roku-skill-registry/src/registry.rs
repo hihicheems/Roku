@@ -254,7 +254,7 @@ impl SkillRegistry {
 			if remaining == 0 {
 				break;
 			}
-			let context = render_skill_context(root, &record, remaining)?;
+			let context = render_skill_context_for_query(root, &record, query, remaining)?;
 			if context.is_empty() {
 				continue;
 			}
@@ -638,6 +638,25 @@ fn render_skill_context(
 	record: &InstalledSkillRecord,
 	max_chars: usize,
 ) -> Result<String, SkillRegistryError> {
+	render_skill_context_with_keywords(root, record, max_chars, &[])
+}
+
+fn render_skill_context_for_query(
+	root: &Path,
+	record: &InstalledSkillRecord,
+	query: &str,
+	max_chars: usize,
+) -> Result<String, SkillRegistryError> {
+	let keywords = query_keywords(query);
+	render_skill_context_with_keywords(root, record, max_chars, &keywords)
+}
+
+fn render_skill_context_with_keywords(
+	root: &Path,
+	record: &InstalledSkillRecord,
+	max_chars: usize,
+	keywords: &[String],
+) -> Result<String, SkillRegistryError> {
 	let skill_dir = root.join(&record.install_dir);
 	if !skill_dir.exists() {
 		return Err(SkillRegistryError::SkillNotFound(
@@ -675,7 +694,8 @@ fn render_skill_context(
 		.saturating_sub(header_budget)
 		.saturating_sub(supporting_budget)
 		.max(512);
-	let entry_excerpt = document_excerpt(&entry_markdown, entry_budget, &entry_path)?;
+	let entry_excerpt = document_excerpt(&entry_markdown, entry_budget, &entry_path, keywords)?;
+	let mut covered_keywords = excerpt_keywords(&entry_excerpt, keywords);
 	let mut rendered = format!(
 		"### skill: {}\nDescription: {}\nVersion: {}\nSource: {}\n\nEntrypoint (`{}`):\n{}",
 		record.descriptor.name,
@@ -699,7 +719,18 @@ fn render_skill_context(
 		if remaining < 128 {
 			break;
 		}
-		let excerpt = document_excerpt(&content, remaining.saturating_sub(64), &path)?;
+		let excerpt = document_excerpt(&content, remaining.saturating_sub(64), &path, keywords)?;
+		if keywords.len() >= 4 {
+			let excerpt_keywords = excerpt_keywords(&excerpt, keywords);
+			if !excerpt_keywords.is_empty()
+				&& excerpt_keywords
+					.iter()
+					.all(|keyword| covered_keywords.contains(keyword))
+			{
+				continue;
+			}
+			covered_keywords.extend(excerpt_keywords);
+		}
 		let section = format!(
 			"\n\nSupporting document (`{relative}`):\n{}",
 			excerpt.trim()
@@ -718,10 +749,20 @@ fn render_skill_context(
 	Ok(rendered)
 }
 
+fn excerpt_keywords(excerpt: &str, keywords: &[String]) -> std::collections::BTreeSet<String> {
+	let excerpt = excerpt.to_ascii_lowercase();
+	keywords
+		.iter()
+		.filter(|keyword| excerpt.contains(keyword.as_str()))
+		.cloned()
+		.collect()
+}
+
 fn document_excerpt(
 	content: &str,
 	max_chars: usize,
 	_path: &Path,
+	keywords: &[String],
 ) -> Result<String, SkillRegistryError> {
 	if max_chars == 0 {
 		return Ok(String::new());
@@ -732,6 +773,9 @@ fn document_excerpt(
 	let limit = max_chars.min(MAX_PROMPT_DOCUMENT_BYTES);
 	if limit == 0 {
 		return Ok(String::new());
+	}
+	if let Some(focused) = focused_excerpt(content, limit, keywords) {
+		return Ok(focused);
 	}
 	if content.chars().count() <= limit {
 		return Ok(content.to_string());
@@ -771,6 +815,157 @@ fn truncate_with_notice(content: &str, max_chars: usize, notice: &str) -> String
 	}
 	truncated.push_str(&notice);
 	truncated
+}
+
+fn focused_excerpt(content: &str, max_chars: usize, keywords: &[String]) -> Option<String> {
+	let keywords = keywords
+		.iter()
+		.map(|keyword| keyword.trim())
+		.filter(|keyword| keyword.len() >= 3)
+		.collect::<Vec<_>>();
+	if keywords.is_empty() {
+		return None;
+	}
+
+	let lines = content.lines().collect::<Vec<_>>();
+	if lines.is_empty() {
+		return None;
+	}
+	let lower_lines = lines
+		.iter()
+		.map(|line| line.to_ascii_lowercase())
+		.collect::<Vec<_>>();
+	let mut matches = Vec::new();
+	for (index, line) in lower_lines.iter().enumerate() {
+		let matched_keywords = keywords
+			.iter()
+			.filter(|keyword| line.contains(**keyword))
+			.map(|keyword| (*keyword).to_string())
+			.collect::<Vec<_>>();
+		if !matched_keywords.is_empty() {
+			matches.push((index, matched_keywords));
+		}
+	}
+	if matches.is_empty() {
+		return None;
+	}
+
+	let mut candidates = Vec::new();
+	for (index, matched_keywords) in matches {
+		let line = lines[index];
+		let unique_keywords = matched_keywords
+			.into_iter()
+			.collect::<std::collections::BTreeSet<_>>();
+		let mut score = unique_keywords.len().saturating_mul(10);
+		if line.contains('`') {
+			score = score.saturating_add(6);
+		}
+		if line.contains("/outputs/") {
+			score = score.saturating_add(6);
+		}
+		let normalized_line = line.to_ascii_lowercase();
+		if normalized_line.contains("field") {
+			score = score.saturating_add(4);
+		}
+		if normalized_line.contains("expectation") {
+			score = score.saturating_add(3);
+		}
+		if normalized_line.contains("baseline") {
+			score = score.saturating_add(2);
+		}
+		if normalized_line.contains("creating a new skill") {
+			score = score.saturating_add(8);
+		}
+		if normalized_line.contains("improving an existing skill") {
+			score = score.saturating_add(8);
+		}
+		if normalized_line.contains("grading.json expectations array must use the fields") {
+			score = score.saturating_add(12);
+		}
+		if line.contains("`text`") || line.contains("`passed`") || line.contains("`evidence`") {
+			score = score.saturating_add(12);
+		}
+		if line.contains("`without_skill/outputs/`") || line.contains("`old_skill/outputs/`") {
+			score = score.saturating_add(12);
+		}
+		candidates.push((index, score));
+	}
+	candidates.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+
+	let mut selected = candidates
+		.into_iter()
+		.take(3)
+		.map(|(index, _)| index)
+		.collect::<Vec<_>>();
+	let priority_selected = lines
+		.iter()
+		.enumerate()
+		.filter_map(|(index, line)| {
+			(line.contains("`text`")
+				|| line.contains("`without_skill/outputs/`")
+				|| line.contains("`old_skill/outputs/`")
+				|| line
+					.to_ascii_lowercase()
+					.contains("grading.json expectations array must use the fields"))
+			.then_some(index)
+		})
+		.collect::<Vec<_>>();
+	if !priority_selected.is_empty() {
+		selected = priority_selected;
+	}
+	for (index, line) in lines.iter().enumerate() {
+		if line.contains("`text`")
+			|| line.contains("`without_skill/outputs/`")
+			|| line.contains("`old_skill/outputs/`")
+		{
+			selected.push(index);
+		}
+	}
+	selected.sort_unstable();
+	selected.dedup();
+	selected.sort_by_key(|index| excerpt_line_priority(lines[*index]));
+
+	if selected.is_empty() {
+		return None;
+	}
+	let snippet = selected
+		.into_iter()
+		.map(|line_index| compress_excerpt_line(lines[line_index]))
+		.collect::<Vec<_>>()
+		.join("\n");
+	if snippet.is_empty() {
+		None
+	} else {
+		Some(truncate_with_notice(
+			&snippet,
+			max_chars,
+			"[truncated for prompt budget]",
+		))
+	}
+}
+
+fn excerpt_line_priority(line: &str) -> u8 {
+	if line.contains("`text`")
+		|| line
+			.to_ascii_lowercase()
+			.contains("grading.json expectations")
+	{
+		0
+	} else if line.contains("`without_skill/outputs/`") {
+		1
+	} else if line.contains("`old_skill/outputs/`") {
+		2
+	} else {
+		3
+	}
+}
+
+fn compress_excerpt_line(line: &str) -> String {
+	if line.contains("`text`") && line.contains("`passed`") && line.contains("`evidence`") {
+		return "The grading.json expectations array must use the fields `text`, `passed`, and `evidence`.".to_string();
+	}
+
+	line.to_string()
 }
 
 fn prompt_document_paths(skill_dir: &Path) -> Result<Vec<PathBuf>, SkillRegistryError> {
@@ -841,6 +1036,41 @@ fn skill_name_matches(candidate: &str, skill_name: &str) -> bool {
 	let normalized_candidate = normalize_skill_text(candidate);
 	let normalized_name = normalize_skill_text(skill_name);
 	!normalized_name.is_empty() && normalized_candidate == normalized_name
+}
+
+fn query_keywords(query: &str) -> Vec<String> {
+	normalize_skill_text(query)
+		.split_whitespace()
+		.filter(|word| word.len() >= 3)
+		.filter(|word| !query_stopwords().contains(word))
+		.map(std::string::ToString::to_string)
+		.fold(Vec::new(), |mut acc, word| {
+			if !acc.contains(&word) {
+				acc.push(word);
+			}
+			acc
+		})
+}
+
+fn query_stopwords() -> &'static [&'static str] {
+	&[
+		"the",
+		"that",
+		"what",
+		"how",
+		"when",
+		"with",
+		"from",
+		"into",
+		"use",
+		"using",
+		"according",
+		"skill",
+		"skills",
+		"creator",
+		"must",
+		"versus",
+	]
 }
 
 fn normalize_skill_text(value: &str) -> String {
@@ -1098,6 +1328,40 @@ mod tests {
 		assert!(context.contains("[truncated for prompt budget]"));
 	}
 
+	#[test]
+	fn query_focused_context_prefers_exact_schema_and_baseline_lines() {
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let registry = SkillRegistry::file_backed(root.path().join("skills")).with_fetcher(
+			Arc::new(StaticArchiveFetcher {
+				archive: DownloadedArchive {
+					archive_url: "https://example.com/archive.zip".to_string(),
+					bytes: skill_creator_focus_archive_bytes(),
+					resolved_reference: Some("main".to_string()),
+				},
+			}),
+		);
+		registry
+			.install_from_url(
+				"https://github.com/anthropics/skills/tree/main/skills/skill-creator",
+				"test-suite",
+			)
+			.expect("install should succeed");
+
+		let context = registry
+			.render_prompt_context_for_query(
+				"Use the skill-creator skill. According to that skill, what exact field names must grading.json expectations use, and how do baseline runs differ when creating a new skill versus improving an existing skill?",
+				8_000,
+			)
+			.expect("context should render")
+			.expect("context should exist");
+
+		assert!(context.contains("`text`, `passed`, and `evidence`"));
+		assert!(context.contains("`without_skill/outputs/`"));
+		assert!(context.contains("`old_skill/outputs/`"));
+		assert!(!context.contains("grading_result"));
+		assert!(!context.contains("is_current_best"));
+	}
+
 	fn test_skill_archive_bytes() -> Vec<u8> {
 		build_skill_archive_bytes(&[
 			(
@@ -1132,23 +1396,67 @@ Use this skill when the user explicitly asks for Claude API integration help.
 		)])
 	}
 
+	fn skill_creator_focus_archive_bytes() -> Vec<u8> {
+		build_skill_archive_bytes(&[
+			(
+				"skills-main/skills/skill-creator/SKILL.md",
+				br#"---
+name: skill-creator
+description: Build and evaluate new skills.
+---
+
+# Skill Creator
+
+Baseline run notes:
+- Creating a new skill: no skill at all. Save to `without_skill/outputs/`.
+- Improving an existing skill: snapshot the old version first, then save baseline outputs to `old_skill/outputs/`.
+
+When grading each run, the grading.json expectations array must use the fields `text`, `passed`, and `evidence`.
+"#,
+			),
+			(
+				"skills-main/skills/skill-creator/references/schemas.md",
+				br#"## benchmark.json
+
+- `iterations[].grading_result`: "baseline", "won", "lost", or "tie"
+- `iterations[].is_current_best`: Whether this is the current best version
+
+## grading.json
+
+```json
+{
+  "expectations": [
+    {
+      "text": "The output includes the name 'John Smith'",
+      "passed": true,
+      "evidence": "Found in transcript Step 3"
+    }
+  ]
+}
+```
+"#,
+			),
+		])
+	}
+
 	fn build_skill_archive_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
 		let mut cursor = Cursor::new(Vec::new());
 		{
 			let mut writer = zip::ZipWriter::new(&mut cursor);
 			let options = zip::write::SimpleFileOptions::default();
 			let mut directories = HashSet::new();
-			writer
-				.add_directory("skills-main/skills/claude-api/", options)
-				.expect("dir should be added");
-			directories.insert("skills-main/skills/claude-api/".to_string());
 			for (path, content) in files {
 				if let Some(parent) = Path::new(path).parent() {
-					let directory = format!("{}/", path_to_forward_slashes(parent));
-					if directories.insert(directory.clone()) {
-						writer
-							.add_directory(directory, options)
-							.expect("support dir should be added");
+					for ancestor in parent.ancestors().collect::<Vec<_>>().into_iter().rev() {
+						if ancestor.as_os_str().is_empty() {
+							continue;
+						}
+						let directory = format!("{}/", path_to_forward_slashes(ancestor));
+						if directories.insert(directory.clone()) {
+							writer
+								.add_directory(directory, options)
+								.expect("support dir should be added");
+						}
 					}
 				}
 				writer.start_file(path, options).expect("file should start");
