@@ -60,6 +60,7 @@ pub trait EventRepository {
 pub trait ApprovalRepository {
 	fn save_ticket(&mut self, ticket: ApprovalTicket) -> Result<(), StoreError>;
 	fn load_ticket(&self, approval_id: &ApprovalId) -> Result<Option<ApprovalTicket>, StoreError>;
+	fn list_tickets_for_task(&self, task_id: &TaskId) -> Result<Vec<ApprovalTicket>, StoreError>;
 }
 
 pub trait ResultRepository {
@@ -140,6 +141,15 @@ impl ApprovalRepository for InMemoryApprovalRepository {
 
 	fn load_ticket(&self, approval_id: &ApprovalId) -> Result<Option<ApprovalTicket>, StoreError> {
 		Ok(self.tickets.get(&approval_id.0).cloned())
+	}
+
+	fn list_tickets_for_task(&self, task_id: &TaskId) -> Result<Vec<ApprovalTicket>, StoreError> {
+		Ok(self
+			.tickets
+			.values()
+			.filter(|ticket| ticket.task_id == *task_id)
+			.cloned()
+			.collect())
 	}
 }
 
@@ -330,6 +340,15 @@ impl ApprovalRepository for FileApprovalRepository {
 	fn load_ticket(&self, approval_id: &ApprovalId) -> Result<Option<ApprovalTicket>, StoreError> {
 		let tickets = self.read_all()?;
 		Ok(tickets.get(&approval_id.0).cloned())
+	}
+
+	fn list_tickets_for_task(&self, task_id: &TaskId) -> Result<Vec<ApprovalTicket>, StoreError> {
+		let tickets = self.read_all()?;
+		Ok(tickets
+			.values()
+			.filter(|ticket| ticket.task_id == *task_id)
+			.cloned()
+			.collect())
 	}
 }
 
@@ -643,6 +662,9 @@ mod tests {
 		let loaded_ticket = approval_repo
 			.load_ticket(&ApprovalId("approval-1".to_string()))
 			.expect("load approval ticket should succeed");
+		let loaded_tickets = approval_repo
+			.list_tickets_for_task(&TaskId("task-1".to_string()))
+			.expect("list approval tickets should succeed");
 		let loaded_result = result_repo
 			.load_result(&TaskId("task-1".to_string()), &NodeId("node-1".to_string()))
 			.expect("load result should succeed");
@@ -656,6 +678,7 @@ mod tests {
 		assert!(loaded_task.is_some());
 		assert_eq!(loaded_events.len(), 1);
 		assert!(loaded_ticket.is_some());
+		assert_eq!(loaded_tickets.len(), 1);
 		assert!(loaded_result.is_some());
 		assert_eq!(
 			loaded_preferences.and_then(|preferences| preferences.planning_mode),
@@ -720,6 +743,9 @@ mod tests {
 		let loaded_ticket = approval_repo
 			.load_ticket(&ApprovalId("approval-1".to_string()))
 			.expect("load approval ticket should succeed");
+		let loaded_tickets = approval_repo
+			.list_tickets_for_task(&TaskId("task-1".to_string()))
+			.expect("list approval tickets should succeed");
 		let loaded_result = result_repo
 			.load_result(&TaskId("task-1".to_string()), &NodeId("node-1".to_string()))
 			.expect("load result should succeed");
@@ -733,6 +759,7 @@ mod tests {
 		assert!(loaded_task.is_some());
 		assert_eq!(loaded_events.len(), 1);
 		assert!(loaded_ticket.is_some());
+		assert_eq!(loaded_tickets.len(), 1);
 		assert!(loaded_result.is_some());
 		assert_eq!(
 			loaded_preferences.and_then(|preferences| preferences.planning_mode),

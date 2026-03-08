@@ -1507,6 +1507,34 @@
 2. Revisit structured logging/export sinks now that the Telegram response surface is richer and includes progress receipts.
 3. Expand Telegram UX further only if a stronger progress protocol or artifact actions are needed.
 
+## 2026-03-08 - Session Milestone (Phase 41)
+
+### Completed Modules
+
+- `roku-state-store`
+  - Added task-scoped approval ticket listing so replay/recovery logic can reconstruct approval progress from persisted approval state instead of only from the live task snapshot.
+- `roku-runtime-service`
+  - Persisted successful validation results, which lets replay treat validation completion as durable recovery state instead of a snapshot-only marker.
+  - Extended task reconstruction so approved approval gates and persisted validation results can repopulate completed helper nodes even when the saved task snapshot is stale.
+  - Kept validation helper nodes transparent for downstream result collection, so aggregation still represents the underlying execution results instead of collapsing to helper-node messages.
+  - Added regression coverage for approval + validation progress reconstruction from persisted state.
+
+### Verification Status
+
+- `cargo test -p roku-state-store -p roku-runtime-service -p roku-e2e`: passed
+
+### Remaining Work
+
+- `RS-15` / `OR-05` are closer, but still not fully done: replay now reconstructs execution, approval, validation, and aggregation progress from more persisted state, yet full event-stream-first reconstruction and partial rerun orchestration are still missing.
+- `GB-07` still lacks retry/dead-letter helper-node injection.
+- `GB-08`, `SS-10`, and `E2E-08` are still open.
+
+### Next Recommended Steps
+
+1. Add retry/dead-letter helper-node contracts so replay can model failure branches explicitly instead of only through terminal task state.
+2. Add duplicate-delivery and lease-expiry chaos tests to push the dispatch/recovery boundary under contention.
+3. Keep shrinking snapshot dependence by reconstructing any remaining helper-node progress directly from persisted events and results.
+
 ## 2026-03-08 - Session Milestone (Phase 40)
 
 ### Completed Modules

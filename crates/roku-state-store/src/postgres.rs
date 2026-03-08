@@ -234,6 +234,23 @@ impl ApprovalRepository for PostgresApprovalRepository {
 		})
 		.transpose()
 	}
+
+	fn list_tickets_for_task(&self, task_id: &TaskId) -> Result<Vec<ApprovalTicket>, StoreError> {
+		let mut client = self.connect_client()?;
+		let query = format!(
+			"SELECT ticket_json FROM {}.approval_tickets WHERE task_id = $1 ORDER BY approval_id",
+			self.schema,
+		);
+		client
+			.query(&query, &[&task_id.0])
+			.map_err(postgres_error)?
+			.into_iter()
+			.map(|row| {
+				serde_json::from_str::<ApprovalTicket>(&row.get::<_, String>(0))
+					.map_err(StoreError::from)
+			})
+			.collect()
+	}
 }
 
 pub struct PostgresResultRepository {
