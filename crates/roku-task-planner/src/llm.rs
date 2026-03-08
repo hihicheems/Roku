@@ -17,6 +17,7 @@ use roku_llm_adapter::{GenerationRequest, LlmRouter, RiskTier};
 use roku_planning_engine::{PlanningDecision, PlanningMode};
 
 use crate::planner::{AdaptiveTaskPlanner, TaskPlanner};
+use crate::strategies::build_skill_install_steps;
 
 pub struct LlmTaskPlanner {
 	router: LlmRouter,
@@ -60,6 +61,13 @@ impl LlmTaskPlanner {
 
 impl TaskPlanner for LlmTaskPlanner {
 	fn build_outline(&self, request: &RequestEnvelope, decision: &PlanningDecision) -> PlanOutline {
+		if let Some(steps) = build_skill_install_steps(&request.goal) {
+			return PlanOutline {
+				goal: request.goal.clone(),
+				steps,
+			};
+		}
+
 		if matches!(decision.mode, PlanningMode::ReAct) {
 			return self.fallback.build_outline(request, decision);
 		}
@@ -433,5 +441,22 @@ mod tests {
 		assert_eq!(outline.steps.len(), 2);
 		assert_eq!(outline.steps[0].step_id, "observe-context");
 		assert_eq!(outline.steps[1].step_id, "act-primary");
+	}
+
+	#[test]
+	fn llm_planner_uses_skill_install_fast_path_before_llm_generation() {
+		let planner = planner_with_output("this should never be used");
+		let mut request = request();
+		request.goal =
+			"Install skill from https://github.com/anthropics/skills/tree/main/skills/claude-api"
+				.to_string();
+		let outline = planner.build_outline(&request, &decision());
+
+		assert_eq!(outline.steps.len(), 1);
+		assert_eq!(outline.steps[0].step_id, "install-skill");
+		assert_eq!(
+			outline.steps[0].required_capabilities,
+			vec!["skill.install".to_string()]
+		);
 	}
 }

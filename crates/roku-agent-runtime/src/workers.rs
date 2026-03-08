@@ -22,7 +22,9 @@ use serde_json::json;
 
 use crate::result::{tool_failure_result, tool_success_result};
 use crate::runtime::RuntimeWorker;
-use crate::tools::{DATA_TOOL_NAME, GENERAL_TOOL_NAME, RESEARCH_TOOL_NAME, REVIEW_TOOL_NAME};
+use crate::tools::{
+	DATA_TOOL_NAME, GENERAL_TOOL_NAME, RESEARCH_TOOL_NAME, REVIEW_TOOL_NAME, SKILL_TOOL_NAME,
+};
 
 pub(crate) struct ToolBackedWorker {
 	worker_id: &'static str,
@@ -131,6 +133,16 @@ pub(crate) fn review_worker(tool_runtime: Arc<ToolRuntime>) -> ToolBackedWorker 
 		&["review.", "validation."],
 		tool_runtime,
 		0.92,
+	)
+}
+
+pub(crate) fn skill_worker(tool_runtime: Arc<ToolRuntime>) -> ToolBackedWorker {
+	ToolBackedWorker::new(
+		"skill-worker",
+		SKILL_TOOL_NAME,
+		&["skill."],
+		tool_runtime,
+		0.94,
 	)
 }
 

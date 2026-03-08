@@ -19,12 +19,16 @@ use roku_common_types::{
 	RecoveryEligibility, RequestEnvelope, RequestId, ResponseStatus, ResultEnvelope, ResultStatus,
 	Task, TaskEdge, TaskEventKind, TaskGraph, TaskId, TaskNode, TaskNodeKind, TaskState,
 };
+use roku_skill_registry::{
+	DownloadedArchive, SkillArchiveFetcher, SkillRegistry, SkillRegistryError, SkillSource,
+};
 use roku_state_store::{
 	DispatchClaim, DispatchEnvelope, DispatchLease, DispatchQueue, RetryClaim, StoreError,
 	TaskRepository,
 };
 use roku_supervisor_agent::DefaultSupervisorAgent;
 use std::collections::VecDeque;
+use std::io::{Cursor, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -167,6 +171,58 @@ fn service_succeeds_for_happy_path() {
 	assert_eq!(experiment.artifact_ids.len(), 3);
 }
 
+#[derive(Clone)]
+struct StaticArchiveFetcher {
+	archive: DownloadedArchive,
+}
+
+impl SkillArchiveFetcher for StaticArchiveFetcher {
+	fn fetch(&self, _source: &SkillSource) -> Result<DownloadedArchive, SkillRegistryError> {
+		Ok(self.archive.clone())
+	}
+}
+
+#[test]
+fn service_surfaces_skill_install_success_message() {
+	let paths = file_backed_paths("skill-install");
+	let skill_root = unique_path("skill-root");
+	let registry = SkillRegistry::file_backed(skill_root.clone()).with_fetcher(Arc::new(
+		StaticArchiveFetcher {
+			archive: DownloadedArchive {
+				archive_url: "https://example.com/archive.zip".to_string(),
+				bytes: test_skill_archive_bytes(),
+				resolved_reference: Some("main".to_string()),
+			},
+		},
+	));
+	let runtime = GenericAgentRuntime::with_skill_registry(registry);
+	let service = file_backed_service_with_planner(
+		&paths,
+		runtime,
+		Box::new(roku_task_planner::AdaptiveTaskPlanner),
+	);
+	let response = service
+		.execute(RequestEnvelope {
+			request_id: RequestId("req-skill".to_string()),
+			session_id: "session-1".to_string(),
+			goal: "Install skill from https://github.com/anthropics/skills/tree/main/skills/claude-api"
+				.to_string(),
+			planning_mode_hint: Some(PlanningModeHint::TaskDecomposition),
+			conversation_history: Vec::new(),
+		})
+		.expect("runtime service should succeed");
+
+	assert_eq!(response.status, ResponseStatus::Succeeded);
+	assert!(response.message.contains("Installed skill `claude-api`"));
+	assert!(
+		skill_root
+			.join("installed")
+			.join("claude-api")
+			.join("SKILL.md")
+			.exists()
+	);
+}
+
 #[test]
 fn service_exposes_task_snapshot_and_event_timeline() {
 	let service = RuntimeService::default();
@@ -197,6 +253,35 @@ fn service_exposes_task_snapshot_and_event_timeline() {
 		events.last().expect("event should exist").to,
 		TaskState::Succeeded
 	);
+}
+
+fn test_skill_archive_bytes() -> Vec<u8> {
+	let mut cursor = Cursor::new(Vec::new());
+	{
+		let mut writer = zip::ZipWriter::new(&mut cursor);
+		let options = zip::write::SimpleFileOptions::default();
+		writer
+			.add_directory("skills-main/skills/claude-api/", options)
+			.expect("dir should be added");
+		writer
+			.start_file("skills-main/skills/claude-api/SKILL.md", options)
+			.expect("skill file should start");
+		writer
+			.write_all(
+				br#"---
+name: claude-api
+description: Build apps with the Claude API.
+---
+
+# Claude API Skill
+
+Use this skill when the user explicitly asks for Claude API integration help.
+"#,
+			)
+			.expect("skill markdown should write");
+		writer.finish().expect("zip should finish");
+	}
+	cursor.into_inner()
 }
 
 #[test]

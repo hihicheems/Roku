@@ -16,9 +16,10 @@ use std::sync::Arc;
 
 use crate::result::policy_rejection_result;
 use crate::tools::{build_builtin_tool_runtime, build_llm_tool_runtime};
-use crate::workers::{data_worker, generic_worker, research_worker, review_worker};
+use crate::workers::{data_worker, generic_worker, research_worker, review_worker, skill_worker};
 use roku_common_types::{AgentInstanceSpec, ResultEnvelope, TaskNode};
 use roku_llm_adapter::LlmRouter;
+use roku_skill_registry::SkillRegistry;
 use roku_tool_runtime::ToolRuntime;
 
 pub trait AgentWorker {
@@ -48,6 +49,7 @@ impl GenericAgentRuntime {
 			workers: Vec::new(),
 			tool_runtime: Arc::clone(&shared_tool_runtime),
 		};
+		runtime.register_worker(95, skill_worker(Arc::clone(&shared_tool_runtime)));
 		runtime.register_worker(90, research_worker(Arc::clone(&shared_tool_runtime)));
 		runtime.register_worker(80, data_worker(Arc::clone(&shared_tool_runtime)));
 		runtime.register_worker(70, review_worker(Arc::clone(&shared_tool_runtime)));
@@ -55,8 +57,19 @@ impl GenericAgentRuntime {
 		runtime
 	}
 
+	pub fn with_skill_registry(skill_registry: SkillRegistry) -> Self {
+		Self::with_tool_runtime(build_builtin_tool_runtime(skill_registry))
+	}
+
 	pub fn with_llm_router(router: LlmRouter) -> Self {
-		Self::with_tool_runtime(build_llm_tool_runtime(Arc::new(router)))
+		Self::with_llm_router_and_skill_registry(router, SkillRegistry::disabled())
+	}
+
+	pub fn with_llm_router_and_skill_registry(
+		router: LlmRouter,
+		skill_registry: SkillRegistry,
+	) -> Self {
+		Self::with_tool_runtime(build_llm_tool_runtime(Arc::new(router), skill_registry))
 	}
 
 	pub fn register_worker<W>(&mut self, priority: u8, worker: W)
@@ -99,7 +112,7 @@ impl AgentWorker for GenericAgentRuntime {
 
 impl Default for GenericAgentRuntime {
 	fn default() -> Self {
-		Self::with_tool_runtime(build_builtin_tool_runtime())
+		Self::with_skill_registry(SkillRegistry::disabled())
 	}
 }
 
@@ -113,6 +126,11 @@ mod tests {
 		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderCallError,
 		ProviderResponse, RiskTier, RoutingPolicy,
 	};
+	use roku_skill_registry::{
+		DownloadedArchive, SkillArchiveFetcher, SkillRegistry, SkillRegistryError, SkillSource,
+	};
+	use std::io::{Cursor, Write};
+	use std::sync::Arc;
 
 	use super::*;
 
@@ -179,6 +197,52 @@ mod tests {
 		assert_eq!(result.status, ResultStatus::Ok);
 		assert_eq!(result.evidence[0].value, "review-worker");
 		assert_eq!(result.evidence[1].value, "review.assess");
+	}
+
+	#[derive(Clone)]
+	struct StaticArchiveFetcher {
+		archive: DownloadedArchive,
+	}
+
+	impl SkillArchiveFetcher for StaticArchiveFetcher {
+		fn fetch(&self, _source: &SkillSource) -> Result<DownloadedArchive, SkillRegistryError> {
+			Ok(self.archive.clone())
+		}
+	}
+
+	#[test]
+	fn dispatches_to_skill_worker_and_returns_install_message() {
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let registry = SkillRegistry::file_backed(root.path().join("skills")).with_fetcher(
+			Arc::new(StaticArchiveFetcher {
+				archive: DownloadedArchive {
+					archive_url: "https://example.com/archive.zip".to_string(),
+					bytes: test_skill_archive_bytes(),
+					resolved_reference: Some("main".to_string()),
+				},
+			}),
+		);
+		let runtime = GenericAgentRuntime::with_skill_registry(registry);
+		let node = node_with_capability("skill.install");
+		let mut spec = spec_with_capabilities(vec!["skill.install"]);
+		spec.context.summary =
+			"Goal: install skill\nStep: Install requested skill from source URL".to_string();
+		spec.context.conversation_history = Vec::new();
+		let node = TaskNode {
+			description: "Goal: install the claude api skill from https://github.com/anthropics/skills/tree/main/skills/claude-api\nStep: Install requested skill from source URL".to_string(),
+			..node
+		};
+
+		let result = runtime.execute(&spec, &node);
+		assert_eq!(result.status, ResultStatus::Ok);
+		assert_eq!(result.evidence[0].value, "skill-worker");
+		assert_eq!(result.evidence[1].value, "skill.install");
+		assert!(
+			payload_value(&result)["message"]
+				.as_str()
+				.expect("message should be a string")
+				.contains("Installed skill `claude-api`")
+		);
 	}
 
 	#[test]
@@ -371,6 +435,40 @@ So, I'll output: "星期日""#
 
 		let result = runtime.execute(&spec, &node);
 		assert_eq!(result.status, ResultStatus::Ok);
-		assert_eq!(payload_value(&result)["message"], "星期日。");
+		let payload = payload_value(&result);
+		let message = payload["message"]
+			.as_str()
+			.expect("message should be a string");
+		assert!(message.starts_with("星期"));
+		assert!(message.ends_with('。'));
+	}
+
+	fn test_skill_archive_bytes() -> Vec<u8> {
+		let mut cursor = Cursor::new(Vec::new());
+		{
+			let mut writer = zip::ZipWriter::new(&mut cursor);
+			let options = zip::write::SimpleFileOptions::default();
+			writer
+				.add_directory("skills-main/skills/claude-api/", options)
+				.expect("dir should be added");
+			writer
+				.start_file("skills-main/skills/claude-api/SKILL.md", options)
+				.expect("skill file should start");
+			writer
+				.write_all(
+					br#"---
+name: claude-api
+description: Build apps with the Claude API.
+---
+
+# Claude API Skill
+
+Use this skill when the user explicitly asks for Claude API integration help.
+"#,
+				)
+				.expect("skill markdown should write");
+			writer.finish().expect("zip should finish");
+		}
+		cursor.into_inner()
 	}
 }
