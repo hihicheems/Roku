@@ -2068,6 +2068,32 @@
 1. Run `just fmt`, `just lint`, and the targeted crate test set before committing the finished `E2E-08` slice.
 2. Re-check the Phase 1 DoD against the remaining non-Phase-1 backlog so follow-up work does not drift into Phase 2 prematurely.
 
+## 2026-03-08 - Session Milestone (Phase 1 Closure)
+
+### Closure Decision
+
+- `tmp/phase-1-control-plane-recovery.md` 的 Phase 1 DoD 已全部满足，控制面恢复阶段正式闭环。
+- 当前 `docs/todo-list.md` 中仍然存在的 `TODO` 已归入后续阶段、扩展能力或工程化增强，不再作为 Phase 1 阻塞项。
+
+### DoD Audit
+
+- `roku-supervisor-agent` 已进入 workspace，并由 `roku-runtime-service` 主链路调用最终完成判定与结果选择逻辑。
+- `task replay` 已从诊断能力升级为真实恢复入口：`resume_task`、approval resume、timeout recovery、restart replay、snapshot compaction 都已落地并通过回归测试。
+- graph 节点已具备恢复、预算、deadline 元数据，调度器也已区分 happy-path 与 failure-path helper edges。
+- cancellation / timeout / compensation 已形成明确状态流，并具备 service 与 e2e 覆盖。
+- dispatch 抽象已经稳定，`InMemoryDispatchQueue` 与 `SqliteDispatchQueue` 都具备 publish / claim / ack / nack / lease / backpressure 行为测试与 chaos 验证。
+- `docs/todo-list.md` 已同步本阶段收尾状态，`E2E-08` 已标记完成。
+
+### Verification Status
+
+- `just fmt`: passed
+- `just lint`: passed
+- `cargo test -p roku-state-store -p roku-runtime-service -p roku-e2e`: passed
+
+### Follow-up Boundary
+
+- 后续优先级应切到非 Phase 1 backlog，例如 `RS-14`、`E2E-07`、`E2E-10` 与更长线的数据面 / 组织层扩展。
+
 ## 2026-03-08 - Session Milestone (Phase 43)
 
 ### Completed Modules
