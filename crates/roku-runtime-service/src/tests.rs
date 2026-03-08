@@ -15,9 +15,9 @@
 use roku_agent_runtime::{GenericAgentRuntime, RuntimeWorker};
 use roku_common_types::{
 	AggregationMode, ApprovalDecision, ApprovalId, ApprovalStatus, CompensationAction,
-	CompensationStatus, EvidenceItem, JoinPolicy, NodeId, PlanningModeHint, RecoveryEligibility,
-	RequestEnvelope, RequestId, ResponseStatus, ResultEnvelope, ResultStatus, Task, TaskEdge,
-	TaskGraph, TaskId, TaskNode, TaskNodeKind, TaskState,
+	CompensationStatus, ErrorClass, EvidenceItem, JoinPolicy, NodeId, PlanningModeHint,
+	RecoveryEligibility, RequestEnvelope, RequestId, ResponseStatus, ResultEnvelope, ResultStatus,
+	Task, TaskEdge, TaskGraph, TaskId, TaskNode, TaskNodeKind, TaskState,
 };
 use roku_state_store::{
 	DispatchClaim, DispatchEnvelope, DispatchLease, DispatchQueue, RetryClaim, StoreError,
@@ -732,6 +732,99 @@ fn service_reconstructs_execution_progress_from_persisted_results_after_restart(
 
 	assert_eq!(response.status, ResponseStatus::Succeeded);
 	assert_eq!(counter.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn service_enters_timeout_recovery_when_node_deadline_is_exceeded() {
+	struct SlowWorker;
+
+	impl RuntimeWorker for SlowWorker {
+		fn worker_id(&self) -> &'static str {
+			"slow-worker"
+		}
+
+		fn supports(&self, _capabilities: &[String]) -> bool {
+			true
+		}
+
+		fn execute(
+			&self,
+			spec: &roku_common_types::AgentInstanceSpec,
+			node: &TaskNode,
+		) -> ResultEnvelope {
+			ResultEnvelope {
+				task_id: spec.context.task_id.clone(),
+				node_id: node.node_id.clone(),
+				producer: spec.instance_id.clone(),
+				schema_version: "result.v1".to_string(),
+				status: ResultStatus::Ok,
+				payload: r#"{"message":"slow execution completed","elapsed_ms":50}"#.to_string(),
+				evidence: vec![EvidenceItem {
+					kind: "runtime".to_string(),
+					value: "slow-worker".to_string(),
+				}],
+				confidence: 0.9,
+			}
+		}
+	}
+
+	let mut runtime = GenericAgentRuntime::default();
+	runtime.register_worker(255, SlowWorker);
+	let service = RuntimeService::in_memory_with_agent_runtime(runtime);
+	let mut task = Task {
+		task_id: TaskId("task-time-budget".to_string()),
+		request_id: RequestId("req-time-budget".to_string()),
+		session_id: "session-time-budget".to_string(),
+		goal: "enforce deadline".to_string(),
+		state: TaskState::Delegating,
+		attempts: 0,
+		planning_mode_hint: None,
+		conversation_history: Vec::new(),
+		completed_nodes: Vec::new(),
+		next_node_index: 0,
+		pending_approval_id: None,
+		last_result: None,
+		compensation_records: Vec::new(),
+		graph: None,
+	};
+	let mut node = TaskNode {
+		node_id: NodeId("slow-step".to_string()),
+		kind: TaskNodeKind::Execution,
+		description: "slow step".to_string(),
+		capabilities: vec!["data.read".to_string()],
+		join_policy: JoinPolicy::AllParents,
+		aggregation_mode: AggregationMode::CollectAll,
+		..TaskNode::default()
+	};
+	node.budget_snapshot.time_budget_ms = 1;
+	node.deadline_ms = 1;
+	node.retry_policy.retry_on_timeout = true;
+	service
+		.start_experiment_run(&task, &task.goal, "test")
+		.expect("experiment run should start");
+
+	let response = service
+		.process_execution_node(&mut task, &node, RunMode::Normal)
+		.expect("execution should return a response")
+		.expect("timeout recovery response should be returned");
+
+	assert_eq!(response.status, ResponseStatus::Failed);
+	assert!(response.message.contains("timed out"));
+	assert_eq!(task.state, TaskState::TimeoutRecovering);
+	assert!(task.completed_nodes.is_empty());
+	let results = service
+		.list_results(&task.task_id)
+		.expect("results should load");
+	assert_eq!(results.len(), 1);
+	assert_eq!(results[0].status, ResultStatus::Error);
+	assert!(results[0].payload.contains("node_deadline_exceeded"));
+	let events = service
+		.list_task_events(&task.task_id)
+		.expect("events should load");
+	assert_eq!(
+		events.last().and_then(|event| event.error_class),
+		Some(ErrorClass::Timeout)
+	);
 }
 
 #[test]

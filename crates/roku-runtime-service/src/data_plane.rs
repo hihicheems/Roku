@@ -519,10 +519,15 @@ impl RuntimeService {
 		};
 
 		let mut reconstructed = task.clone();
-		let result_by_node_id = self
+		let successful_result_by_node_id = self
 			.list_results(&task.task_id)?
 			.into_iter()
-			.filter(|result| matches!(result.status, ResultStatus::Ok | ResultStatus::Error))
+			.filter(|result| matches!(result.status, ResultStatus::Ok))
+			.map(|result| (result.node_id.0.clone(), result))
+			.collect::<HashMap<_, _>>();
+		let last_result_by_node_id = self
+			.list_results(&task.task_id)?
+			.into_iter()
 			.map(|result| (result.node_id.0.clone(), result))
 			.collect::<HashMap<_, _>>();
 		let snapshot_completed = task
@@ -541,7 +546,9 @@ impl RuntimeService {
 			.nodes
 			.iter()
 			.filter(|node| match node.kind {
-				TaskNodeKind::Execution => result_by_node_id.contains_key(&node.node_id.0),
+				TaskNodeKind::Execution => {
+					successful_result_by_node_id.contains_key(&node.node_id.0)
+				}
 				_ => snapshot_completed.contains(&node.node_id.0),
 			})
 			.filter(|node| pending_approval_node_id.as_ref() != Some(&node.node_id.0))
@@ -552,7 +559,7 @@ impl RuntimeService {
 			.nodes
 			.iter()
 			.rev()
-			.find_map(|node| result_by_node_id.get(&node.node_id.0).cloned())
+			.find_map(|node| last_result_by_node_id.get(&node.node_id.0).cloned())
 		{
 			reconstructed.last_result = Some(last_result);
 		}

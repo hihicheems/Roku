@@ -252,6 +252,16 @@ fn derive_policy_bindings(node: &TaskNode, profile: &CapabilityProfile) -> Polic
 		time_budget_ms = time_budget_ms.min(15_000);
 	}
 
+	if node.budget_snapshot.token_budget > 0 {
+		budget_tokens = budget_tokens.min(node.budget_snapshot.token_budget);
+	}
+	if node.budget_snapshot.time_budget_ms > 0 {
+		time_budget_ms = time_budget_ms.min(node.budget_snapshot.time_budget_ms);
+	}
+	if node.deadline_ms > 0 {
+		time_budget_ms = time_budget_ms.min(node.deadline_ms);
+	}
+
 	PolicyBindings {
 		budget_tokens,
 		time_budget_ms,
@@ -337,5 +347,20 @@ mod tests {
 		let spec = factory.build_from_profile(&task_id, DefaultProfile::Review);
 		assert!(spec.instance_id.starts_with("agent-review-"));
 		assert!(spec.capabilities.contains(&"review.check".to_string()));
+	}
+
+	#[test]
+	fn node_budget_snapshot_clamps_policy_bindings() {
+		let factory = AgentInstanceFactory::default();
+		let task_id = TaskId("task-budget".to_string());
+		let mut node = execution_node("node-budget", vec!["data.read"]);
+		node.budget_snapshot.token_budget = 4_000;
+		node.budget_snapshot.time_budget_ms = 2_500;
+		node.deadline_ms = 1_000;
+
+		let spec = factory.build_for_node(&task_id, &node);
+
+		assert_eq!(spec.policy_bindings.budget_tokens, 4_000);
+		assert_eq!(spec.policy_bindings.time_budget_ms, 1_000);
 	}
 }

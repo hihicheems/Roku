@@ -17,8 +17,8 @@ use std::collections::HashMap;
 
 use roku_common_types::{
 	ApprovalStatus, CompensationAction, CompensationRecord, CompensationStatus, ErrorClass,
-	EvidenceItem, RecoveryEligibility, ResponseEnvelope, ResponseStatus, ResultStatus,
-	RuntimeError, Task, TaskId, TaskNode, TaskNodeKind, TaskState,
+	EvidenceItem, RecoveryEligibility, ResponseEnvelope, ResponseStatus, ResultEnvelope,
+	ResultStatus, RuntimeError, Task, TaskId, TaskNode, TaskNodeKind, TaskState,
 };
 use roku_execution_graph_builder::TaskGraphScheduler;
 use roku_observability::{AuditCorrelation, AuditRecord};
@@ -335,6 +335,12 @@ impl RuntimeService {
 			}));
 		}
 		let mut result = self.runtime.execute(&spec, node);
+		if let Some(limit_ms) = node_time_budget_limit_ms(&spec, node)
+			&& let Some(elapsed_ms) = result_elapsed_ms(&result)
+			&& elapsed_ms > limit_ms
+		{
+			result = node_budget_timeout_result(&spec, node, elapsed_ms, limit_ms);
+		}
 		let artifact = self.persist_result_artifact(&result)?;
 		if matches!(mode, RunMode::MissingEvidence | RunMode::RetryExhausted) {
 			result.evidence.clear();
@@ -355,7 +361,24 @@ impl RuntimeService {
 				task.attempts = self.orchestrator.config.max_attempts.saturating_sub(1);
 			}
 			let reason = result_message(&result);
-			let terminal_state = self.fail_task(task, &reason, ErrorClass::Dependency)?;
+			let error_class = classify_result_error(&result);
+			if matches!(error_class, ErrorClass::Timeout) && node.retry_policy.retry_on_timeout {
+				self.record_transition_with_error_class(
+					task,
+					TaskState::TimeoutRecovering,
+					&reason,
+					Some(ErrorClass::Timeout),
+				)?;
+				self.save_task(task.clone())?;
+
+				return Ok(Some(ResponseEnvelope {
+					request_id: task.request_id.clone(),
+					status: ResponseStatus::Failed,
+					message: "task timed out and entered recovery flow".to_string(),
+					artifacts: vec![artifact.uri],
+				}));
+			}
+			let terminal_state = self.fail_task(task, &reason, error_class)?;
 			self.fail_experiment_run(task, &reason)?;
 			self.save_task(task.clone())?;
 
@@ -599,5 +622,86 @@ fn compensation_note(action: CompensationAction) -> &'static str {
 	match action {
 		CompensationAction::Noop => "noop compensation recorded",
 		CompensationAction::AuditOnly => "audit-only compensation recorded",
+	}
+}
+
+fn node_time_budget_limit_ms(
+	spec: &roku_common_types::AgentInstanceSpec,
+	node: &TaskNode,
+) -> Option<u64> {
+	let mut limit_ms = spec.policy_bindings.time_budget_ms;
+	if node.budget_snapshot.time_budget_ms > 0 {
+		limit_ms = limit_ms.min(node.budget_snapshot.time_budget_ms);
+	}
+	if node.deadline_ms > 0 {
+		limit_ms = limit_ms.min(node.deadline_ms);
+	}
+	(limit_ms > 0).then_some(limit_ms)
+}
+
+fn result_elapsed_ms(result: &ResultEnvelope) -> Option<u64> {
+	let payload = serde_json::from_str::<serde_json::Value>(&result.payload).ok()?;
+	payload.get("elapsed_ms")?.as_u64()
+}
+
+fn node_budget_timeout_result(
+	spec: &roku_common_types::AgentInstanceSpec,
+	node: &TaskNode,
+	elapsed_ms: u64,
+	limit_ms: u64,
+) -> ResultEnvelope {
+	ResultEnvelope {
+		task_id: spec.context.task_id.clone(),
+		node_id: node.node_id.clone(),
+		producer: spec.instance_id.clone(),
+		schema_version: "result.v1".to_string(),
+		status: ResultStatus::Error,
+		payload: serde_json::json!({
+			"error_code": "node_deadline_exceeded",
+			"message": format!(
+				"node exceeded time budget: elapsed {elapsed_ms}ms > limit {limit_ms}ms"
+			),
+			"node_id": node.node_id.0,
+			"elapsed_ms": elapsed_ms,
+			"time_budget_ms": limit_ms,
+		})
+		.to_string(),
+		evidence: vec![
+			EvidenceItem {
+				kind: "policy".to_string(),
+				value: "deadline-exceeded".to_string(),
+			},
+			EvidenceItem {
+				kind: "elapsed_ms".to_string(),
+				value: elapsed_ms.to_string(),
+			},
+		],
+		confidence: 0.0,
+	}
+}
+
+fn classify_result_error(result: &ResultEnvelope) -> ErrorClass {
+	let payload = serde_json::from_str::<serde_json::Value>(&result.payload).ok();
+	let error_code = payload
+		.as_ref()
+		.and_then(|value| value.get("error_code"))
+		.and_then(serde_json::Value::as_str);
+
+	if result
+		.evidence
+		.iter()
+		.any(|item| item.kind == "policy" && item.value == "budget-exhausted")
+		|| matches!(error_code, Some("policy_bindings_rejected"))
+	{
+		ErrorClass::BudgetExhausted
+	} else if result
+		.evidence
+		.iter()
+		.any(|item| item.kind == "tool_error" && item.value == "timeout")
+		|| matches!(error_code, Some("timeout" | "node_deadline_exceeded"))
+	{
+		ErrorClass::Timeout
+	} else {
+		ErrorClass::Dependency
 	}
 }
