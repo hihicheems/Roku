@@ -14,6 +14,7 @@
 
 //! Trait-backed state repositories with in-memory and file adapters.
 
+mod dispatch;
 mod postgres;
 
 use std::collections::HashMap;
@@ -26,6 +27,10 @@ use roku_common_types::{
 };
 use thiserror::Error;
 
+pub use dispatch::{
+	BackpressureSnapshot, DispatchClaim, DispatchEnvelope, DispatchLease, DispatchQueue,
+	InMemoryDispatchQueue, RetryClaim,
+};
 pub use postgres::{
 	PostgresApprovalRepository, PostgresConversationRepository, PostgresEventRepository,
 	PostgresResultRepository, PostgresSessionPreferenceRepository, PostgresStoreConfig,

@@ -127,6 +127,7 @@ impl AgentInstanceFactory {
 			capabilities: profile.default_capabilities.clone(),
 			join_policy: JoinPolicy::default(),
 			aggregation_mode: AggregationMode::default(),
+			..TaskNode::default()
 		};
 		self.build_instance(task_id, &node, profile, &[])
 	}
@@ -274,6 +275,7 @@ mod tests {
 				.collect(),
 			join_policy: JoinPolicy::default(),
 			aggregation_mode: AggregationMode::default(),
+			..TaskNode::default()
 		}
 	}
 

@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TaskId(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -148,7 +148,49 @@ pub struct TaskReplayReport {
 	pub chain_consistent: bool,
 	pub snapshot_matches_replay: bool,
 	pub recoverable: bool,
+	pub replay_cursor: TaskReplayCursor,
+	pub consistency_status: ReplayConsistencyStatus,
+	pub recovery_eligibility: RecoveryEligibility,
+	#[serde(default)]
+	pub resume_candidates: Vec<ResumeCandidate>,
 	pub events: Vec<TaskEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskReplayCursor {
+	pub replayed_state: TaskState,
+	pub event_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ReplayConsistencyStatus {
+	#[default]
+	Consistent,
+	InvalidTransitions,
+	BrokenTransitionChain,
+	SnapshotMismatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RecoveryEligibility {
+	ResumeReady,
+	FinalizeReady,
+	PendingApproval,
+	RequiresManualResume,
+	Blocked,
+	#[default]
+	NotRecoverable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResumeCandidate {
+	pub node_id: NodeId,
+	pub kind: TaskNodeKind,
+	pub resume_point_id: String,
+	pub eligibility: RecoveryEligibility,
+	pub deadline_ms: u64,
+	pub capability_requirements: Vec<String>,
+	pub rerun_policy: RerunPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,8 +239,9 @@ pub struct TaskGraph {
 	pub edges: Vec<TaskEdge>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TaskNodeKind {
+	#[default]
 	Execution,
 	Validation,
 	Approval,
@@ -220,7 +263,45 @@ pub enum AggregationMode {
 	HighestConfidence,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct NodeRecoveryAnchor {
+	pub resume_point_id: String,
+	#[serde(default)]
+	pub requires_manual_resume: bool,
+	#[serde(default)]
+	pub allows_partial_rerun: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct NodeBudgetSnapshot {
+	pub token_budget: u64,
+	pub time_budget_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryPolicy {
+	pub max_attempts: u8,
+	pub retry_on_timeout: bool,
+}
+
+impl Default for RetryPolicy {
+	fn default() -> Self {
+		Self {
+			max_attempts: 1,
+			retry_on_timeout: false,
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RerunPolicy {
+	#[default]
+	SafeToRerun,
+	RequiresManualResume,
+	Never,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskNode {
 	pub node_id: NodeId,
 	pub kind: TaskNodeKind,
@@ -230,6 +311,18 @@ pub struct TaskNode {
 	pub join_policy: JoinPolicy,
 	#[serde(default)]
 	pub aggregation_mode: AggregationMode,
+	#[serde(default)]
+	pub recovery_anchor: NodeRecoveryAnchor,
+	#[serde(default)]
+	pub budget_snapshot: NodeBudgetSnapshot,
+	#[serde(default)]
+	pub deadline_ms: u64,
+	#[serde(default)]
+	pub capability_requirements_snapshot: Vec<String>,
+	#[serde(default)]
+	pub retry_policy: RetryPolicy,
+	#[serde(default)]
+	pub rerun_policy: RerunPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

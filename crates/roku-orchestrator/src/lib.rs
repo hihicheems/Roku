@@ -15,7 +15,8 @@
 //! Task state machine and orchestration primitives.
 
 use roku_common_types::{
-	ErrorClass, RequestEnvelope, RuntimeError, Task, TaskEvent, TaskId, TaskState,
+	ErrorClass, RecoveryEligibility, ReplayConsistencyStatus, RequestEnvelope, RuntimeError, Task,
+	TaskEvent, TaskId, TaskState,
 };
 
 #[derive(Debug, Clone)]
@@ -150,6 +151,54 @@ pub fn is_valid_transition(from: TaskState, to: TaskState) -> bool {
 	)
 }
 
+pub fn replayed_state(persisted_state: TaskState, events: &[TaskEvent]) -> TaskState {
+	events
+		.last()
+		.map(|event| event.to)
+		.unwrap_or(persisted_state)
+}
+
+pub fn replay_consistency_status(
+	persisted_state: TaskState,
+	events: &[TaskEvent],
+) -> ReplayConsistencyStatus {
+	let transitions_valid = events
+		.iter()
+		.all(|event| is_valid_transition(event.from, event.to));
+	if !transitions_valid {
+		return ReplayConsistencyStatus::InvalidTransitions;
+	}
+
+	let chain_consistent = events
+		.windows(2)
+		.all(|window| window[0].to == window[1].from);
+	if !chain_consistent {
+		return ReplayConsistencyStatus::BrokenTransitionChain;
+	}
+
+	if replayed_state(persisted_state, events) != persisted_state {
+		return ReplayConsistencyStatus::SnapshotMismatch;
+	}
+
+	ReplayConsistencyStatus::Consistent
+}
+
+pub fn recovery_eligibility_for_state(state: TaskState) -> RecoveryEligibility {
+	match state {
+		TaskState::Planning
+		| TaskState::GraphBuilding
+		| TaskState::Delegating
+		| TaskState::Executing
+		| TaskState::Validating
+		| TaskState::Failed => RecoveryEligibility::ResumeReady,
+		TaskState::WaitingApproval => RecoveryEligibility::PendingApproval,
+		TaskState::Aggregating => RecoveryEligibility::FinalizeReady,
+		TaskState::Queued | TaskState::Succeeded | TaskState::DeadLetter | TaskState::Cancelled => {
+			RecoveryEligibility::NotRecoverable
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -222,5 +271,29 @@ mod tests {
 			.expect("dead-letter registration should succeed");
 		assert_eq!(second.terminal_state, TaskState::DeadLetter);
 		assert_eq!(second.events.len(), 2);
+	}
+
+	#[test]
+	fn replay_consistency_detects_snapshot_mismatch() {
+		let events = vec![TaskEvent {
+			task_id: TaskId("task-1".to_string()),
+			from: TaskState::Queued,
+			to: TaskState::Planning,
+			reason: "start".to_string(),
+			error_class: None,
+		}];
+
+		assert_eq!(
+			replay_consistency_status(TaskState::Queued, &events),
+			ReplayConsistencyStatus::SnapshotMismatch
+		);
+	}
+
+	#[test]
+	fn recovery_eligibility_maps_waiting_approval() {
+		assert_eq!(
+			recovery_eligibility_for_state(TaskState::WaitingApproval),
+			RecoveryEligibility::PendingApproval
+		);
 	}
 }
