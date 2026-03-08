@@ -206,6 +206,27 @@ impl SkillRegistry {
 		Ok(records)
 	}
 
+	pub fn get_skill(&self, skill_name: &str) -> Result<InstalledSkillRecord, SkillRegistryError> {
+		self.list_skills()?
+			.into_iter()
+			.find(|record| skill_name_matches(skill_name, &record.descriptor.name))
+			.ok_or_else(|| SkillRegistryError::SkillNotFound(skill_name.to_string()))
+	}
+
+	pub fn render_prompt_context_for_skill(
+		&self,
+		skill_name: &str,
+		max_chars: usize,
+	) -> Result<String, SkillRegistryError> {
+		let root = self.root_path()?;
+		if max_chars == 0 {
+			return Ok(String::new());
+		}
+
+		let record = self.get_skill(skill_name)?;
+		render_skill_context(root, &record, max_chars)
+	}
+
 	pub fn render_prompt_context_for_query(
 		&self,
 		query: &str,
@@ -626,10 +647,35 @@ fn render_skill_context(
 
 	let entry_path = skill_dir.join(&record.descriptor.entrypoint);
 	let entry_markdown = fs::read_to_string(&entry_path)?;
-	if entry_markdown.len() > max_chars.max(MAX_PROMPT_DOCUMENT_BYTES) {
-		return Err(SkillRegistryError::PromptDocumentTooLarge { path: entry_path });
-	}
+	let supporting_paths = prompt_document_paths(&skill_dir)?;
+	let supporting_budget = if supporting_paths.is_empty() {
+		0
+	} else {
+		max_chars.min(4_096) / 4
+	};
 
+	let header = format!(
+		"### skill: {}\nDescription: {}\nVersion: {}\nSource: {}\n\nEntrypoint (`{}`):\n{}",
+		record.descriptor.name,
+		record.descriptor.description,
+		record.descriptor.version,
+		record.source.original_url(),
+		record.descriptor.entrypoint,
+		""
+	);
+	let header_budget = header.chars().count();
+	if header_budget >= max_chars {
+		return Ok(truncate_with_notice(
+			&header,
+			max_chars,
+			"[skill context truncated]",
+		));
+	}
+	let entry_budget = max_chars
+		.saturating_sub(header_budget)
+		.saturating_sub(supporting_budget)
+		.max(512);
+	let entry_excerpt = document_excerpt(&entry_markdown, entry_budget, &entry_path)?;
 	let mut rendered = format!(
 		"### skill: {}\nDescription: {}\nVersion: {}\nSource: {}\n\nEntrypoint (`{}`):\n{}",
 		record.descriptor.name,
@@ -637,24 +683,26 @@ fn render_skill_context(
 		record.descriptor.version,
 		record.source.original_url(),
 		record.descriptor.entrypoint,
-		entry_markdown.trim()
+		entry_excerpt.trim()
 	);
 	let mut documents = 0usize;
-	for path in prompt_document_paths(&skill_dir)? {
+	for path in supporting_paths {
 		if documents >= MAX_PROMPT_DOCUMENTS || rendered.chars().count() >= max_chars {
 			break;
 		}
 		let content = fs::read_to_string(&path)?;
-		if content.len() > MAX_PROMPT_DOCUMENT_BYTES {
-			continue;
-		}
 		let relative = path_to_forward_slashes(
 			path.strip_prefix(&skill_dir)
 				.map_err(|error| SkillRegistryError::Io(std::io::Error::other(error)))?,
 		);
+		let remaining = max_chars.saturating_sub(rendered.chars().count());
+		if remaining < 128 {
+			break;
+		}
+		let excerpt = document_excerpt(&content, remaining.saturating_sub(64), &path)?;
 		let section = format!(
 			"\n\nSupporting document (`{relative}`):\n{}",
-			content.trim()
+			excerpt.trim()
 		);
 		if rendered
 			.chars()
@@ -670,6 +718,61 @@ fn render_skill_context(
 	Ok(rendered)
 }
 
+fn document_excerpt(
+	content: &str,
+	max_chars: usize,
+	_path: &Path,
+) -> Result<String, SkillRegistryError> {
+	if max_chars == 0 {
+		return Ok(String::new());
+	}
+	if content.is_empty() {
+		return Ok(String::new());
+	}
+	let limit = max_chars.min(MAX_PROMPT_DOCUMENT_BYTES);
+	if limit == 0 {
+		return Ok(String::new());
+	}
+	if content.chars().count() <= limit {
+		return Ok(content.to_string());
+	}
+	if limit < 96 {
+		return Ok(truncate_with_notice(content, limit, "[truncated]"));
+	}
+	Ok(truncate_with_notice(
+		content,
+		limit,
+		"[truncated for prompt budget]",
+	))
+}
+
+fn truncate_with_notice(content: &str, max_chars: usize, notice: &str) -> String {
+	if max_chars == 0 {
+		return String::new();
+	}
+	let content_chars = content.chars().count();
+	if content_chars <= max_chars {
+		return content.to_string();
+	}
+	let notice = format!("\n\n{notice}");
+	let notice_chars = notice.chars().count();
+	if max_chars <= notice_chars {
+		return content.chars().take(max_chars).collect();
+	}
+	let keep_chars = max_chars - notice_chars;
+	let mut truncated = content.chars().take(keep_chars).collect::<String>();
+	while truncated
+		.chars()
+		.last()
+		.map(char::is_whitespace)
+		.unwrap_or(false)
+	{
+		truncated.pop();
+	}
+	truncated.push_str(&notice);
+	truncated
+}
+
 fn prompt_document_paths(skill_dir: &Path) -> Result<Vec<PathBuf>, SkillRegistryError> {
 	let mut paths = WalkDir::new(skill_dir)
 		.into_iter()
@@ -681,21 +784,63 @@ fn prompt_document_paths(skill_dir: &Path) -> Result<Vec<PathBuf>, SkillRegistry
 				&& supported_prompt_document(path)
 		})
 		.collect::<Vec<_>>();
-	paths.sort();
+	paths.sort_by_key(|path| prompt_document_priority(skill_dir, path));
 	Ok(paths)
 }
 
 fn supported_prompt_document(path: &Path) -> bool {
+	let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+		return false;
+	};
+	let normalized_name = file_name.to_ascii_lowercase();
+	if matches!(
+		normalized_name.as_str(),
+		"license" | "license.txt" | "license.md"
+	) {
+		return false;
+	}
+
 	matches!(
 		path.extension().and_then(|value| value.to_str()),
 		Some("md" | "txt" | "json" | "yaml" | "yml" | "toml")
 	)
 }
 
+fn prompt_document_priority(skill_dir: &Path, path: &Path) -> (u8, String) {
+	let relative = path
+		.strip_prefix(skill_dir)
+		.map(path_to_forward_slashes)
+		.unwrap_or_else(|_| path_to_forward_slashes(path));
+	let extension = path
+		.extension()
+		.and_then(|value| value.to_str())
+		.unwrap_or_default();
+	let bucket = if relative.starts_with("references/") {
+		0
+	} else if relative.starts_with("agents/") {
+		1
+	} else if relative.starts_with("docs/") {
+		2
+	} else if extension.eq_ignore_ascii_case("md") {
+		3
+	} else if matches!(extension, "json" | "yaml" | "yml" | "toml") {
+		4
+	} else {
+		5
+	};
+	(bucket, relative)
+}
+
 fn query_mentions_skill(query: &str, skill_name: &str) -> bool {
 	let normalized_query = normalize_skill_text(query);
 	let normalized_name = normalize_skill_text(skill_name);
 	!normalized_name.is_empty() && normalized_query.contains(&normalized_name)
+}
+
+fn skill_name_matches(candidate: &str, skill_name: &str) -> bool {
+	let normalized_candidate = normalize_skill_text(candidate);
+	let normalized_name = normalize_skill_text(skill_name);
+	!normalized_name.is_empty() && normalized_candidate == normalized_name
 }
 
 fn normalize_skill_text(value: &str) -> String {
@@ -777,6 +922,7 @@ fn log_skill_event(message: &str, fields: impl IntoIterator<Item = (&'static str
 
 #[cfg(test)]
 mod tests {
+	use std::collections::HashSet;
 	use std::io::{Cursor, Write};
 	use std::sync::Arc;
 
@@ -876,23 +1022,87 @@ mod tests {
 		assert!(context.is_none());
 	}
 
+	#[test]
+	fn gets_skill_by_normalized_name() {
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let registry = SkillRegistry::file_backed(root.path().join("skills")).with_fetcher(
+			Arc::new(StaticArchiveFetcher {
+				archive: DownloadedArchive {
+					archive_url: "https://example.com/archive.zip".to_string(),
+					bytes: test_skill_archive_bytes(),
+					resolved_reference: Some("main".to_string()),
+				},
+			}),
+		);
+		registry
+			.install_from_url(
+				"https://github.com/anthropics/skills/tree/main/skills/claude-api",
+				"test-suite",
+			)
+			.expect("install should succeed");
+
+		let record = registry
+			.get_skill("Claude API")
+			.expect("normalized lookup should succeed");
+		assert_eq!(record.descriptor.name, "claude-api");
+	}
+
+	#[test]
+	fn renders_prompt_context_for_exact_skill_lookup() {
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let registry = SkillRegistry::file_backed(root.path().join("skills")).with_fetcher(
+			Arc::new(StaticArchiveFetcher {
+				archive: DownloadedArchive {
+					archive_url: "https://example.com/archive.zip".to_string(),
+					bytes: test_skill_archive_bytes(),
+					resolved_reference: Some("main".to_string()),
+				},
+			}),
+		);
+		registry
+			.install_from_url(
+				"https://github.com/anthropics/skills/tree/main/skills/claude-api",
+				"test-suite",
+			)
+			.expect("install should succeed");
+
+		let context = registry
+			.render_prompt_context_for_skill("claude api", 16_000)
+			.expect("exact skill context should render");
+		assert!(context.contains("### skill: claude-api"));
+	}
+
+	#[test]
+	fn truncates_large_entrypoint_instead_of_failing() {
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let registry = SkillRegistry::file_backed(root.path().join("skills")).with_fetcher(
+			Arc::new(StaticArchiveFetcher {
+				archive: DownloadedArchive {
+					archive_url: "https://example.com/archive.zip".to_string(),
+					bytes: large_skill_archive_bytes(),
+					resolved_reference: Some("main".to_string()),
+				},
+			}),
+		);
+		registry
+			.install_from_url(
+				"https://github.com/anthropics/skills/tree/main/skills/claude-api",
+				"test-suite",
+			)
+			.expect("install should succeed");
+
+		let context = registry
+			.render_prompt_context_for_skill("claude-api", 4_096)
+			.expect("large skill context should still render");
+		assert!(context.contains("### skill: claude-api"));
+		assert!(context.contains("[truncated for prompt budget]"));
+	}
+
 	fn test_skill_archive_bytes() -> Vec<u8> {
-		let mut cursor = Cursor::new(Vec::new());
-		{
-			let mut writer = zip::ZipWriter::new(&mut cursor);
-			let options = zip::write::SimpleFileOptions::default();
-			writer
-				.add_directory("skills-main/skills/claude-api/", options)
-				.expect("dir should be added");
-			writer
-				.add_directory("skills-main/skills/claude-api/shared/", options)
-				.expect("shared dir should be added");
-			writer
-				.start_file("skills-main/skills/claude-api/SKILL.md", options)
-				.expect("skill file should start");
-			writer
-				.write_all(
-					br#"---
+		build_skill_archive_bytes(&[
+			(
+				"skills-main/skills/claude-api/SKILL.md",
+				br#"---
 name: claude-api
 description: Build apps with the Claude API.
 license: Apache-2.0
@@ -901,15 +1111,49 @@ license: Apache-2.0
 # Claude API Skill
 
 Use this skill when the user explicitly asks for Claude API integration help.
-"#,
-				)
-				.expect("skill markdown should write");
+"#
+				.as_slice(),
+			),
+			(
+				"skills-main/skills/claude-api/shared/models.md",
+				b"Use claude-opus-4-6 unless the user asks otherwise.".as_slice(),
+			),
+		])
+	}
+
+	fn large_skill_archive_bytes() -> Vec<u8> {
+		let repeated = "Use this skill to follow a very detailed workflow.\n".repeat(2_000);
+		let skill_md = format!(
+			"---\nname: claude-api\ndescription: Build apps with the Claude API.\n---\n\n# Claude API Skill\n\n{repeated}"
+		);
+		build_skill_archive_bytes(&[(
+			"skills-main/skills/claude-api/SKILL.md",
+			skill_md.as_bytes(),
+		)])
+	}
+
+	fn build_skill_archive_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
+		let mut cursor = Cursor::new(Vec::new());
+		{
+			let mut writer = zip::ZipWriter::new(&mut cursor);
+			let options = zip::write::SimpleFileOptions::default();
+			let mut directories = HashSet::new();
 			writer
-				.start_file("skills-main/skills/claude-api/shared/models.md", options)
-				.expect("support file should start");
-			writer
-				.write_all(b"Use claude-opus-4-6 unless the user asks otherwise.")
-				.expect("support file should write");
+				.add_directory("skills-main/skills/claude-api/", options)
+				.expect("dir should be added");
+			directories.insert("skills-main/skills/claude-api/".to_string());
+			for (path, content) in files {
+				if let Some(parent) = Path::new(path).parent() {
+					let directory = format!("{}/", path_to_forward_slashes(parent));
+					if directories.insert(directory.clone()) {
+						writer
+							.add_directory(directory, options)
+							.expect("support dir should be added");
+					}
+				}
+				writer.start_file(path, options).expect("file should start");
+				writer.write_all(content).expect("file should write");
+			}
 			writer.finish().expect("zip should finish");
 		}
 		cursor.into_inner()
