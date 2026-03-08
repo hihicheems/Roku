@@ -1566,6 +1566,7 @@ dependencies = [
  "roku-orchestrator",
  "roku-planning-engine",
  "roku-state-store",
+ "roku-supervisor-agent",
  "roku-task-planner",
  "roku-validation-plane",
  "serde_json",
@@ -1579,6 +1580,15 @@ dependencies = [
  "roku-common-types",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "roku-supervisor-agent"
+version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+ "roku-execution-graph-builder",
+ "roku-planning-engine",
 ]
 
 [[package]]

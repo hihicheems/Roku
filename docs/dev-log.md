@@ -1257,6 +1257,8 @@
 
 ### Remaining Work
 
+- `roku-connectors-telegram` live transport still needs longer-running operational hardening and richer ingress governance.
+
 - Telegram polling is implemented, but long-task status push / approval callback interactions are still not implemented.
 - Planning still uses hard-coded heuristic inputs; it is not yet driven by live llm-adapter requests.
 - Tool output schema enforcement and artifact/audit persistence still need to be added on the tool-runtime side.
@@ -1638,3 +1640,34 @@
 1. Close `LLM-08` by routing coding-provider model selection through `roku-llm-adapter`.
 2. Implement `TG-07` and `TG-08` so Telegram can render artifacts and stream long-task progress instead of only final status text.
 3. Revisit structured logging/export sinks once the Telegram artifact/progress path is in place.
+
+## 2026-03-08 - Session Milestone (Phase 34)
+
+### Completed Modules
+
+- `roku-supervisor-agent`
+  - Added a new workspace crate to hold the first explicit `Supervisor Agent` boundary.
+  - Introduced `SupervisorInput`, `SupervisorDecision`, `SupervisorExecutionFeedback`, and `CompletionAssessment` as the initial control-plane contracts.
+  - Centralized goal normalization, planning-input derivation, planning-strategy selection, and the first replan-policy hook inside `DefaultSupervisorAgent`.
+  - Added supervisor tests for request-hint handling, planning-input scaling, completion assessment, and replan policy.
+- `roku-runtime-service`
+  - Replaced direct planning-strategy selection in the runtime service with calls into `roku-supervisor-agent`.
+  - Wired final task completion through the supervisor completion assessment path so completion policy is no longer embedded only in runtime-service local logic.
+- `docs/todo-list.md`
+  - Marked `SA-01`, `SA-02`, `SA-03`, and `RS-13` as done.
+
+### Verification Status
+
+- `cargo test -p roku-supervisor-agent`: passed
+- `cargo test -p roku-runtime-service`: passed
+
+### Remaining Work
+
+- `SA-04` is still only partially covered; result aggregation policy is not yet extracted into the supervisor crate.
+- Replay/recovery, node-level resume metadata, cancellation recovery, and dispatch/backpressure abstractions are still pending for Phase 1.
+
+### Next Recommended Steps
+
+1. Add recovery-oriented metadata to `TaskNode` and inject it from `roku-execution-graph-builder`.
+2. Refactor replay/reporting and `resume_task` to share a single recovery-analysis path.
+3. Add the first `DispatchQueue` abstraction and in-memory lease/ack/backpressure semantics in `roku-state-store`.

@@ -344,6 +344,10 @@ impl RuntimeService {
 		task: &mut Task,
 		request_id: roku_common_types::RequestId,
 	) -> Result<ResponseEnvelope, RuntimeError> {
+		let completion = self.supervisor.assess_completion(task)?;
+		if !completion.completed {
+			return Err(RuntimeError::new(completion.reason));
+		}
 		if task.state != TaskState::Aggregating {
 			self.record_transition(task, TaskState::Aggregating, "aggregate")?;
 		}

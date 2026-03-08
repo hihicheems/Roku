@@ -61,9 +61,9 @@
 
 | ID | Subtask | Design Anchor | Status |
 | --- | --- | --- | --- |
-| SA-01 | 拆出独立 `Supervisor Agent` crate，承接高层目标理解与策略控制 | §4.1 平台抽象 / §7.2 | TODO |
-| SA-02 | 建立目标、约束、预算、风险偏好的规范化输入模型 | §7.2 / §14 | TODO |
-| SA-03 | 将重规划策略从 `runtime-service` 中抽离为显式 supervisor policy | §7.2 / §7.5 | TODO |
+| SA-01 | 拆出独立 `Supervisor Agent` crate，承接高层目标理解与策略控制 | §4.1 平台抽象 / §7.2 | DONE |
+| SA-02 | 建立目标、约束、预算、风险偏好的规范化输入模型 | §7.2 / §14 | DONE |
+| SA-03 | 将重规划策略从 `runtime-service` 中抽离为显式 supervisor policy | §7.2 / §7.5 | DONE |
 | SA-04 | 实现最终结果聚合与完成判定策略 | §7.2 / §9 请求生命周期 | TODO |
 | SA-05 | 实现 supervisor 对 reviewer / research / data / coding provider 的委派规则 | §7.2 / §7.7 / §13.4 | TODO |
 | SA-06 | 实现 supervisor 与组织策略、审批、预算治理的绑定 | §10 / §14 / §15 / §17 | TODO |
@@ -352,7 +352,7 @@
 | RS-12 | 将 planning / reasoning 接入 `roku-llm-adapter`，消除硬编码 planning 输入 | §7 Planning Architecture / §14 | DONE |
 | RS-12A | 支持 request-level / session-level planning mode override，并补齐四种 planning mode 测试覆盖 | §7.3 Planning Strategy 模式 | DONE |
 | RS-12B | 将 recent conversation history 注入 planner 与 worker prompt 构建链路 | §12 Memory / §7 Planning Architecture | DONE |
-| RS-13 | 将 `Supervisor Agent` 逻辑从 `runtime-service` 中进一步显式分离 | §4.1 / §7.2 | TODO |
+| RS-13 | 将 `Supervisor Agent` 逻辑从 `runtime-service` 中进一步显式分离 | §4.1 / §7.2 | DONE |
 | RS-14 | 增加组织级审批规则、风险动作 gating 与 capability/approval 联动 | §15.3 / §17 OrgPolicy | TODO |
 | RS-15 | 增加基于持久化事件的 replay / recovery / partial rerun 主链路 | §8 ResumePoint / §20 replay | TODO |
 | RS-16 | 增加 cancellation / compensation / timeout recovery 主链路 | §8 状态机 / §22 风险缓解 | TODO |
