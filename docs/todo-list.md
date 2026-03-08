@@ -105,7 +105,7 @@
 | GB-04 | 让 validation gate 依赖于 terminal steps，支持分支场景 | §8.2 并行分支 / §11 验证流水线 | DONE |
 | GB-05 | 提供 ready-node scheduler、执行层次划分与 cycle detection | §8 Task Graph / 调度 | DONE |
 | GB-06 | 为 graph builder 注入 recovery point / resume point / partial rerun anchor | §8.1 ResumePoint | DONE |
-| GB-07 | 自动注入 approval / aggregation / retry / dead-letter 辅助节点 | §8.2 / §15.3 人审闸门 | TODO |
+| GB-07 | 自动注入 approval / aggregation / retry / dead-letter 辅助节点 | §8.2 / §15.3 人审闸门 | DONE |
 | GB-08 | 增加条件边、条件分支和受控回环 DAG 编译能力 | §8.2 条件分支 / 回环有限图 | TODO |
 | GB-09 | 为每个节点写入预算、deadline、capability requirement snapshot | §8.4 / §14 | DONE |
 

@@ -246,7 +246,10 @@ fn derive_policy_bindings(node: &TaskNode, profile: &CapabilityProfile) -> Polic
 
 	if matches!(
 		node.kind,
-		TaskNodeKind::Validation | TaskNodeKind::Aggregation
+		TaskNodeKind::Validation
+			| TaskNodeKind::Aggregation
+			| TaskNodeKind::Retry
+			| TaskNodeKind::DeadLetter
 	) {
 		budget_tokens = budget_tokens.min(6_000);
 		time_budget_ms = time_budget_ms.min(15_000);
@@ -283,6 +286,7 @@ mod tests {
 				.into_iter()
 				.map(std::string::ToString::to_string)
 				.collect(),
+			dispatch_policy: roku_common_types::TaskNodeDispatchPolicy::Automatic,
 			join_policy: JoinPolicy::default(),
 			aggregation_mode: AggregationMode::default(),
 			..TaskNode::default()

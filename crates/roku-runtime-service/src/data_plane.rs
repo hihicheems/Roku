@@ -574,7 +574,10 @@ impl RuntimeService {
 					approved_approval_node_ids.contains(&node.node_id.0)
 						|| snapshot_completed.contains(&node.node_id.0)
 				}
-				TaskNodeKind::Validation | TaskNodeKind::Aggregation => {
+				TaskNodeKind::Validation
+				| TaskNodeKind::Aggregation
+				| TaskNodeKind::Retry
+				| TaskNodeKind::DeadLetter => {
 					successful_result_by_node_id.contains_key(&node.node_id.0)
 						|| snapshot_completed.contains(&node.node_id.0)
 				}
@@ -617,8 +620,13 @@ impl RuntimeService {
 			.result_repo
 			.load_result(&task.task_id, node_id)
 			.map_err(|error| RuntimeError::new(error.to_string()))?
-			&& !matches!(node_kind, TaskNodeKind::Approval | TaskNodeKind::Validation)
-		{
+			&& !matches!(
+				node_kind,
+				TaskNodeKind::Approval
+					| TaskNodeKind::Validation
+					| TaskNodeKind::Retry
+					| TaskNodeKind::DeadLetter
+			) {
 			return Ok(vec![result]);
 		}
 

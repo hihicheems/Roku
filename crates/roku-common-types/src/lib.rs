@@ -276,6 +276,15 @@ pub enum TaskNodeKind {
 	Validation,
 	Approval,
 	Aggregation,
+	Retry,
+	DeadLetter,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TaskNodeDispatchPolicy {
+	#[default]
+	Automatic,
+	ManualRecovery,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -337,6 +346,8 @@ pub struct TaskNode {
 	pub kind: TaskNodeKind,
 	pub description: String,
 	pub capabilities: Vec<String>,
+	#[serde(default)]
+	pub dispatch_policy: TaskNodeDispatchPolicy,
 	#[serde(default)]
 	pub join_policy: JoinPolicy,
 	#[serde(default)]

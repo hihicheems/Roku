@@ -91,6 +91,12 @@ impl RuntimeService {
 						self.process_aggregation_node(task, node)?;
 						self.ack_dispatched_node(&claim.lease)?;
 					}
+					TaskNodeKind::Retry | TaskNodeKind::DeadLetter => {
+						return Err(RuntimeError::new(format!(
+							"manual recovery helper node {} was dispatched on the automatic path",
+							node.node_id.0
+						)));
+					}
 				}
 			}
 		}

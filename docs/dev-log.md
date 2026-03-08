@@ -1881,3 +1881,37 @@
 1. Finish `RS-15` by moving from replay diagnostics/preflight into true event-stream-driven task reconstruction.
 2. Wire `DispatchQueue` into runtime dispatch and begin lease-aware worker coordination.
 3. Add cancellation / timeout recovery states and tests in `roku-orchestrator` and `roku-runtime-service`.
+
+## 2026-03-08 - Session Milestone (Phase 42)
+
+### Completed Modules
+
+- `roku-common-types`
+  - Added `TaskNodeKind::Retry` and `TaskNodeKind::DeadLetter` plus `TaskNodeDispatchPolicy`, so helper nodes can be represented explicitly without being mistaken for ordinary happy-path work.
+- `roku-execution-graph-builder`
+  - Injected per-step `retry` and `dead-letter` helper nodes alongside the existing execution/approval/validation/aggregation graph shape.
+  - Marked retry/dead-letter helpers as `ManualRecovery`, and taught the scheduler to ignore non-automatic helper nodes for ready-node, execution-layer, completion, and replay-ready calculations.
+  - Added regression coverage proving helper-node injection exists while the automatic scheduler still advances directly to the normal validation path.
+- `roku-runtime-service`
+  - Extended reconstruction/result-resolution logic to recognize retry/dead-letter helper kinds without collapsing helper-node results into downstream aggregation inputs.
+  - Added an explicit runtime guard so manually gated helper nodes cannot leak into the automatic execution path silently.
+- `roku-agent-instance-factory`
+  - Treated retry/dead-letter helper nodes like other low-budget control-plane helpers when deriving worker policy bindings.
+- `docs/todo-list.md`
+  - Marked `GB-07` as done.
+
+### Verification Status
+
+- `cargo test -p roku-common-types -p roku-execution-graph-builder -p roku-agent-instance-factory -p roku-runtime-service`: passed
+
+### Remaining Work
+
+- `RS-15` / `OR-05` still need fuller event-stream-first reconstruction and branch-local partial rerun orchestration.
+- `GB-08` remains open: conditional edges and controlled loop compilation are still missing, so retry/dead-letter helpers are modeled in the graph but not yet conditionally activated.
+- `SS-10` and `E2E-08` remain open: replay compaction plus duplicate-delivery / lease-expiry / provider-loss / restart-stress coverage still need to land.
+
+### Next Recommended Steps
+
+1. Continue `GB-08` by adding conditional edge contracts so the new retry/dead-letter helper nodes can participate in explicit failure-path routing instead of staying passive graph structure.
+2. Push `RS-15` / `OR-05` further toward event-derived branch-local partial rerun on top of the richer helper-node graph.
+3. Expand `E2E-08` chaos coverage around duplicate delivery, lease expiry, and restart contention once failure-path routing metadata exists.

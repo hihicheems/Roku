@@ -16,7 +16,8 @@ use std::collections::{HashMap, HashSet};
 
 use roku_common_types::{
 	AggregationMode, JoinPolicy, NodeBudgetSnapshot, NodeId, NodeRecoveryAnchor, PlanOutline,
-	RerunPolicy, RetryPolicy, TaskEdge, TaskGraph, TaskId, TaskNode, TaskNodeKind,
+	RerunPolicy, RetryPolicy, TaskEdge, TaskGraph, TaskId, TaskNode, TaskNodeDispatchPolicy,
+	TaskNodeKind,
 };
 use thiserror::Error;
 
@@ -72,22 +73,53 @@ impl ExecutionGraphBuilder {
 				TaskNodeKind::Execution,
 				&step.required_capabilities,
 			);
-			nodes.push(TaskNode {
-				node_id: execution_node_id.clone(),
-				kind: TaskNodeKind::Execution,
-				description: step.summary.clone(),
-				capabilities: step.required_capabilities.clone(),
-				join_policy: JoinPolicy::AllParents,
-				aggregation_mode: AggregationMode::CollectAll,
-				recovery_anchor: execution_metadata.recovery_anchor,
-				budget_snapshot: execution_metadata.budget_snapshot,
-				deadline_ms: execution_metadata.deadline_ms,
-				capability_requirements_snapshot: execution_metadata
-					.capability_requirements_snapshot,
-				retry_policy: execution_metadata.retry_policy,
-				rerun_policy: execution_metadata.rerun_policy,
-			});
+			nodes.push(build_task_node(
+				execution_node_id.clone(),
+				TaskNodeKind::Execution,
+				step.summary.clone(),
+				step.required_capabilities.clone(),
+				TaskNodeDispatchPolicy::Automatic,
+				execution_metadata,
+			));
 			execution_nodes.insert(step.step_id.clone(), execution_node_id.clone());
+
+			let retry_node_id = NodeId(format!("{}-retry", step.step_id));
+			let retry_metadata = default_node_metadata(
+				&retry_node_id,
+				TaskNodeKind::Retry,
+				&[String::from("control.retry")],
+			);
+			nodes.push(build_task_node(
+				retry_node_id.clone(),
+				TaskNodeKind::Retry,
+				format!("Retry helper for {}", step.step_id),
+				vec!["control.retry".to_string()],
+				TaskNodeDispatchPolicy::ManualRecovery,
+				retry_metadata,
+			));
+			edges.push(TaskEdge {
+				from: execution_node_id.clone(),
+				to: retry_node_id.clone(),
+			});
+
+			let dead_letter_node_id = NodeId(format!("{}-dead-letter", step.step_id));
+			let dead_letter_metadata = default_node_metadata(
+				&dead_letter_node_id,
+				TaskNodeKind::DeadLetter,
+				&[String::from("control.dead_letter")],
+			);
+			nodes.push(build_task_node(
+				dead_letter_node_id.clone(),
+				TaskNodeKind::DeadLetter,
+				format!("Dead-letter helper for {}", step.step_id),
+				vec!["control.dead_letter".to_string()],
+				TaskNodeDispatchPolicy::ManualRecovery,
+				dead_letter_metadata,
+			));
+			edges.push(TaskEdge {
+				from: retry_node_id,
+				to: dead_letter_node_id,
+			});
 
 			let terminal_node_id = if cfg.include_approval_gate && step.requires_approval {
 				let approval_node_id = NodeId(format!("{}-approval", step.step_id));
@@ -96,21 +128,14 @@ impl ExecutionGraphBuilder {
 					TaskNodeKind::Approval,
 					&[String::from("approve.action")],
 				);
-				nodes.push(TaskNode {
-					node_id: approval_node_id.clone(),
-					kind: TaskNodeKind::Approval,
-					description: "Approval gate".to_string(),
-					capabilities: vec!["approve.action".to_string()],
-					join_policy: JoinPolicy::AllParents,
-					aggregation_mode: AggregationMode::CollectAll,
-					recovery_anchor: approval_metadata.recovery_anchor,
-					budget_snapshot: approval_metadata.budget_snapshot,
-					deadline_ms: approval_metadata.deadline_ms,
-					capability_requirements_snapshot: approval_metadata
-						.capability_requirements_snapshot,
-					retry_policy: approval_metadata.retry_policy,
-					rerun_policy: approval_metadata.rerun_policy,
-				});
+				nodes.push(build_task_node(
+					approval_node_id.clone(),
+					TaskNodeKind::Approval,
+					"Approval gate".to_string(),
+					vec!["approve.action".to_string()],
+					TaskNodeDispatchPolicy::Automatic,
+					approval_metadata,
+				));
 				edges.push(TaskEdge {
 					from: execution_node_id,
 					to: approval_node_id.clone(),
@@ -148,21 +173,14 @@ impl ExecutionGraphBuilder {
 				TaskNodeKind::Validation,
 				&[String::from("validate.result")],
 			);
-			nodes.push(TaskNode {
-				node_id: validation_id.clone(),
-				kind: TaskNodeKind::Validation,
-				description: "Validation gate".to_string(),
-				capabilities: vec!["validate.result".to_string()],
-				join_policy: JoinPolicy::AllParents,
-				aggregation_mode: AggregationMode::CollectAll,
-				recovery_anchor: validation_metadata.recovery_anchor,
-				budget_snapshot: validation_metadata.budget_snapshot,
-				deadline_ms: validation_metadata.deadline_ms,
-				capability_requirements_snapshot: validation_metadata
-					.capability_requirements_snapshot,
-				retry_policy: validation_metadata.retry_policy,
-				rerun_policy: validation_metadata.rerun_policy,
-			});
+			nodes.push(build_task_node(
+				validation_id.clone(),
+				TaskNodeKind::Validation,
+				"Validation gate".to_string(),
+				vec!["validate.result".to_string()],
+				TaskNodeDispatchPolicy::Automatic,
+				validation_metadata,
+			));
 
 			for terminal_node in terminal_step_nodes(outline, &terminal_nodes) {
 				edges.push(TaskEdge {
@@ -180,21 +198,14 @@ impl ExecutionGraphBuilder {
 				TaskNodeKind::Aggregation,
 				&[String::from("aggregate.result")],
 			);
-			nodes.push(TaskNode {
-				node_id: aggregation_id.clone(),
-				kind: TaskNodeKind::Aggregation,
-				description: "Aggregation gate".to_string(),
-				capabilities: vec!["aggregate.result".to_string()],
-				join_policy: JoinPolicy::AllParents,
-				aggregation_mode: AggregationMode::CollectAll,
-				recovery_anchor: aggregation_metadata.recovery_anchor,
-				budget_snapshot: aggregation_metadata.budget_snapshot,
-				deadline_ms: aggregation_metadata.deadline_ms,
-				capability_requirements_snapshot: aggregation_metadata
-					.capability_requirements_snapshot,
-				retry_policy: aggregation_metadata.retry_policy,
-				rerun_policy: aggregation_metadata.rerun_policy,
-			});
+			nodes.push(build_task_node(
+				aggregation_id.clone(),
+				TaskNodeKind::Aggregation,
+				"Aggregation gate".to_string(),
+				vec!["aggregate.result".to_string()],
+				TaskNodeDispatchPolicy::Automatic,
+				aggregation_metadata,
+			));
 
 			let aggregation_parents = validation_node_id.into_iter().collect::<Vec<_>>();
 			if aggregation_parents.is_empty() {
@@ -229,6 +240,31 @@ struct NodeMetadata {
 	capability_requirements_snapshot: Vec<String>,
 	retry_policy: RetryPolicy,
 	rerun_policy: RerunPolicy,
+}
+
+fn build_task_node(
+	node_id: NodeId,
+	kind: TaskNodeKind,
+	description: String,
+	capabilities: Vec<String>,
+	dispatch_policy: TaskNodeDispatchPolicy,
+	metadata: NodeMetadata,
+) -> TaskNode {
+	TaskNode {
+		node_id,
+		kind,
+		description,
+		capabilities,
+		dispatch_policy,
+		join_policy: JoinPolicy::AllParents,
+		aggregation_mode: AggregationMode::CollectAll,
+		recovery_anchor: metadata.recovery_anchor,
+		budget_snapshot: metadata.budget_snapshot,
+		deadline_ms: metadata.deadline_ms,
+		capability_requirements_snapshot: metadata.capability_requirements_snapshot,
+		retry_policy: metadata.retry_policy,
+		rerun_policy: metadata.rerun_policy,
+	}
 }
 
 fn default_node_metadata(
@@ -275,6 +311,20 @@ fn default_node_metadata(
 				false,
 				false,
 			),
+			TaskNodeKind::Retry => (
+				5_000,
+				RetryPolicy::default(),
+				RerunPolicy::SafeToRerun,
+				false,
+				true,
+			),
+			TaskNodeKind::DeadLetter => (
+				5_000,
+				RetryPolicy::default(),
+				RerunPolicy::Never,
+				false,
+				false,
+			),
 		};
 	let capability_count = u64::try_from(capabilities.len()).unwrap_or(u64::MAX);
 
@@ -316,7 +366,7 @@ fn terminal_step_nodes(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use roku_common_types::{PlanOutline, PlanStep, TaskId, TaskNodeKind};
+	use roku_common_types::{PlanOutline, PlanStep, TaskId, TaskNodeDispatchPolicy, TaskNodeKind};
 
 	#[test]
 	fn compile_outline_to_graph() {
@@ -338,13 +388,45 @@ mod tests {
 			)
 			.expect("graph compilation should succeed");
 
-		assert_eq!(graph.nodes.len(), 4);
-		assert_eq!(graph.nodes[1].kind, TaskNodeKind::Approval);
-		assert_eq!(graph.nodes[2].kind, TaskNodeKind::Validation);
-		assert_eq!(graph.nodes[3].kind, TaskNodeKind::Aggregation);
+		assert_eq!(graph.nodes.len(), 6);
 		assert_eq!(graph.nodes[0].recovery_anchor.resume_point_id, "resume:s1");
 		assert!(graph.nodes[0].capability_requirements_snapshot.is_empty());
 		assert!(graph.nodes[0].budget_snapshot.time_budget_ms > 0);
+		assert!(
+			graph
+				.nodes
+				.iter()
+				.any(|node| node.kind == TaskNodeKind::Approval)
+		);
+		assert!(graph.nodes.iter().any(|node| {
+			node.kind == TaskNodeKind::Retry
+				&& node.dispatch_policy == TaskNodeDispatchPolicy::ManualRecovery
+		}));
+		assert!(
+			graph
+				.nodes
+				.iter()
+				.any(|node| node.kind == TaskNodeKind::DeadLetter)
+		);
+		assert!(
+			graph
+				.nodes
+				.iter()
+				.any(|node| node.kind == TaskNodeKind::Validation)
+		);
+		assert!(
+			graph
+				.nodes
+				.iter()
+				.any(|node| node.kind == TaskNodeKind::Aggregation)
+		);
+		assert!(graph.edges.iter().any(|edge| {
+			edge.from == NodeId("s1".to_string()) && edge.to == NodeId("s1-retry".to_string())
+		}));
+		assert!(graph.edges.iter().any(|edge| {
+			edge.from == NodeId("s1-retry".to_string())
+				&& edge.to == NodeId("s1-dead-letter".to_string())
+		}));
 	}
 
 	#[test]
