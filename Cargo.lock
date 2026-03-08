@@ -1434,6 +1434,7 @@ dependencies = [
 name = "roku-cmd"
 version = "0.1.0"
 dependencies = [
+ "actix-web",
  "dotenvy",
  "roku-agent-runtime",
  "roku-api-gateway",
@@ -1531,6 +1532,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "time",
 ]
 
 [[package]]

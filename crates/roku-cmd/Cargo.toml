@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+actix-web = "4"
 dotenvy = "0.15"
 roku-agent-runtime = { path = "../roku-agent-runtime" }
 roku-api-gateway = { path = "../roku-api-gateway" }

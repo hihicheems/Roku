@@ -1,5 +1,6 @@
 //! Roku command runtime bootstrap.
 
+mod api;
 mod bot;
 mod runtime;
 
@@ -16,8 +17,11 @@ use thiserror::Error;
 
 pub use runtime::{RunMode, run_live_once_from_env, run_once, run_with_mode};
 
+use crate::api::run_api_gateway_from_env;
 use crate::bot::run_telegram_bot_from_env;
-use crate::runtime::{ExecutionRequestOptions, run_live_once_with_options_from_env, run_with_mode_and_options};
+use crate::runtime::{
+	ExecutionRequestOptions, run_live_once_with_options_from_env, run_with_mode_and_options,
+};
 
 #[derive(Debug, Error)]
 pub enum CommandError {
@@ -25,6 +29,8 @@ pub enum CommandError {
 	Usage(String),
 	#[error("invalid logging configuration: {0}")]
 	LoggingConfiguration(String),
+	#[error("failed to bootstrap api gateway: {0}")]
+	ApiGatewayBootstrap(String),
 	#[error("failed to bootstrap state store: {0}")]
 	StateStoreBootstrap(String),
 	#[error(transparent)]
@@ -62,6 +68,10 @@ where
 			run_telegram_bot_from_env()?;
 			Ok(None)
 		}
+		Some("api-gateway") | Some("http-api") => {
+			run_api_gateway_from_env()?;
+			Ok(None)
+		}
 		Some("--help") | Some("-h") | Some("help") => Ok(Some(help_text().to_string())),
 		Some(command) => Err(CommandError::Usage(format!(
 			"unknown command: {command}\n\n{}",
@@ -71,7 +81,7 @@ where
 }
 
 pub fn help_text() -> &'static str {
-	"Usage:\n  roku-cmd once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd live-once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd telegram-bot\n\nCommands:\n  once         Run the deterministic in-process pipeline.\n  live-once    Run the OpenRouter-backed live pipeline from environment.\n  telegram-bot Start the Telegram polling bot using environment configuration.\n\nPlanning Modes:\n  react | taskdecomposition | treesearch | iterativerefinement"
+	"Usage:\n  roku-cmd once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd live-once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n\nCommands:\n  once         Run the deterministic in-process pipeline.\n  live-once    Run the OpenRouter-backed live pipeline from environment.\n  telegram-bot Start the Telegram polling bot using environment configuration.\n  api-gateway  Start the Actix HTTP gateway using environment configuration.\n\nPlanning Modes:\n  react | taskdecomposition | treesearch | iterativerefinement"
 }
 
 fn join_goal(parts: &[String]) -> Result<String, CommandError> {
@@ -255,11 +265,9 @@ mod tests {
 	fn execute_cli_help_renders_usage() {
 		let output = execute_cli(["help"]).expect("help should succeed");
 		assert!(output.is_some());
-		assert!(
-			output
-				.expect("help output should exist")
-				.contains("telegram-bot")
-		);
+		let help = output.expect("help output should exist");
+		assert!(help.contains("telegram-bot"));
+		assert!(help.contains("api-gateway"));
 	}
 
 	#[test]
@@ -275,7 +283,10 @@ mod tests {
 		.expect("request options should parse");
 
 		assert_eq!(options.session_id, "chat-42");
-		assert_eq!(options.planning_mode_hint, Some(PlanningModeHint::TreeSearch));
+		assert_eq!(
+			options.planning_mode_hint,
+			Some(PlanningModeHint::TreeSearch)
+		);
 		assert_eq!(options.goal, "investigate memory");
 	}
 
