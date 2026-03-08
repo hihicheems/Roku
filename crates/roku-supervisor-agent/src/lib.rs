@@ -289,6 +289,7 @@ mod tests {
 			next_node_index: 1,
 			pending_approval_id: None,
 			last_result: None,
+			compensation_records: Vec::new(),
 			graph: Some(TaskGraph {
 				task_id: roku_common_types::TaskId("task-1".to_string()),
 				nodes: vec![sample_node("step-1")],

@@ -60,6 +60,7 @@ impl Orchestrator {
 			next_node_index: 0,
 			pending_approval_id: None,
 			last_result: None,
+			compensation_records: Vec::new(),
 			graph: None,
 		}
 	}
@@ -123,6 +124,40 @@ impl Orchestrator {
 			events,
 		})
 	}
+
+	pub fn request_cancellation(
+		&self,
+		task: &mut Task,
+		reason: impl Into<String>,
+		has_compensation_work: bool,
+	) -> Result<Vec<TaskEvent>, RuntimeError> {
+		let reason = reason.into();
+		let mut events = vec![self.transition(task, TaskState::CancelRequested, reason, None)?];
+
+		if has_compensation_work {
+			events.push(self.transition(
+				task,
+				TaskState::Compensating,
+				"record cancellation compensation",
+				None,
+			)?);
+			events.push(self.transition(
+				task,
+				TaskState::Cancelled,
+				"cancellation compensation recorded",
+				None,
+			)?);
+		} else {
+			events.push(self.transition(
+				task,
+				TaskState::Cancelled,
+				"cancelled before additional work started",
+				None,
+			)?);
+		}
+
+		Ok(events)
+	}
 }
 
 pub fn build_idempotency_key(task_id: &TaskId, node_id: &str, attempt: u32) -> String {
@@ -143,6 +178,26 @@ pub fn is_valid_transition(from: TaskState, to: TaskState) -> bool {
 			| (TaskState::Validating, TaskState::WaitingApproval)
 			| (TaskState::WaitingApproval, TaskState::Executing)
 			| (TaskState::Executing, TaskState::Aggregating)
+			| (TaskState::Planning, TaskState::CancelRequested)
+			| (TaskState::GraphBuilding, TaskState::CancelRequested)
+			| (TaskState::Delegating, TaskState::CancelRequested)
+			| (TaskState::Executing, TaskState::CancelRequested)
+			| (TaskState::Validating, TaskState::CancelRequested)
+			| (TaskState::WaitingApproval, TaskState::CancelRequested)
+			| (TaskState::Aggregating, TaskState::CancelRequested)
+			| (TaskState::Failed, TaskState::CancelRequested)
+			| (TaskState::TimeoutRecovering, TaskState::CancelRequested)
+			| (TaskState::CancelRequested, TaskState::Compensating)
+			| (TaskState::CancelRequested, TaskState::Cancelled)
+			| (TaskState::Compensating, TaskState::Cancelled)
+			| (TaskState::Delegating, TaskState::TimeoutRecovering)
+			| (TaskState::Executing, TaskState::TimeoutRecovering)
+			| (TaskState::Validating, TaskState::TimeoutRecovering)
+			| (TaskState::TimeoutRecovering, TaskState::Planning)
+			| (TaskState::TimeoutRecovering, TaskState::GraphBuilding)
+			| (TaskState::TimeoutRecovering, TaskState::Delegating)
+			| (TaskState::TimeoutRecovering, TaskState::Executing)
+			| (TaskState::TimeoutRecovering, TaskState::Validating)
 			| (TaskState::Aggregating, TaskState::Succeeded)
 			| (TaskState::Failed, TaskState::Planning)
 			| (_, TaskState::Failed)
@@ -190,12 +245,16 @@ pub fn recovery_eligibility_for_state(state: TaskState) -> RecoveryEligibility {
 		| TaskState::Delegating
 		| TaskState::Executing
 		| TaskState::Validating
-		| TaskState::Failed => RecoveryEligibility::ResumeReady,
+		| TaskState::Failed
+		| TaskState::TimeoutRecovering => RecoveryEligibility::ResumeReady,
 		TaskState::WaitingApproval => RecoveryEligibility::PendingApproval,
 		TaskState::Aggregating => RecoveryEligibility::FinalizeReady,
-		TaskState::Queued | TaskState::Succeeded | TaskState::DeadLetter | TaskState::Cancelled => {
-			RecoveryEligibility::NotRecoverable
-		}
+		TaskState::Queued
+		| TaskState::CancelRequested
+		| TaskState::Compensating
+		| TaskState::Succeeded
+		| TaskState::DeadLetter
+		| TaskState::Cancelled => RecoveryEligibility::NotRecoverable,
 	}
 }
 
@@ -294,6 +353,40 @@ mod tests {
 		assert_eq!(
 			recovery_eligibility_for_state(TaskState::WaitingApproval),
 			RecoveryEligibility::PendingApproval
+		);
+	}
+
+	#[test]
+	fn request_cancellation_transitions_through_compensation_when_work_exists() {
+		let orchestrator = Orchestrator::default();
+		let request = RequestEnvelope {
+			request_id: RequestId("req-1".to_string()),
+			session_id: "s1".to_string(),
+			goal: "g".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+		let mut task = orchestrator.create_task(&request);
+		orchestrator
+			.transition(&mut task, TaskState::Planning, "plan", None)
+			.expect("planning transition should succeed");
+
+		let events = orchestrator
+			.request_cancellation(&mut task, "operator cancelled", true)
+			.expect("cancellation should succeed");
+
+		assert_eq!(events.len(), 3);
+		assert_eq!(events[0].to, TaskState::CancelRequested);
+		assert_eq!(events[1].to, TaskState::Compensating);
+		assert_eq!(events[2].to, TaskState::Cancelled);
+		assert_eq!(task.state, TaskState::Cancelled);
+	}
+
+	#[test]
+	fn timeout_recovery_state_is_resumable() {
+		assert_eq!(
+			recovery_eligibility_for_state(TaskState::TimeoutRecovering),
+			RecoveryEligibility::ResumeReady
 		);
 	}
 }

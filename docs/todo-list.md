@@ -53,7 +53,7 @@
 | OR-03 | 实现失败注册、重试预算与 dead-letter 终态流转 | §8.4 状态变更要求 | DONE |
 | OR-04 | 输出幂等键构造函数 `task_id + node_id + attempt` | §8.4 状态变更要求 | DONE |
 | OR-05 | 增加基于持久化事件的任务重建 / replay 能力 | §8 / §20.2 验收重点 | TODO |
-| OR-06 | 增加取消、补偿与中断恢复状态流 | §8 状态机 / §22 风险缓解 | TODO |
+| OR-06 | 增加取消、补偿与中断恢复状态流 | §8 状态机 / §22 风险缓解 | DONE |
 | OR-07 | 增加 node-level deadline / budget snapshot enforcement | §8.4 / §14 预算治理 | TODO |
 | OR-08 | 接入真实 dispatch plane（Redis / NATS / JetStream）后的 lease / ack / retry 协议 | §14.3 背压与资源隔离 | TODO |
 
@@ -355,7 +355,7 @@
 | RS-13 | 将 `Supervisor Agent` 逻辑从 `runtime-service` 中进一步显式分离 | §4.1 / §7.2 | DONE |
 | RS-14 | 增加组织级审批规则、风险动作 gating 与 capability/approval 联动 | §15.3 / §17 OrgPolicy | TODO |
 | RS-15 | 增加基于持久化事件的 replay / recovery / partial rerun 主链路 | §8 ResumePoint / §20 replay | TODO |
-| RS-16 | 增加 cancellation / compensation / timeout recovery 主链路 | §8 状态机 / §22 风险缓解 | TODO |
+| RS-16 | 增加 cancellation / compensation / timeout recovery 主链路 | §8 状态机 / §22 风险缓解 | DONE |
 | RS-17 | 暴露 `task snapshot` 与 `task event timeline` 查询接口，为后续 replay / CLI 运维命令提供 recovery 基线 | §8 ResumePoint / §20 replay | DONE |
 | RS-18 | 增加 `resume_task` 入口，基于 persisted task snapshot + graph + completed nodes 恢复可继续执行的任务，并对等待审批态返回明确挂起响应 | §8 ResumePoint / §15.3 人审闸门 | DONE |
 | RS-19 | 暴露统一 `task replay report` 查询接口，收敛事件链一致性与 recoverable 判定，避免 CLI / Gateway 重复实现编排规则 | §8 ResumePoint / §19 运维接口 | DONE |

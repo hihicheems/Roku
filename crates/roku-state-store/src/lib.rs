@@ -550,6 +550,7 @@ mod tests {
 			next_node_index: 0,
 			pending_approval_id: None,
 			last_result: None,
+			compensation_records: Vec::new(),
 			graph: None,
 		}
 	}

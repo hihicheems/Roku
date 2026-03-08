@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use roku_common_types::{
-	AggregationMode, ApprovalTicket, Artifact, ArtifactId, ExperimentMetric, ExperimentRun,
-	JoinPolicy, NodeId, NodeResultSet, RecoveryEligibility, ReplayConsistencyStatus,
+	AggregationMode, ApprovalTicket, Artifact, ArtifactId, ErrorClass, ExperimentMetric,
+	ExperimentRun, JoinPolicy, NodeId, NodeResultSet, RecoveryEligibility, ReplayConsistencyStatus,
 	ResultEnvelope, RuntimeError, Task, TaskEvent, TaskId, TaskNode, TaskReplayCursor,
 	TaskReplayReport, TaskState, ValidationEvidenceSet,
 };
@@ -104,7 +104,19 @@ impl RuntimeService {
 		next: TaskState,
 		reason: &str,
 	) -> Result<(), RuntimeError> {
-		let event = self.orchestrator.transition(task, next, reason, None)?;
+		self.record_transition_with_error_class(task, next, reason, None)
+	}
+
+	pub(super) fn record_transition_with_error_class(
+		&self,
+		task: &mut Task,
+		next: TaskState,
+		reason: &str,
+		error_class: Option<ErrorClass>,
+	) -> Result<(), RuntimeError> {
+		let event = self
+			.orchestrator
+			.transition(task, next, reason, error_class)?;
 		let mut state = self.lock_state()?;
 		state
 			.event_repo

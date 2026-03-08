@@ -1507,6 +1507,39 @@
 2. Revisit structured logging/export sinks now that the Telegram response surface is richer and includes progress receipts.
 3. Expand Telegram UX further only if a stronger progress protocol or artifact actions are needed.
 
+## 2026-03-08 - Session Milestone (Phase 37)
+
+### Completed Modules
+
+- `roku-common-types`
+  - Added explicit `CancelRequested`, `Compensating`, and `TimeoutRecovering` task states plus cancellation compensation records so recovery and interrupt paths have a stable persisted contract.
+  - Added `ApprovalStatus::Cancelled` so approval gates can be closed cleanly when operators cancel an in-flight task.
+- `roku-orchestrator`
+  - Added cancellation flow helpers and updated transition/recovery rules so cancel and timeout recovery no longer collapse into the generic failure path.
+- `roku-runtime-service`
+  - Added `cancel_task` to stop resumable work, clear pending approval gates, record audit/no-op compensation entries, and persist a final `Cancelled` task state.
+  - Added explicit timeout-recovery handling with `RunMode::TimeoutRecovery` and `recover_timed_out_task`, so interrupted execution can move through `TimeoutRecovering` before resuming the normal recovery path.
+- `roku-e2e`
+  - Added end-to-end coverage for timeout recovery and approval-path cancellation.
+- `docs/todo-list.md`
+  - Marked `OR-06` and `RS-16` as done.
+
+### Verification Status
+
+- `cargo test -p roku-orchestrator -p roku-runtime-service -p roku-e2e`: passed
+
+### Remaining Work
+
+- `RS-15` / `OR-05` are still incomplete because recovery still leans on persisted task shape and `completed_nodes`; it is not yet a fully event-stream-first reconstruction path.
+- `GB-07` / `GB-08` remain open: helper-node injection and conditional/loop graph compilation are still missing.
+- `SS-10` and the rest of `E2E-08` / `E2E-09` remain open: snapshot/compaction work, duplicate-delivery chaos coverage, and restart-driven replay recovery still need to be finished.
+
+### Next Recommended Steps
+
+1. Reconstruct recovery state from persisted events/results instead of trusting `completed_nodes` as the primary source of truth.
+2. Add restart/replay coverage that reloads persisted task, event, result, and artifact state into a fresh runtime instance.
+3. Finish helper-node and conditional-graph compilation so branch-local rerun has a fuller graph contract to work with.
+
 ## 2026-03-08 - Session Milestone (Phase 36)
 
 ### Completed Modules
