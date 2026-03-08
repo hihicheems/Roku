@@ -281,8 +281,8 @@
 | SS-04 | 为 task / approval / result 增加 roundtrip 测试 | §20 测试策略 | DONE |
 | SS-04A | 增加 `SessionPreferenceRepository` / `ConversationRepository` trait 与 in-memory adapter | §12 Memory / §19 state-store | DONE |
 | SS-04B | 增加 session preference / conversation history 的 file-backed adapter | §12 Memory / 原型持久化基线 | DONE |
-| SS-05 | 增加 PostgreSQL task backend | §6.1 PostgreSQL / §21 Phase 4+ | TODO |
-| SS-06 | 增加 PostgreSQL event / approval / result backend | §6.1 PostgreSQL | TODO |
+| SS-05 | 增加 PostgreSQL task backend | §6.1 PostgreSQL / §21 Phase 4+ | DONE |
+| SS-06 | 增加 PostgreSQL event / approval / result backend | §6.1 PostgreSQL | DONE |
 | SS-06A | 增加 PostgreSQL session preference / conversation memory backend | §6.1 PostgreSQL / §12 Memory | DONE |
 | SS-07 | 增加 migration / bootstrap / repository index 设计 | 生产级持久化边界 | TODO |
 | SS-08 | 增加 Redis / NATS / JetStream 风格 dispatch 抽象 | §6.1 NATS JetStream / §14.3 | TODO |
@@ -355,6 +355,7 @@
 | RS-14 | 增加组织级审批规则、风险动作 gating 与 capability/approval 联动 | §15.3 / §17 OrgPolicy | TODO |
 | RS-15 | 增加基于持久化事件的 replay / recovery / partial rerun 主链路 | §8 ResumePoint / §20 replay | TODO |
 | RS-16 | 增加 cancellation / compensation / timeout recovery 主链路 | §8 状态机 / §22 风险缓解 | TODO |
+| RS-17 | 暴露 `task snapshot` 与 `task event timeline` 查询接口，为后续 replay / CLI 运维命令提供 recovery 基线 | §8 ResumePoint / §20 replay | DONE |
 
 ## roku-cmd
 
@@ -372,6 +373,7 @@
 | CMD-10 | 在 `justfile` 中增加 `start-all` / `stop-all` / `doctor` / `start` / `stop` / `status` recipe | §19 Rust 工程结构 / 运维诊断 | DONE |
 | CMD-11 | 将 `doctor` 升级为分组面板视图，区分常驻服务、内嵌组件、集成配置、日志与端点 | §19 Rust 工程结构 / 运维诊断 | DONE |
 | CMD-12 | 将 `api-gateway` 收敛为可选接口层，默认不随 `start-all` 启动，但保留 `doctor` 可见性与手动启动能力 | §4.1 Gateway 运行形态 / 运维诊断 | DONE |
+| CMD-13 | 让 live runtime bootstrap 优先装配 PostgreSQL-backed orchestration state store，并在日志中显式输出 backend 选择 | §6.1 PostgreSQL / §19 state-store / §16 可观测性 | DONE |
 
 ## roku-agent-directory (planned)
 

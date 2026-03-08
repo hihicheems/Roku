@@ -16,11 +16,17 @@ use std::sync::Arc;
 
 use roku_agent_runtime::GenericAgentRuntime;
 use roku_api_gateway::{Gateway, RawRequest};
+use roku_artifact_store::ArtifactStore;
 use roku_common_types::{PlanningModeHint, ResponseEnvelope, RuntimeError};
+use roku_experiment_registry::ExperimentRegistry;
 use roku_llm_adapter::{OpenRouterConfig, build_openrouter_router_with_metrics};
-use roku_observability::Metrics;
+use roku_observability::{InMemoryAuditSink, LogLevel, LogRecord, Metrics, emit_global_log};
 pub use roku_runtime_service::RunMode;
 use roku_runtime_service::RuntimeService;
+use roku_state_store::{
+	PostgresApprovalRepository, PostgresEventRepository, PostgresResultRepository,
+	PostgresStoreConfig, PostgresTaskRepository,
+};
 use roku_task_planner::llm::LlmTaskPlanner;
 
 use crate::CommandError;
@@ -84,11 +90,56 @@ pub(crate) fn run_live_once_with_options_from_env(
 
 pub(crate) fn build_live_runtime_service_from_env() -> Result<RuntimeService, CommandError> {
 	let config = OpenRouterConfig::from_env()?;
+	let store_config = PostgresStoreConfig::from_env()
+		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?;
 	let metrics = Arc::new(Metrics::default());
 	let runtime_router = build_openrouter_router_with_metrics(config.clone(), metrics.clone())?;
 	let planner_router = build_openrouter_router_with_metrics(config, metrics.clone())?;
 	let runtime = GenericAgentRuntime::with_llm_router(runtime_router);
 	let planner = Box::new(LlmTaskPlanner::new(planner_router));
+
+	if let Some(store_config) = store_config {
+		let _ = emit_global_log(
+			LogRecord::new(
+				"roku-cmd",
+				LogLevel::Info,
+				"using postgres-backed orchestration state store",
+			)
+			.with_field("schema", store_config.schema.clone()),
+		);
+
+		return Ok(RuntimeService::new_with_data_plane_and_runtime_and_metrics(
+			Box::new(
+				PostgresTaskRepository::connect(store_config.clone())
+					.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?,
+			),
+			Box::new(
+				PostgresEventRepository::connect(store_config.clone())
+					.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?,
+			),
+			Box::new(
+				PostgresApprovalRepository::connect(store_config.clone())
+					.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?,
+			),
+			Box::new(
+				PostgresResultRepository::connect(store_config)
+					.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?,
+			),
+			ArtifactStore::default(),
+			ExperimentRegistry::default(),
+			Arc::new(InMemoryAuditSink::default()),
+			runtime,
+			metrics,
+			planner,
+		));
+	}
+
+	let _ = emit_global_log(LogRecord::new(
+		"roku-cmd",
+		LogLevel::Info,
+		"using in-memory orchestration state store",
+	));
+
 	Ok(RuntimeService::in_memory_with_agent_runtime_planner_and_metrics(runtime, planner, metrics))
 }
 

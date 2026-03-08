@@ -27,7 +27,9 @@ use roku_common_types::{
 use thiserror::Error;
 
 pub use postgres::{
-	PostgresConversationRepository, PostgresSessionPreferenceRepository, PostgresStoreConfig,
+	PostgresApprovalRepository, PostgresConversationRepository, PostgresEventRepository,
+	PostgresResultRepository, PostgresSessionPreferenceRepository, PostgresStoreConfig,
+	PostgresTaskRepository,
 };
 
 #[derive(Debug, Error)]

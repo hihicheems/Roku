@@ -1,5 +1,39 @@
 # Roku Agent Dev Log
 
+## 2026-03-08 - Session Milestone (Phase 22)
+
+### Completed Modules
+
+- `roku-state-store`
+  - Added PostgreSQL-backed orchestration repositories for `TaskRepository`, `EventRepository`, `ApprovalRepository`, and `ResultRepository`.
+  - Stored full serialized task / event / approval / result envelopes in PostgreSQL tables so live orchestration state is no longer limited to in-memory process state.
+  - Preserved the existing PostgreSQL-backed session preference and conversation memory repositories under the same schema configuration.
+- `roku-cmd`
+  - Updated live runtime bootstrap so `live-once`, `telegram-bot`, and `api-gateway` now prefer PostgreSQL-backed orchestration repositories when `ROKU_DATABASE_URL` or `DATABASE_URL` is configured.
+  - Added explicit backend selection logs so operators can immediately tell whether a live process is using PostgreSQL or the in-memory fallback.
+- `roku-runtime-service`
+  - Added public `task snapshot` and `task event timeline` query accessors as a recovery baseline for future replay / resume / CLI inspection flows.
+  - Added regression coverage that asserts a completed task can be reloaded together with its persisted event timeline.
+
+### Verification Status
+
+- `cargo test -p roku-state-store -p roku-runtime-service -p roku-cmd`: passed
+  - `roku-state-store`: 5 passed
+  - `roku-runtime-service`: 24 passed
+  - `roku-cmd`: 8 passed
+
+### Remaining Work
+
+- Extend PostgreSQL persistence to artifact-store / experiment-registry if live restart continuity should cover artifacts and experiment metadata in the same durability tier.
+- Implement full replay / recovery orchestration that can rebuild runnable state from persisted task snapshots and event streams, not just query them.
+- Add operator-facing CLI commands for task inspection, approval inspection, and resume based on the newly exposed runtime data-plane accessors.
+
+### Next Recommended Steps
+
+1. Implement `RS-15` replay / recovery flow on top of the new persisted task + event query surface.
+2. Add `CMD-03/CMD-04` task inspection and resume commands that consume the runtime-service recovery accessors.
+3. Expand PostgreSQL-backed persistence to artifact / experiment metadata if restart continuity must include non-task data products.
+
 ## 2026-03-08 - Session Milestone (Phase 21)
 
 ### Completed Modules
