@@ -27,8 +27,8 @@ use roku_agent_runtime::GenericAgentRuntime;
 use roku_artifact_store::ArtifactStore;
 use roku_capability_auth::CapabilityAuthority;
 use roku_common_types::{
-	ApprovalDecision, ApprovalId, ApprovalStatus, ApprovalTicket, ErrorClass, PlanningModeHint,
-	RequestEnvelope, ResponseEnvelope, ResponseStatus, RuntimeError, Task, TaskNode, TaskState,
+	ApprovalDecision, ApprovalId, ApprovalStatus, ApprovalTicket, ErrorClass, RequestEnvelope,
+	ResponseEnvelope, ResponseStatus, RuntimeError, Task, TaskNode, TaskState,
 };
 use roku_execution_graph_builder::{ExecutionGraphBuilder, GraphBuildConfig};
 use roku_experiment_registry::ExperimentRegistry;
@@ -37,11 +37,11 @@ use roku_observability::{
 	MetricsSnapshot, emit_global_log,
 };
 use roku_orchestrator::Orchestrator;
-use roku_planning_engine::{DefaultPlanningEngine, PlanningInput, RiskLevel, StrategySelector};
 use roku_state_store::{
 	ApprovalRepository, EventRepository, InMemoryApprovalRepository, InMemoryEventRepository,
 	InMemoryResultRepository, InMemoryTaskRepository, ResultRepository, TaskRepository,
 };
+use roku_supervisor_agent::{DefaultSupervisorAgent, SupervisorAgent};
 use roku_task_planner::{AdaptiveTaskPlanner, TaskPlanner};
 use roku_validation_plane::ValidationPipeline;
 
@@ -69,7 +69,7 @@ struct RuntimeState {
 
 pub struct RuntimeService {
 	orchestrator: Orchestrator,
-	planning_engine: DefaultPlanningEngine,
+	supervisor: Box<dyn SupervisorAgent + Send + Sync>,
 	planner: Box<dyn TaskPlanner + Send + Sync>,
 	builder: ExecutionGraphBuilder,
 	factory: AgentInstanceFactory,
@@ -163,7 +163,7 @@ impl RuntimeService {
 	) -> Self {
 		Self {
 			orchestrator: Orchestrator::default(),
-			planning_engine: DefaultPlanningEngine,
+			supervisor: Box::new(DefaultSupervisorAgent::default()),
 			planner,
 			builder: ExecutionGraphBuilder,
 			factory: AgentInstanceFactory::default(),
@@ -249,34 +249,30 @@ impl RuntimeService {
 		mode: RunMode,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		self.metrics.inc_requests();
+		let supervisor_plan = self.supervisor.plan(&request);
+		let planning_input = supervisor_plan.input.planning_input.clone();
+		let planning_mode_label = format!("{:?}", supervisor_plan.planning_decision.mode);
+		let mut normalized_request = request.clone();
+		normalized_request.goal = supervisor_plan.input.normalized_goal;
 		log_runtime(
 			LogLevel::Info,
 			"received runtime request",
 			[
-				("request_id", request.request_id.0.clone()),
-				("session_id", request.session_id.clone()),
+				("request_id", normalized_request.request_id.0.clone()),
+				("session_id", normalized_request.session_id.clone()),
 				("mode", format!("{mode:?}")),
-				("goal", truncate_for_log(&request.goal, 200)),
+				("goal", truncate_for_log(&normalized_request.goal, 200)),
 			],
 		);
-		let mut task = self.orchestrator.create_task(&request);
+		let mut task = self.orchestrator.create_task(&normalized_request);
 
 		self.record_transition(&mut task, TaskState::Planning, "start planning")?;
 
-		let planning_input = planning_input_for_request(&request);
-		let decision = request
-			.planning_mode_hint
-			.map(|hint| {
-				self.planning_engine
-					.decision_for_mode(planning_mode_from_hint(hint), &planning_input)
-			})
-			.unwrap_or_else(|| self.planning_engine.select(&planning_input));
-		let planning_mode_label = format!("{:?}", decision.mode);
 		log_runtime(
 			LogLevel::Info,
 			"selected planning mode",
 			[
-				("request_id", request.request_id.0.clone()),
+				("request_id", normalized_request.request_id.0.clone()),
 				("planning_mode", planning_mode_label.clone()),
 				(
 					"complexity_score",
@@ -292,12 +288,14 @@ impl RuntimeService {
 		);
 		self.metrics.inc_planning_run();
 		self.metrics.inc_planning_strategy(&planning_mode_label);
-		let mut outline = self.planner.build_outline(&request, &decision);
+		let mut outline = self
+			.planner
+			.build_outline(&normalized_request, &supervisor_plan.planning_decision);
 		log_runtime(
 			LogLevel::Info,
 			"built plan outline",
 			[
-				("request_id", request.request_id.0.clone()),
+				("request_id", normalized_request.request_id.0.clone()),
 				("outline_steps", outline.steps.len().to_string()),
 			],
 		);
@@ -332,7 +330,7 @@ impl RuntimeService {
 		task.next_node_index = 0;
 		task.pending_approval_id = None;
 		task.last_result = None;
-		self.start_experiment_run(&task, &request.goal, &planning_mode_label)?;
+		self.start_experiment_run(&task, &normalized_request.goal, &planning_mode_label)?;
 
 		self.record_transition(&mut task, TaskState::Delegating, "delegate")?;
 		self.process_task(&mut task, mode)
@@ -476,105 +474,6 @@ impl Default for RuntimeService {
 	fn default() -> Self {
 		Self::in_memory()
 	}
-}
-
-pub(crate) fn planning_input_for_request(request: &RequestEnvelope) -> PlanningInput {
-	let goal = request.goal.to_ascii_lowercase();
-	let word_count = u64::try_from(goal.split_whitespace().count()).unwrap_or(u64::MAX);
-	let complexity_keywords = [
-		"and",
-		"then",
-		"compare",
-		"analyze",
-		"research",
-		"plan",
-		"build",
-		"integrate",
-		"deploy",
-		"workflow",
-	];
-	let uncertainty_keywords = [
-		"maybe",
-		"explore",
-		"option",
-		"alternatives",
-		"unknown",
-		"unclear",
-		"investigate",
-		"hypothesis",
-		"why",
-	];
-	let high_risk_keywords = [
-		"delete",
-		"production",
-		"payment",
-		"secret",
-		"credential",
-		"approve",
-	];
-	let medium_risk_keywords = ["write", "publish", "external", "notify", "mutation"];
-
-	let complexity_hits = keyword_hits(&goal, &complexity_keywords);
-	let uncertainty_hits = keyword_hits(&goal, &uncertainty_keywords);
-	let complexity_score = score_from_hits(word_count, complexity_hits, 6, 10);
-	let uncertainty_score = score_from_hits(word_count / 8, uncertainty_hits, 4, 10);
-	let risk_level = if contains_any_keyword(&goal, &high_risk_keywords) {
-		RiskLevel::High
-	} else if contains_any_keyword(&goal, &medium_risk_keywords) {
-		RiskLevel::Medium
-	} else {
-		RiskLevel::Low
-	};
-	let risk_budget = match risk_level {
-		RiskLevel::Low => 0,
-		RiskLevel::Medium => 2_000,
-		RiskLevel::High => 4_000,
-	};
-	let budget_tokens = 4_000u64
-		.saturating_add(word_count.saturating_mul(120))
-		.saturating_add(u64::from(complexity_score).saturating_mul(250))
-		.saturating_add(u64::from(uncertainty_score).saturating_mul(150))
-		.saturating_add(risk_budget);
-
-	PlanningInput {
-		complexity_score,
-		uncertainty_score,
-		risk_level,
-		budget_tokens,
-	}
-}
-
-fn planning_mode_from_hint(hint: PlanningModeHint) -> roku_planning_engine::PlanningMode {
-	match hint {
-		PlanningModeHint::ReAct => roku_planning_engine::PlanningMode::ReAct,
-		PlanningModeHint::TaskDecomposition => {
-			roku_planning_engine::PlanningMode::TaskDecomposition
-		}
-		PlanningModeHint::TreeSearch => roku_planning_engine::PlanningMode::TreeSearch,
-		PlanningModeHint::IterativeRefinement => {
-			roku_planning_engine::PlanningMode::IterativeRefinement
-		}
-	}
-}
-
-fn keyword_hits(goal: &str, keywords: &[&str]) -> u8 {
-	let hits = keywords
-		.iter()
-		.filter(|keyword| goal.contains(**keyword))
-		.count();
-	u8::try_from(hits).unwrap_or(u8::MAX)
-}
-
-fn contains_any_keyword(goal: &str, keywords: &[&str]) -> bool {
-	keywords.iter().any(|keyword| goal.contains(keyword))
-}
-
-fn score_from_hits(base: u64, hits: u8, divisor: u64, max_score: u8) -> u8 {
-	let derived = 2u64
-		.saturating_add(base / divisor)
-		.saturating_add(u64::from(hits).saturating_mul(2));
-	let capped = derived.min(u64::from(max_score));
-	u8::try_from(capped).unwrap_or(max_score)
 }
 
 fn truncate_for_log(value: &str, max_chars: usize) -> String {

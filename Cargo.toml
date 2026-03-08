@@ -10,6 +10,7 @@ members = [
     "crates/roku-cmd",
     "crates/roku-common-types",
     "crates/roku-orchestrator",
+    "crates/roku-supervisor-agent",
     "crates/roku-planning-engine",
     "crates/roku-task-planner",
     "crates/roku-execution-graph-builder",

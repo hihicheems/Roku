@@ -18,8 +18,9 @@ use roku_common_types::{
 	PlanningModeHint, RequestEnvelope, RequestId, ResponseStatus, ResultEnvelope, ResultStatus,
 	Task, TaskEdge, TaskGraph, TaskId, TaskNode, TaskNodeKind, TaskState,
 };
+use roku_supervisor_agent::DefaultSupervisorAgent;
 
-use crate::{RunMode, RuntimeService, compact_approval_id, planning_input_for_request};
+use crate::{RunMode, RuntimeService, compact_approval_id};
 
 fn sample_request() -> RequestEnvelope {
 	RequestEnvelope {
@@ -33,7 +34,7 @@ fn sample_request() -> RequestEnvelope {
 
 #[test]
 fn planning_input_scales_for_complex_goal() {
-	let input = planning_input_for_request(&RequestEnvelope {
+	let input = DefaultSupervisorAgent::default().planning_input_for_request(&RequestEnvelope {
 		request_id: RequestId("req-complex".to_string()),
 		session_id: "session-1".to_string(),
 		goal: "build and integrate a workflow to research alternatives, compare options, and deploy a production-ready bot".to_string(),
@@ -47,7 +48,7 @@ fn planning_input_scales_for_complex_goal() {
 
 #[test]
 fn planning_input_marks_high_risk_requests() {
-	let input = planning_input_for_request(&RequestEnvelope {
+	let input = DefaultSupervisorAgent::default().planning_input_for_request(&RequestEnvelope {
 		request_id: RequestId("req-risk".to_string()),
 		session_id: "session-1".to_string(),
 		goal: "delete the production secret and approve the mutation".to_string(),

@@ -17,6 +17,7 @@ roku-observability = { path = "../roku-observability" }
 roku-orchestrator = { path = "../roku-orchestrator" }
 roku-planning-engine = { path = "../roku-planning-engine" }
 roku-state-store = { path = "../roku-state-store" }
+roku-supervisor-agent = { path = "../roku-supervisor-agent" }
 roku-task-planner = { path = "../roku-task-planner" }
 roku-validation-plane = { path = "../roku-validation-plane" }
 serde_json = "1"
