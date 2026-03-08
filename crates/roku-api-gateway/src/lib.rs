@@ -30,5 +30,5 @@ pub use models::{
 pub use routes::{
 	configure_routes, decide_approval_handler, download_artifact_handler, get_approval_handler,
 	get_artifact_content_handler, get_experiment_handler, get_task_artifacts_handler,
-	health_handler, submit_handler,
+	get_task_replay_handler, health_handler, submit_handler,
 };

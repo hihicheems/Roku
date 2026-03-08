@@ -1,5 +1,36 @@
 # Roku Agent Dev Log
 
+## 2026-03-08 - Session Milestone (Phase 27)
+
+### Completed Modules
+
+- `roku-api-gateway`
+  - Added `GET /v1/tasks/{task_id}/replay` so operator tooling can inspect replay/recovery diagnostics over HTTP instead of relying only on the CLI.
+  - Reused the shared `RuntimeService::get_task_replay_report` interface rather than re-deriving transition checks inside the gateway layer.
+- gateway tests
+  - Added regression coverage for both the `not found` replay path and the successful runtime-backed replay report path.
+
+### Verification Status
+
+- `just fmt`: passed
+- `just lint`: passed
+- targeted `cargo test -p roku-api-gateway -p roku-runtime-service -p roku-e2e`: passed
+  - `roku-api-gateway`: 4 passed
+  - `roku-runtime-service`: 28 passed
+  - `roku-e2e`: 10 passed
+
+### Remaining Work
+
+- Replay diagnostics are now available in CLI and HTTP, but Telegram and richer operator dashboards still do not surface them.
+- `RS-15` remains incomplete: current replay reporting is read-only and does not yet expose branch-local rerun anchors.
+- API Gateway still lacks auth / rate limit / correlation middleware for these operator endpoints.
+
+### Next Recommended Steps
+
+1. Add branch-local recovery metadata to the replay report once partial rerun exists.
+2. Decide whether replay diagnostics should be surfaced through Telegram admin commands or only through operator interfaces.
+3. Continue `AG-07/AG-08` so diagnostic endpoints are protected and correlated.
+
 ## 2026-03-08 - Session Milestone (Phase 26)
 
 ### Completed Modules

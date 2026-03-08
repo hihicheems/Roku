@@ -18,6 +18,7 @@ use std::sync::atomic::AtomicU64;
 use roku_common_types::{
 	ApprovalDecision, ApprovalId, ApprovalTicket, Artifact, ArtifactId, ExperimentRun,
 	RequestEnvelope, RequestId, ResponseEnvelope, ResponseStatus, RuntimeError, TaskId,
+	TaskReplayReport,
 };
 use roku_runtime_service::RuntimeService;
 
@@ -66,6 +67,10 @@ pub trait TaskDataExecutor: Send + Sync {
 		task_id: &TaskId,
 		artifact_id: &ArtifactId,
 	) -> Result<Option<String>, RuntimeError>;
+	fn get_task_replay_report(
+		&self,
+		task_id: &TaskId,
+	) -> Result<Option<TaskReplayReport>, RuntimeError>;
 }
 
 pub trait GatewayExecutor: RequestExecutor + ApprovalExecutor + TaskDataExecutor {}
@@ -119,6 +124,13 @@ impl TaskDataExecutor for NoopExecutor {
 	) -> Result<Option<String>, RuntimeError> {
 		Ok(None)
 	}
+
+	fn get_task_replay_report(
+		&self,
+		_task_id: &TaskId,
+	) -> Result<Option<TaskReplayReport>, RuntimeError> {
+		Ok(None)
+	}
 }
 
 pub struct RuntimeServiceExecutor {
@@ -169,6 +181,13 @@ impl TaskDataExecutor for RuntimeServiceExecutor {
 		artifact_id: &ArtifactId,
 	) -> Result<Option<String>, RuntimeError> {
 		self.service.get_artifact_content(task_id, artifact_id)
+	}
+
+	fn get_task_replay_report(
+		&self,
+		task_id: &TaskId,
+	) -> Result<Option<TaskReplayReport>, RuntimeError> {
+		self.service.get_task_replay_report(task_id)
 	}
 }
 

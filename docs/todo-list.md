@@ -249,6 +249,7 @@
 | AG-09 | 增加异步任务观察、流式响应或 callback 机制 | §9 请求生命周期 / 长任务治理 | TODO |
 | AG-10 | 增加 OpenAPI / schema 文档与 API versioning 策略 | §19.1 / §20 验收 | TODO |
 | AG-11 | 在 `roku-cmd` 中补齐 `api-gateway` 常驻服务启动入口，并纳入开发态 service registry | §4.1 Connector / Gateway 运行形态 | DONE |
+| AG-12 | 增加 `task replay` 诊断路由，并直接复用 `roku-runtime-service` 的 replay report 查询接口 | §8 ResumePoint / §19.1 Gateway 运维接口 | DONE |
 
 ## roku-connectors-telegram
 

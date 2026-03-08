@@ -9,7 +9,7 @@ use roku_api_gateway::{
 use roku_cmd::{RunMode, run_once, run_with_mode};
 use roku_common_types::{
 	ApprovalDecision, ApprovalId, Artifact, ArtifactId, ExperimentRun, RequestEnvelope,
-	ResponseStatus, RuntimeError, TaskId,
+	ResponseStatus, RuntimeError, TaskId, TaskReplayReport, TaskState,
 };
 use roku_runtime_service::RuntimeService;
 
@@ -147,6 +147,15 @@ async fn http_gateway_exposes_task_artifacts_and_experiment() {
 		actix_web::test::call_and_read_body_json(&app, experiment_request).await;
 	assert_eq!(experiment.status, "succeeded");
 	assert_eq!(experiment.artifact_ids.len(), 2);
+
+	let replay_request = actix_web::test::TestRequest::get()
+		.uri(&format!("/v1/tasks/{task_id}/replay"))
+		.to_request();
+	let replay: TaskReplayReport =
+		actix_web::test::call_and_read_body_json(&app, replay_request).await;
+	assert_eq!(replay.task_id.0, task_id);
+	assert_eq!(replay.persisted_state, TaskState::Succeeded);
+	assert!(replay.snapshot_matches_replay);
 }
 
 struct FixedModeExecutor {
@@ -195,6 +204,13 @@ impl TaskDataExecutor for FixedModeExecutor {
 		artifact_id: &ArtifactId,
 	) -> Result<Option<String>, RuntimeError> {
 		self.service.get_artifact_content(task_id, artifact_id)
+	}
+
+	fn get_task_replay_report(
+		&self,
+		task_id: &TaskId,
+	) -> Result<Option<TaskReplayReport>, RuntimeError> {
+		self.service.get_task_replay_report(task_id)
 	}
 }
 
