@@ -17,7 +17,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use roku_common_types::{
 	ApprovalDecision, ApprovalId, ConversationRole, ConversationTurn, PlanningModeHint,
-	RequestEnvelope, ResponseEnvelope, RuntimeError, SessionPreferences,
+	RequestEnvelope, RequestId, ResponseEnvelope, RuntimeError, SessionPreferences,
+};
+use roku_connectors_telegram::{
+	TelegramInteractionHandler, TelegramOutboundMessage, TelegramParseMode,
 };
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_state_store::{
@@ -25,26 +28,45 @@ use roku_state_store::{
 	SessionPreferenceRepository, SqliteConversationRepository, SqliteSessionPreferenceRepository,
 	SqliteStoreConfig, StoreError,
 };
+use serde_json::json;
 
 use crate::CommandError;
+use crate::runtime::ExecutionRequestOptions;
 use crate::runtime::build_live_runtime_service_from_env;
 use crate::storage::LocalStorageLayout;
 
 pub fn run_telegram_bot_from_env() -> Result<(), CommandError> {
-	let service = Arc::new(build_live_runtime_service_from_env()?);
-	let session_state = Arc::new(TelegramSessionState::from_env()?);
+	let handler = build_live_telegram_handler_from_env()?;
 	let runner = roku_connectors_telegram::TelegramPollingRunner::from_env()?;
 	let _ = emit_global_log(LogRecord::new(
 		"roku-cmd",
 		LogLevel::Info,
 		"starting telegram bot polling loop",
 	));
-	runner
-		.run(RuntimeServiceTelegramHandler {
-			service,
-			session_state,
-		})
-		.map_err(CommandError::TelegramTransport)
+	runner.run(handler).map_err(CommandError::TelegramTransport)
+}
+
+pub(crate) fn run_telegram_once_with_options_from_env(
+	options: ExecutionRequestOptions,
+) -> Result<String, CommandError> {
+	let handler = build_live_telegram_handler_from_env()?;
+	render_telegram_preview(
+		1,
+		handler.handle_request(RequestEnvelope {
+			request_id: RequestId(format!("tg-cli-{}", now_unix_ms())),
+			session_id: options.session_id,
+			goal: options.goal,
+			planning_mode_hint: options.planning_mode_hint,
+			conversation_history: Vec::new(),
+		}),
+	)
+}
+
+fn build_live_telegram_handler_from_env() -> Result<RuntimeServiceTelegramHandler, CommandError> {
+	Ok(RuntimeServiceTelegramHandler {
+		service: Arc::new(build_live_runtime_service_from_env()?),
+		session_state: Arc::new(TelegramSessionState::from_env()?),
+	})
 }
 
 struct RuntimeServiceTelegramHandler {
@@ -113,6 +135,41 @@ impl roku_connectors_telegram::TelegramInteractionHandler for RuntimeServiceTele
 		decision: ApprovalDecision,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		self.service.decide_approval(&approval_id, decision)
+	}
+}
+
+fn render_telegram_preview(
+	chat_id: i64,
+	response: Result<ResponseEnvelope, RuntimeError>,
+) -> Result<String, CommandError> {
+	let preview = match response {
+		Ok(response) => {
+			let outbound = TelegramOutboundMessage::from_response(chat_id, &response);
+			json!({
+				"runtime_status": format!("{:?}", response.status),
+				"request_id": response.request_id.0,
+				"telegram_message": outbound.text,
+				"parse_mode": telegram_parse_mode_label(outbound.parse_mode),
+			})
+		}
+		Err(error) => {
+			let outbound = TelegramOutboundMessage::from_error(chat_id, &error.message);
+			json!({
+				"runtime_status": "Error",
+				"telegram_message": outbound.text,
+				"parse_mode": telegram_parse_mode_label(outbound.parse_mode),
+				"error": error.message,
+			})
+		}
+	};
+	serde_json::to_string_pretty(&preview)
+		.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+}
+
+fn telegram_parse_mode_label(mode: TelegramParseMode) -> &'static str {
+	match mode {
+		TelegramParseMode::PlainText => "PlainText",
+		TelegramParseMode::MarkdownV2 => "MarkdownV2",
 	}
 }
 
@@ -237,6 +294,7 @@ fn now_unix_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+	use std::io::{Cursor, Write};
 	use std::sync::Arc;
 
 	use roku_agent_runtime::GenericAgentRuntime;
@@ -247,10 +305,25 @@ mod tests {
 		ProviderResponse, RiskTier, RoutingPolicy,
 	};
 	use roku_runtime_service::RuntimeService;
+	use roku_skill_registry::{
+		DownloadedArchive, SkillArchiveFetcher, SkillRegistry, SkillRegistryError, SkillSource,
+	};
+	use serde_json::Value;
 
 	use super::*;
 
 	struct SessionAwareLlmProvider;
+
+	#[derive(Clone)]
+	struct StaticArchiveFetcher {
+		archive: DownloadedArchive,
+	}
+
+	impl SkillArchiveFetcher for StaticArchiveFetcher {
+		fn fetch(&self, _source: &SkillSource) -> Result<DownloadedArchive, SkillRegistryError> {
+			Ok(self.archive.clone())
+		}
+	}
 
 	impl LlmProvider for SessionAwareLlmProvider {
 		fn provider_name(&self) -> &'static str {
@@ -341,6 +414,45 @@ mod tests {
 		assert_eq!(turns[4].content, "我刚问了你什么？");
 	}
 
+	#[test]
+	fn telegram_handler_surfaces_skill_install_message() {
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let registry = SkillRegistry::file_backed(root.path().join("skills")).with_fetcher(
+			Arc::new(StaticArchiveFetcher {
+				archive: DownloadedArchive {
+					archive_url: "https://example.com/archive.zip".to_string(),
+					bytes: test_skill_archive_bytes(),
+					resolved_reference: Some("main".to_string()),
+				},
+			}),
+		);
+		let handler = RuntimeServiceTelegramHandler {
+			service: Arc::new(RuntimeService::in_memory_with_agent_runtime(
+				GenericAgentRuntime::with_skill_registry(registry),
+			)),
+			session_state: Arc::new(TelegramSessionState::default()),
+		};
+
+		let response = handler
+			.handle_request(request(
+				"telegram-skill-install",
+				"Install skill from https://github.com/anthropics/skills/tree/main/skills/claude-api",
+			))
+			.expect("skill install request should succeed");
+		assert_eq!(response.status, ResponseStatus::Succeeded);
+		assert!(response.message.contains("Installed skill `claude-api`"));
+
+		let preview = render_telegram_preview(1001, Ok(response)).expect("preview should render");
+		let json: Value = serde_json::from_str(&preview).expect("preview should be valid json");
+		assert_eq!(json["runtime_status"], "Succeeded");
+		assert!(
+			json["telegram_message"]
+				.as_str()
+				.expect("telegram message should be string")
+				.contains("Installed skill `claude-api`")
+		);
+	}
+
 	fn request(session_id: &str, goal: &str) -> RequestEnvelope {
 		RequestEnvelope {
 			request_id: RequestId(format!("req-{goal}")),
@@ -362,5 +474,34 @@ mod tests {
 			.lines()
 			.rev()
 			.find_map(|line| line.strip_prefix("user: ").map(str::to_string))
+	}
+
+	fn test_skill_archive_bytes() -> Vec<u8> {
+		let mut cursor = Cursor::new(Vec::new());
+		{
+			let mut writer = zip::ZipWriter::new(&mut cursor);
+			let options = zip::write::SimpleFileOptions::default();
+			writer
+				.add_directory("skills-main/skills/claude-api/", options)
+				.expect("dir should be added");
+			writer
+				.start_file("skills-main/skills/claude-api/SKILL.md", options)
+				.expect("skill file should start");
+			writer
+				.write_all(
+					br#"---
+name: claude-api
+description: Build apps with the Claude API.
+---
+
+# Claude API Skill
+
+Use this skill when the user explicitly asks for Claude API integration help.
+"#,
+				)
+				.expect("skill markdown should write");
+			writer.finish().expect("zip should finish");
+		}
+		cursor.into_inner()
 	}
 }

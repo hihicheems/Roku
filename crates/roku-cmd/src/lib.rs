@@ -34,7 +34,7 @@ use thiserror::Error;
 pub use runtime::{RunMode, run_live_once_from_env, run_once, run_with_mode};
 
 use crate::api::run_api_gateway_from_env;
-use crate::bot::run_telegram_bot_from_env;
+use crate::bot::{run_telegram_bot_from_env, run_telegram_once_with_options_from_env};
 use crate::runtime::{
 	ExecutionRequestOptions, decide_approval_from_env, download_artifact_from_env,
 	install_skill_from_env, replay_task_from_env, resume_task_from_env,
@@ -91,6 +91,10 @@ where
 			let response = run_live_once_with_options_from_env(options)?;
 			Ok(Some(response.message))
 		}
+		Some("telegram-once") | Some("tg-once") => {
+			let options = parse_request_options(&args[1..])?;
+			Ok(Some(run_telegram_once_with_options_from_env(options)?))
+		}
 		Some("telegram-bot") | Some("tg-bot") => {
 			run_telegram_bot_from_env()?;
 			Ok(None)
@@ -113,7 +117,7 @@ where
 }
 
 pub fn help_text() -> &'static str {
-	"Usage:\n  roku-cmd once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd live-once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n  roku-cmd task show <task-id>\n  roku-cmd task replay <task-id>\n  roku-cmd task resume <task-id>\n  roku-cmd approval show <approval-id>\n  roku-cmd approval approve <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd approval reject <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd artifact list <task-id>\n  roku-cmd artifact content <task-id> <artifact-id>\n  roku-cmd artifact download <task-id> <artifact-id> --output <path>\n  roku-cmd experiment show <task-id>\n  roku-cmd skill install <source-url>\n  roku-cmd skill list\n  roku-cmd skill show <skill-name>\n\nCommands:\n  once              Run the deterministic in-process pipeline.\n  live-once         Run the OpenRouter-backed live pipeline from environment.\n  telegram-bot      Start the Telegram polling bot using environment configuration.\n  api-gateway       Start the Actix HTTP gateway using environment configuration.\n  task show         Render a persisted task snapshot with its event timeline.\n  task replay       Rebuild a state-transition report from persisted task events.\n  task resume       Continue a resumable persisted task using the live runtime path.\n  approval          Show or decide an approval ticket from persisted state.\n  artifact          List artifacts, print artifact content, or download an artifact payload.\n  experiment show   Render the persisted experiment run for a task.\n  skill install     Install a skill package into the local file-backed registry.\n  skill list        List installed skills from the local registry.\n  skill show        Render installed skill metadata and prompt context.\n\nPlanning Modes:\n  react | taskdecomposition | treesearch | iterativerefinement"
+	"Usage:\n  roku-cmd once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd live-once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd telegram-once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n  roku-cmd task show <task-id>\n  roku-cmd task replay <task-id>\n  roku-cmd task resume <task-id>\n  roku-cmd approval show <approval-id>\n  roku-cmd approval approve <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd approval reject <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd artifact list <task-id>\n  roku-cmd artifact content <task-id> <artifact-id>\n  roku-cmd artifact download <task-id> <artifact-id> --output <path>\n  roku-cmd experiment show <task-id>\n  roku-cmd skill install <source-url>\n  roku-cmd skill list\n  roku-cmd skill show <skill-name>\n\nCommands:\n  once              Run the deterministic in-process pipeline.\n  live-once         Run the OpenRouter-backed live pipeline from environment.\n  telegram-once     Run one live Telegram handler turn and print the outbound bot message.\n  telegram-bot      Start the Telegram polling bot using environment configuration.\n  api-gateway       Start the Actix HTTP gateway using environment configuration.\n  task show         Render a persisted task snapshot with its event timeline.\n  task replay       Rebuild a state-transition report from persisted task events.\n  task resume       Continue a resumable persisted task using the live runtime path.\n  approval          Show or decide an approval ticket from persisted state.\n  artifact          List artifacts, print artifact content, or download an artifact payload.\n  experiment show   Render the persisted experiment run for a task.\n  skill install     Install a skill package into the local file-backed registry.\n  skill list        List installed skills from the local registry.\n  skill show        Render installed skill metadata and prompt context.\n\nPlanning Modes:\n  react | taskdecomposition | treesearch | iterativerefinement"
 }
 
 fn join_goal(parts: &[String]) -> Result<String, CommandError> {
@@ -523,6 +527,7 @@ mod tests {
 		let output = execute_cli(["help"]).expect("help should succeed");
 		assert!(output.is_some());
 		let help = output.expect("help output should exist");
+		assert!(help.contains("telegram-once"));
 		assert!(help.contains("telegram-bot"));
 		assert!(help.contains("api-gateway"));
 		assert!(help.contains("task show"));
