@@ -15,6 +15,22 @@
 use roku_common_types::{PlanBranch, PlanLoopControl, PlanStep};
 use roku_planning_engine::PlanningDecision;
 
+pub(crate) fn build_skill_install_steps(goal: &str) -> Option<Vec<PlanStep>> {
+	if !looks_like_skill_install_request(goal) {
+		return None;
+	}
+
+	Some(vec![PlanStep {
+		step_id: "install-skill".to_string(),
+		summary: step_summary(goal, "Install requested skill from source URL"),
+		required_capabilities: vec!["skill.install".to_string()],
+		requires_approval: false,
+		depends_on: Vec::new(),
+		branch: None,
+		loop_control: None,
+	}])
+}
+
 pub(crate) fn build_react_steps(goal: &str, decision: &PlanningDecision) -> Vec<PlanStep> {
 	if should_use_direct_react_action(goal) {
 		return vec![PlanStep {
@@ -54,6 +70,17 @@ pub(crate) fn build_react_steps(goal: &str, decision: &PlanningDecision) -> Vec<
 			loop_control: None,
 		},
 	]
+}
+
+fn looks_like_skill_install_request(goal: &str) -> bool {
+	let normalized = goal.to_ascii_lowercase();
+	(normalized.contains("install skill")
+		|| normalized.contains("install the skill")
+		|| normalized.contains("skill install")
+		|| goal.contains("安装技能")
+		|| goal.contains("安装 skill")
+		|| goal.contains("安装这个 skill"))
+		&& goal.contains("http")
 }
 
 fn should_use_direct_react_action(goal: &str) -> bool {
@@ -397,5 +424,23 @@ mod tests {
 		assert_eq!(outline.steps.len(), 2);
 		assert_eq!(outline.steps[0].step_id, "observe-context");
 		assert_eq!(outline.steps[1].step_id, "act-primary");
+	}
+
+	#[test]
+	fn skill_install_requests_use_single_install_step() {
+		let planner = AdaptiveTaskPlanner;
+		let mut request = sample_request();
+		request.goal =
+			"Install skill from https://github.com/anthropics/skills/tree/main/skills/claude-api"
+				.to_string();
+		let outline =
+			planner.build_outline(&request, &decision(PlanningMode::TaskDecomposition, 4, 2));
+
+		assert_eq!(outline.steps.len(), 1);
+		assert_eq!(outline.steps[0].step_id, "install-skill");
+		assert_eq!(
+			outline.steps[0].required_capabilities,
+			vec!["skill.install".to_string()]
+		);
 	}
 }

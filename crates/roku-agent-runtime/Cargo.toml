@@ -9,6 +9,12 @@ authors.workspace = true
 roku-common-types = { path = "../roku-common-types" }
 roku-llm-adapter = { path = "../roku-llm-adapter" }
 roku-observability = { path = "../roku-observability" }
+roku-skill-registry = { path = "../roku-skill-registry" }
 roku-tool-runtime = { path = "../roku-tool-runtime" }
 serde_json = "1"
 time = { version = "0.3", features = ["formatting", "local-offset"] }
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+zip = { version = "2", default-features = false, features = ["deflate"] }
