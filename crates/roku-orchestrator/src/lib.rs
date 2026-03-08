@@ -219,6 +219,15 @@ pub fn replayed_state(persisted_state: TaskState, events: &[TaskEvent]) -> TaskS
 		.unwrap_or(persisted_state)
 }
 
+pub fn replayed_state_from(base_state: TaskState, events: &[TaskEvent]) -> TaskState {
+	events
+		.iter()
+		.rev()
+		.find(|event| event.kind == TaskEventKind::StateTransition)
+		.map(|event| event.to)
+		.unwrap_or(base_state)
+}
+
 pub fn replay_consistency_status(
 	persisted_state: TaskState,
 	events: &[TaskEvent],
@@ -243,6 +252,43 @@ pub fn replay_consistency_status(
 	}
 
 	if replayed_state(persisted_state, events) != persisted_state {
+		return ReplayConsistencyStatus::SnapshotMismatch;
+	}
+
+	ReplayConsistencyStatus::Consistent
+}
+
+pub fn replay_consistency_status_from(
+	base_state: TaskState,
+	expected_state: TaskState,
+	events: &[TaskEvent],
+) -> ReplayConsistencyStatus {
+	let state_events = events
+		.iter()
+		.filter(|event| event.kind == TaskEventKind::StateTransition)
+		.cloned()
+		.collect::<Vec<_>>();
+	let transitions_valid = state_events
+		.iter()
+		.all(|event| is_valid_transition(event.from, event.to));
+	if !transitions_valid {
+		return ReplayConsistencyStatus::InvalidTransitions;
+	}
+
+	if let Some(first) = state_events.first()
+		&& first.from != base_state
+	{
+		return ReplayConsistencyStatus::BrokenTransitionChain;
+	}
+
+	let chain_consistent = state_events
+		.windows(2)
+		.all(|window| window[0].to == window[1].from);
+	if !chain_consistent {
+		return ReplayConsistencyStatus::BrokenTransitionChain;
+	}
+
+	if replayed_state_from(base_state, events) != expected_state {
 		return ReplayConsistencyStatus::SnapshotMismatch;
 	}
 

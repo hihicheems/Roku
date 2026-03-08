@@ -237,6 +237,70 @@ fn e2e_replay_reconstructs_progress_after_restart_with_stale_snapshot() {
 	assert_eq!(task.state, TaskState::Succeeded);
 }
 
+#[test]
+fn e2e_replay_snapshot_compaction_preserves_restart_recovery() {
+	let paths = file_backed_paths("replay-compaction");
+	let service = file_backed_runtime_service(&paths);
+	let pending = service
+		.execute_with_mode(
+			RequestEnvelope {
+				request_id: RequestId("req-replay-compact".to_string()),
+				session_id: "replay-compact-session".to_string(),
+				goal: "build execution graph".to_string(),
+				planning_mode_hint: None,
+				conversation_history: Vec::new(),
+			},
+			RunMode::ApprovalRequired,
+		)
+		.expect("pipeline should stop for approval");
+	assert!(matches!(pending.status, ResponseStatus::PendingApproval));
+
+	let task_id = TaskId("task-req-replay-compact".to_string());
+	service
+		.compact_task_replay(&task_id, 1)
+		.expect("replay compaction should succeed");
+
+	let mut task_repo = roku_state_store::SqliteTaskRepository::connect(
+		roku_state_store::SqliteStoreConfig::new(paths.state_db.clone()),
+	)
+	.expect("sqlite task repo should open");
+	let mut persisted_task = task_repo
+		.load_task(&task_id)
+		.expect("task load should succeed")
+		.expect("task should exist");
+	persisted_task.completed_nodes.clear();
+	persisted_task.next_node_index = 0;
+	persisted_task.last_result = None;
+	task_repo
+		.save_task(persisted_task)
+		.expect("task save should succeed");
+
+	let restarted_service = file_backed_runtime_service(&paths);
+	let replay = restarted_service
+		.get_task_replay_report(&task_id)
+		.expect("replay report lookup should succeed")
+		.expect("replay report should exist");
+	assert!(replay.event_count > replay.events.len());
+	assert!(replay.snapshot_matches_replay);
+
+	let approval_id = ApprovalId(
+		pending.artifacts[0]
+			.trim_start_matches("approval://")
+			.to_string(),
+	);
+	let resumed = restarted_service
+		.decide_approval(
+			&approval_id,
+			ApprovalDecision {
+				actor: "reviewer".to_string(),
+				approved: true,
+				comment: Some("recover after compaction".to_string()),
+			},
+		)
+		.expect("approval should resume task after compaction");
+	assert!(matches!(resumed.status, ResponseStatus::Succeeded));
+}
+
 #[actix_web::test]
 async fn http_gateway_executes_runtime_service() {
 	let service = Arc::new(RuntimeService::default());

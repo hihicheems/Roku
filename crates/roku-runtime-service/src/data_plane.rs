@@ -16,13 +16,13 @@ use roku_common_types::{
 	AggregationMode, ApprovalStatus, ApprovalTicket, Artifact, ArtifactId, ErrorClass,
 	ExperimentMetric, ExperimentRun, JoinPolicy, NodeId, NodeResultSet, RecoveryEligibility,
 	ReplayConsistencyStatus, ResultEnvelope, ResultStatus, RuntimeError, Task, TaskEvent,
-	TaskEventKind, TaskId, TaskNode, TaskNodeKind, TaskReplayCursor, TaskReplayReport, TaskState,
-	ValidationEvidenceSet,
+	TaskEventKind, TaskId, TaskNode, TaskNodeKind, TaskReplayCursor, TaskReplayReport,
+	TaskReplaySnapshot, TaskState, ValidationEvidenceSet,
 };
 use roku_execution_graph_builder::TaskGraphScheduler;
 use roku_orchestrator::{
 	build_idempotency_key, recovery_eligibility_for_state, replay_consistency_status,
-	replayed_state,
+	replay_consistency_status_from, replayed_state, replayed_state_from,
 };
 use roku_state_store::{DispatchEnvelope, DispatchLease};
 use std::collections::{HashMap, HashSet};
@@ -43,6 +43,30 @@ impl RuntimeService {
 		state
 			.event_repo
 			.list_events(task_id)
+			.map_err(|error| RuntimeError::new(error.to_string()))
+	}
+
+	pub fn compact_task_replay(
+		&self,
+		task_id: &TaskId,
+		retain_events: usize,
+	) -> Result<(), RuntimeError> {
+		let task = self
+			.get_task(task_id)?
+			.ok_or_else(|| RuntimeError::new(format!("task not found: {}", task_id.0)))?;
+		let analysis = self.analyze_task_recovery(&task)?;
+		let snapshot = TaskReplaySnapshot {
+			task_id: task_id.clone(),
+			compacted_event_count: 0,
+			replayed_state: analysis.replayed_state,
+			completed_nodes: analysis.reconstructed_task.completed_nodes.clone(),
+			pending_approval_id: analysis.reconstructed_task.pending_approval_id.clone(),
+			last_result: analysis.reconstructed_task.last_result.clone(),
+		};
+		let mut state = self.lock_state()?;
+		state
+			.event_repo
+			.compact_task_events(snapshot, retain_events)
 			.map_err(|error| RuntimeError::new(error.to_string()))
 	}
 
@@ -484,10 +508,23 @@ impl RuntimeService {
 		&self,
 		task: &Task,
 	) -> Result<TaskRecoveryAnalysis, RuntimeError> {
+		let replay_snapshot = self.load_replay_snapshot(&task.task_id)?;
 		let events = self.list_task_events(&task.task_id)?;
 		let reconstructed_task = self.reconstruct_task_progress(task)?;
-		let replayed_state = replayed_state(task.state, &events);
-		let consistency_status = replay_consistency_status(task.state, &events);
+		let total_event_count = replay_snapshot.as_ref().map_or(events.len(), |snapshot| {
+			snapshot.compacted_event_count.saturating_add(events.len())
+		});
+		let (replayed_state, consistency_status) = if let Some(snapshot) = &replay_snapshot {
+			(
+				replayed_state_from(snapshot.replayed_state, &events),
+				replay_consistency_status_from(snapshot.replayed_state, task.state, &events),
+			)
+		} else {
+			(
+				replayed_state(task.state, &events),
+				replay_consistency_status(task.state, &events),
+			)
+		};
 		let transitions_valid = !matches!(
 			consistency_status,
 			ReplayConsistencyStatus::InvalidTransitions
@@ -537,6 +574,7 @@ impl RuntimeService {
 		Ok(TaskRecoveryAnalysis {
 			reconstructed_task,
 			events,
+			total_event_count,
 			replayed_state,
 			transitions_valid,
 			chain_consistent,
@@ -555,6 +593,7 @@ impl RuntimeService {
 		};
 
 		let mut reconstructed = task.clone();
+		let replay_snapshot = self.load_replay_snapshot(&task.task_id)?;
 		let events = self.list_task_events(&task.task_id)?;
 		let results = self.list_results(&task.task_id)?;
 		let successful_result_by_node_id = results
@@ -583,9 +622,30 @@ impl RuntimeService {
 		reconstructed.pending_approval_id = pending_ticket
 			.as_ref()
 			.map(|ticket| ticket.approval_id.clone());
+		if reconstructed.pending_approval_id.is_none()
+			&& !events.iter().any(|event| {
+				matches!(
+					event.kind,
+					TaskEventKind::ApprovalApproved | TaskEventKind::ApprovalRejected
+				)
+			}) && let Some(snapshot) = &replay_snapshot
+		{
+			reconstructed.pending_approval_id = snapshot.pending_approval_id.clone();
+		}
+		if reconstructed.last_result.is_none()
+			&& let Some(snapshot) = &replay_snapshot
+		{
+			reconstructed.last_result = snapshot.last_result.clone();
+		}
 
-		let mut event_completed = Vec::new();
-		let mut event_completed_set = HashSet::new();
+		let mut event_completed = replay_snapshot
+			.as_ref()
+			.map(|snapshot| snapshot.completed_nodes.clone())
+			.unwrap_or_default();
+		let mut event_completed_set = event_completed
+			.iter()
+			.map(|node_id| node_id.0.clone())
+			.collect::<HashSet<_>>();
 		for event in &events {
 			if !matches!(
 				event.kind,
@@ -656,6 +716,17 @@ impl RuntimeService {
 		}
 
 		Ok(reconstructed)
+	}
+
+	fn load_replay_snapshot(
+		&self,
+		task_id: &TaskId,
+	) -> Result<Option<TaskReplaySnapshot>, RuntimeError> {
+		let state = self.lock_state()?;
+		state
+			.event_repo
+			.load_replay_snapshot(task_id)
+			.map_err(|error| RuntimeError::new(error.to_string()))
 	}
 
 	fn resolve_branch_results(
@@ -737,7 +808,7 @@ fn build_replay_report(task: Task, analysis: TaskRecoveryAnalysis) -> TaskReplay
 		task_id: task.task_id,
 		persisted_state: task.state,
 		replayed_state: analysis.replayed_state,
-		event_count: analysis.events.len(),
+		event_count: analysis.total_event_count,
 		transitions_valid: analysis.transitions_valid,
 		chain_consistent: analysis.chain_consistent,
 		snapshot_matches_replay: analysis.snapshot_matches_replay,
@@ -747,7 +818,7 @@ fn build_replay_report(task: Task, analysis: TaskRecoveryAnalysis) -> TaskReplay
 		),
 		replay_cursor: TaskReplayCursor {
 			replayed_state: analysis.replayed_state,
-			event_count: analysis.events.len(),
+			event_count: analysis.total_event_count,
 		},
 		consistency_status: analysis.consistency_status,
 		recovery_eligibility: analysis.recovery_eligibility,
@@ -759,6 +830,7 @@ fn build_replay_report(task: Task, analysis: TaskRecoveryAnalysis) -> TaskReplay
 pub(super) struct TaskRecoveryAnalysis {
 	pub reconstructed_task: Task,
 	pub events: Vec<TaskEvent>,
+	pub total_event_count: usize,
 	pub replayed_state: TaskState,
 	pub transitions_valid: bool,
 	pub chain_consistent: bool,

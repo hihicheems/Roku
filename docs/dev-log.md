@@ -1916,6 +1916,39 @@
 2. Push `RS-15` / `OR-05` further toward event-derived branch-local partial rerun on top of the richer helper-node graph.
 3. Expand `E2E-08` chaos coverage around duplicate delivery, lease expiry, and restart contention once failure-path routing metadata exists.
 
+## 2026-03-08 - Session Milestone (Phase 47)
+
+### Completed Modules
+
+- `roku-common-types`
+  - Added `TaskReplaySnapshot` so replay compaction can persist a typed recovery baseline without changing the event stream into the source of truth.
+- `roku-state-store`
+  - Extended the SQLite event repository with replay snapshot loading plus task-event compaction, backed by a new `task_replay_snapshots` table.
+  - Added regression coverage proving the SQLite event log can compact older entries while preserving a replay snapshot and the retained suffix.
+- `roku-runtime-service`
+  - Added `compact_task_replay`, which materializes a replay snapshot from the current recovery analysis and asks the event store to retain only the most recent event suffix.
+  - Updated recovery analysis and reconstruction to treat replay snapshots as accelerators: total event counts, replay consistency, completed nodes, pending approvals, and final result recovery can now resume correctly even after event-log compaction.
+  - Added restart/regression coverage proving recovery still succeeds after the replay log is compacted and the persisted task snapshot is intentionally made stale.
+- `roku-e2e`
+  - Added an end-to-end restart scenario that compacts the SQLite replay log, restarts the runtime, and then finishes the approval-gated task successfully.
+- `docs/todo-list.md`
+  - Marked `SS-10` done.
+
+### Verification Status
+
+- `cargo test -p roku-state-store -p roku-runtime-service -p roku-e2e`: passed
+
+### Remaining Work
+
+- `E2E-08` still needs the remaining chaos matrix: duplicate delivery, lease expiry, provider loss, and restart stress.
+- Phase 1 is now blocked primarily on dispatch-chaos coverage rather than missing control-plane recovery primitives.
+
+### Next Recommended Steps
+
+1. Finish `E2E-08` by adding duplicate-delivery and lease-expiry coverage against the SQLite dispatch queue.
+2. Add provider-loss and restart-stress scenarios so dispatch recovery is exercised under worker/process churn.
+3. Re-evaluate the Phase 1 DoD once the full chaos matrix passes on the SQLite-first runtime.
+
 ## 2026-03-08 - Session Milestone (Phase 46)
 
 ### Completed Modules

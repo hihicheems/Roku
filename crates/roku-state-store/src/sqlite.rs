@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use roku_common_types::{
 	ApprovalId, ApprovalTicket, ConversationTurn, NodeId, ResultEnvelope, SessionPreferences, Task,
-	TaskEvent, TaskId,
+	TaskEvent, TaskId, TaskReplaySnapshot,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -125,6 +125,95 @@ impl EventRepository for SqliteEventRepository {
 				serde_json::from_str(&encoded).map_err(StoreError::from)
 			})
 			.collect()
+	}
+
+	fn load_replay_snapshot(
+		&self,
+		task_id: &TaskId,
+	) -> Result<Option<TaskReplaySnapshot>, StoreError> {
+		let connection = self.open()?;
+		let encoded = connection
+			.query_row(
+				"SELECT snapshot_json FROM task_replay_snapshots WHERE task_id = ?1",
+				params![task_id.0],
+				|row| row.get::<_, String>(0),
+			)
+			.optional()?;
+		encoded
+			.map(|value| serde_json::from_str(&value).map_err(StoreError::from))
+			.transpose()
+	}
+
+	fn compact_task_events(
+		&mut self,
+		mut snapshot: TaskReplaySnapshot,
+		retain_events: usize,
+	) -> Result<(), StoreError> {
+		let mut connection = self.open()?;
+		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+		let previous_snapshot = transaction
+			.query_row(
+				"SELECT snapshot_json FROM task_replay_snapshots WHERE task_id = ?1",
+				params![snapshot.task_id.0],
+				|row| row.get::<_, String>(0),
+			)
+			.optional()?
+			.map(|encoded| serde_json::from_str::<TaskReplaySnapshot>(&encoded))
+			.transpose()?;
+		let current_event_count = transaction.query_row(
+			"SELECT COUNT(*) FROM task_events WHERE task_id = ?1",
+			params![snapshot.task_id.0],
+			|row| row.get::<_, usize>(0),
+		)?;
+		let total_event_count =
+			previous_snapshot
+				.as_ref()
+				.map_or(current_event_count, |existing| {
+					existing
+						.compacted_event_count
+						.saturating_add(current_event_count)
+				});
+		let retained_count = current_event_count.min(retain_events);
+		let cutoff_seq = if retained_count == 0 {
+			None
+		} else {
+			transaction.query_row(
+				"SELECT MIN(seq) FROM (
+						SELECT seq FROM task_events
+						WHERE task_id = ?1
+						ORDER BY seq DESC
+						LIMIT ?2
+					)",
+				params![
+					snapshot.task_id.0,
+					i64::try_from(retain_events).unwrap_or(i64::MAX),
+				],
+				|row| row.get::<_, Option<i64>>(0),
+			)?
+		};
+		if let Some(cutoff_seq) = cutoff_seq {
+			transaction.execute(
+				"DELETE FROM task_events WHERE task_id = ?1 AND seq < ?2",
+				params![snapshot.task_id.0, cutoff_seq],
+			)?;
+		} else {
+			transaction.execute(
+				"DELETE FROM task_events WHERE task_id = ?1",
+				params![snapshot.task_id.0],
+			)?;
+		}
+		snapshot.compacted_event_count = total_event_count.saturating_sub(retained_count);
+		transaction.execute(
+			"INSERT INTO task_replay_snapshots (task_id, snapshot_json, updated_at_unix_ms) VALUES (?1, ?2, ?3)
+			 ON CONFLICT(task_id) DO UPDATE SET snapshot_json = excluded.snapshot_json, updated_at_unix_ms = excluded.updated_at_unix_ms",
+			params![
+				snapshot.task_id.0,
+				serde_json::to_string(&snapshot)?,
+				now_unix_ms(),
+			],
+		)?;
+		transaction.commit()?;
+		Ok(())
 	}
 }
 
@@ -639,6 +728,11 @@ fn ensure_schema_objects(connection: &Connection) -> Result<(), StoreError> {
 		);
 		CREATE INDEX IF NOT EXISTS idx_task_events_task_id_seq
 			ON task_events(task_id, seq);
+		CREATE TABLE IF NOT EXISTS task_replay_snapshots (
+			task_id TEXT PRIMARY KEY,
+			snapshot_json TEXT NOT NULL,
+			updated_at_unix_ms INTEGER NOT NULL DEFAULT 0
+		);
 		CREATE TABLE IF NOT EXISTS approval_tickets (
 			approval_id TEXT PRIMARY KEY,
 			task_id TEXT NOT NULL,
@@ -736,7 +830,7 @@ mod tests {
 	use super::*;
 	use roku_common_types::{
 		ApprovalStatus, ConversationRole, EvidenceItem, PlanningModeHint, RequestId, ResultStatus,
-		TaskState,
+		TaskReplaySnapshot, TaskState,
 	};
 
 	fn unique_path(suffix: &str) -> PathBuf {
@@ -927,6 +1021,60 @@ mod tests {
 
 		assert_eq!(claim.envelope.entry_id, reclaimed.envelope.entry_id);
 		assert_eq!(reclaimed.lease.consumer_id, "worker-b");
+
+		let _ = fs::remove_file(path);
+	}
+
+	#[test]
+	fn sqlite_event_repo_compacts_events_into_replay_snapshot() {
+		let path = unique_path("replay-snapshot");
+		let config = SqliteStoreConfig::new(path.clone());
+		let mut event_repo = SqliteEventRepository::connect(config).expect("event repo");
+		for step in [
+			(TaskState::Queued, TaskState::Planning, "plan"),
+			(TaskState::Planning, TaskState::GraphBuilding, "graph"),
+			(TaskState::GraphBuilding, TaskState::Delegating, "delegate"),
+		] {
+			event_repo
+				.append_event(TaskEvent {
+					task_id: TaskId("task-1".to_string()),
+					from: step.0,
+					to: step.1,
+					reason: step.2.to_string(),
+					error_class: None,
+					kind: roku_common_types::TaskEventKind::StateTransition,
+					node_id: None,
+					node_kind: None,
+					attempt: Some(0),
+				})
+				.expect("event append should succeed");
+		}
+
+		event_repo
+			.compact_task_events(
+				TaskReplaySnapshot {
+					task_id: TaskId("task-1".to_string()),
+					compacted_event_count: 0,
+					replayed_state: TaskState::Delegating,
+					completed_nodes: vec![NodeId("step-1".to_string())],
+					pending_approval_id: None,
+					last_result: None,
+				},
+				1,
+			)
+			.expect("event compaction should succeed");
+
+		let retained_events = event_repo
+			.list_events(&TaskId("task-1".to_string()))
+			.expect("retained events should load");
+		let snapshot = event_repo
+			.load_replay_snapshot(&TaskId("task-1".to_string()))
+			.expect("snapshot load should succeed")
+			.expect("snapshot should exist");
+
+		assert_eq!(retained_events.len(), 1);
+		assert_eq!(snapshot.compacted_event_count, 2);
+		assert_eq!(snapshot.completed_nodes, vec![NodeId("step-1".to_string())]);
 
 		let _ = fs::remove_file(path);
 	}

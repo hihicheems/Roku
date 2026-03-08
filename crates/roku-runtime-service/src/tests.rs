@@ -761,6 +761,69 @@ fn service_reconstructs_execution_progress_from_persisted_results_after_restart(
 }
 
 #[test]
+fn service_recovers_after_replay_log_is_compacted_into_snapshot() {
+	let paths = file_backed_paths("recovery-compaction");
+	let service = file_backed_service_with_planner(
+		&paths,
+		GenericAgentRuntime::default(),
+		Box::new(roku_task_planner::AdaptiveTaskPlanner),
+	);
+	let pending = service
+		.execute_with_mode(sample_request(), RunMode::ApprovalRequired)
+		.expect("runtime service should create approval ticket");
+	assert_eq!(pending.status, ResponseStatus::PendingApproval);
+
+	let task_id = TaskId("task-req-1".to_string());
+	service
+		.compact_task_replay(&task_id, 1)
+		.expect("replay log compaction should succeed");
+
+	let mut task_repo = roku_state_store::SqliteTaskRepository::connect(
+		roku_state_store::SqliteStoreConfig::new(paths.state_db.clone()),
+	)
+	.expect("sqlite task repo should open");
+	let mut persisted_task = task_repo
+		.load_task(&task_id)
+		.expect("task load should succeed")
+		.expect("task should exist");
+	persisted_task.completed_nodes.clear();
+	persisted_task.next_node_index = 0;
+	persisted_task.last_result = None;
+	task_repo
+		.save_task(persisted_task)
+		.expect("task save should succeed");
+
+	let restarted_service = file_backed_service_with_planner(
+		&paths,
+		GenericAgentRuntime::default(),
+		Box::new(roku_task_planner::AdaptiveTaskPlanner),
+	);
+	let replay = restarted_service
+		.get_task_replay_report(&task_id)
+		.expect("replay report lookup should succeed")
+		.expect("replay report should exist");
+	assert!(replay.event_count > replay.events.len());
+	assert!(replay.snapshot_matches_replay);
+
+	let approval_id = ApprovalId(
+		pending.artifacts[0]
+			.trim_start_matches("approval://")
+			.to_string(),
+	);
+	let resumed = restarted_service
+		.decide_approval(
+			&approval_id,
+			ApprovalDecision {
+				actor: "reviewer".to_string(),
+				approved: true,
+				comment: Some("resume after compaction".to_string()),
+			},
+		)
+		.expect("approval should resume task after compaction");
+	assert_eq!(resumed.status, ResponseStatus::Succeeded);
+}
+
+#[test]
 fn service_reconstructs_approval_and_validation_progress_from_persistence() {
 	let service = RuntimeService::default();
 	let task = Task {
