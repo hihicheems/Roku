@@ -20,6 +20,7 @@ members = [
     "crates/roku-capability-auth",
     "crates/roku-validation-plane",
     "crates/roku-tool-runtime",
+    "crates/roku-skill-registry",
     "crates/roku-mcp-bridge",
     "crates/roku-coding-provider-adapter",
     "crates/roku-api-gateway",
