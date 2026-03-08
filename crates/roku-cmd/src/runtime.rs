@@ -12,17 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use roku_agent_runtime::GenericAgentRuntime;
 use roku_api_gateway::{Gateway, RawRequest};
 use roku_artifact_store::ArtifactStore;
 use roku_common_types::{
-	ApprovalDecision, ApprovalId, PlanningModeHint, ResponseEnvelope, RuntimeError, TaskId,
+	ApprovalDecision, ApprovalId, ArtifactId, PlanningModeHint, ResponseEnvelope, RuntimeError,
+	TaskId, TaskState,
 };
 use roku_experiment_registry::ExperimentRegistry;
 use roku_llm_adapter::{OpenRouterConfig, build_openrouter_router_with_metrics};
 use roku_observability::{InMemoryAuditSink, LogLevel, LogRecord, Metrics, emit_global_log};
+use roku_orchestrator::is_valid_transition;
 pub use roku_runtime_service::RunMode;
 use roku_runtime_service::RuntimeService;
 use roku_state_store::{
@@ -100,6 +105,7 @@ pub(crate) fn build_live_runtime_service_from_env() -> Result<RuntimeService, Co
 	let planner = Box::new(LlmTaskPlanner::new(planner_router));
 	let store_config = PostgresStoreConfig::from_env()
 		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?;
+	let (artifact_store, experiment_registry) = build_runtime_data_plane_from_env();
 
 	if let Some(store_config) = store_config {
 		return Ok(RuntimeService::new_with_data_plane_and_runtime_and_metrics(
@@ -107,8 +113,8 @@ pub(crate) fn build_live_runtime_service_from_env() -> Result<RuntimeService, Co
 			Box::new(connect_postgres_event_repository(&store_config)?),
 			Box::new(connect_postgres_approval_repository(&store_config)?),
 			Box::new(connect_postgres_result_repository(&store_config)?),
-			ArtifactStore::default(),
-			ExperimentRegistry::default(),
+			artifact_store,
+			experiment_registry,
 			Arc::new(InMemoryAuditSink::default()),
 			runtime,
 			metrics,
@@ -118,7 +124,18 @@ pub(crate) fn build_live_runtime_service_from_env() -> Result<RuntimeService, Co
 
 	log_state_store_backend("in-memory", None);
 
-	Ok(RuntimeService::in_memory_with_agent_runtime_planner_and_metrics(runtime, planner, metrics))
+	Ok(RuntimeService::new_with_data_plane_and_runtime_and_metrics(
+		Box::new(roku_state_store::InMemoryTaskRepository::default()),
+		Box::new(roku_state_store::InMemoryEventRepository::default()),
+		Box::new(roku_state_store::InMemoryApprovalRepository::default()),
+		Box::new(roku_state_store::InMemoryResultRepository::default()),
+		artifact_store,
+		experiment_registry,
+		Arc::new(InMemoryAuditSink::default()),
+		runtime,
+		metrics,
+		planner,
+	))
 }
 
 pub(crate) fn show_task_from_env(task_id: &str) -> Result<String, CommandError> {
@@ -151,6 +168,94 @@ pub(crate) fn show_approval_from_env(approval_id: &str) -> Result<String, Comman
 		.map_err(|error| CommandError::OutputEncoding(error.to_string()))
 }
 
+pub(crate) fn show_artifacts_from_env(task_id: &str) -> Result<String, CommandError> {
+	let service = build_stateful_runtime_service_from_env()?;
+	let artifacts = service
+		.list_artifacts(&TaskId(task_id.to_string()))
+		.map_err(CommandError::Runtime)?;
+
+	serde_json::to_string_pretty(&artifacts)
+		.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+}
+
+pub(crate) fn show_artifact_content_from_env(
+	task_id: &str,
+	artifact_id: &str,
+) -> Result<String, CommandError> {
+	let service = build_stateful_runtime_service_from_env()?;
+	service
+		.get_artifact_content(
+			&TaskId(task_id.to_string()),
+			&ArtifactId(artifact_id.to_string()),
+		)
+		.map_err(CommandError::Runtime)?
+		.ok_or_else(|| {
+			CommandError::Usage(format!(
+				"artifact content not found for task={} artifact={artifact_id}",
+				task_id
+			))
+		})
+}
+
+pub(crate) fn download_artifact_from_env(
+	task_id: &str,
+	artifact_id: &str,
+	output_path: &Path,
+) -> Result<String, CommandError> {
+	let content = show_artifact_content_from_env(task_id, artifact_id)?;
+	if let Some(parent) = output_path.parent() {
+		fs::create_dir_all(parent).map_err(CommandError::Io)?;
+	}
+	fs::write(output_path, content).map_err(CommandError::Io)?;
+	Ok(output_path.display().to_string())
+}
+
+pub(crate) fn show_experiment_from_env(task_id: &str) -> Result<String, CommandError> {
+	let service = build_stateful_runtime_service_from_env()?;
+	let experiment = service
+		.get_experiment_run(&TaskId(task_id.to_string()))
+		.map_err(CommandError::Runtime)?
+		.ok_or_else(|| CommandError::Usage(format!("experiment not found for task: {task_id}")))?;
+
+	serde_json::to_string_pretty(&experiment)
+		.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+}
+
+pub(crate) fn replay_task_from_env(task_id: &str) -> Result<String, CommandError> {
+	let service = build_stateful_runtime_service_from_env()?;
+	let task_id = TaskId(task_id.to_string());
+	let task = service
+		.get_task(&task_id)
+		.map_err(CommandError::Runtime)?
+		.ok_or_else(|| CommandError::Usage(format!("task not found: {}", task_id.0)))?;
+	let events = service
+		.list_task_events(&task_id)
+		.map_err(CommandError::Runtime)?;
+
+	let replayed_state = events.last().map(|event| event.to).unwrap_or(task.state);
+	let transitions_valid = events
+		.iter()
+		.all(|event| is_valid_transition(event.from, event.to));
+	let chain_consistent = events
+		.windows(2)
+		.all(|window| window[0].to == window[1].from);
+	let snapshot_matches_replay = task.state == replayed_state;
+	let recoverable = is_recoverable_state(task.state);
+
+	serde_json::to_string_pretty(&json!({
+		"task_id": task.task_id.0,
+		"persisted_state": format!("{:?}", task.state),
+		"replayed_state": format!("{:?}", replayed_state),
+		"event_count": events.len(),
+		"transitions_valid": transitions_valid,
+		"chain_consistent": chain_consistent,
+		"snapshot_matches_replay": snapshot_matches_replay,
+		"recoverable": recoverable,
+		"events": events,
+	}))
+	.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+}
+
 pub(crate) fn decide_approval_from_env(
 	approval_id: &str,
 	decision: ApprovalDecision,
@@ -167,6 +272,7 @@ pub(crate) fn decide_approval_from_env(
 fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandError> {
 	let store_config = PostgresStoreConfig::from_env()
 		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?;
+	let (artifact_store, experiment_registry) = build_runtime_data_plane_from_env();
 
 	if let Some(store_config) = store_config {
 		return Ok(RuntimeService::new_with_data_plane(
@@ -174,14 +280,22 @@ fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandEr
 			Box::new(connect_postgres_event_repository(&store_config)?),
 			Box::new(connect_postgres_approval_repository(&store_config)?),
 			Box::new(connect_postgres_result_repository(&store_config)?),
-			ArtifactStore::default(),
-			ExperimentRegistry::default(),
+			artifact_store,
+			experiment_registry,
 			Arc::new(InMemoryAuditSink::default()),
 		));
 	}
 
 	log_state_store_backend("in-memory", None);
-	Ok(RuntimeService::default())
+	Ok(RuntimeService::new_with_data_plane(
+		Box::new(roku_state_store::InMemoryTaskRepository::default()),
+		Box::new(roku_state_store::InMemoryEventRepository::default()),
+		Box::new(roku_state_store::InMemoryApprovalRepository::default()),
+		Box::new(roku_state_store::InMemoryResultRepository::default()),
+		artifact_store,
+		experiment_registry,
+		Arc::new(InMemoryAuditSink::default()),
+	))
 }
 
 fn connect_postgres_task_repository(
@@ -223,6 +337,72 @@ fn log_state_store_backend(kind: &str, schema: Option<&str>) {
 		record = record.with_field("schema", schema.to_string());
 	}
 	let _ = emit_global_log(record);
+}
+
+fn build_runtime_data_plane_from_env() -> (ArtifactStore, ExperimentRegistry) {
+	let config = RuntimeDataPlaneConfig::from_env();
+	log_data_plane_backend("artifact-store", &config.artifact_store_path);
+	log_data_plane_backend("experiment-registry", &config.experiment_registry_path);
+	(
+		ArtifactStore::file_backed(config.artifact_store_path),
+		ExperimentRegistry::file_backed(config.experiment_registry_path),
+	)
+}
+
+fn log_data_plane_backend(component: &str, path: &Path) {
+	let _ = emit_global_log(
+		LogRecord::new(
+			"roku-cmd",
+			LogLevel::Info,
+			format!("using file-backed {component}"),
+		)
+		.with_field("path", path.display().to_string()),
+	);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeDataPlaneConfig {
+	artifact_store_path: PathBuf,
+	experiment_registry_path: PathBuf,
+}
+
+impl RuntimeDataPlaneConfig {
+	fn from_env() -> Self {
+		let base_dir = env::var("ROKU_RUNTIME_DATA_DIR")
+			.ok()
+			.filter(|value| !value.trim().is_empty())
+			.map(PathBuf::from)
+			.unwrap_or_else(|| PathBuf::from("state"));
+		let artifact_store_path = env::var("ROKU_ARTIFACT_STORE_PATH")
+			.ok()
+			.filter(|value| !value.trim().is_empty())
+			.map(PathBuf::from)
+			.unwrap_or_else(|| base_dir.join("artifacts.json"));
+		let experiment_registry_path = env::var("ROKU_EXPERIMENT_REGISTRY_PATH")
+			.ok()
+			.filter(|value| !value.trim().is_empty())
+			.map(PathBuf::from)
+			.unwrap_or_else(|| base_dir.join("experiments.json"));
+
+		Self {
+			artifact_store_path,
+			experiment_registry_path,
+		}
+	}
+}
+
+fn is_recoverable_state(state: TaskState) -> bool {
+	matches!(
+		state,
+		TaskState::Planning
+			| TaskState::GraphBuilding
+			| TaskState::Delegating
+			| TaskState::Executing
+			| TaskState::WaitingApproval
+			| TaskState::Validating
+			| TaskState::Aggregating
+			| TaskState::Failed
+	)
 }
 
 fn build_request(

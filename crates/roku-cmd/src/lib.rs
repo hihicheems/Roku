@@ -34,8 +34,10 @@ pub use runtime::{RunMode, run_live_once_from_env, run_once, run_with_mode};
 use crate::api::run_api_gateway_from_env;
 use crate::bot::run_telegram_bot_from_env;
 use crate::runtime::{
-	ExecutionRequestOptions, decide_approval_from_env, run_live_once_with_options_from_env,
-	run_with_mode_and_options, show_approval_from_env, show_task_from_env,
+	ExecutionRequestOptions, decide_approval_from_env, download_artifact_from_env,
+	replay_task_from_env, run_live_once_with_options_from_env, run_with_mode_and_options,
+	show_approval_from_env, show_artifact_content_from_env, show_artifacts_from_env,
+	show_experiment_from_env, show_task_from_env,
 };
 
 #[derive(Debug, Error)]
@@ -50,6 +52,8 @@ pub enum CommandError {
 	StateStoreBootstrap(String),
 	#[error("failed to encode command output: {0}")]
 	OutputEncoding(String),
+	#[error("io error: {0}")]
+	Io(#[from] std::io::Error),
 	#[error(transparent)]
 	Runtime(#[from] roku_common_types::RuntimeError),
 	#[error(transparent)]
@@ -91,6 +95,8 @@ where
 		}
 		Some("task") => execute_task_command(&args[1..]).map(Some),
 		Some("approval") => execute_approval_command(&args[1..]).map(Some),
+		Some("artifact") => execute_artifact_command(&args[1..]).map(Some),
+		Some("experiment") => execute_experiment_command(&args[1..]).map(Some),
 		Some("--help") | Some("-h") | Some("help") => Ok(Some(help_text().to_string())),
 		Some(command) => Err(CommandError::Usage(format!(
 			"unknown command: {command}\n\n{}",
@@ -100,7 +106,7 @@ where
 }
 
 pub fn help_text() -> &'static str {
-	"Usage:\n  roku-cmd once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd live-once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n  roku-cmd task show <task-id>\n  roku-cmd approval show <approval-id>\n  roku-cmd approval approve <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd approval reject <approval-id> --actor <actor> [--comment <text>]\n\nCommands:\n  once         Run the deterministic in-process pipeline.\n  live-once    Run the OpenRouter-backed live pipeline from environment.\n  telegram-bot Start the Telegram polling bot using environment configuration.\n  api-gateway  Start the Actix HTTP gateway using environment configuration.\n  task show    Render a persisted task snapshot with its event timeline.\n  approval     Show or decide an approval ticket from persisted state.\n\nPlanning Modes:\n  react | taskdecomposition | treesearch | iterativerefinement"
+	"Usage:\n  roku-cmd once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd live-once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n  roku-cmd task show <task-id>\n  roku-cmd task replay <task-id>\n  roku-cmd approval show <approval-id>\n  roku-cmd approval approve <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd approval reject <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd artifact list <task-id>\n  roku-cmd artifact content <task-id> <artifact-id>\n  roku-cmd artifact download <task-id> <artifact-id> --output <path>\n  roku-cmd experiment show <task-id>\n\nCommands:\n  once              Run the deterministic in-process pipeline.\n  live-once         Run the OpenRouter-backed live pipeline from environment.\n  telegram-bot      Start the Telegram polling bot using environment configuration.\n  api-gateway       Start the Actix HTTP gateway using environment configuration.\n  task show         Render a persisted task snapshot with its event timeline.\n  task replay       Rebuild a state-transition report from persisted task events.\n  approval          Show or decide an approval ticket from persisted state.\n  artifact          List artifacts, print artifact content, or download an artifact payload.\n  experiment show   Render the persisted experiment run for a task.\n\nPlanning Modes:\n  react | taskdecomposition | treesearch | iterativerefinement"
 }
 
 fn join_goal(parts: &[String]) -> Result<String, CommandError> {
@@ -190,6 +196,9 @@ fn parse_planning_mode_hint(value: &str) -> Result<PlanningModeHint, CommandErro
 fn execute_task_command(parts: &[String]) -> Result<String, CommandError> {
 	match parts {
 		[command, task_id] if command.eq_ignore_ascii_case("show") => show_task_from_env(task_id),
+		[command, task_id] if command.eq_ignore_ascii_case("replay") => {
+			replay_task_from_env(task_id)
+		}
 		_ => Err(CommandError::Usage(format!(
 			"invalid task command\n\n{}",
 			help_text()
@@ -230,6 +239,67 @@ fn execute_approval_command(parts: &[String]) -> Result<String, CommandError> {
 		}
 		_ => Err(CommandError::Usage(format!(
 			"invalid approval command\n\n{}",
+			help_text()
+		))),
+	}
+}
+
+fn execute_artifact_command(parts: &[String]) -> Result<String, CommandError> {
+	match parts.first().map(String::as_str) {
+		Some(command) if command.eq_ignore_ascii_case("list") => {
+			let task_id = parts.get(1).ok_or_else(|| {
+				CommandError::Usage(format!(
+					"missing task id for artifact list\n\n{}",
+					help_text()
+				))
+			})?;
+			show_artifacts_from_env(task_id)
+		}
+		Some(command) if command.eq_ignore_ascii_case("content") => {
+			let task_id = parts.get(1).ok_or_else(|| {
+				CommandError::Usage(format!(
+					"missing task id for artifact content\n\n{}",
+					help_text()
+				))
+			})?;
+			let artifact_id = parts.get(2).ok_or_else(|| {
+				CommandError::Usage(format!(
+					"missing artifact id for artifact content\n\n{}",
+					help_text()
+				))
+			})?;
+			show_artifact_content_from_env(task_id, artifact_id)
+		}
+		Some(command) if command.eq_ignore_ascii_case("download") => {
+			let task_id = parts.get(1).ok_or_else(|| {
+				CommandError::Usage(format!(
+					"missing task id for artifact download\n\n{}",
+					help_text()
+				))
+			})?;
+			let artifact_id = parts.get(2).ok_or_else(|| {
+				CommandError::Usage(format!(
+					"missing artifact id for artifact download\n\n{}",
+					help_text()
+				))
+			})?;
+			let output_path = parse_download_output_path(&parts[3..])?;
+			download_artifact_from_env(task_id, artifact_id, &output_path)
+		}
+		_ => Err(CommandError::Usage(format!(
+			"invalid artifact command\n\n{}",
+			help_text()
+		))),
+	}
+}
+
+fn execute_experiment_command(parts: &[String]) -> Result<String, CommandError> {
+	match parts {
+		[command, task_id] if command.eq_ignore_ascii_case("show") => {
+			show_experiment_from_env(task_id)
+		}
+		_ => Err(CommandError::Usage(format!(
+			"invalid experiment command\n\n{}",
 			help_text()
 		))),
 	}
@@ -292,6 +362,31 @@ fn parse_approval_decision_options(
 		})?,
 		comment,
 	})
+}
+
+fn parse_download_output_path(parts: &[String]) -> Result<PathBuf, CommandError> {
+	let Some(current) = parts.first() else {
+		return Err(CommandError::Usage(format!(
+			"missing required --output for artifact download\n\n{}",
+			help_text()
+		)));
+	};
+
+	if let Some(value) = current.strip_prefix("--output=") {
+		return Ok(PathBuf::from(parse_non_empty_flag("--output", value)?));
+	}
+
+	if current == "--output" {
+		let value = parts
+			.get(1)
+			.ok_or_else(|| CommandError::Usage("missing value for --output".to_string()))?;
+		return Ok(PathBuf::from(parse_non_empty_flag("--output", value)?));
+	}
+
+	Err(CommandError::Usage(format!(
+		"unknown artifact download flag: {current}\n\n{}",
+		help_text()
+	)))
 }
 
 fn configure_logging_from_env() -> Result<(), CommandError> {
@@ -395,7 +490,10 @@ mod tests {
 		assert!(help.contains("telegram-bot"));
 		assert!(help.contains("api-gateway"));
 		assert!(help.contains("task show"));
+		assert!(help.contains("task replay"));
 		assert!(help.contains("approval show"));
+		assert!(help.contains("artifact list"));
+		assert!(help.contains("experiment show"));
 	}
 
 	#[test]
@@ -452,5 +550,20 @@ mod tests {
 		.expect_err("actor should be required");
 
 		assert!(error.to_string().contains("missing required --actor"));
+	}
+
+	#[test]
+	fn parse_download_output_path_supports_output_flag() {
+		let path =
+			parse_download_output_path(&["--output".to_string(), "/tmp/artifact.txt".to_string()])
+				.expect("download output path should parse");
+
+		assert_eq!(path, PathBuf::from("/tmp/artifact.txt"));
+	}
+
+	#[test]
+	fn parse_download_output_path_requires_output_flag() {
+		let error = parse_download_output_path(&[]).expect_err("output flag should be required");
+		assert!(error.to_string().contains("missing required --output"));
 	}
 }

@@ -16,6 +16,7 @@ roku-connectors-telegram = { path = "../roku-connectors-telegram" }
 roku-experiment-registry = { path = "../roku-experiment-registry" }
 roku-llm-adapter = { path = "../roku-llm-adapter" }
 roku-observability = { path = "../roku-observability" }
+roku-orchestrator = { path = "../roku-orchestrator" }
 roku-runtime-service = { path = "../roku-runtime-service" }
 roku-state-store = { path = "../roku-state-store" }
 roku-task-planner = { path = "../roku-task-planner" }
