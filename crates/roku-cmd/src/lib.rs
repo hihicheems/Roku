@@ -35,9 +35,9 @@ use crate::api::run_api_gateway_from_env;
 use crate::bot::run_telegram_bot_from_env;
 use crate::runtime::{
 	ExecutionRequestOptions, decide_approval_from_env, download_artifact_from_env,
-	replay_task_from_env, run_live_once_with_options_from_env, run_with_mode_and_options,
-	show_approval_from_env, show_artifact_content_from_env, show_artifacts_from_env,
-	show_experiment_from_env, show_task_from_env,
+	replay_task_from_env, resume_task_from_env, run_live_once_with_options_from_env,
+	run_with_mode_and_options, show_approval_from_env, show_artifact_content_from_env,
+	show_artifacts_from_env, show_experiment_from_env, show_task_from_env,
 };
 
 #[derive(Debug, Error)]
@@ -106,7 +106,7 @@ where
 }
 
 pub fn help_text() -> &'static str {
-	"Usage:\n  roku-cmd once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd live-once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n  roku-cmd task show <task-id>\n  roku-cmd task replay <task-id>\n  roku-cmd approval show <approval-id>\n  roku-cmd approval approve <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd approval reject <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd artifact list <task-id>\n  roku-cmd artifact content <task-id> <artifact-id>\n  roku-cmd artifact download <task-id> <artifact-id> --output <path>\n  roku-cmd experiment show <task-id>\n\nCommands:\n  once              Run the deterministic in-process pipeline.\n  live-once         Run the OpenRouter-backed live pipeline from environment.\n  telegram-bot      Start the Telegram polling bot using environment configuration.\n  api-gateway       Start the Actix HTTP gateway using environment configuration.\n  task show         Render a persisted task snapshot with its event timeline.\n  task replay       Rebuild a state-transition report from persisted task events.\n  approval          Show or decide an approval ticket from persisted state.\n  artifact          List artifacts, print artifact content, or download an artifact payload.\n  experiment show   Render the persisted experiment run for a task.\n\nPlanning Modes:\n  react | taskdecomposition | treesearch | iterativerefinement"
+	"Usage:\n  roku-cmd once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd live-once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n  roku-cmd task show <task-id>\n  roku-cmd task replay <task-id>\n  roku-cmd task resume <task-id>\n  roku-cmd approval show <approval-id>\n  roku-cmd approval approve <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd approval reject <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd artifact list <task-id>\n  roku-cmd artifact content <task-id> <artifact-id>\n  roku-cmd artifact download <task-id> <artifact-id> --output <path>\n  roku-cmd experiment show <task-id>\n\nCommands:\n  once              Run the deterministic in-process pipeline.\n  live-once         Run the OpenRouter-backed live pipeline from environment.\n  telegram-bot      Start the Telegram polling bot using environment configuration.\n  api-gateway       Start the Actix HTTP gateway using environment configuration.\n  task show         Render a persisted task snapshot with its event timeline.\n  task replay       Rebuild a state-transition report from persisted task events.\n  task resume       Continue a resumable persisted task using the live runtime path.\n  approval          Show or decide an approval ticket from persisted state.\n  artifact          List artifacts, print artifact content, or download an artifact payload.\n  experiment show   Render the persisted experiment run for a task.\n\nPlanning Modes:\n  react | taskdecomposition | treesearch | iterativerefinement"
 }
 
 fn join_goal(parts: &[String]) -> Result<String, CommandError> {
@@ -198,6 +198,9 @@ fn execute_task_command(parts: &[String]) -> Result<String, CommandError> {
 		[command, task_id] if command.eq_ignore_ascii_case("show") => show_task_from_env(task_id),
 		[command, task_id] if command.eq_ignore_ascii_case("replay") => {
 			replay_task_from_env(task_id)
+		}
+		[command, task_id] if command.eq_ignore_ascii_case("resume") => {
+			resume_task_from_env(task_id)
 		}
 		_ => Err(CommandError::Usage(format!(
 			"invalid task command\n\n{}",
@@ -491,6 +494,7 @@ mod tests {
 		assert!(help.contains("api-gateway"));
 		assert!(help.contains("task show"));
 		assert!(help.contains("task replay"));
+		assert!(help.contains("task resume"));
 		assert!(help.contains("approval show"));
 		assert!(help.contains("artifact list"));
 		assert!(help.contains("experiment show"));

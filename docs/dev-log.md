@@ -1,5 +1,36 @@
 # Roku Agent Dev Log
 
+## 2026-03-08 - Session Milestone (Phase 25)
+
+### Completed Modules
+
+- `roku-runtime-service`
+  - Added `resume_task` so persisted task snapshots with graphs and completed-node state can continue execution after process restart.
+  - Resume now handles two concrete recovery paths:
+    - `WaitingApproval` returns a stable pending-approval response instead of failing with an opaque state mismatch
+    - failed execution tasks can be normalized back through valid state-machine transitions and continued with the normal execution path
+  - Refactored task finalization so both fresh execution and resumed execution share the same success path.
+- `roku-cmd`
+  - Added `task resume <task-id>` to drive the new runtime-service resume entrypoint from CLI.
+
+### Verification Status
+
+- `cargo test -p roku-runtime-service -p roku-cmd`: passed
+  - `roku-runtime-service`: 26 passed
+  - `roku-cmd`: 12 passed
+
+### Remaining Work
+
+- `RS-15` is still not complete: resume currently relies on the persisted task snapshot and validated event history, but it does not yet rebuild runnable state purely from persisted events/artifacts/results.
+- Partial rerun and branch-local replay are still missing.
+- Cancellation / compensation recovery remains unimplemented.
+
+### Next Recommended Steps
+
+1. Extend resume from “snapshot-backed continuation” to true event-stream replay / recovery.
+2. Add CLI support for branch-local or node-local rerun once replay can rebuild execution anchors.
+3. Implement cancellation / compensation recovery paths for interrupted long-running tasks.
+
 ## 2026-03-08 - Session Milestone (Phase 24)
 
 ### Completed Modules

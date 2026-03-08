@@ -3,13 +3,6 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-RUN_DIR="${ROKU_RUN_DIR:-$ROOT_DIR/run/dev-services}"
-LOG_DIR="${ROKU_DEV_SERVICE_LOG_DIR:-$ROOT_DIR/logs/dev-services}"
-DEFAULT_API_BIND_ADDR="127.0.0.1:8787"
-DEFAULT_OPENROUTER_PRIMARY_MODEL="step-3.5-flash:free"
-DEFAULT_OPENROUTER_FALLBACK_MODELS="deepseek-chat,gemini-2.0-flash"
-
-readonly ROOT_DIR RUN_DIR LOG_DIR DEFAULT_API_BIND_ADDR DEFAULT_OPENROUTER_PRIMARY_MODEL DEFAULT_OPENROUTER_FALLBACK_MODELS
 
 load_env_file() {
 	if [[ -f "$ROOT_DIR/.env" ]]; then
@@ -19,6 +12,16 @@ load_env_file() {
 		set +a
 	fi
 }
+
+load_env_file
+
+RUN_DIR="${ROKU_RUN_DIR:-$ROOT_DIR/run/dev-services}"
+LOG_DIR="${ROKU_DEV_SERVICE_LOG_DIR:-$ROOT_DIR/logs/dev-services}"
+DEFAULT_API_BIND_ADDR="127.0.0.1:8787"
+DEFAULT_OPENROUTER_PRIMARY_MODEL="step-3.5-flash:free"
+DEFAULT_OPENROUTER_FALLBACK_MODELS="deepseek-chat,gemini-2.0-flash"
+
+readonly ROOT_DIR RUN_DIR LOG_DIR DEFAULT_API_BIND_ADDR DEFAULT_OPENROUTER_PRIMARY_MODEL DEFAULT_OPENROUTER_FALLBACK_MODELS
 
 services() {
 	printf '%s\n' "telegram-bot"
@@ -583,7 +586,6 @@ USAGE
 }
 
 main() {
-	load_env_file
 	local command="${1:-}"
 	case "$command" in
 	start)

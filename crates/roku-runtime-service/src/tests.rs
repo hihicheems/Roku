@@ -377,6 +377,37 @@ fn service_resumes_after_approval_is_granted() {
 }
 
 #[test]
+fn service_resume_task_returns_pending_approval_for_waiting_ticket() {
+	let service = RuntimeService::default();
+	let response = service
+		.execute_with_mode(sample_request(), RunMode::ApprovalRequired)
+		.expect("runtime service should create approval ticket");
+	let approval_artifact = response.artifacts[0].clone();
+
+	let resumed = service
+		.resume_task(&TaskId("task-req-1".to_string()))
+		.expect("resume should surface pending approval");
+
+	assert_eq!(resumed.status, ResponseStatus::PendingApproval);
+	assert_eq!(resumed.artifacts, vec![approval_artifact]);
+}
+
+#[test]
+fn service_resume_task_recovers_failed_execution() {
+	let service = RuntimeService::default();
+	let response = service
+		.execute_with_mode(sample_request(), RunMode::CapabilityDenied)
+		.expect("runtime service should fail before resume");
+	assert_eq!(response.status, ResponseStatus::Failed);
+
+	let resumed = service
+		.resume_task(&TaskId("task-req-1".to_string()))
+		.expect("resume should continue failed task");
+
+	assert_eq!(resumed.status, ResponseStatus::Succeeded);
+}
+
+#[test]
 fn service_fails_when_approval_is_rejected() {
 	let service = RuntimeService::default();
 	let response = service
