@@ -983,6 +983,122 @@ fn service_reconstructs_progress_from_node_events_without_snapshot_or_results() 
 }
 
 #[test]
+fn service_finalize_uses_supervisor_selected_final_result() {
+	let service = RuntimeService::default();
+	let task_id = TaskId("task-final-selection".to_string());
+	let task = Task {
+		task_id: task_id.clone(),
+		request_id: RequestId("req-final-selection".to_string()),
+		session_id: "session-final-selection".to_string(),
+		goal: "select final result".to_string(),
+		state: TaskState::Aggregating,
+		attempts: 0,
+		planning_mode_hint: None,
+		conversation_history: Vec::new(),
+		completed_nodes: vec![
+			NodeId("step-1".to_string()),
+			NodeId("aggregation-gate".to_string()),
+		],
+		next_node_index: 2,
+		pending_approval_id: None,
+		last_result: Some(ResultEnvelope {
+			task_id: task_id.clone(),
+			node_id: NodeId("step-1".to_string()),
+			producer: "agent-step-1".to_string(),
+			schema_version: "result.v1".to_string(),
+			status: ResultStatus::Ok,
+			payload: serde_json::json!({"message": "stale execution summary"}).to_string(),
+			evidence: Vec::new(),
+			confidence: 0.9,
+		}),
+		compensation_records: Vec::new(),
+		graph: Some(TaskGraph {
+			task_id: task_id.clone(),
+			nodes: vec![
+				TaskNode {
+					node_id: NodeId("aggregation-gate".to_string()),
+					kind: TaskNodeKind::Aggregation,
+					description: "aggregate".to_string(),
+					capabilities: Vec::new(),
+					join_policy: JoinPolicy::AllParents,
+					aggregation_mode: AggregationMode::CollectAll,
+					..TaskNode::default()
+				},
+				TaskNode {
+					node_id: NodeId("step-1".to_string()),
+					kind: TaskNodeKind::Execution,
+					description: "step 1".to_string(),
+					capabilities: Vec::new(),
+					join_policy: JoinPolicy::AllParents,
+					aggregation_mode: AggregationMode::CollectAll,
+					..TaskNode::default()
+				},
+			],
+			edges: vec![TaskEdge {
+				from: NodeId("step-1".to_string()),
+				to: NodeId("aggregation-gate".to_string()),
+				condition: roku_common_types::TaskEdgeCondition::OnSuccess,
+			}],
+		}),
+	};
+	service.save_task(task).expect("task should persist");
+	service
+		.save_result(ResultEnvelope {
+			task_id: task_id.clone(),
+			node_id: NodeId("step-1".to_string()),
+			producer: "agent-step-1".to_string(),
+			schema_version: "result.v1".to_string(),
+			status: ResultStatus::Ok,
+			payload: serde_json::json!({"message": "execution summary"}).to_string(),
+			evidence: Vec::new(),
+			confidence: 0.95,
+		})
+		.expect("execution result should persist");
+	service
+		.save_result(ResultEnvelope {
+			task_id: task_id.clone(),
+			node_id: NodeId("aggregation-gate".to_string()),
+			producer: "aggregation:aggregation-gate".to_string(),
+			schema_version: "result.v1".to_string(),
+			status: ResultStatus::Ok,
+			payload: serde_json::json!({"message": "aggregated final summary"}).to_string(),
+			evidence: Vec::new(),
+			confidence: 0.4,
+		})
+		.expect("aggregation result should persist");
+	service
+		.start_experiment_run(
+			&service
+				.get_task(&task_id)
+				.expect("task lookup should succeed")
+				.expect("task should exist"),
+			"select final result",
+			"test",
+		)
+		.expect("experiment run should start");
+
+	let response = service
+		.resume_task(&task_id)
+		.expect("aggregating task should finalize successfully");
+
+	assert_eq!(response.status, ResponseStatus::Succeeded);
+	assert_eq!(response.message, "aggregated final summary");
+	let persisted = service
+		.get_task(&task_id)
+		.expect("task lookup should succeed")
+		.expect("task should exist");
+	assert_eq!(persisted.state, TaskState::Succeeded);
+	assert_eq!(
+		persisted
+			.last_result
+			.as_ref()
+			.expect("final result should persist")
+			.node_id,
+		NodeId("aggregation-gate".to_string())
+	);
+}
+
+#[test]
 fn service_enters_timeout_recovery_when_node_deadline_is_exceeded() {
 	struct SlowWorker;
 
