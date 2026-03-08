@@ -28,6 +28,7 @@ use roku_llm_adapter::{OpenRouterConfig, build_openrouter_router_with_metrics};
 use roku_observability::{InMemoryAuditSink, LogLevel, LogRecord, Metrics, emit_global_log};
 pub use roku_runtime_service::RunMode;
 use roku_runtime_service::RuntimeService;
+use roku_skill_registry::SkillRegistry;
 use roku_state_store::{
 	SqliteApprovalRepository, SqliteDispatchQueue, SqliteEventRepository, SqliteResultRepository,
 	SqliteStoreConfig, SqliteTaskRepository,
@@ -100,10 +101,12 @@ pub(crate) fn build_live_runtime_service_from_env() -> Result<RuntimeService, Co
 	let metrics = Arc::new(Metrics::default());
 	let runtime_router = build_openrouter_router_with_metrics(config.clone(), metrics.clone())?;
 	let planner_router = build_openrouter_router_with_metrics(config, metrics.clone())?;
-	let runtime = GenericAgentRuntime::with_llm_router(runtime_router);
-	let planner = Box::new(LlmTaskPlanner::new(planner_router));
 	let layout = LocalStorageLayout::from_env();
 	layout.ensure_dirs().map_err(CommandError::Io)?;
+	let skill_registry = build_skill_registry(&layout);
+	let runtime =
+		GenericAgentRuntime::with_llm_router_and_skill_registry(runtime_router, skill_registry);
+	let planner = Box::new(LlmTaskPlanner::new(planner_router));
 	let store_config = sqlite_store_config(&layout);
 	let (artifact_store, experiment_registry) = build_runtime_data_plane(&layout);
 
@@ -245,6 +248,7 @@ pub(crate) fn decide_approval_from_env(
 fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandError> {
 	let layout = LocalStorageLayout::from_env();
 	layout.ensure_dirs().map_err(CommandError::Io)?;
+	let skill_registry = build_skill_registry(&layout);
 	let store_config = sqlite_store_config(&layout);
 	let (artifact_store, experiment_registry) = build_runtime_data_plane(&layout);
 
@@ -259,7 +263,7 @@ fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandEr
 			experiment_registry,
 		},
 		Arc::new(InMemoryAuditSink::default()),
-		GenericAgentRuntime::default(),
+		GenericAgentRuntime::with_skill_registry(skill_registry),
 		Arc::new(Metrics::default()),
 		Box::new(roku_task_planner::AdaptiveTaskPlanner),
 	))
@@ -329,6 +333,11 @@ fn log_data_plane_backend(component: &str, path: &Path) {
 		)
 		.with_field("path", path.display().to_string()),
 	);
+}
+
+fn build_skill_registry(layout: &LocalStorageLayout) -> SkillRegistry {
+	log_data_plane_backend("skill-registry", &layout.skill_root);
+	SkillRegistry::file_backed(layout.skill_root.clone())
 }
 
 fn sqlite_store_config(layout: &LocalStorageLayout) -> SqliteStoreConfig {

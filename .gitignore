@@ -22,6 +22,7 @@ debug
 **/*.DS_Store
 logs/
 .env
+.roku/
 run/
 tmp/
 prompts/

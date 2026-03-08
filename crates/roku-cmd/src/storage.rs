@@ -24,6 +24,7 @@ pub(crate) struct LocalStorageLayout {
 	pub artifact_root: PathBuf,
 	pub experiment_root: PathBuf,
 	pub report_root: PathBuf,
+	pub skill_root: PathBuf,
 	pub prompt_archive_dir: PathBuf,
 	pub memory_summary_dir: PathBuf,
 	pub audit_export_dir: PathBuf,
@@ -43,6 +44,8 @@ impl LocalStorageLayout {
 		let experiment_root =
 			env_path("ROKU_EXPERIMENT_ROOT").unwrap_or_else(|| home_dir.join("experiments"));
 		let report_root = env_path("ROKU_REPORT_ROOT").unwrap_or_else(|| home_dir.join("reports"));
+		let skill_root =
+			env_path("ROKU_SKILL_ROOT").unwrap_or_else(|| PathBuf::from(".roku").join("skills"));
 		let prompt_archive_dir =
 			env_path("ROKU_PROMPT_ARCHIVE_DIR").unwrap_or_else(|| home_dir.join("prompts"));
 		let memory_summary_dir =
@@ -60,6 +63,7 @@ impl LocalStorageLayout {
 			artifact_root,
 			experiment_root,
 			report_root,
+			skill_root,
 			prompt_archive_dir,
 			memory_summary_dir,
 			audit_export_dir,
@@ -76,6 +80,7 @@ impl LocalStorageLayout {
 			&self.artifact_root,
 			&self.experiment_root,
 			&self.report_root,
+			&self.skill_root,
 			&self.prompt_archive_dir,
 			&self.memory_summary_dir,
 			&self.audit_export_dir,
@@ -135,5 +140,6 @@ mod tests {
 		assert!(layout.home_dir.ends_with(".roku"));
 		assert!(layout.sqlite_path.ends_with("state/control-plane.db"));
 		assert!(layout.artifact_root.ends_with("artifacts"));
+		assert!(layout.skill_root.ends_with(".roku/skills"));
 	}
 }
