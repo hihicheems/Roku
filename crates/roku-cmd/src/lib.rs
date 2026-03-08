@@ -28,6 +28,7 @@ use roku_observability::{
 	AsyncRotatingFileLogSink, FanoutLogSink, FileLogConfig, LogSink, StderrLogSink,
 	install_global_log_sink,
 };
+use roku_skill_registry::SkillRegistryError;
 use thiserror::Error;
 
 pub use runtime::{RunMode, run_live_once_from_env, run_once, run_with_mode};
@@ -36,9 +37,10 @@ use crate::api::run_api_gateway_from_env;
 use crate::bot::run_telegram_bot_from_env;
 use crate::runtime::{
 	ExecutionRequestOptions, decide_approval_from_env, download_artifact_from_env,
-	replay_task_from_env, resume_task_from_env, run_live_once_with_options_from_env,
-	run_with_mode_and_options, show_approval_from_env, show_artifact_content_from_env,
-	show_artifacts_from_env, show_experiment_from_env, show_task_from_env,
+	install_skill_from_env, replay_task_from_env, resume_task_from_env,
+	run_live_once_with_options_from_env, run_with_mode_and_options, show_approval_from_env,
+	show_artifact_content_from_env, show_artifacts_from_env, show_experiment_from_env,
+	show_skill_from_env, show_skills_from_env, show_task_from_env,
 };
 use crate::storage::LocalStorageLayout;
 
@@ -58,6 +60,8 @@ pub enum CommandError {
 	Io(#[from] std::io::Error),
 	#[error(transparent)]
 	Runtime(#[from] roku_common_types::RuntimeError),
+	#[error(transparent)]
+	SkillRegistry(#[from] SkillRegistryError),
 	#[error(transparent)]
 	OpenRouterBootstrap(#[from] roku_llm_adapter::OpenRouterBootstrapError),
 	#[error(transparent)]
@@ -99,6 +103,7 @@ where
 		Some("approval") => execute_approval_command(&args[1..]).map(Some),
 		Some("artifact") => execute_artifact_command(&args[1..]).map(Some),
 		Some("experiment") => execute_experiment_command(&args[1..]).map(Some),
+		Some("skill") => execute_skill_command(&args[1..]).map(Some),
 		Some("--help") | Some("-h") | Some("help") => Ok(Some(help_text().to_string())),
 		Some(command) => Err(CommandError::Usage(format!(
 			"unknown command: {command}\n\n{}",
@@ -108,7 +113,7 @@ where
 }
 
 pub fn help_text() -> &'static str {
-	"Usage:\n  roku-cmd once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd live-once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n  roku-cmd task show <task-id>\n  roku-cmd task replay <task-id>\n  roku-cmd task resume <task-id>\n  roku-cmd approval show <approval-id>\n  roku-cmd approval approve <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd approval reject <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd artifact list <task-id>\n  roku-cmd artifact content <task-id> <artifact-id>\n  roku-cmd artifact download <task-id> <artifact-id> --output <path>\n  roku-cmd experiment show <task-id>\n\nCommands:\n  once              Run the deterministic in-process pipeline.\n  live-once         Run the OpenRouter-backed live pipeline from environment.\n  telegram-bot      Start the Telegram polling bot using environment configuration.\n  api-gateway       Start the Actix HTTP gateway using environment configuration.\n  task show         Render a persisted task snapshot with its event timeline.\n  task replay       Rebuild a state-transition report from persisted task events.\n  task resume       Continue a resumable persisted task using the live runtime path.\n  approval          Show or decide an approval ticket from persisted state.\n  artifact          List artifacts, print artifact content, or download an artifact payload.\n  experiment show   Render the persisted experiment run for a task.\n\nPlanning Modes:\n  react | taskdecomposition | treesearch | iterativerefinement"
+	"Usage:\n  roku-cmd once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd live-once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n  roku-cmd task show <task-id>\n  roku-cmd task replay <task-id>\n  roku-cmd task resume <task-id>\n  roku-cmd approval show <approval-id>\n  roku-cmd approval approve <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd approval reject <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd artifact list <task-id>\n  roku-cmd artifact content <task-id> <artifact-id>\n  roku-cmd artifact download <task-id> <artifact-id> --output <path>\n  roku-cmd experiment show <task-id>\n  roku-cmd skill install <source-url>\n  roku-cmd skill list\n  roku-cmd skill show <skill-name>\n\nCommands:\n  once              Run the deterministic in-process pipeline.\n  live-once         Run the OpenRouter-backed live pipeline from environment.\n  telegram-bot      Start the Telegram polling bot using environment configuration.\n  api-gateway       Start the Actix HTTP gateway using environment configuration.\n  task show         Render a persisted task snapshot with its event timeline.\n  task replay       Rebuild a state-transition report from persisted task events.\n  task resume       Continue a resumable persisted task using the live runtime path.\n  approval          Show or decide an approval ticket from persisted state.\n  artifact          List artifacts, print artifact content, or download an artifact payload.\n  experiment show   Render the persisted experiment run for a task.\n  skill install     Install a skill package into the local file-backed registry.\n  skill list        List installed skills from the local registry.\n  skill show        Render installed skill metadata and prompt context.\n\nPlanning Modes:\n  react | taskdecomposition | treesearch | iterativerefinement"
 }
 
 fn join_goal(parts: &[String]) -> Result<String, CommandError> {
@@ -310,6 +315,34 @@ fn execute_experiment_command(parts: &[String]) -> Result<String, CommandError> 
 	}
 }
 
+fn execute_skill_command(parts: &[String]) -> Result<String, CommandError> {
+	match parts.first().map(String::as_str) {
+		Some(command) if command.eq_ignore_ascii_case("install") => {
+			let source_url = parts.get(1).ok_or_else(|| {
+				CommandError::Usage(format!(
+					"missing source url for skill install\n\n{}",
+					help_text()
+				))
+			})?;
+			install_skill_from_env(source_url)
+		}
+		Some(command) if command.eq_ignore_ascii_case("list") => show_skills_from_env(),
+		Some(command) if command.eq_ignore_ascii_case("show") => {
+			let skill_name = parts.get(1).ok_or_else(|| {
+				CommandError::Usage(format!(
+					"missing skill name for skill show\n\n{}",
+					help_text()
+				))
+			})?;
+			show_skill_from_env(skill_name)
+		}
+		_ => Err(CommandError::Usage(format!(
+			"invalid skill command\n\n{}",
+			help_text()
+		))),
+	}
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ApprovalDecisionOptions {
 	actor: String,
@@ -498,6 +531,20 @@ mod tests {
 		assert!(help.contains("approval show"));
 		assert!(help.contains("artifact list"));
 		assert!(help.contains("experiment show"));
+		assert!(help.contains("skill install"));
+		assert!(help.contains("skill list"));
+		assert!(help.contains("skill show"));
+	}
+
+	#[test]
+	fn execute_skill_command_requires_expected_arguments() {
+		let error =
+			execute_skill_command(&["show".to_string()]).expect_err("skill show should fail");
+		assert!(error.to_string().contains("missing skill name"));
+
+		let error = execute_skill_command(&["install".to_string()])
+			.expect_err("skill install should require a source url");
+		assert!(error.to_string().contains("missing source url"));
 	}
 
 	#[test]

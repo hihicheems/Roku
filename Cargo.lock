@@ -1537,7 +1537,9 @@ dependencies = [
  "roku-state-store",
  "roku-task-planner",
  "serde_json",
+ "tempfile",
  "thiserror",
+ "zip",
 ]
 
 [[package]]
