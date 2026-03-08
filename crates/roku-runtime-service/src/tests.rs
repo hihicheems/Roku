@@ -21,10 +21,14 @@ use roku_common_types::{
 };
 use roku_state_store::{
 	DispatchClaim, DispatchEnvelope, DispatchLease, DispatchQueue, RetryClaim, StoreError,
+	TaskRepository,
 };
 use roku_supervisor_agent::DefaultSupervisorAgent;
 use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{RunMode, RuntimeDataPlane, RuntimeService, compact_approval_id};
 
@@ -36,6 +40,69 @@ fn sample_request() -> RequestEnvelope {
 		planning_mode_hint: None,
 		conversation_history: Vec::new(),
 	}
+}
+
+#[derive(Clone)]
+struct FileBackedPaths {
+	tasks: PathBuf,
+	events: PathBuf,
+	approvals: PathBuf,
+	results: PathBuf,
+	artifacts: PathBuf,
+	experiments: PathBuf,
+}
+
+fn unique_path(suffix: &str) -> PathBuf {
+	let nanos = SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.expect("clock should be after epoch")
+		.as_nanos();
+	std::env::temp_dir().join(format!("roku-runtime-test-{suffix}-{nanos}.json"))
+}
+
+fn file_backed_paths(prefix: &str) -> FileBackedPaths {
+	FileBackedPaths {
+		tasks: unique_path(&format!("{prefix}-tasks")),
+		events: unique_path(&format!("{prefix}-events")),
+		approvals: unique_path(&format!("{prefix}-approvals")),
+		results: unique_path(&format!("{prefix}-results")),
+		artifacts: unique_path(&format!("{prefix}-artifacts")),
+		experiments: unique_path(&format!("{prefix}-experiments")),
+	}
+}
+
+fn file_backed_service_with_planner(
+	paths: &FileBackedPaths,
+	runtime: GenericAgentRuntime,
+	planner: Box<dyn roku_task_planner::TaskPlanner + Send + Sync>,
+) -> RuntimeService {
+	RuntimeService::new_with_runtime_data_plane_and_metrics(
+		RuntimeDataPlane {
+			task_repo: Box::new(roku_state_store::FileTaskRepository::new(
+				paths.tasks.clone(),
+			)),
+			event_repo: Box::new(roku_state_store::FileEventRepository::new(
+				paths.events.clone(),
+			)),
+			approval_repo: Box::new(roku_state_store::FileApprovalRepository::new(
+				paths.approvals.clone(),
+			)),
+			result_repo: Box::new(roku_state_store::FileResultRepository::new(
+				paths.results.clone(),
+			)),
+			dispatch_queue: Box::new(roku_state_store::InMemoryDispatchQueue::default()),
+			artifact_store: roku_artifact_store::ArtifactStore::file_backed(
+				paths.artifacts.clone(),
+			),
+			experiment_registry: roku_experiment_registry::ExperimentRegistry::file_backed(
+				paths.experiments.clone(),
+			),
+		},
+		Arc::new(roku_observability::InMemoryAuditSink::default()),
+		runtime,
+		Arc::new(roku_observability::Metrics::default()),
+		planner,
+	)
 }
 
 #[test]
@@ -549,6 +616,122 @@ fn service_timeout_recovery_resumes_timed_out_task() {
 		.expect("task lookup should succeed")
 		.expect("task should exist");
 	assert_eq!(task.state, TaskState::Succeeded);
+}
+
+#[test]
+fn service_reconstructs_execution_progress_from_persisted_results_after_restart() {
+	#[derive(Clone)]
+	struct CountingWorker {
+		executions: Arc<AtomicUsize>,
+	}
+
+	struct FixedApprovalPlanner;
+
+	impl roku_task_planner::TaskPlanner for FixedApprovalPlanner {
+		fn build_outline(
+			&self,
+			request: &RequestEnvelope,
+			_decision: &roku_planning_engine::PlanningDecision,
+		) -> roku_common_types::PlanOutline {
+			roku_common_types::PlanOutline {
+				goal: request.goal.clone(),
+				steps: vec![roku_common_types::PlanStep {
+					step_id: "single-step".to_string(),
+					summary: "single-step".to_string(),
+					required_capabilities: Vec::new(),
+					requires_approval: true,
+					depends_on: Vec::new(),
+				}],
+			}
+		}
+	}
+
+	impl RuntimeWorker for CountingWorker {
+		fn worker_id(&self) -> &'static str {
+			"counting-worker"
+		}
+
+		fn supports(&self, _capabilities: &[String]) -> bool {
+			true
+		}
+
+		fn execute(
+			&self,
+			spec: &roku_common_types::AgentInstanceSpec,
+			node: &TaskNode,
+		) -> ResultEnvelope {
+			self.executions.fetch_add(1, Ordering::SeqCst);
+			ResultEnvelope {
+				task_id: spec.context.task_id.clone(),
+				node_id: node.node_id.clone(),
+				producer: spec.instance_id.clone(),
+				schema_version: "result.v1".to_string(),
+				status: ResultStatus::Ok,
+				payload: r#"{"message":"counted execution completed"}"#.to_string(),
+				evidence: vec![EvidenceItem {
+					kind: "runtime".to_string(),
+					value: "counting-worker".to_string(),
+				}],
+				confidence: 0.95,
+			}
+		}
+	}
+
+	let paths = file_backed_paths("recovery-restart");
+	let counter = Arc::new(AtomicUsize::new(0));
+	let mut runtime = GenericAgentRuntime::default();
+	runtime.register_worker(
+		255,
+		CountingWorker {
+			executions: counter.clone(),
+		},
+	);
+	let service = file_backed_service_with_planner(&paths, runtime, Box::new(FixedApprovalPlanner));
+	let pending = service
+		.execute_with_mode(sample_request(), RunMode::ApprovalRequired)
+		.expect("runtime service should create approval ticket");
+	assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+	let task_id = TaskId("task-req-1".to_string());
+	let mut task_repo = roku_state_store::FileTaskRepository::new(paths.tasks.clone());
+	let mut persisted_task = task_repo
+		.load_task(&task_id)
+		.expect("task load should succeed")
+		.expect("task should exist");
+	persisted_task.completed_nodes.clear();
+	persisted_task.next_node_index = 0;
+	persisted_task.last_result = None;
+	task_repo
+		.save_task(persisted_task)
+		.expect("task save should succeed");
+
+	let approval_id = ApprovalId(
+		pending.artifacts[0]
+			.trim_start_matches("approval://")
+			.to_string(),
+	);
+	let mut resumed_runtime = GenericAgentRuntime::default();
+	resumed_runtime.register_worker(
+		255,
+		CountingWorker {
+			executions: counter.clone(),
+		},
+	);
+	let resumed_service =
+		file_backed_service_with_planner(&paths, resumed_runtime, Box::new(FixedApprovalPlanner));
+	let response = resumed_service
+		.decide_approval(
+			&approval_id,
+			ApprovalDecision {
+				actor: "reviewer".to_string(),
+				approved: true,
+				comment: Some("resume with persisted results".to_string()),
+			},
+		)
+		.expect("approval decision should complete the task");
+
+	assert_eq!(response.status, ResponseStatus::Succeeded);
+	assert_eq!(counter.load(Ordering::SeqCst), 1);
 }
 
 #[test]

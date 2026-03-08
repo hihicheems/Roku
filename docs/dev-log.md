@@ -1507,6 +1507,35 @@
 2. Revisit structured logging/export sinks now that the Telegram response surface is richer and includes progress receipts.
 3. Expand Telegram UX further only if a stronger progress protocol or artifact actions are needed.
 
+## 2026-03-08 - Session Milestone (Phase 38)
+
+### Completed Modules
+
+- `roku-runtime-service`
+  - Added persisted-result-backed task reconstruction for recovery analysis so execution progress is no longer trusted only from the saved `completed_nodes` snapshot.
+  - Reused the reconstructed task shape in both `resume_task` and approval-driven continuation, which lets recovery resume correctly even when the persisted task snapshot loses execution progress.
+  - Added a file-backed restart regression that corrupts the task snapshot and proves persisted results can still reconstruct execution progress across a fresh runtime instance.
+- `roku-e2e`
+  - Added a replay/restart regression that reloads persisted task/event/result/artifact state into a fresh runtime and finishes the task after the snapshot is intentionally made stale.
+- `docs/todo-list.md`
+  - Marked `E2E-09` as done.
+
+### Verification Status
+
+- `cargo test -p roku-runtime-service -p roku-e2e`: passed
+
+### Remaining Work
+
+- `RS-15` / `OR-05` are still not fully done because recovery is now result-backed for execution progress, but the system still lacks full event-stream-first task reconstruction and partial rerun orchestration.
+- `GB-07` / `GB-08` remain open: helper-node injection and conditional/loop graph compilation are still missing.
+- `SS-10` and the rest of `E2E-08` remain open: snapshot/compaction, duplicate-delivery chaos, and broader restart/timeout/provider degradation coverage still need to land.
+
+### Next Recommended Steps
+
+1. Push recovery one step further by deriving more non-execution progress from persisted events instead of keeping those nodes snapshot-backed.
+2. Add duplicate-delivery and lease-expiry replay scenarios so dispatch and recovery share the same restart contract under contention.
+3. Finish helper-node injection and conditional graph support so replay can target richer branch-local rerun shapes.
+
 ## 2026-03-08 - Session Milestone (Phase 37)
 
 ### Completed Modules

@@ -15,8 +15,8 @@
 use roku_common_types::{
 	AggregationMode, ApprovalTicket, Artifact, ArtifactId, ErrorClass, ExperimentMetric,
 	ExperimentRun, JoinPolicy, NodeId, NodeResultSet, RecoveryEligibility, ReplayConsistencyStatus,
-	ResultEnvelope, RuntimeError, Task, TaskEvent, TaskId, TaskNode, TaskReplayCursor,
-	TaskReplayReport, TaskState, ValidationEvidenceSet,
+	ResultEnvelope, ResultStatus, RuntimeError, Task, TaskEvent, TaskId, TaskNode, TaskNodeKind,
+	TaskReplayCursor, TaskReplayReport, TaskState, ValidationEvidenceSet,
 };
 use roku_execution_graph_builder::TaskGraphScheduler;
 use roku_orchestrator::{
@@ -24,6 +24,7 @@ use roku_orchestrator::{
 	replayed_state,
 };
 use roku_state_store::{DispatchEnvelope, DispatchLease};
+use std::collections::{HashMap, HashSet};
 
 use crate::RuntimeService;
 
@@ -448,6 +449,7 @@ impl RuntimeService {
 		task: &Task,
 	) -> Result<TaskRecoveryAnalysis, RuntimeError> {
 		let events = self.list_task_events(&task.task_id)?;
+		let reconstructed_task = self.reconstruct_task_progress(task)?;
 		let replayed_state = replayed_state(task.state, &events);
 		let consistency_status = replay_consistency_status(task.state, &events);
 		let transitions_valid = !matches!(
@@ -463,21 +465,22 @@ impl RuntimeService {
 			ReplayConsistencyStatus::SnapshotMismatch
 		);
 
-		let (resume_candidates, ready_nodes, is_complete) = if let Some(graph) = &task.graph {
-			let scheduler = TaskGraphScheduler;
-			let ready_nodes = scheduler
-				.replay_ready_nodes(graph, &task.completed_nodes)
-				.map_err(|error| RuntimeError::new(error.to_string()))?;
-			let resume_candidates = scheduler
-				.resume_candidates(graph, &task.completed_nodes)
-				.map_err(|error| RuntimeError::new(error.to_string()))?;
-			let is_complete = scheduler
-				.is_complete(graph, &task.completed_nodes)
-				.map_err(|error| RuntimeError::new(error.to_string()))?;
-			(resume_candidates, ready_nodes, is_complete)
-		} else {
-			(Vec::new(), Vec::new(), false)
-		};
+		let (resume_candidates, ready_nodes, is_complete) =
+			if let Some(graph) = &reconstructed_task.graph {
+				let scheduler = TaskGraphScheduler;
+				let ready_nodes = scheduler
+					.replay_ready_nodes(graph, &reconstructed_task.completed_nodes)
+					.map_err(|error| RuntimeError::new(error.to_string()))?;
+				let resume_candidates = scheduler
+					.resume_candidates(graph, &reconstructed_task.completed_nodes)
+					.map_err(|error| RuntimeError::new(error.to_string()))?;
+				let is_complete = scheduler
+					.is_complete(graph, &reconstructed_task.completed_nodes)
+					.map_err(|error| RuntimeError::new(error.to_string()))?;
+				(resume_candidates, ready_nodes, is_complete)
+			} else {
+				(Vec::new(), Vec::new(), false)
+			};
 
 		let mut recovery_eligibility = recovery_eligibility_for_state(task.state);
 		if matches!(recovery_eligibility, RecoveryEligibility::ResumeReady) {
@@ -496,6 +499,7 @@ impl RuntimeService {
 		}
 
 		Ok(TaskRecoveryAnalysis {
+			reconstructed_task,
 			events,
 			replayed_state,
 			transitions_valid,
@@ -507,6 +511,53 @@ impl RuntimeService {
 			ready_nodes,
 			is_complete,
 		})
+	}
+
+	pub(super) fn reconstruct_task_progress(&self, task: &Task) -> Result<Task, RuntimeError> {
+		let Some(graph) = &task.graph else {
+			return Ok(task.clone());
+		};
+
+		let mut reconstructed = task.clone();
+		let result_by_node_id = self
+			.list_results(&task.task_id)?
+			.into_iter()
+			.filter(|result| matches!(result.status, ResultStatus::Ok | ResultStatus::Error))
+			.map(|result| (result.node_id.0.clone(), result))
+			.collect::<HashMap<_, _>>();
+		let snapshot_completed = task
+			.completed_nodes
+			.iter()
+			.map(|node_id| node_id.0.clone())
+			.collect::<HashSet<_>>();
+		let pending_approval_node_id = if let Some(approval_id) = &task.pending_approval_id {
+			self.get_approval(approval_id)?
+				.map(|ticket| ticket.node_id.0)
+		} else {
+			None
+		};
+
+		reconstructed.completed_nodes = graph
+			.nodes
+			.iter()
+			.filter(|node| match node.kind {
+				TaskNodeKind::Execution => result_by_node_id.contains_key(&node.node_id.0),
+				_ => snapshot_completed.contains(&node.node_id.0),
+			})
+			.filter(|node| pending_approval_node_id.as_ref() != Some(&node.node_id.0))
+			.map(|node| node.node_id.clone())
+			.collect();
+		reconstructed.next_node_index = reconstructed.completed_nodes.len();
+		if let Some(last_result) = graph
+			.nodes
+			.iter()
+			.rev()
+			.find_map(|node| result_by_node_id.get(&node.node_id.0).cloned())
+		{
+			reconstructed.last_result = Some(last_result);
+		}
+
+		Ok(reconstructed)
 	}
 
 	fn resolve_branch_results(
@@ -595,6 +646,7 @@ fn build_replay_report(task: Task, analysis: TaskRecoveryAnalysis) -> TaskReplay
 }
 
 pub(super) struct TaskRecoveryAnalysis {
+	pub reconstructed_task: Task,
 	pub events: Vec<TaskEvent>,
 	pub replayed_state: TaskState,
 	pub transitions_valid: bool,

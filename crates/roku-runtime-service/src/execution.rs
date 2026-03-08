@@ -99,10 +99,11 @@ impl RuntimeService {
 	}
 
 	pub fn resume_task(&self, task_id: &TaskId) -> Result<ResponseEnvelope, RuntimeError> {
-		let mut task = self
+		let task = self
 			.get_task(task_id)?
 			.ok_or_else(|| RuntimeError::new(format!("task not found: {}", task_id.0)))?;
 		let analysis = self.analyze_task_recovery(&task)?;
+		let mut task = analysis.reconstructed_task.clone();
 
 		match task.state {
 			TaskState::Succeeded | TaskState::Cancelled | TaskState::DeadLetter => {

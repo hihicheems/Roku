@@ -446,6 +446,7 @@ impl RuntimeService {
 				"approval ticket does not match task state",
 			));
 		}
+		task = self.reconstruct_task_progress(&task)?;
 
 		ticket.status = if decision.approved {
 			ApprovalStatus::Approved

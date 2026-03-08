@@ -418,5 +418,5 @@
 | E2E-06 | 覆盖 HTTP artifact / experiment / artifact-content / download 路由 | §12 / §19.1 | DONE |
 | E2E-07 | 增加 property-based 状态迁移 / graph compilation / capability attenuation 测试 | §20 测试策略 | TODO |
 | E2E-08 | 增加 chaos 测试：timeout、进程重启、重复投递、provider 失联 | §20 混沌测试 | TODO |
-| E2E-09 | 增加 replay 测试：基于持久化 task/event/result/artifact 恢复执行 | §20 回归测试 / replay | TODO |
+| E2E-09 | 增加 replay 测试：基于持久化 task/event/result/artifact 恢复执行 | §20 回归测试 / replay | DONE |
 | E2E-10 | 增加 tool / MCP / coding provider / approval gate / backpressure 组合矩阵 | §20 集成测试 / 验收重点 | TODO |
