@@ -1,4 +1,6 @@
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use actix_web::{App, web};
 use roku_api_gateway::{
@@ -12,6 +14,66 @@ use roku_common_types::{
 	RequestEnvelope, RequestId, ResponseStatus, RuntimeError, TaskId, TaskReplayReport, TaskState,
 };
 use roku_runtime_service::RuntimeService;
+use roku_state_store::TaskRepository;
+
+fn unique_path(suffix: &str) -> PathBuf {
+	let nanos = SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.expect("clock should be after epoch")
+		.as_nanos();
+	std::env::temp_dir().join(format!("roku-e2e-{suffix}-{nanos}.json"))
+}
+
+#[derive(Clone)]
+struct FileBackedPaths {
+	tasks: PathBuf,
+	events: PathBuf,
+	approvals: PathBuf,
+	results: PathBuf,
+	artifacts: PathBuf,
+	experiments: PathBuf,
+}
+
+fn file_backed_paths(prefix: &str) -> FileBackedPaths {
+	FileBackedPaths {
+		tasks: unique_path(&format!("{prefix}-tasks")),
+		events: unique_path(&format!("{prefix}-events")),
+		approvals: unique_path(&format!("{prefix}-approvals")),
+		results: unique_path(&format!("{prefix}-results")),
+		artifacts: unique_path(&format!("{prefix}-artifacts")),
+		experiments: unique_path(&format!("{prefix}-experiments")),
+	}
+}
+
+fn file_backed_runtime_service(paths: &FileBackedPaths) -> RuntimeService {
+	RuntimeService::new_with_runtime_data_plane_and_metrics(
+		roku_runtime_service::RuntimeDataPlane {
+			task_repo: Box::new(roku_state_store::FileTaskRepository::new(
+				paths.tasks.clone(),
+			)),
+			event_repo: Box::new(roku_state_store::FileEventRepository::new(
+				paths.events.clone(),
+			)),
+			approval_repo: Box::new(roku_state_store::FileApprovalRepository::new(
+				paths.approvals.clone(),
+			)),
+			result_repo: Box::new(roku_state_store::FileResultRepository::new(
+				paths.results.clone(),
+			)),
+			dispatch_queue: Box::new(roku_state_store::InMemoryDispatchQueue::default()),
+			artifact_store: roku_artifact_store::ArtifactStore::file_backed(
+				paths.artifacts.clone(),
+			),
+			experiment_registry: roku_experiment_registry::ExperimentRegistry::file_backed(
+				paths.experiments.clone(),
+			),
+		},
+		Arc::new(roku_observability::InMemoryAuditSink::default()),
+		roku_agent_runtime::GenericAgentRuntime::default(),
+		Arc::new(roku_observability::Metrics::default()),
+		Box::new(roku_task_planner::AdaptiveTaskPlanner),
+	)
+}
 
 #[test]
 fn e2e_happy_path_succeeds() {
@@ -112,6 +174,62 @@ fn e2e_cancelled_approval_flow_records_cancelled_ticket() {
 		.expect("approval lookup should succeed")
 		.expect("approval ticket should exist");
 	assert_eq!(ticket.status, ApprovalStatus::Cancelled);
+}
+
+#[test]
+fn e2e_replay_reconstructs_progress_after_restart_with_stale_snapshot() {
+	let paths = file_backed_paths("replay-restart");
+	let service = file_backed_runtime_service(&paths);
+	let pending = service
+		.execute_with_mode(
+			RequestEnvelope {
+				request_id: RequestId("req-replay".to_string()),
+				session_id: "replay-session".to_string(),
+				goal: "build execution graph".to_string(),
+				planning_mode_hint: None,
+				conversation_history: Vec::new(),
+			},
+			RunMode::ApprovalRequired,
+		)
+		.expect("pipeline should stop for approval");
+	assert!(matches!(pending.status, ResponseStatus::PendingApproval));
+
+	let task_id = TaskId("task-req-replay".to_string());
+	let mut task_repo = roku_state_store::FileTaskRepository::new(paths.tasks.clone());
+	let mut persisted_task = task_repo
+		.load_task(&task_id)
+		.expect("task load should succeed")
+		.expect("task should exist");
+	persisted_task.completed_nodes.clear();
+	persisted_task.next_node_index = 0;
+	persisted_task.last_result = None;
+	task_repo
+		.save_task(persisted_task)
+		.expect("task save should succeed");
+
+	let restarted_service = file_backed_runtime_service(&paths);
+	let approval_id = ApprovalId(
+		pending.artifacts[0]
+			.trim_start_matches("approval://")
+			.to_string(),
+	);
+	let resumed = restarted_service
+		.decide_approval(
+			&approval_id,
+			ApprovalDecision {
+				actor: "reviewer".to_string(),
+				approved: true,
+				comment: Some("recover after restart".to_string()),
+			},
+		)
+		.expect("approval should resume task after restart");
+	assert!(matches!(resumed.status, ResponseStatus::Succeeded));
+
+	let task = restarted_service
+		.get_task(&task_id)
+		.expect("task lookup should succeed")
+		.expect("task should exist");
+	assert_eq!(task.state, TaskState::Succeeded);
 }
 
 #[actix_web::test]

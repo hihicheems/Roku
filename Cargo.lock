@@ -1488,10 +1488,16 @@ name = "roku-e2e"
 version = "0.1.0"
 dependencies = [
  "actix-web",
+ "roku-agent-runtime",
  "roku-api-gateway",
+ "roku-artifact-store",
  "roku-cmd",
  "roku-common-types",
+ "roku-experiment-registry",
+ "roku-observability",
  "roku-runtime-service",
+ "roku-state-store",
+ "roku-task-planner",
  "serde",
 ]
 
