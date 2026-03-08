@@ -470,6 +470,53 @@ impl RuntimeService {
 				node.node_id.0
 			)));
 		}
+		if task.state != TaskState::Aggregating {
+			self.record_transition(task, TaskState::Aggregating, "aggregate")?;
+		}
+		let representative_result =
+			result_set.results.first().cloned().ok_or_else(|| {
+				RuntimeError::new("aggregation node has no representative result")
+			})?;
+		let selected_result_node_ids = result_set
+			.results
+			.iter()
+			.map(|result| result.node_id.0.clone())
+			.collect::<Vec<_>>();
+		let aggregated_confidence = result_set
+			.results
+			.iter()
+			.map(|result| result.confidence)
+			.fold(0.0_f32, f32::max);
+		let mut aggregation_result = ResultEnvelope {
+			task_id: task.task_id.clone(),
+			node_id: node.node_id.clone(),
+			producer: format!("aggregation:{}", node.node_id.0),
+			schema_version: "result.v1".to_string(),
+			status: ResultStatus::Ok,
+			payload: serde_json::json!({
+				"message": result_message(&representative_result),
+				"node_id": node.node_id.0,
+				"source_node_ids": result_set.source_node_ids.iter().map(|node_id| node_id.0.clone()).collect::<Vec<_>>(),
+				"selected_result_node_ids": selected_result_node_ids,
+				"aggregation_mode": format!("{:?}", result_set.aggregation_mode),
+				"result_count": result_set.results.len(),
+			})
+			.to_string(),
+			evidence: vec![EvidenceItem {
+				kind: "aggregation".to_string(),
+				value: format!("sources={}", result_set.source_node_ids.len()),
+			}],
+			confidence: aggregated_confidence,
+		};
+		let artifact = self.persist_result_artifact(&aggregation_result)?;
+		aggregation_result.evidence.push(EvidenceItem {
+			kind: "artifact_ref".to_string(),
+			value: artifact.uri.clone(),
+		});
+		self.save_result(aggregation_result.clone())?;
+		self.attach_artifact_to_experiment(&task.task_id, artifact.artifact_id.clone())?;
+		self.metrics.inc_artifacts();
+		task.last_result = Some(aggregation_result);
 		self.mark_node_completed(task, node);
 		Ok(())
 	}

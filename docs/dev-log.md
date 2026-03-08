@@ -1507,6 +1507,32 @@
 2. Revisit structured logging/export sinks now that the Telegram response surface is richer and includes progress receipts.
 3. Expand Telegram UX further only if a stronger progress protocol or artifact actions are needed.
 
+## 2026-03-08 - Session Milestone (Phase 40)
+
+### Completed Modules
+
+- `roku-execution-graph-builder`
+  - Added an explicit `aggregation-gate` helper node after validation, so compiled graphs now exercise the aggregation stage instead of skipping straight from validation to terminal success.
+- `roku-runtime-service`
+  - Turned `process_aggregation_node` into a real aggregation step that persists an aggregated result/artifact and keeps the final response message aligned with the representative upstream result.
+  - Updated runtime evidence assertions and end-to-end artifact expectations to include the persisted aggregation artifact.
+
+### Verification Status
+
+- `cargo test -p roku-execution-graph-builder -p roku-runtime-service -p roku-e2e`: passed
+
+### Remaining Work
+
+- `GB-07` is only partially advanced: approval and aggregation helper nodes are now wired, but retry/dead-letter helper-node injection is still missing.
+- `GB-08` remains open: conditional edges and controlled loop compilation are still missing.
+- `RS-15` / `OR-05`, `SS-10`, and `E2E-08` are still open.
+
+### Next Recommended Steps
+
+1. Finish `GB-07` by introducing retry/dead-letter helper-node contracts without forcing them onto the happy-path scheduler.
+2. Add conditional edge metadata so helper-node routing can become policy-aware instead of always-on.
+3. Continue `RS-15` toward fuller event-derived replay and branch-local rerun orchestration.
+
 ## 2026-03-08 - Session Milestone (Phase 39)
 
 ### Completed Modules

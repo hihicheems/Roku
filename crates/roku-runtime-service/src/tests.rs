@@ -152,17 +152,17 @@ fn service_succeeds_for_happy_path() {
 		.expect("runtime service should succeed");
 
 	assert_eq!(response.status, ResponseStatus::Succeeded);
-	assert_eq!(response.artifacts.len(), 2);
+	assert_eq!(response.artifacts.len(), 3);
 	let artifacts = service
 		.list_artifacts(&TaskId("task-req-1".to_string()))
 		.expect("artifacts should load");
-	assert_eq!(artifacts.len(), 2);
+	assert_eq!(artifacts.len(), 3);
 	let experiment = service
 		.get_experiment_run(&TaskId("task-req-1".to_string()))
 		.expect("experiment load should succeed")
 		.expect("experiment should exist");
 	assert_eq!(experiment.summary.as_deref(), Some("task succeeded"));
-	assert_eq!(experiment.artifact_ids.len(), 2);
+	assert_eq!(experiment.artifact_ids.len(), 3);
 }
 
 #[test]
@@ -229,17 +229,29 @@ fn service_persists_tool_runtime_evidence_for_execution_nodes() {
 		.list_results(&TaskId("task-req-1".to_string()))
 		.expect("results should load");
 	assert!(!results.is_empty());
-	assert!(results.iter().all(|result| {
+	let execution_results = results
+		.iter()
+		.filter(|result| result.producer != "aggregation:aggregation-gate")
+		.collect::<Vec<_>>();
+	assert!(!execution_results.is_empty());
+	assert!(execution_results.iter().all(|result| {
 		result
 			.evidence
 			.iter()
 			.any(|item| item.kind == "tool" && !item.value.is_empty())
 	}));
-	assert!(results.iter().all(|result| {
+	assert!(execution_results.iter().all(|result| {
 		result
 			.evidence
 			.iter()
 			.any(|item| item.kind == "output_fingerprint" && !item.value.is_empty())
+	}));
+	assert!(results.iter().any(|result| {
+		result.producer == "aggregation:aggregation-gate"
+			&& result
+				.evidence
+				.iter()
+				.any(|item| item.kind == "aggregation")
 	}));
 	assert!(
 		results

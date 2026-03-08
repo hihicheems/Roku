@@ -32,6 +32,7 @@ pub enum GraphBuildError {
 pub struct GraphBuildConfig {
 	pub include_validation_gate: bool,
 	pub include_approval_gate: bool,
+	pub include_aggregation_gate: bool,
 }
 
 impl Default for GraphBuildConfig {
@@ -39,6 +40,7 @@ impl Default for GraphBuildConfig {
 		Self {
 			include_validation_gate: true,
 			include_approval_gate: true,
+			include_aggregation_gate: true,
 		}
 	}
 }
@@ -138,6 +140,7 @@ impl ExecutionGraphBuilder {
 			}
 		}
 
+		let mut validation_node_id = None;
 		if cfg.include_validation_gate {
 			let validation_id = NodeId("validation-gate".to_string());
 			let validation_metadata = default_node_metadata(
@@ -166,6 +169,48 @@ impl ExecutionGraphBuilder {
 					from: terminal_node,
 					to: validation_id.clone(),
 				});
+			}
+			validation_node_id = Some(validation_id);
+		}
+
+		if cfg.include_aggregation_gate {
+			let aggregation_id = NodeId("aggregation-gate".to_string());
+			let aggregation_metadata = default_node_metadata(
+				&aggregation_id,
+				TaskNodeKind::Aggregation,
+				&[String::from("aggregate.result")],
+			);
+			nodes.push(TaskNode {
+				node_id: aggregation_id.clone(),
+				kind: TaskNodeKind::Aggregation,
+				description: "Aggregation gate".to_string(),
+				capabilities: vec!["aggregate.result".to_string()],
+				join_policy: JoinPolicy::AllParents,
+				aggregation_mode: AggregationMode::CollectAll,
+				recovery_anchor: aggregation_metadata.recovery_anchor,
+				budget_snapshot: aggregation_metadata.budget_snapshot,
+				deadline_ms: aggregation_metadata.deadline_ms,
+				capability_requirements_snapshot: aggregation_metadata
+					.capability_requirements_snapshot,
+				retry_policy: aggregation_metadata.retry_policy,
+				rerun_policy: aggregation_metadata.rerun_policy,
+			});
+
+			let aggregation_parents = validation_node_id.into_iter().collect::<Vec<_>>();
+			if aggregation_parents.is_empty() {
+				for terminal_node in terminal_step_nodes(outline, &terminal_nodes) {
+					edges.push(TaskEdge {
+						from: terminal_node,
+						to: aggregation_id.clone(),
+					});
+				}
+			} else {
+				for parent in aggregation_parents {
+					edges.push(TaskEdge {
+						from: parent,
+						to: aggregation_id.clone(),
+					});
+				}
 			}
 		}
 
@@ -293,9 +338,10 @@ mod tests {
 			)
 			.expect("graph compilation should succeed");
 
-		assert_eq!(graph.nodes.len(), 3);
+		assert_eq!(graph.nodes.len(), 4);
 		assert_eq!(graph.nodes[1].kind, TaskNodeKind::Approval);
 		assert_eq!(graph.nodes[2].kind, TaskNodeKind::Validation);
+		assert_eq!(graph.nodes[3].kind, TaskNodeKind::Aggregation);
 		assert_eq!(graph.nodes[0].recovery_anchor.resume_point_id, "resume:s1");
 		assert!(graph.nodes[0].capability_requirements_snapshot.is_empty());
 		assert!(graph.nodes[0].budget_snapshot.time_budget_ms > 0);
@@ -346,6 +392,10 @@ mod tests {
 		assert_eq!(validation_parents.len(), 2);
 		assert!(validation_parents.contains(&"analyze-a".to_string()));
 		assert!(validation_parents.contains(&"analyze-b".to_string()));
+		assert!(graph.edges.iter().any(|edge| {
+			edge.from == NodeId("validation-gate".to_string())
+				&& edge.to == NodeId("aggregation-gate".to_string())
+		}));
 	}
 
 	#[test]

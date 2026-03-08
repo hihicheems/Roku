@@ -291,7 +291,7 @@ async fn http_gateway_exposes_task_artifacts_and_experiment() {
 		.to_request();
 	let artifacts: Vec<ArtifactResponse> =
 		actix_web::test::call_and_read_body_json(&app, artifacts_request).await;
-	assert_eq!(artifacts.len(), 2);
+	assert_eq!(artifacts.len(), 3);
 	assert!(
 		artifacts
 			.iter()
@@ -327,7 +327,7 @@ async fn http_gateway_exposes_task_artifacts_and_experiment() {
 	let experiment: ExperimentResponse =
 		actix_web::test::call_and_read_body_json(&app, experiment_request).await;
 	assert_eq!(experiment.status, "succeeded");
-	assert_eq!(experiment.artifact_ids.len(), 2);
+	assert_eq!(experiment.artifact_ids.len(), 3);
 
 	let replay_request = actix_web::test::TestRequest::get()
 		.uri(&format!("/v1/tasks/{task_id}/replay"))
