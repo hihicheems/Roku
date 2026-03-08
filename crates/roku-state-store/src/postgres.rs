@@ -1,3 +1,17 @@
+// Copyright 2025 itscheems
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::env;
 
 use postgres::{Client, NoTls};
@@ -130,11 +144,7 @@ impl PostgresConversationRepository {
 }
 
 impl ConversationRepository for PostgresConversationRepository {
-	fn append_turn(
-		&mut self,
-		session_id: &str,
-		turn: ConversationTurn,
-	) -> Result<(), StoreError> {
+	fn append_turn(&mut self, session_id: &str, turn: ConversationTurn) -> Result<(), StoreError> {
 		let mut client = self.connect_client()?;
 		let query = format!(
 			"INSERT INTO {}.conversation_turns (session_id, role, content, created_at_unix_ms) VALUES ($1, $2, $3, $4)",
@@ -168,19 +178,18 @@ impl ConversationRepository for PostgresConversationRepository {
 		let rows = client
 			.query(
 				&query,
-				&[
-					&session_id,
-					&(i64::try_from(limit).unwrap_or(i64::MAX)),
-				],
+				&[&session_id, &(i64::try_from(limit).unwrap_or(i64::MAX))],
 			)
 			.map_err(postgres_error)?;
 		let mut turns = rows
 			.into_iter()
 			.filter_map(|row| {
-				parse_conversation_role(row.get::<_, String>(0).as_str()).map(|role| ConversationTurn {
-					role,
-					content: row.get::<_, String>(1),
-					created_at_unix_ms: row.get::<_, i64>(2).try_into().unwrap_or(u64::MAX),
+				parse_conversation_role(row.get::<_, String>(0).as_str()).map(|role| {
+					ConversationTurn {
+						role,
+						content: row.get::<_, String>(1),
+						created_at_unix_ms: row.get::<_, i64>(2).try_into().unwrap_or(u64::MAX),
+					}
 				})
 			})
 			.collect::<Vec<_>>();
