@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use roku_common_types::{
 	ApprovalId, ApprovalTicket, ConversationTurn, NodeId, ResultEnvelope, SessionPreferences, Task,
-	TaskEvent, TaskId,
+	TaskEvent, TaskId, TaskReplaySnapshot,
 };
 use thiserror::Error;
 
@@ -57,6 +57,19 @@ pub trait TaskRepository {
 pub trait EventRepository {
 	fn append_event(&mut self, event: TaskEvent) -> Result<(), StoreError>;
 	fn list_events(&self, task_id: &TaskId) -> Result<Vec<TaskEvent>, StoreError>;
+	fn load_replay_snapshot(
+		&self,
+		_task_id: &TaskId,
+	) -> Result<Option<TaskReplaySnapshot>, StoreError> {
+		Ok(None)
+	}
+	fn compact_task_events(
+		&mut self,
+		_snapshot: TaskReplaySnapshot,
+		_retain_events: usize,
+	) -> Result<(), StoreError> {
+		Ok(())
+	}
 }
 
 pub trait ApprovalRepository {

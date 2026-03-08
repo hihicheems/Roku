@@ -183,6 +183,19 @@ pub struct TaskReplayCursor {
 	pub event_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskReplaySnapshot {
+	pub task_id: TaskId,
+	pub compacted_event_count: usize,
+	pub replayed_state: TaskState,
+	#[serde(default)]
+	pub completed_nodes: Vec<NodeId>,
+	#[serde(default)]
+	pub pending_approval_id: Option<ApprovalId>,
+	#[serde(default)]
+	pub last_result: Option<ResultEnvelope>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ReplayConsistencyStatus {
 	#[default]

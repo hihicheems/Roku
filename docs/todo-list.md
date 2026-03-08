@@ -288,7 +288,7 @@
 | SS-07 | 增加 SQLite migration / bootstrap / repository index 设计 | 生产级持久化边界 | DONE |
 | SS-08 | 增加 local-first dispatch 抽象（in-memory / SQLite） | §6.1 Local State Store / §14.3 | DONE |
 | SS-09 | 增加 ack、lease、backpressure、retry claim 语义 | §14.3 背压与资源隔离 | DONE |
-| SS-10 | 增加 SQLite-backed replay / snapshot / compaction 能力，以支撑大规模任务恢复 | §8 ResumePoint / §20 replay | TODO |
+| SS-10 | 增加 SQLite-backed replay / snapshot / compaction 能力，以支撑大规模任务恢复 | §8 ResumePoint / §20 replay | DONE |
 
 ## roku-artifact-store
 
