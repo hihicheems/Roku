@@ -151,6 +151,7 @@
 | LLM-09 | 增加 deterministic request key / prompt cache / replay 支持 | §20 回归测试 / replay | TODO |
 | LLM-10 | 增加 OpenRouter provider、环境变量装配、默认主模型链与兼容头部 | §4.1 / §19 llm-adapter | DONE |
 | LLM-11 | 将 `system/user` 消息显式映射到 OpenAI-compatible chat completions schema，并支持 OpenRouter `models[]` fallback chain | §4.1 / §19 llm-adapter | DONE |
+| LLM-12 | 对 OpenRouter 请求显式关闭 reasoning surfacing，并在响应解析时只接受 assistant content / refusal，拒绝将 reasoning 当作最终答案 | §19 llm-adapter / live response safety | DONE |
 
 ## roku-capability-auth
 
@@ -265,6 +266,8 @@
 | TG-12 | 默认仅向 Telegram 用户展示最终 answer 文本；request/status/artifact 元信息改为可配置扩展输出 | §4.1 Connector / Telegram 交互体验 | DONE |
 | TG-13 | 将 progress notice 默认降到日志侧，通过环境变量显式开启用户可见进度提示 | §4.1 Connector / 长任务体验 | DONE |
 | TG-14 | 支持单条命令式输入（如 `/react 你好`），并兼容原有两步式会话策略切换 | §7.3 Planning Strategy 模式 / Telegram 交互 | DONE |
+| TG-15 | 对泄漏出的 prompt / analysis 文本做最终回复级清洗，并确保这类回复不会再污染会话记忆 | §4.1 Connector / §12 Memory / user response safety | DONE |
+| TG-16 | 增加会话级多轮回归 harness，覆盖 planning-mode 切换后时间问题与后续知识问答的记忆污染场景 | §12 Memory / §20 集成测试 | TODO |
 
 ## roku-state-store
 
@@ -366,6 +369,7 @@
 | CMD-09 | 增加 `scripts/dev-services.sh`，统一管理开发态常驻服务的 pid、stdout log 与运行目录 | §19 Rust 工程结构 / 工程化 | DONE |
 | CMD-10 | 在 `justfile` 中增加 `start-all` / `stop-all` / `doctor` / `start` / `stop` / `status` recipe | §19 Rust 工程结构 / 运维诊断 | DONE |
 | CMD-11 | 将 `doctor` 升级为分组面板视图，区分常驻服务、内嵌组件、集成配置、日志与端点 | §19 Rust 工程结构 / 运维诊断 | DONE |
+| CMD-12 | 将 `api-gateway` 收敛为可选接口层，默认不随 `start-all` 启动，但保留 `doctor` 可见性与手动启动能力 | §4.1 Gateway 运行形态 / 运维诊断 | DONE |
 
 ## roku-agent-directory (planned)
 
