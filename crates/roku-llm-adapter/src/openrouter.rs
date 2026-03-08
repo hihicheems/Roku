@@ -1,3 +1,17 @@
+// Copyright 2025 itscheems
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::env;
 use std::sync::Arc;
 use std::time::Instant;
@@ -134,7 +148,7 @@ impl LlmProvider for OpenRouterProvider {
 		model: &ModelProfile,
 		request: &GenerationRequest,
 	) -> Result<ProviderResponse, ProviderCallError> {
-		let body = build_request_body(&self.config, model, request);
+		let attempt_models = attempt_model_sequence(&self.config, &model.model_id);
 		let mut headers = HeaderMap::new();
 		headers.insert(
 			reqwest::header::AUTHORIZATION,
@@ -167,11 +181,56 @@ impl LlmProvider for OpenRouterProvider {
 			);
 		}
 
+		let mut last_error = None;
+		for (index, requested_model) in attempt_models.iter().enumerate() {
+			let fallback_models = attempt_models
+				.iter()
+				.skip(index + 1)
+				.cloned()
+				.collect::<Vec<_>>();
+			match self.complete_once(&headers, requested_model, &fallback_models, request) {
+				Ok(response) => return Ok(response),
+				Err(error) => {
+					let has_next_candidate = index + 1 < attempt_models.len();
+					if has_next_candidate && should_try_explicit_fallback(&error) {
+						log_openrouter(
+							LogLevel::Warn,
+							"retrying with explicit fallback model after unreadable response",
+							[
+								("provider", OPENROUTER_PROVIDER.to_string()),
+								("requested_model", requested_model.clone()),
+								("next_model", attempt_models[index + 1].clone()),
+								("reason", error.to_string()),
+							],
+						);
+						last_error = Some(error);
+						continue;
+					}
+					return Err(error);
+				}
+			}
+		}
+
+		Err(last_error.unwrap_or_else(|| {
+			ProviderCallError::retryable("openrouter exhausted explicit model fallback attempts")
+		}))
+	}
+}
+
+impl OpenRouterProvider {
+	fn complete_once(
+		&self,
+		headers: &HeaderMap,
+		requested_model: &str,
+		fallback_models: &[String],
+		request: &GenerationRequest,
+	) -> Result<ProviderResponse, ProviderCallError> {
+		let body = build_request_body(requested_model, fallback_models, request);
 		let started_at = Instant::now();
 		let response = self
 			.client
 			.post(&self.config.base_url)
-			.headers(headers)
+			.headers(headers.clone())
 			.json(&body)
 			.send()
 			.map_err(classify_request_error)?;
@@ -189,7 +248,7 @@ impl LlmProvider for OpenRouterProvider {
 				"provider returned non-success status",
 				[
 					("provider", OPENROUTER_PROVIDER.to_string()),
-					("model", model.model_id.clone()),
+					("model", requested_model.to_string()),
 					("status", status.to_string()),
 					("body", truncate_for_log(&response_body, 800)),
 				],
@@ -204,7 +263,7 @@ impl LlmProvider for OpenRouterProvider {
 					"failed to parse provider response",
 					[
 						("provider", OPENROUTER_PROVIDER.to_string()),
-						("model", model.model_id.clone()),
+						("model", requested_model.to_string()),
 						("parse_error", error.to_string()),
 						("body", truncate_for_log(&response_body, 800)),
 					],
@@ -212,14 +271,18 @@ impl LlmProvider for OpenRouterProvider {
 			})
 			.map_err(classify_parse_error)?;
 		let latency_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-		let served_model = parsed.served_model_id.as_deref().unwrap_or(&model.model_id);
+		let served_model = parsed
+			.served_model_id
+			.as_deref()
+			.unwrap_or(requested_model)
+			.to_string();
 		log_openrouter(
 			LogLevel::Info,
 			"provider request completed",
 			[
 				("provider", OPENROUTER_PROVIDER.to_string()),
-				("requested_model", model.model_id.clone()),
-				("served_model", served_model.to_string()),
+				("requested_model", requested_model.to_string()),
+				("served_model", served_model),
 				("status", "ok".to_string()),
 				("latency_ms", latency_ms.to_string()),
 				("prompt_tokens", parsed.prompt_tokens.to_string()),
@@ -255,6 +318,16 @@ fn classify_parse_error(message: String) -> ProviderCallError {
 	ProviderCallError::retryable(format!("unreadable provider response: {message}"))
 }
 
+fn should_try_explicit_fallback(error: &ProviderCallError) -> bool {
+	match error {
+		ProviderCallError::Retryable { message } => {
+			message.contains("unreadable provider response")
+				|| message.contains("no readable assistant content")
+		}
+		ProviderCallError::NonRetryable { .. } => false,
+	}
+}
+
 pub fn build_openrouter_router(
 	config: OpenRouterConfig,
 ) -> Result<LlmRouter, OpenRouterBootstrapError> {
@@ -271,20 +344,25 @@ pub fn build_openrouter_router_with_metrics(
 	})
 	.with_metrics(metrics);
 	router.register_provider(OpenRouterProvider::new(config.clone())?);
-	router.register_model(ModelProfile {
-		model_id: config.primary_model.clone(),
-		provider: OPENROUTER_PROVIDER.to_string(),
-		max_context_tokens: config.max_context_tokens,
-		cost_per_1k_tokens_usd: config.cost_per_1k_tokens_usd,
-		max_risk_tier: RiskTier::Critical,
-		route_priority: 100,
-	});
+	for (index, model_id) in attempt_model_sequence(&config, &config.primary_model)
+		.into_iter()
+		.enumerate()
+	{
+		router.register_model(ModelProfile {
+			model_id,
+			provider: OPENROUTER_PROVIDER.to_string(),
+			max_context_tokens: config.max_context_tokens,
+			cost_per_1k_tokens_usd: config.cost_per_1k_tokens_usd,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100u8.saturating_sub(u8::try_from(index).unwrap_or(u8::MAX)),
+		});
+	}
 	Ok(router)
 }
 
 fn build_request_body<'a>(
-	config: &'a OpenRouterConfig,
-	model: &'a ModelProfile,
+	model_id: &'a str,
+	fallback_models: &'a [String],
 	request: &'a GenerationRequest,
 ) -> OpenAiChatCompletionRequest<'a> {
 	let mut messages = Vec::with_capacity(2);
@@ -300,11 +378,11 @@ fn build_request_body<'a>(
 	});
 
 	OpenAiChatCompletionRequest {
-		model: &model.model_id,
-		models: config.request_fallback_chain(&model.model_id),
+		model: model_id,
+		models: fallback_models.to_vec(),
 		messages,
 		max_tokens: request.expected_output_tokens,
-		reasoning: OpenRouterReasoningConfig { exclude: true },
+		reasoning: reasoning_config_for_model(model_id),
 	}
 }
 
@@ -382,6 +460,39 @@ struct OpenAiChatCompletionMessage<'a> {
 #[derive(Debug, Serialize)]
 struct OpenRouterReasoningConfig {
 	exclude: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	effort: Option<&'static str>,
+}
+
+fn reasoning_config_for_model(model_id: &str) -> OpenRouterReasoningConfig {
+	let effort = if model_id.starts_with("stepfun/step-3.5-flash") {
+		None
+	} else {
+		Some("none")
+	};
+
+	OpenRouterReasoningConfig {
+		exclude: true,
+		effort,
+	}
+}
+
+fn attempt_model_sequence(config: &OpenRouterConfig, selected_model: &str) -> Vec<String> {
+	let mut attempts = Vec::new();
+	attempts.push(selected_model.to_string());
+	attempts.extend(config.request_fallback_chain(selected_model));
+	dedupe_preserving_order(attempts)
+}
+
+fn dedupe_preserving_order(models: Vec<String>) -> Vec<String> {
+	let mut deduped = Vec::new();
+	for model in models {
+		if deduped.iter().any(|existing| existing == &model) {
+			continue;
+		}
+		deduped.push(model);
+	}
+	deduped
 }
 
 fn extract_message_text(message: &Value) -> Option<String> {
@@ -575,15 +686,8 @@ mod tests {
 			max_latency_ms: 60_000,
 		};
 		let body = serde_json::to_value(build_request_body(
-			&config,
-			&ModelProfile {
-				model_id: config.primary_model.clone(),
-				provider: "openrouter".to_string(),
-				max_context_tokens: 128_000,
-				cost_per_1k_tokens_usd: 0.0,
-				max_risk_tier: RiskTier::Critical,
-				route_priority: 100,
-			},
+			&config.primary_model,
+			&config.fallback_models,
 			&sample_request(),
 		))
 		.expect("request body should serialize");
@@ -614,15 +718,8 @@ mod tests {
 			max_latency_ms: 60_000,
 		};
 		let body = serde_json::to_value(build_request_body(
-			&config,
-			&ModelProfile {
-				model_id: config.primary_model.clone(),
-				provider: "openrouter".to_string(),
-				max_context_tokens: 128_000,
-				cost_per_1k_tokens_usd: 0.0,
-				max_risk_tier: RiskTier::Critical,
-				route_priority: 100,
-			},
+			&config.primary_model,
+			&config.fallback_models,
 			&GenerationRequest {
 				system_prompt: Some("You are Roku.".to_string()),
 				..sample_request()
@@ -634,6 +731,7 @@ mod tests {
 		assert_eq!(body["messages"][0]["content"], "You are Roku.");
 		assert_eq!(body["messages"][1]["role"], "user");
 		assert_eq!(body["reasoning"]["exclude"], true);
+		assert!(body["reasoning"].get("effort").is_none());
 	}
 
 	#[test]
@@ -709,5 +807,52 @@ mod tests {
 			normalize_model_id("gemini-2.0-flash"),
 			"google/gemini-2.0-flash-001",
 		);
+	}
+
+	#[test]
+	fn attempt_model_sequence_starts_with_selected_model_and_preserves_fallback_order() {
+		let config = OpenRouterConfig {
+			api_key: "test-key".to_string(),
+			primary_model: normalize_model_id(DEFAULT_OPENROUTER_PRIMARY_MODEL),
+			fallback_models: default_fallback_models(),
+			app_name: None,
+			site_url: None,
+			base_url: DEFAULT_OPENROUTER_URL.to_string(),
+			max_context_tokens: 128_000,
+			cost_per_1k_tokens_usd: 0.0,
+			max_request_cost_usd: 1.0,
+			max_latency_ms: 60_000,
+		};
+
+		assert_eq!(
+			attempt_model_sequence(&config, &config.primary_model),
+			vec![
+				"stepfun/step-3.5-flash:free".to_string(),
+				"deepseek/deepseek-chat".to_string(),
+				"google/gemini-2.0-flash-001".to_string(),
+			],
+		);
+		assert_eq!(
+			attempt_model_sequence(&config, "deepseek/deepseek-chat"),
+			vec![
+				"deepseek/deepseek-chat".to_string(),
+				"google/gemini-2.0-flash-001".to_string(),
+			],
+		);
+	}
+
+	#[test]
+	fn reasoning_config_disables_effort_override_for_stepfun_models_only() {
+		let stepfun_config =
+			serde_json::to_value(reasoning_config_for_model("stepfun/step-3.5-flash:free"))
+				.expect("stepfun reasoning config should serialize");
+		assert_eq!(stepfun_config["exclude"], true);
+		assert!(stepfun_config.get("effort").is_none());
+
+		let deepseek_config =
+			serde_json::to_value(reasoning_config_for_model("deepseek/deepseek-chat"))
+				.expect("deepseek reasoning config should serialize");
+		assert_eq!(deepseek_config["exclude"], true);
+		assert_eq!(deepseek_config["effort"], "none");
 	}
 }

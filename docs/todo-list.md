@@ -18,7 +18,7 @@
 | WS-01 | 统一所有 crate 命名为 `roku-xxx` 并完成 workspace 成员注册 | §19 Rust 工程结构 | DONE |
 | WS-02 | 固化约定式提交 scope 为 `roku-xxx` 命名规范 | 项目规范 / 实施流程 | DONE |
 | WS-03 | 维护 `Cargo.toml` workspace 依赖与基础包元信息 | §19 Rust 工程结构 | DONE |
-| WS-04 | 增加统一的 lint / test / fmt 自动化入口（如 `just` / CI） | §20 测试与验收 | TODO |
+| WS-04 | 增加统一的 lint / test / fmt 自动化入口（如 `just` / CI） | §20 测试与验收 | DONE |
 | WS-05 | 增加 release profile、bench profile 与 workspace 级构建优化策略 | §5 非功能基线 | TODO |
 | WS-06 | 增加 deploy / docker / k8s 工程骨架，与设计文档的部署结构对齐 | §19 Rust 工程结构 | TODO |
 | WS-07 | 增加开发态 service orchestration 入口（`start-all` / `stop-all` / `doctor`）并为后续常驻组件扩展保留 registry | §19 Rust 工程结构 / 运行治理 | DONE |
@@ -93,6 +93,7 @@
 | TP-06 | 增加可复用 planner template library，支持高频任务类型模板化 | §7.4 历史表现 | TODO |
 | TP-07 | 接入 memory / artifact / experiment 检索以辅助 plan outline 生成 | §12 Context、Memory 与 Artifact | TODO |
 | TP-08 | 为 quant / coding / review 类任务增加特定 outline 生成模板 | §4.2 适用场景 / §18 量化研究 Agent | TODO |
+| TP-09 | 对简单对话型 `ReAct` 请求降级为单步 direct-action outline，减少不必要的观察步骤与 live LLM 波动 | §7.3 ReAct / §22 风险缓解 | DONE |
 
 ## roku-execution-graph-builder
 
@@ -152,6 +153,7 @@
 | LLM-10 | 增加 OpenRouter provider、环境变量装配、默认主模型链与兼容头部 | §4.1 / §19 llm-adapter | DONE |
 | LLM-11 | 将 `system/user` 消息显式映射到 OpenAI-compatible chat completions schema，并支持 OpenRouter `models[]` fallback chain | §4.1 / §19 llm-adapter | DONE |
 | LLM-12 | 对 OpenRouter 请求显式关闭 reasoning surfacing，并在响应解析时只接受 assistant content / refusal，拒绝将 reasoning 当作最终答案 | §19 llm-adapter / live response safety | DONE |
+| LLM-13 | 对 `content=null` / `finish_reason=length` 等不可读 OpenRouter 响应执行显式 fallback model 重试，并按模型特性调整 reasoning 请求参数 | §19 llm-adapter / §22 风险缓解 | DONE |
 
 ## roku-capability-auth
 
@@ -267,7 +269,7 @@
 | TG-13 | 将 progress notice 默认降到日志侧，通过环境变量显式开启用户可见进度提示 | §4.1 Connector / 长任务体验 | DONE |
 | TG-14 | 支持单条命令式输入（如 `/react 你好`），并兼容原有两步式会话策略切换 | §7.3 Planning Strategy 模式 / Telegram 交互 | DONE |
 | TG-15 | 对泄漏出的 prompt / analysis 文本做最终回复级清洗，并确保这类回复不会再污染会话记忆 | §4.1 Connector / §12 Memory / user response safety | DONE |
-| TG-16 | 增加会话级多轮回归 harness，覆盖 planning-mode 切换后时间问题与后续知识问答的记忆污染场景 | §12 Memory / §20 集成测试 | TODO |
+| TG-16 | 增加会话级多轮回归 harness，覆盖 planning-mode 切换后时间问题与后续知识问答的记忆污染场景 | §12 Memory / §20 集成测试 | DONE |
 
 ## roku-state-store
 

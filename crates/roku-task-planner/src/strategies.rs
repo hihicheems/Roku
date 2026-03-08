@@ -1,7 +1,31 @@
+// Copyright 2025 itscheems
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use roku_common_types::PlanStep;
 use roku_planning_engine::PlanningDecision;
 
 pub(crate) fn build_react_steps(goal: &str, decision: &PlanningDecision) -> Vec<PlanStep> {
+	if should_use_direct_react_action(goal) {
+		return vec![PlanStep {
+			step_id: "act-primary".to_string(),
+			summary: step_summary(goal, "Execute primary action"),
+			required_capabilities: vec!["tool.invoke".to_string()],
+			requires_approval: false,
+			depends_on: Vec::new(),
+		}];
+	}
+
 	vec![
 		PlanStep {
 			step_id: "observe-context".to_string(),
@@ -24,6 +48,40 @@ pub(crate) fn build_react_steps(goal: &str, decision: &PlanningDecision) -> Vec<
 			depends_on: vec!["observe-context".to_string()],
 		},
 	]
+}
+
+fn should_use_direct_react_action(goal: &str) -> bool {
+	let normalized = goal.trim();
+	if normalized.is_empty() || normalized.lines().count() > 1 {
+		return false;
+	}
+
+	let short_goal = normalized.chars().count() <= 24;
+	let lower = normalized.to_lowercase();
+	let complex_markers = [
+		"如何",
+		"怎么",
+		"步骤",
+		"比较",
+		"分析",
+		"设计",
+		"实现",
+		"构建",
+		"部署",
+		"证明",
+		"compare",
+		"analyze",
+		"design",
+		"implement",
+		"build ",
+		"plan",
+		"step by step",
+	];
+
+	short_goal
+		&& !complex_markers
+			.iter()
+			.any(|marker| lower.contains(marker) || normalized.contains(marker))
 }
 
 pub(crate) fn build_decomposition_steps(goal: &str, decision: &PlanningDecision) -> Vec<PlanStep> {
@@ -246,5 +304,28 @@ mod tests {
 			.expect("final review should exist");
 		assert_eq!(final_review.depends_on, vec!["improve-2".to_string()]);
 		assert!(final_review.requires_approval);
+	}
+
+	#[test]
+	fn react_uses_single_direct_action_for_simple_chat_goal() {
+		let planner = AdaptiveTaskPlanner;
+		let mut request = sample_request();
+		request.goal = "今天周几？".to_string();
+		let outline = planner.build_outline(&request, &decision(PlanningMode::ReAct, 4, 1));
+
+		assert_eq!(outline.steps.len(), 1);
+		assert_eq!(outline.steps[0].step_id, "act-primary");
+	}
+
+	#[test]
+	fn react_keeps_observe_then_act_for_complex_goal() {
+		let planner = AdaptiveTaskPlanner;
+		let mut request = sample_request();
+		request.goal = "如何解决哥德巴赫猜想？".to_string();
+		let outline = planner.build_outline(&request, &decision(PlanningMode::ReAct, 4, 1));
+
+		assert_eq!(outline.steps.len(), 2);
+		assert_eq!(outline.steps[0].step_id, "observe-context");
+		assert_eq!(outline.steps[1].step_id, "act-primary");
 	}
 }
