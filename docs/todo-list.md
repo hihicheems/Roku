@@ -1,6 +1,6 @@
 # Roku Agent Implementation Todo List
 
-更新时间：2026-03-08
+更新时间：2026-03-09
 
 ## 文档定位
 
@@ -95,6 +95,7 @@
 | TP-07 | 接入 memory / artifact / experiment 检索以辅助 plan outline 生成 | §12 Context、Memory 与 Artifact | TODO |
 | TP-08 | 为 quant / coding / review 类任务增加特定 outline 生成模板 | §4.2 适用场景 / §18 量化研究 Agent | TODO |
 | TP-09 | 对简单对话型 `ReAct` 请求降级为单步 direct-action outline，减少不必要的观察步骤与 live LLM 波动 | §7.3 ReAct / §22 风险缓解 | DONE |
+| TP-10 | 对显式 `install skill from <url>` 请求走确定性单步 outline，避免被通用 planner 稀释 | §13.2 Skill 生命周期 / §22 风险缓解 | DONE |
 
 ## roku-execution-graph-builder
 
@@ -137,6 +138,7 @@
 | AR-07 | 按 profile / task type 选择输出 schema 和 evidence 模板 | §11 结果合同 | TODO |
 | AR-08 | 将 timeout / retry / budget 消耗下放到 worker 执行层 | §14 预算与超时 | TODO |
 | AR-09 | 在 live worker prompt 中注入可信 runtime date/time context，并显式抑制 meta-reasoning 泄漏 | §7 Agent Instance / §16 可观测与运行治理 | DONE |
+| AR-10 | 增加 `skill-worker` / `skill.install`，并在显式引用已安装 skill 时向 live prompt 注入 skill context | §13 Tool / Skill / MCP | DONE |
 
 ## roku-llm-adapter
 
@@ -200,16 +202,17 @@
 | TR-10 | 接入 skill registry / MCP discovery，支持 tool catalog 与版本治理 | §13.2 / §13.3 | TODO |
 | TR-11 | 将 `roku-tool-runtime` 拆分为 descriptor / error / event / runtime / tests 模块，降低单文件复杂度 | §13 Tool / Skill / MCP | DONE |
 
-## roku-skill-registry (planned)
+## roku-skill-registry
 
 | ID | Subtask | Design Anchor | Status |
 | --- | --- | --- | --- |
+| SR-00 | 建立独立 `roku-skill-registry` crate，支持 file-backed install/list/prompt-context 基线 | §13.2 Skill 生命周期 | DONE |
 | SR-01 | 建立 `SkillDescriptor` / version / signature / dependency 模型 | §13.2 Skill 生命周期 | TODO |
-| SR-02 | 实现 skill 注册、验证、发布、回滚主链路 | §13.2 | TODO |
+| SR-02 | 实现 skill 安装、元数据注册、备份替换与本地发布主链路 | §13.2 | DONE |
 | SR-03 | 对 skill 做 schema / capability / dependency / smoke test 审查 | §13.2 | TODO |
 | SR-04 | 支持租户级 / 版本级灰度发布 | §13.2 发布 | TODO |
 | SR-05 | 增加 success rate / failure rate / permission deny rate 统计与熔断 | §13.2 观测 / 回滚 | TODO |
-| SR-06 | 接入 `roku-tool-runtime`，让 skill 成为受治理的执行资源 | §13 Tool / Skill / MCP | TODO |
+| SR-06 | 接入 `roku-agent-runtime` / live prompt 链路，让已安装 skill 可被执行与引用 | §13 Tool / Skill / MCP | DONE |
 
 ## roku-mcp-bridge
 
@@ -384,6 +387,7 @@
 | CMD-17 | 增加 `artifact list|content|download` 与 `experiment show` CLI 命令，打通 artifact / experiment 运维查询链路 | §12 Artifact / Experiment / CLI 运维入口 | DONE |
 | CMD-18 | 增加 `task replay <task-id>` CLI 命令，基于 persisted task snapshot + event timeline 生成一致性与 recoverable 报告 | §8 ResumePoint / §20 replay | DONE |
 | CMD-19 | 让 `task replay` 直接复用 `roku-runtime-service` 的 replay report，而不是在 CLI 层自行重建状态链规则 | §19 CLI 运维入口 / 降耦 | DONE |
+| CMD-20 | 增加 `ROKU_SKILL_ROOT` 配置、项目内默认 skill 安装目录与 live/stateful runtime 装配日志 | §13.2 Skill 生命周期 / §19 工程化 | DONE |
 
 ## roku-agent-directory (planned)
 
