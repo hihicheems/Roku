@@ -64,7 +64,7 @@
 | SA-01 | 拆出独立 `Supervisor Agent` crate，承接高层目标理解与策略控制 | §4.1 平台抽象 / §7.2 | DONE |
 | SA-02 | 建立目标、约束、预算、风险偏好的规范化输入模型 | §7.2 / §14 | DONE |
 | SA-03 | 将重规划策略从 `runtime-service` 中抽离为显式 supervisor policy | §7.2 / §7.5 | DONE |
-| SA-04 | 实现最终结果聚合与完成判定策略 | §7.2 / §9 请求生命周期 | TODO |
+| SA-04 | 实现最终结果聚合与完成判定策略 | §7.2 / §9 请求生命周期 | DONE |
 | SA-05 | 实现 supervisor 对 reviewer / research / data / coding provider 的委派规则 | §7.2 / §7.7 / §13.4 | TODO |
 | SA-06 | 实现 supervisor 与组织策略、审批、预算治理的绑定 | §10 / §14 / §15 / §17 | TODO |
 

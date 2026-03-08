@@ -1916,6 +1916,36 @@
 2. Push `RS-15` / `OR-05` further toward event-derived branch-local partial rerun on top of the richer helper-node graph.
 3. Expand `E2E-08` chaos coverage around duplicate delivery, lease expiry, and restart contention once failure-path routing metadata exists.
 
+## 2026-03-08 - Session Milestone (Phase 46)
+
+### Completed Modules
+
+- `roku-supervisor-agent`
+  - Expanded `CompletionAssessment` so the supervisor now owns both graph-completion checks and final-result selection, instead of leaving final response synthesis in `roku-runtime-service`.
+  - Added final-result selection policy that prefers terminal aggregation outputs, then validation outputs, then terminal execution outputs, independent of task snapshot `last_result` ordering.
+  - Added regression coverage for both aggregation-preferred completion and execution-only fallback completion.
+- `roku-runtime-service`
+  - Changed final task completion to pass persisted results into the supervisor and persist the supervisor-selected final result back onto the task before responding.
+  - Added regression coverage proving an aggregating task now returns the supervisor-selected final summary even when the task snapshot still points at a stale execution result.
+- `docs/todo-list.md`
+  - Marked `SA-04` done.
+
+### Verification Status
+
+- `cargo test -p roku-supervisor-agent -p roku-runtime-service`: passed
+
+### Remaining Work
+
+- `SS-10` still needs SQLite-backed replay compaction / snapshot acceleration for larger event histories.
+- `E2E-08` still needs the remaining chaos matrix: duplicate delivery, lease expiry, provider loss, and restart stress.
+- Phase 1 is still not done until those replay-scale and dispatch-chaos requirements land.
+
+### Next Recommended Steps
+
+1. Implement `SS-10` so long event timelines can compact into replay snapshots without making snapshots the primary recovery source.
+2. Expand `E2E-08` with duplicate-delivery and lease-expiry tests against the SQLite dispatch queue.
+3. Add provider-loss and restart-stress chaos coverage once the replay snapshot path exists.
+
 ## 2026-03-08 - Session Milestone (Phase 45)
 
 ### Completed Modules

@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_common_types::{ErrorClass, RequestEnvelope, RuntimeError, Task};
+use roku_common_types::{
+	ErrorClass, NodeId, RequestEnvelope, ResultEnvelope, ResultStatus, RuntimeError, Task,
+	TaskEdgeCondition, TaskGraph, TaskNodeKind,
+};
 use roku_execution_graph_builder::TaskGraphScheduler;
 use roku_planning_engine::{
 	DefaultPlanningEngine, PlanningDecision, PlanningInput, PlanningMode, RiskLevel,
 	StrategySelector,
 };
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct SupervisorInput {
@@ -43,12 +47,18 @@ pub struct SupervisorExecutionFeedback {
 pub struct CompletionAssessment {
 	pub completed: bool,
 	pub reason: String,
+	pub final_node_id: Option<NodeId>,
+	pub final_message: Option<String>,
 }
 
 pub trait SupervisorAgent {
 	fn plan(&self, request: &RequestEnvelope) -> SupervisorDecision;
 	fn should_replan(&self, feedback: &SupervisorExecutionFeedback) -> bool;
-	fn assess_completion(&self, task: &Task) -> Result<CompletionAssessment, RuntimeError>;
+	fn assess_completion(
+		&self,
+		task: &Task,
+		results: &[ResultEnvelope],
+	) -> Result<CompletionAssessment, RuntimeError>;
 }
 
 #[derive(Debug, Default)]
@@ -158,11 +168,17 @@ impl SupervisorAgent for DefaultSupervisorAgent {
 			&& feedback.completed_nodes > 0
 	}
 
-	fn assess_completion(&self, task: &Task) -> Result<CompletionAssessment, RuntimeError> {
+	fn assess_completion(
+		&self,
+		task: &Task,
+		results: &[ResultEnvelope],
+	) -> Result<CompletionAssessment, RuntimeError> {
 		let Some(graph) = &task.graph else {
 			return Ok(CompletionAssessment {
 				completed: false,
 				reason: "task graph is missing".to_string(),
+				final_node_id: None,
+				final_message: None,
 			});
 		};
 
@@ -171,6 +187,12 @@ impl SupervisorAgent for DefaultSupervisorAgent {
 			.is_complete(graph, &task.completed_nodes)
 			.map_err(|error| RuntimeError::new(error.to_string()))?;
 
+		let selected_result = is_complete
+			.then(|| select_final_result(graph, results))
+			.flatten();
+		let selected_message = selected_result.map(result_message);
+		let selected_node_id = selected_result.map(|result| result.node_id.clone());
+
 		Ok(CompletionAssessment {
 			completed: is_complete,
 			reason: if is_complete {
@@ -178,8 +200,119 @@ impl SupervisorAgent for DefaultSupervisorAgent {
 			} else {
 				"task graph still has incomplete nodes".to_string()
 			},
+			final_node_id: selected_node_id,
+			final_message: selected_message,
 		})
 	}
+}
+
+fn select_final_result<'a>(
+	graph: &TaskGraph,
+	results: &'a [ResultEnvelope],
+) -> Option<&'a ResultEnvelope> {
+	let successful_results = results
+		.iter()
+		.filter(|result| matches!(result.status, ResultStatus::Ok))
+		.collect::<Vec<_>>();
+	if successful_results.is_empty() {
+		return None;
+	}
+
+	let node_by_id = graph
+		.nodes
+		.iter()
+		.map(|node| (node.node_id.0.as_str(), node))
+		.collect::<HashMap<_, _>>();
+	let node_position = graph
+		.nodes
+		.iter()
+		.enumerate()
+		.map(|(index, node)| (node.node_id.0.as_str(), index))
+		.collect::<HashMap<_, _>>();
+	let completion_path_sources = graph
+		.edges
+		.iter()
+		.filter(|edge| edge_is_completion_path(edge.condition))
+		.map(|edge| edge.from.0.as_str())
+		.collect::<HashSet<_>>();
+
+	for kind in [
+		TaskNodeKind::Aggregation,
+		TaskNodeKind::Validation,
+		TaskNodeKind::Execution,
+	] {
+		if let Some(result) = pick_best_result(
+			successful_results.iter().copied().filter(|result| {
+				node_by_id
+					.get(result.node_id.0.as_str())
+					.is_some_and(|node| node.kind == kind)
+					&& !completion_path_sources.contains(result.node_id.0.as_str())
+			}),
+			&node_position,
+		) {
+			return Some(result);
+		}
+	}
+
+	for kind in [
+		TaskNodeKind::Aggregation,
+		TaskNodeKind::Validation,
+		TaskNodeKind::Execution,
+	] {
+		if let Some(result) = pick_best_result(
+			successful_results.iter().copied().filter(|result| {
+				node_by_id
+					.get(result.node_id.0.as_str())
+					.is_some_and(|node| node.kind == kind)
+			}),
+			&node_position,
+		) {
+			return Some(result);
+		}
+	}
+
+	pick_best_result(successful_results.into_iter(), &node_position)
+}
+
+fn pick_best_result<'a>(
+	candidates: impl Iterator<Item = &'a ResultEnvelope>,
+	node_position: &HashMap<&str, usize>,
+) -> Option<&'a ResultEnvelope> {
+	candidates.max_by(|left, right| {
+		left.confidence
+			.total_cmp(&right.confidence)
+			.then_with(|| {
+				let left_position = node_position
+					.get(left.node_id.0.as_str())
+					.copied()
+					.unwrap_or(0);
+				let right_position = node_position
+					.get(right.node_id.0.as_str())
+					.copied()
+					.unwrap_or(0);
+				left_position.cmp(&right_position)
+			})
+			.then_with(|| left.node_id.0.cmp(&right.node_id.0))
+	})
+}
+
+fn edge_is_completion_path(condition: TaskEdgeCondition) -> bool {
+	matches!(
+		condition,
+		TaskEdgeCondition::Always | TaskEdgeCondition::OnSuccess | TaskEdgeCondition::OnApproved
+	)
+}
+
+fn result_message(result: &ResultEnvelope) -> String {
+	extract_message(&result.payload).unwrap_or_else(|| result.payload.clone())
+}
+
+fn extract_message(payload: &str) -> Option<String> {
+	let parsed = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+	parsed
+		.get("message")
+		.and_then(serde_json::Value::as_str)
+		.map(str::to_string)
 }
 
 fn normalize_goal(goal: &str) -> String {
@@ -226,7 +359,8 @@ fn score_from_hits(base: u64, hits: u8, divisor: u64, max_score: u8) -> u8 {
 mod tests {
 	use super::*;
 	use roku_common_types::{
-		NodeId, RequestEnvelope, RequestId, TaskGraph, TaskNode, TaskNodeKind, TaskState,
+		NodeId, RequestEnvelope, RequestId, ResultEnvelope, ResultStatus, TaskEdge, TaskGraph,
+		TaskId, TaskNode, TaskNodeKind, TaskState,
 	};
 
 	fn sample_request(goal: &str) -> RequestEnvelope {
@@ -248,6 +382,22 @@ mod tests {
 			join_policy: roku_common_types::JoinPolicy::AllParents,
 			aggregation_mode: roku_common_types::AggregationMode::CollectAll,
 			..TaskNode::default()
+		}
+	}
+
+	fn sample_result(node_id: &str, message: &str, confidence: f32) -> ResultEnvelope {
+		ResultEnvelope {
+			task_id: TaskId("task-1".to_string()),
+			node_id: NodeId(node_id.to_string()),
+			producer: format!("producer:{node_id}"),
+			schema_version: "result.v1".to_string(),
+			status: ResultStatus::Ok,
+			payload: serde_json::json!({
+				"message": message,
+			})
+			.to_string(),
+			evidence: Vec::new(),
+			confidence,
 		}
 	}
 
@@ -298,9 +448,99 @@ mod tests {
 		};
 
 		let assessment = supervisor
-			.assess_completion(&task)
+			.assess_completion(&task, &[])
 			.expect("completion assessment should succeed");
 		assert!(assessment.completed);
+		assert_eq!(assessment.final_node_id, None);
+	}
+
+	#[test]
+	fn assess_completion_prefers_terminal_aggregation_result() {
+		let supervisor = DefaultSupervisorAgent::default();
+		let mut aggregation_node = sample_node("aggregation-gate");
+		aggregation_node.kind = TaskNodeKind::Aggregation;
+		let task = Task {
+			task_id: TaskId("task-1".to_string()),
+			request_id: RequestId("req-1".to_string()),
+			session_id: "session-1".to_string(),
+			goal: "goal".to_string(),
+			state: TaskState::Aggregating,
+			attempts: 0,
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+			completed_nodes: vec![
+				NodeId("step-1".to_string()),
+				NodeId("aggregation-gate".to_string()),
+			],
+			next_node_index: 2,
+			pending_approval_id: None,
+			last_result: None,
+			compensation_records: Vec::new(),
+			graph: Some(TaskGraph {
+				task_id: TaskId("task-1".to_string()),
+				nodes: vec![aggregation_node, sample_node("step-1")],
+				edges: vec![TaskEdge {
+					from: NodeId("step-1".to_string()),
+					to: NodeId("aggregation-gate".to_string()),
+					condition: roku_common_types::TaskEdgeCondition::OnSuccess,
+				}],
+			}),
+		};
+		let results = vec![
+			sample_result("step-1", "execution summary", 0.7),
+			sample_result("aggregation-gate", "aggregated summary", 0.6),
+		];
+
+		let assessment = supervisor
+			.assess_completion(&task, &results)
+			.expect("completion assessment should succeed");
+
+		assert!(assessment.completed);
+		assert_eq!(
+			assessment.final_node_id,
+			Some(NodeId("aggregation-gate".to_string()))
+		);
+		assert_eq!(
+			assessment.final_message.as_deref(),
+			Some("aggregated summary")
+		);
+	}
+
+	#[test]
+	fn assess_completion_falls_back_to_terminal_execution_result() {
+		let supervisor = DefaultSupervisorAgent::default();
+		let task = Task {
+			task_id: TaskId("task-1".to_string()),
+			request_id: RequestId("req-1".to_string()),
+			session_id: "session-1".to_string(),
+			goal: "goal".to_string(),
+			state: TaskState::Executing,
+			attempts: 0,
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+			completed_nodes: vec![NodeId("step-1".to_string())],
+			next_node_index: 1,
+			pending_approval_id: None,
+			last_result: None,
+			compensation_records: Vec::new(),
+			graph: Some(TaskGraph {
+				task_id: TaskId("task-1".to_string()),
+				nodes: vec![sample_node("step-1")],
+				edges: Vec::new(),
+			}),
+		};
+		let results = vec![sample_result("step-1", "execution summary", 0.8)];
+
+		let assessment = supervisor
+			.assess_completion(&task, &results)
+			.expect("completion assessment should succeed");
+
+		assert!(assessment.completed);
+		assert_eq!(assessment.final_node_id, Some(NodeId("step-1".to_string())));
+		assert_eq!(
+			assessment.final_message.as_deref(),
+			Some("execution summary")
+		);
 	}
 
 	#[test]

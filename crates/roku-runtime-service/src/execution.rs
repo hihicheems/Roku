@@ -23,7 +23,7 @@ use roku_common_types::{
 use roku_execution_graph_builder::TaskGraphScheduler;
 use roku_observability::{AuditCorrelation, AuditRecord};
 
-use crate::helpers::{failure_message, result_message, success_message};
+use crate::helpers::{failure_message, result_message};
 use crate::{RunMode, RuntimeService};
 
 impl RuntimeService {
@@ -577,16 +577,22 @@ impl RuntimeService {
 		task: &mut Task,
 		request_id: roku_common_types::RequestId,
 	) -> Result<ResponseEnvelope, RuntimeError> {
-		let completion = self.supervisor.assess_completion(task)?;
+		let results = self.list_results(&task.task_id)?;
+		let completion = self.supervisor.assess_completion(task, &results)?;
 		if !completion.completed {
 			return Err(RuntimeError::new(completion.reason));
+		}
+		if let Some(final_node_id) = &completion.final_node_id {
+			task.last_result = results
+				.iter()
+				.find(|result| result.node_id == *final_node_id)
+				.cloned();
 		}
 		if task.state != TaskState::Aggregating {
 			self.record_transition(task, TaskState::Aggregating, "aggregate")?;
 		}
 		self.record_transition(task, TaskState::Succeeded, "done")?;
-		let result_count = self.list_results(&task.task_id)?.len();
-		self.complete_experiment_run(task, result_count)?;
+		self.complete_experiment_run(task, results.len())?;
 		let artifacts = self
 			.list_artifacts(&task.task_id)?
 			.into_iter()
@@ -597,7 +603,9 @@ impl RuntimeService {
 		Ok(ResponseEnvelope {
 			request_id,
 			status: ResponseStatus::Succeeded,
-			message: success_message(task.last_result.as_ref()),
+			message: completion
+				.final_message
+				.unwrap_or_else(|| "task succeeded".to_string()),
 			artifacts,
 		})
 	}

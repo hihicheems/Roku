@@ -9,3 +9,4 @@ authors.workspace = true
 roku-common-types = { path = "../roku-common-types" }
 roku-execution-graph-builder = { path = "../roku-execution-graph-builder" }
 roku-planning-engine = { path = "../roku-planning-engine" }
+serde_json = "1"
