@@ -96,6 +96,7 @@
 | TP-08 | 为 quant / coding / review 类任务增加特定 outline 生成模板 | §4.2 适用场景 / §18 量化研究 Agent | TODO |
 | TP-09 | 对简单对话型 `ReAct` 请求降级为单步 direct-action outline，减少不必要的观察步骤与 live LLM 波动 | §7.3 ReAct / §22 风险缓解 | DONE |
 | TP-10 | 对显式 `install skill from <url>` 请求走确定性单步 outline，避免被通用 planner 稀释 | §13.2 Skill 生命周期 / §22 风险缓解 | DONE |
+| TP-11 | 对显式已安装 skill 使用请求走确定性单步 outline，避免被通用 planner 拆散后丢失权威 skill 上下文 | §13.2 Skill 生命周期 / §22 风险缓解 | DONE |
 
 ## roku-execution-graph-builder
 
@@ -390,6 +391,7 @@
 | CMD-19 | 让 `task replay` 直接复用 `roku-runtime-service` 的 replay report，而不是在 CLI 层自行重建状态链规则 | §19 CLI 运维入口 / 降耦 | DONE |
 | CMD-20 | 增加 `ROKU_SKILL_ROOT` 配置、项目内默认 skill 安装目录与 live/stateful runtime 装配日志 | §13.2 Skill 生命周期 / §19 工程化 | DONE |
 | CMD-21 | 增加 `skill install|list|show` CLI 运维命令，直接管理本地 skill registry | §13.2 Skill 生命周期 / CLI 运维入口 | DONE |
+| CMD-22 | 增加 `telegram-once` 命令，在 CLI 中复用真实 Telegram handler / outbound 渲染路径做单次验收 | §4.1 Connector / CLI / Telegram 验证 | DONE |
 
 ## roku-agent-directory (planned)
 

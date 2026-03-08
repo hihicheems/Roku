@@ -16,8 +16,8 @@ use roku_common_types::{PlanOutline, RequestEnvelope};
 use roku_planning_engine::{PlanningDecision, PlanningMode};
 
 use crate::strategies::{
-	build_decomposition_steps, build_react_steps, build_refinement_steps,
-	build_skill_install_steps, build_tree_search_steps,
+	build_decomposition_steps, build_explicit_skill_usage_steps, build_react_steps,
+	build_refinement_steps, build_skill_install_steps, build_tree_search_steps,
 };
 
 pub trait TaskPlanner {
@@ -30,6 +30,12 @@ pub struct AdaptiveTaskPlanner;
 impl TaskPlanner for AdaptiveTaskPlanner {
 	fn build_outline(&self, request: &RequestEnvelope, decision: &PlanningDecision) -> PlanOutline {
 		if let Some(steps) = build_skill_install_steps(&request.goal) {
+			return PlanOutline {
+				goal: request.goal.clone(),
+				steps,
+			};
+		}
+		if let Some(steps) = build_explicit_skill_usage_steps(&request.goal) {
 			return PlanOutline {
 				goal: request.goal.clone(),
 				steps,

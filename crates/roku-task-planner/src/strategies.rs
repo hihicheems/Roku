@@ -31,6 +31,22 @@ pub(crate) fn build_skill_install_steps(goal: &str) -> Option<Vec<PlanStep>> {
 	}])
 }
 
+pub(crate) fn build_explicit_skill_usage_steps(goal: &str) -> Option<Vec<PlanStep>> {
+	if !looks_like_explicit_skill_usage_request(goal) {
+		return None;
+	}
+
+	Some(vec![PlanStep {
+		step_id: "use-installed-skill".to_string(),
+		summary: step_summary(goal, "Use explicitly referenced installed skill"),
+		required_capabilities: vec!["tool.invoke".to_string()],
+		requires_approval: false,
+		depends_on: Vec::new(),
+		branch: None,
+		loop_control: None,
+	}])
+}
+
 pub(crate) fn build_react_steps(goal: &str, decision: &PlanningDecision) -> Vec<PlanStep> {
 	if should_use_direct_react_action(goal) {
 		return vec![PlanStep {
@@ -81,6 +97,26 @@ fn looks_like_skill_install_request(goal: &str) -> bool {
 		|| goal.contains("安装 skill")
 		|| goal.contains("安装这个 skill"))
 		&& goal.contains("http")
+}
+
+fn looks_like_explicit_skill_usage_request(goal: &str) -> bool {
+	let normalized = goal.to_ascii_lowercase();
+	if normalized.contains("http") || !normalized.contains("skill") {
+		return false;
+	}
+
+	[
+		"use the ",
+		"using the ",
+		"according to the ",
+		"with the ",
+		"refer to the ",
+		"use skill ",
+		"使用",
+		"根据",
+	]
+	.iter()
+	.any(|marker| normalized.contains(marker) || goal.contains(marker))
 }
 
 fn should_use_direct_react_action(goal: &str) -> bool {
@@ -441,6 +477,22 @@ mod tests {
 		assert_eq!(
 			outline.steps[0].required_capabilities,
 			vec!["skill.install".to_string()]
+		);
+	}
+
+	#[test]
+	fn explicit_skill_usage_requests_use_single_direct_step() {
+		let planner = AdaptiveTaskPlanner;
+		let mut request = sample_request();
+		request.goal = "Use the skill-creator skill to explain the eval workflow".to_string();
+		let outline =
+			planner.build_outline(&request, &decision(PlanningMode::TaskDecomposition, 4, 2));
+
+		assert_eq!(outline.steps.len(), 1);
+		assert_eq!(outline.steps[0].step_id, "use-installed-skill");
+		assert_eq!(
+			outline.steps[0].required_capabilities,
+			vec!["tool.invoke".to_string()]
 		);
 	}
 }

@@ -17,7 +17,7 @@ use roku_llm_adapter::{GenerationRequest, LlmRouter, RiskTier};
 use roku_planning_engine::{PlanningDecision, PlanningMode};
 
 use crate::planner::{AdaptiveTaskPlanner, TaskPlanner};
-use crate::strategies::build_skill_install_steps;
+use crate::strategies::{build_explicit_skill_usage_steps, build_skill_install_steps};
 
 pub struct LlmTaskPlanner {
 	router: LlmRouter,
@@ -62,6 +62,12 @@ impl LlmTaskPlanner {
 impl TaskPlanner for LlmTaskPlanner {
 	fn build_outline(&self, request: &RequestEnvelope, decision: &PlanningDecision) -> PlanOutline {
 		if let Some(steps) = build_skill_install_steps(&request.goal) {
+			return PlanOutline {
+				goal: request.goal.clone(),
+				steps,
+			};
+		}
+		if let Some(steps) = build_explicit_skill_usage_steps(&request.goal) {
 			return PlanOutline {
 				goal: request.goal.clone(),
 				steps,
@@ -457,6 +463,21 @@ mod tests {
 		assert_eq!(
 			outline.steps[0].required_capabilities,
 			vec!["skill.install".to_string()]
+		);
+	}
+
+	#[test]
+	fn llm_planner_uses_explicit_skill_usage_fast_path_before_llm_generation() {
+		let planner = planner_with_output("this should never be used");
+		let mut request = request();
+		request.goal = "Use the skill-creator skill to explain the eval workflow".to_string();
+		let outline = planner.build_outline(&request, &decision());
+
+		assert_eq!(outline.steps.len(), 1);
+		assert_eq!(outline.steps[0].step_id, "use-installed-skill");
+		assert_eq!(
+			outline.steps[0].required_capabilities,
+			vec!["tool.invoke".to_string()]
 		);
 	}
 }
