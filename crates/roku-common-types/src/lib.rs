@@ -123,6 +123,9 @@ pub enum TaskState {
 	Validating,
 	WaitingApproval,
 	Aggregating,
+	CancelRequested,
+	Compensating,
+	TimeoutRecovering,
 	Succeeded,
 	Failed,
 	DeadLetter,
@@ -213,7 +216,34 @@ pub struct Task {
 	pub pending_approval_id: Option<ApprovalId>,
 	#[serde(default)]
 	pub last_result: Option<ResultEnvelope>,
+	#[serde(default)]
+	pub compensation_records: Vec<CompensationRecord>,
 	pub graph: Option<TaskGraph>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CompensationAction {
+	Noop,
+	#[default]
+	AuditOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CompensationStatus {
+	#[default]
+	Pending,
+	Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CompensationRecord {
+	pub node_id: NodeId,
+	#[serde(default)]
+	pub action: CompensationAction,
+	#[serde(default)]
+	pub status: CompensationStatus,
+	#[serde(default)]
+	pub note: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -459,6 +489,7 @@ pub enum ApprovalStatus {
 	Pending,
 	Approved,
 	Rejected,
+	Cancelled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -16,7 +16,8 @@ use roku_agent_runtime::AgentWorker;
 use std::collections::HashMap;
 
 use roku_common_types::{
-	ErrorClass, EvidenceItem, RecoveryEligibility, ResponseEnvelope, ResponseStatus, ResultStatus,
+	ApprovalStatus, CompensationAction, CompensationRecord, CompensationStatus, ErrorClass,
+	EvidenceItem, RecoveryEligibility, ResponseEnvelope, ResponseStatus, ResultStatus,
 	RuntimeError, Task, TaskId, TaskNode, TaskNodeKind, TaskState,
 };
 use roku_execution_graph_builder::TaskGraphScheduler;
@@ -158,6 +159,72 @@ impl RuntimeService {
 		self.process_task(&mut task, RunMode::Normal)
 	}
 
+	pub fn cancel_task(&self, task_id: &TaskId, actor: &str) -> Result<Task, RuntimeError> {
+		let mut task = self
+			.get_task(task_id)?
+			.ok_or_else(|| RuntimeError::new(format!("task not found: {}", task_id.0)))?;
+
+		match task.state {
+			TaskState::Succeeded | TaskState::DeadLetter | TaskState::Cancelled => {
+				return Err(RuntimeError::new(format!(
+					"task cannot be cancelled from state {:?}",
+					task.state
+				)));
+			}
+			TaskState::CancelRequested | TaskState::Compensating => {
+				return Err(RuntimeError::new(
+					"task cancellation is already in progress",
+				));
+			}
+			_ => {}
+		}
+
+		if let Some(approval_id) = task.pending_approval_id.clone() {
+			self.cancel_pending_approval_ticket(&approval_id, actor)?;
+			task.pending_approval_id = None;
+		}
+
+		task.compensation_records = self.plan_compensation_records(&task);
+		let has_compensation_work = !task.compensation_records.is_empty();
+		let disposition = self.orchestrator.request_cancellation(
+			&mut task,
+			format!("cancel requested by {actor}"),
+			has_compensation_work,
+		)?;
+		let mut state = self.lock_state()?;
+		for event in disposition {
+			state
+				.event_repo
+				.append_event(event)
+				.map_err(|error| RuntimeError::new(error.to_string()))?;
+		}
+		drop(state);
+
+		self.complete_compensation_records(&mut task, actor);
+		if self.get_experiment_run(&task.task_id)?.is_some() {
+			self.fail_experiment_run(&task, "task cancelled")?;
+		}
+		self.save_task(task.clone())?;
+		Ok(task)
+	}
+
+	pub fn recover_timed_out_task(
+		&self,
+		task_id: &TaskId,
+	) -> Result<ResponseEnvelope, RuntimeError> {
+		let task = self
+			.get_task(task_id)?
+			.ok_or_else(|| RuntimeError::new(format!("task not found: {}", task_id.0)))?;
+		if task.state != TaskState::TimeoutRecovering {
+			return Err(RuntimeError::new(format!(
+				"task is not waiting for timeout recovery from state {:?}",
+				task.state
+			)));
+		}
+
+		self.resume_task(task_id)
+	}
+
 	pub(super) fn fail_task(
 		&self,
 		task: &mut Task,
@@ -249,6 +316,22 @@ impl RuntimeService {
 
 		if task.state != TaskState::Executing {
 			self.record_transition(task, TaskState::Executing, "execute")?;
+		}
+		if matches!(mode, RunMode::TimeoutRecovery) {
+			self.record_transition_with_error_class(
+				task,
+				TaskState::TimeoutRecovering,
+				"execution timed out",
+				Some(ErrorClass::Timeout),
+			)?;
+			self.save_task(task.clone())?;
+
+			return Ok(Some(ResponseEnvelope {
+				request_id: task.request_id.clone(),
+				status: ResponseStatus::Failed,
+				message: "task timed out and entered recovery flow".to_string(),
+				artifacts: Vec::new(),
+			}));
 		}
 		let mut result = self.runtime.execute(&spec, node);
 		let artifact = self.persist_result_artifact(&result)?;
@@ -407,6 +490,60 @@ impl RuntimeService {
 		}
 		Ok(())
 	}
+
+	fn plan_compensation_records(&self, task: &Task) -> Vec<CompensationRecord> {
+		let node_by_id = task
+			.graph
+			.as_ref()
+			.map(|graph| {
+				graph
+					.nodes
+					.iter()
+					.map(|node| (node.node_id.clone(), node.kind))
+					.collect::<HashMap<_, _>>()
+			})
+			.unwrap_or_default();
+
+		task.completed_nodes
+			.iter()
+			.map(|node_id| {
+				let action = match node_by_id.get(node_id) {
+					Some(TaskNodeKind::Execution) => CompensationAction::AuditOnly,
+					_ => CompensationAction::Noop,
+				};
+				CompensationRecord {
+					node_id: node_id.clone(),
+					action,
+					status: CompensationStatus::Pending,
+					note: "cancellation compensation recorded".to_string(),
+				}
+			})
+			.collect()
+	}
+
+	fn complete_compensation_records(&self, task: &mut Task, actor: &str) {
+		for record in &mut task.compensation_records {
+			record.status = CompensationStatus::Completed;
+			record.note = format!("{} by {actor}", compensation_note(record.action));
+		}
+	}
+
+	fn cancel_pending_approval_ticket(
+		&self,
+		approval_id: &roku_common_types::ApprovalId,
+		actor: &str,
+	) -> Result<(), RuntimeError> {
+		let mut ticket = self
+			.get_approval(approval_id)?
+			.ok_or_else(|| RuntimeError::new("approval ticket not found for cancellation"))?;
+		if ticket.status == ApprovalStatus::Pending {
+			ticket.status = ApprovalStatus::Cancelled;
+			ticket.decided_by = Some(actor.to_string());
+			ticket.comment = Some("task cancelled before approval resolved".to_string());
+			self.save_approval_ticket(ticket)?;
+		}
+		Ok(())
+	}
 }
 
 fn classify_resume_state(ready_nodes: &[TaskNode]) -> TaskState {
@@ -425,7 +562,8 @@ fn resume_transition_path(
 	target_state: TaskState,
 ) -> Result<Vec<TaskState>, RuntimeError> {
 	use TaskState::{
-		Aggregating, Delegating, Executing, Failed, GraphBuilding, Planning, Validating,
+		Aggregating, Delegating, Executing, Failed, GraphBuilding, Planning, TimeoutRecovering,
+		Validating,
 	};
 
 	let path = match (current_state, target_state) {
@@ -440,6 +578,10 @@ fn resume_transition_path(
 		(Delegating, Validating) => vec![Executing, Validating],
 		(Executing, Validating) => vec![Validating],
 		(Validating, Executing) => vec![Executing],
+		(TimeoutRecovering, Executing) => vec![Planning, GraphBuilding, Delegating, Executing],
+		(TimeoutRecovering, Validating) => {
+			vec![Planning, GraphBuilding, Delegating, Executing, Validating]
+		}
 		(Aggregating, Aggregating) => Vec::new(),
 		_ => {
 			return Err(RuntimeError::new(format!(
@@ -450,4 +592,11 @@ fn resume_transition_path(
 	};
 
 	Ok(path)
+}
+
+fn compensation_note(action: CompensationAction) -> &'static str {
+	match action {
+		CompensationAction::Noop => "noop compensation recorded",
+		CompensationAction::AuditOnly => "audit-only compensation recorded",
+	}
 }

@@ -8,8 +8,8 @@ use roku_api_gateway::{
 };
 use roku_cmd::{RunMode, run_once, run_with_mode};
 use roku_common_types::{
-	ApprovalDecision, ApprovalId, Artifact, ArtifactId, ExperimentRun, RequestEnvelope,
-	ResponseStatus, RuntimeError, TaskId, TaskReplayReport, TaskState,
+	ApprovalDecision, ApprovalId, ApprovalStatus, Artifact, ArtifactId, ExperimentRun,
+	RequestEnvelope, RequestId, ResponseStatus, RuntimeError, TaskId, TaskReplayReport, TaskState,
 };
 use roku_runtime_service::RuntimeService;
 
@@ -49,6 +49,69 @@ fn e2e_dead_letter_path_is_reported() {
 		.expect("pipeline should return dead-letter response");
 	assert!(matches!(response.status, ResponseStatus::Failed));
 	assert!(response.message.contains("dead-lettered"));
+}
+
+#[test]
+fn e2e_timeout_recovery_roundtrip_succeeds() {
+	let service = RuntimeService::default();
+	let response = service
+		.execute_with_mode(
+			RequestEnvelope {
+				request_id: RequestId("req-timeout".to_string()),
+				session_id: "timeout-session".to_string(),
+				goal: "build execution graph".to_string(),
+				planning_mode_hint: None,
+				conversation_history: Vec::new(),
+			},
+			RunMode::TimeoutRecovery,
+		)
+		.expect("pipeline should enter timeout recovery");
+	assert!(matches!(response.status, ResponseStatus::Failed));
+
+	let resumed = service
+		.recover_timed_out_task(&TaskId("task-req-timeout".to_string()))
+		.expect("timeout recovery should resume the task");
+	assert!(matches!(resumed.status, ResponseStatus::Succeeded));
+
+	let task = service
+		.get_task(&TaskId("task-req-timeout".to_string()))
+		.expect("task lookup should succeed")
+		.expect("task should exist");
+	assert_eq!(task.state, TaskState::Succeeded);
+}
+
+#[test]
+fn e2e_cancelled_approval_flow_records_cancelled_ticket() {
+	let service = RuntimeService::default();
+	let pending = service
+		.execute_with_mode(
+			RequestEnvelope {
+				request_id: RequestId("req-cancel".to_string()),
+				session_id: "cancel-session".to_string(),
+				goal: "build execution graph".to_string(),
+				planning_mode_hint: None,
+				conversation_history: Vec::new(),
+			},
+			RunMode::ApprovalRequired,
+		)
+		.expect("pipeline should stop for approval");
+	assert!(matches!(pending.status, ResponseStatus::PendingApproval));
+	let approval_id = ApprovalId(
+		pending.artifacts[0]
+			.trim_start_matches("approval://")
+			.to_string(),
+	);
+
+	let task = service
+		.cancel_task(&TaskId("task-req-cancel".to_string()), "operator")
+		.expect("task cancellation should succeed");
+	assert_eq!(task.state, TaskState::Cancelled);
+
+	let ticket = service
+		.get_approval(&approval_id)
+		.expect("approval lookup should succeed")
+		.expect("approval ticket should exist");
+	assert_eq!(ticket.status, ApprovalStatus::Cancelled);
 }
 
 #[actix_web::test]

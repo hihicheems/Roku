@@ -31,6 +31,7 @@ pub(crate) fn ticket_status_label(status: ApprovalStatus) -> &'static str {
 		ApprovalStatus::Pending => "pending",
 		ApprovalStatus::Approved => "approved",
 		ApprovalStatus::Rejected => "rejected",
+		ApprovalStatus::Cancelled => "cancelled",
 	}
 }
 

@@ -14,10 +14,10 @@
 
 use roku_agent_runtime::{GenericAgentRuntime, RuntimeWorker};
 use roku_common_types::{
-	AggregationMode, ApprovalDecision, ApprovalId, EvidenceItem, JoinPolicy, NodeId,
-	PlanningModeHint, RecoveryEligibility, RequestEnvelope, RequestId, ResponseStatus,
-	ResultEnvelope, ResultStatus, Task, TaskEdge, TaskGraph, TaskId, TaskNode, TaskNodeKind,
-	TaskState,
+	AggregationMode, ApprovalDecision, ApprovalId, ApprovalStatus, CompensationAction,
+	CompensationStatus, EvidenceItem, JoinPolicy, NodeId, PlanningModeHint, RecoveryEligibility,
+	RequestEnvelope, RequestId, ResponseStatus, ResultEnvelope, ResultStatus, Task, TaskEdge,
+	TaskGraph, TaskId, TaskNode, TaskNodeKind, TaskState,
 };
 use roku_state_store::{
 	DispatchClaim, DispatchEnvelope, DispatchLease, DispatchQueue, RetryClaim, StoreError,
@@ -479,6 +479,79 @@ fn service_resume_task_recovers_failed_execution() {
 }
 
 #[test]
+fn service_cancel_task_records_compensation_and_cancels_pending_approval() {
+	let service = RuntimeService::default();
+	let response = service
+		.execute_with_mode(sample_request(), RunMode::ApprovalRequired)
+		.expect("runtime service should create approval ticket");
+	let approval_id = ApprovalId(
+		response.artifacts[0]
+			.trim_start_matches("approval://")
+			.to_string(),
+	);
+
+	let cancelled = service
+		.cancel_task(&TaskId("task-req-1".to_string()), "operator")
+		.expect("task cancellation should succeed");
+
+	assert_eq!(cancelled.state, TaskState::Cancelled);
+	assert!(cancelled.pending_approval_id.is_none());
+	assert!(!cancelled.compensation_records.is_empty());
+	assert!(cancelled.compensation_records.iter().all(|record| {
+		record.status == CompensationStatus::Completed
+			&& matches!(
+				record.action,
+				CompensationAction::AuditOnly | CompensationAction::Noop
+			)
+	}));
+
+	let ticket = service
+		.get_approval(&approval_id)
+		.expect("approval lookup should succeed")
+		.expect("approval ticket should exist");
+	assert_eq!(ticket.status, ApprovalStatus::Cancelled);
+	assert_eq!(ticket.decided_by.as_deref(), Some("operator"));
+
+	let task = service
+		.get_task(&TaskId("task-req-1".to_string()))
+		.expect("task lookup should succeed")
+		.expect("task should exist");
+	assert_eq!(task.state, TaskState::Cancelled);
+}
+
+#[test]
+fn service_timeout_recovery_resumes_timed_out_task() {
+	let service = RuntimeService::default();
+	let response = service
+		.execute_with_mode(sample_request(), RunMode::TimeoutRecovery)
+		.expect("runtime service should enter timeout recovery");
+	assert_eq!(response.status, ResponseStatus::Failed);
+	assert!(response.message.contains("timed out"));
+
+	let task_id = TaskId("task-req-1".to_string());
+	let report = service
+		.get_task_replay_report(&task_id)
+		.expect("replay report lookup should succeed")
+		.expect("replay report should exist");
+	assert_eq!(report.persisted_state, TaskState::TimeoutRecovering);
+	assert_eq!(
+		report.recovery_eligibility,
+		RecoveryEligibility::ResumeReady
+	);
+
+	let resumed = service
+		.recover_timed_out_task(&task_id)
+		.expect("timeout recovery should resume the task");
+	assert_eq!(resumed.status, ResponseStatus::Succeeded);
+
+	let task = service
+		.get_task(&task_id)
+		.expect("task lookup should succeed")
+		.expect("task should exist");
+	assert_eq!(task.state, TaskState::Succeeded);
+}
+
+#[test]
 fn service_fails_when_approval_is_rejected() {
 	let service = RuntimeService::default();
 	let response = service
@@ -555,6 +628,7 @@ fn validation_collects_results_through_approval_nodes() {
 		next_node_index: 1,
 		pending_approval_id: None,
 		last_result: None,
+		compensation_records: Vec::new(),
 		graph: Some(TaskGraph {
 			task_id: TaskId("task-1".to_string()),
 			nodes: vec![
@@ -672,6 +746,7 @@ fn node_result_set_applies_highest_confidence_aggregation() {
 		next_node_index: 2,
 		pending_approval_id: None,
 		last_result: None,
+		compensation_records: Vec::new(),
 		graph: Some(TaskGraph {
 			task_id: TaskId("task-aggregation".to_string()),
 			nodes: vec![
@@ -768,6 +843,7 @@ fn node_result_set_enforces_quorum_policy() {
 		next_node_index: 1,
 		pending_approval_id: None,
 		last_result: None,
+		compensation_records: Vec::new(),
 		graph: Some(TaskGraph {
 			task_id: TaskId("task-quorum".to_string()),
 			nodes: vec![

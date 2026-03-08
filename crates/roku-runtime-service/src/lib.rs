@@ -56,6 +56,7 @@ pub enum RunMode {
 	CapabilityDenied,
 	ApprovalRequired,
 	RetryExhausted,
+	TimeoutRecovery,
 }
 
 struct RuntimeState {
