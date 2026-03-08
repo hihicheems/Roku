@@ -1,5 +1,43 @@
 # Roku Agent Dev Log
 
+## 2026-03-08 - Session Milestone (Phase 21)
+
+### Completed Modules
+
+- `roku-llm-adapter`
+  - Added explicit OpenRouter fallback recovery when the primary model returns HTTP 200 but no readable assistant content, such as `content=null` with `finish_reason=length`.
+  - Registered the primary model and configured fallbacks as explicit router candidates so unreadable responses can step across the model chain instead of repeatedly retrying the same broken response shape.
+  - Made reasoning request shaping model-aware: StepFun keeps `exclude=true` without an invalid `effort=none` override, while other OpenRouter-compatible models still suppress surfaced reasoning.
+- `roku-task-planner`
+  - Added a direct-action fast path for simple conversational `ReAct` prompts so short Telegram turns no longer pay for an unnecessary observe step.
+  - Preserved multi-step `ReAct` decomposition for complex requests with explicit analytical markers.
+- `roku-cmd`
+  - Added a session-level Telegram regression harness that exercises planning-mode persistence, multi-turn memory retention, and post-time-query knowledge-answer continuity in one flow.
+  - Verified that session history persists user/assistant turns and that the stored planning mode remains active across turns.
+
+### Verification Status
+
+- `cargo fmt --all`: passed before repository-level formatting normalization
+- `cargo test -p roku-llm-adapter -p roku-task-planner -p roku-cmd`: passed
+- `source .env && cargo run -p roku-cmd -- live-once --planning-mode ReAct '今天几月几号' && printf '\n---\n' && cargo run -p roku-cmd -- live-once --planning-mode ReAct '叫爸爸'`: passed outside sandbox after the StepFun reasoning fix
+  - `今天几月几号` -> `2026年3月8日`
+  - `叫爸爸` -> `这个称呼不合适。`
+- Log analysis of `logs/dev-services/telegram-bot-20260308T013143Z.stdout.log` confirmed the original failure mode:
+  - OpenRouter/StepFun intermittently returned `finish_reason=length` with `message.content=null`
+  - the prior implementation treated that as a terminal unreadable response instead of escalating to a fallback model
+
+### Remaining Work
+
+- Finish PostgreSQL task/event/result repositories so orchestration recovery is not limited to session memory.
+- Add broader replay and chaos coverage for provider degradation, process restart, and duplicate delivery scenarios.
+- Continue expanding validation-plane reporting so schema / semantic / provenance / policy outcomes are independently inspectable for multi-agent runs.
+
+### Next Recommended Steps
+
+1. Implement PostgreSQL task/event/result repositories and wire them into the live runtime bootstrap path.
+2. Add replay-oriented provider tests that combine unreadable primary responses, fallback promotion, and persisted task recovery.
+3. Extend validation-plane with explicit multi-branch report output and failure-focused e2e cases.
+
 ## 2026-03-08 - Session Milestone (Phase 20)
 
 ### Completed Modules
