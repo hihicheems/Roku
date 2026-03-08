@@ -104,10 +104,10 @@
 | GB-03 | 检测重复 step、缺失依赖等 graph build 错误 | §8.4 / §20 验收重点 | DONE |
 | GB-04 | 让 validation gate 依赖于 terminal steps，支持分支场景 | §8.2 并行分支 / §11 验证流水线 | DONE |
 | GB-05 | 提供 ready-node scheduler、执行层次划分与 cycle detection | §8 Task Graph / 调度 | DONE |
-| GB-06 | 为 graph builder 注入 recovery point / resume point / partial rerun anchor | §8.1 ResumePoint | TODO |
+| GB-06 | 为 graph builder 注入 recovery point / resume point / partial rerun anchor | §8.1 ResumePoint | DONE |
 | GB-07 | 自动注入 approval / aggregation / retry / dead-letter 辅助节点 | §8.2 / §15.3 人审闸门 | TODO |
 | GB-08 | 增加条件边、条件分支和受控回环 DAG 编译能力 | §8.2 条件分支 / 回环有限图 | TODO |
-| GB-09 | 为每个节点写入预算、deadline、capability requirement snapshot | §8.4 / §14 | TODO |
+| GB-09 | 为每个节点写入预算、deadline、capability requirement snapshot | §8.4 / §14 | DONE |
 
 ## roku-agent-instance-factory
 
@@ -286,8 +286,8 @@
 | SS-06 | 增加 PostgreSQL event / approval / result backend | §6.1 PostgreSQL | DONE |
 | SS-06A | 增加 PostgreSQL session preference / conversation memory backend | §6.1 PostgreSQL / §12 Memory | DONE |
 | SS-07 | 增加 migration / bootstrap / repository index 设计 | 生产级持久化边界 | TODO |
-| SS-08 | 增加 Redis / NATS / JetStream 风格 dispatch 抽象 | §6.1 NATS JetStream / §14.3 | TODO |
-| SS-09 | 增加 ack、lease、backpressure、retry claim 语义 | §14.3 背压与资源隔离 | TODO |
+| SS-08 | 增加 Redis / NATS / JetStream 风格 dispatch 抽象 | §6.1 NATS JetStream / §14.3 | DONE |
+| SS-09 | 增加 ack、lease、backpressure、retry claim 语义 | §14.3 背压与资源隔离 | DONE |
 | SS-10 | 增加 replay / snapshot / compaction 能力，以支撑大规模任务恢复 | §8 ResumePoint / §20 replay | TODO |
 
 ## roku-artifact-store

@@ -14,8 +14,8 @@
 
 use roku_agent_runtime::AgentWorker;
 use roku_common_types::{
-	ErrorClass, EvidenceItem, ResponseEnvelope, ResponseStatus, ResultStatus, RuntimeError, Task,
-	TaskId, TaskNode, TaskNodeKind, TaskState,
+	ErrorClass, EvidenceItem, RecoveryEligibility, ResponseEnvelope, ResponseStatus, ResultStatus,
+	RuntimeError, Task, TaskId, TaskNode, TaskNodeKind, TaskState,
 };
 use roku_execution_graph_builder::TaskGraphScheduler;
 use roku_observability::{AuditCorrelation, AuditRecord};
@@ -79,6 +79,7 @@ impl RuntimeService {
 		let mut task = self
 			.get_task(task_id)?
 			.ok_or_else(|| RuntimeError::new(format!("task not found: {}", task_id.0)))?;
+		let analysis = self.analyze_task_recovery(&task)?;
 
 		match task.state {
 			TaskState::Succeeded | TaskState::Cancelled | TaskState::DeadLetter => {
@@ -105,26 +106,31 @@ impl RuntimeService {
 			_ => {}
 		}
 
-		let graph = task
-			.graph
-			.clone()
-			.ok_or_else(|| RuntimeError::new("task graph is missing"))?;
-		let scheduler = TaskGraphScheduler;
-		let is_complete = scheduler
-			.is_complete(&graph, &task.completed_nodes)
-			.map_err(|error| RuntimeError::new(error.to_string()))?;
-		let target_state = if is_complete {
-			TaskState::Validating
-		} else {
-			let ready_nodes = scheduler
-				.ready_nodes(&graph, &task.completed_nodes)
-				.map_err(|error| RuntimeError::new(error.to_string()))?;
-			if ready_nodes.is_empty() {
+		let target_state = match analysis.recovery_eligibility {
+			RecoveryEligibility::FinalizeReady if analysis.is_complete => TaskState::Validating,
+			RecoveryEligibility::ResumeReady => classify_resume_state(&analysis.ready_nodes),
+			RecoveryEligibility::RequiresManualResume => {
 				return Err(RuntimeError::new(
-					"task graph has no ready nodes and cannot be resumed",
+					"task requires manual resume before automatic execution can continue",
 				));
 			}
-			classify_resume_state(&ready_nodes)
+			RecoveryEligibility::Blocked => {
+				return Err(RuntimeError::new(
+					"task graph has no replay-ready nodes and cannot be resumed",
+				));
+			}
+			RecoveryEligibility::NotRecoverable => {
+				return Err(RuntimeError::new(format!(
+					"task is not resumable from state {:?}",
+					task.state
+				)));
+			}
+			RecoveryEligibility::PendingApproval => {
+				return Err(RuntimeError::new(
+					"task is waiting for approval and must be resumed through approval flow",
+				));
+			}
+			RecoveryEligibility::FinalizeReady => TaskState::Validating,
 		};
 		self.normalize_task_for_resume(&mut task, target_state)?;
 		self.process_task(&mut task, RunMode::Normal)

@@ -247,6 +247,7 @@ mod tests {
 			capabilities: Vec::new(),
 			join_policy: roku_common_types::JoinPolicy::AllParents,
 			aggregation_mode: roku_common_types::AggregationMode::CollectAll,
+			..TaskNode::default()
 		}
 	}
 

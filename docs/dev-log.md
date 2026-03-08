@@ -1671,3 +1671,42 @@
 1. Add recovery-oriented metadata to `TaskNode` and inject it from `roku-execution-graph-builder`.
 2. Refactor replay/reporting and `resume_task` to share a single recovery-analysis path.
 3. Add the first `DispatchQueue` abstraction and in-memory lease/ack/backpressure semantics in `roku-state-store`.
+
+## 2026-03-08 - Session Milestone (Phase 35)
+
+### Completed Modules
+
+- `roku-common-types`
+  - Added `NodeRecoveryAnchor`, `NodeBudgetSnapshot`, `RetryPolicy`, `RerunPolicy`, `TaskReplayCursor`, `ReplayConsistencyStatus`, `RecoveryEligibility`, and `ResumeCandidate`.
+  - Extended `TaskNode` and `TaskReplayReport` so replay/recovery and node-level governance can be expressed explicitly.
+- `roku-execution-graph-builder`
+  - Injected recovery anchor, budget snapshot, deadline, capability snapshot, retry policy, and rerun policy defaults for emitted execution, approval, and validation nodes.
+  - Added scheduler support for replay-ready nodes and resume candidates.
+- `roku-orchestrator`
+  - Added shared replay-state helpers for replayed-state derivation, consistency classification, and task-level recovery eligibility.
+- `roku-runtime-service`
+  - Replaced ad hoc replay reporting with a shared recovery-analysis path used by `get_task_replay_report(...)` and `resume_task(...)` preflight.
+  - Extended replay tests to assert pending-approval/manual-resume and failed-task/auto-resume recovery signals.
+- `roku-state-store`
+  - Added a first `DispatchQueue` abstraction with in-memory publish, claim, ack, nack, lease renewal, and backpressure semantics.
+  - Added state-store dispatch tests covering requeue on nack, in-flight backpressure, and expired-lease recovery.
+- `docs/todo-list.md`
+  - Marked `GB-06`, `GB-09`, `SS-08`, and `SS-09` as done.
+
+### Verification Status
+
+- `cargo test -p roku-execution-graph-builder -p roku-orchestrator -p roku-supervisor-agent -p roku-runtime-service`: passed
+- `cargo test -p roku-agent-instance-factory -p roku-agent-runtime`: passed
+- `cargo test -p roku-state-store`: passed
+
+### Remaining Work
+
+- `RS-15` is only partially addressed; recovery analysis is shared now, but event-stream-first task reconstruction and partial rerun orchestration are not yet complete.
+- `OR-06` / `RS-16` cancellation, compensation, and timeout-recovery state flows are still missing.
+- The new dispatch abstraction is not yet wired into `roku-runtime-service` scheduling.
+
+### Next Recommended Steps
+
+1. Finish `RS-15` by moving from replay diagnostics/preflight into true event-stream-driven task reconstruction.
+2. Wire `DispatchQueue` into runtime dispatch and begin lease-aware worker coordination.
+3. Add cancellation / timeout recovery states and tests in `roku-orchestrator` and `roku-runtime-service`.

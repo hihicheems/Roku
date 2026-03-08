@@ -15,7 +15,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
-use roku_common_types::{NodeId, TaskGraph, TaskNode};
+use roku_common_types::{
+	NodeId, RecoveryEligibility, RerunPolicy, ResumeCandidate, TaskGraph, TaskNode,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphScheduleError {
@@ -141,6 +143,41 @@ impl TaskGraphScheduler {
 			.all(|node| completed_ids.contains(&node.node_id.0)))
 	}
 
+	pub fn replay_ready_nodes(
+		&self,
+		graph: &TaskGraph,
+		completed: &[NodeId],
+	) -> Result<Vec<TaskNode>, GraphScheduleError> {
+		Ok(self
+			.ready_nodes(graph, completed)?
+			.into_iter()
+			.filter(|node| !matches!(node.rerun_policy, RerunPolicy::Never))
+			.collect())
+	}
+
+	pub fn resume_candidates(
+		&self,
+		graph: &TaskGraph,
+		completed: &[NodeId],
+	) -> Result<Vec<ResumeCandidate>, GraphScheduleError> {
+		Ok(self
+			.replay_ready_nodes(graph, completed)?
+			.into_iter()
+			.map(|node| {
+				let eligibility = recovery_eligibility_for_node(&node);
+				ResumeCandidate {
+					node_id: node.node_id,
+					kind: node.kind,
+					resume_point_id: node.recovery_anchor.resume_point_id,
+					eligibility,
+					deadline_ms: node.deadline_ms,
+					capability_requirements: node.capability_requirements_snapshot,
+					rerun_policy: node.rerun_policy,
+				}
+			})
+			.collect())
+	}
+
 	fn ensure_valid(&self, graph: &TaskGraph) -> Result<(), GraphScheduleError> {
 		self.validate_edges(graph)?;
 		let _ = self.execution_layers(graph)?;
@@ -210,6 +247,16 @@ fn outgoing_map(graph: &TaskGraph) -> Result<HashMap<String, Vec<String>>, Graph
 	Ok(outgoing)
 }
 
+fn recovery_eligibility_for_node(node: &TaskNode) -> RecoveryEligibility {
+	if node.recovery_anchor.requires_manual_resume
+		|| matches!(node.rerun_policy, RerunPolicy::RequiresManualResume)
+	{
+		RecoveryEligibility::RequiresManualResume
+	} else {
+		RecoveryEligibility::ResumeReady
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -223,6 +270,23 @@ mod tests {
 			capabilities: Vec::new(),
 			join_policy: roku_common_types::JoinPolicy::AllParents,
 			aggregation_mode: roku_common_types::AggregationMode::CollectAll,
+			recovery_anchor: roku_common_types::NodeRecoveryAnchor {
+				resume_point_id: format!("resume:{id}"),
+				requires_manual_resume: matches!(kind, TaskNodeKind::Approval),
+				allows_partial_rerun: matches!(kind, TaskNodeKind::Execution),
+			},
+			budget_snapshot: roku_common_types::NodeBudgetSnapshot {
+				token_budget: 1_000,
+				time_budget_ms: 1_000,
+			},
+			deadline_ms: 1_000,
+			capability_requirements_snapshot: Vec::new(),
+			retry_policy: roku_common_types::RetryPolicy::default(),
+			rerun_policy: if matches!(kind, TaskNodeKind::Approval) {
+				roku_common_types::RerunPolicy::RequiresManualResume
+			} else {
+				roku_common_types::RerunPolicy::SafeToRerun
+			},
 		}
 	}
 
@@ -316,5 +380,24 @@ mod tests {
 			.execution_layers(&graph)
 			.expect_err("cyclic graph should be rejected");
 		assert_eq!(error, GraphScheduleError::CycleDetected);
+	}
+
+	#[test]
+	fn resume_candidates_reflect_manual_resume_policy() {
+		let scheduler = TaskGraphScheduler;
+		let graph = TaskGraph {
+			task_id: TaskId("task-replay".to_string()),
+			nodes: vec![node("approval", TaskNodeKind::Approval)],
+			edges: Vec::new(),
+		};
+
+		let candidates = scheduler
+			.resume_candidates(&graph, &[])
+			.expect("resume candidates should resolve");
+		assert_eq!(candidates.len(), 1);
+		assert_eq!(
+			candidates[0].eligibility,
+			RecoveryEligibility::RequiresManualResume
+		);
 	}
 }

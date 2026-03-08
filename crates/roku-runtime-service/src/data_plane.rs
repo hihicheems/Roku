@@ -14,10 +14,14 @@
 
 use roku_common_types::{
 	AggregationMode, ApprovalTicket, Artifact, ArtifactId, ExperimentMetric, ExperimentRun,
-	JoinPolicy, NodeId, NodeResultSet, ResultEnvelope, RuntimeError, Task, TaskEvent, TaskId,
-	TaskNode, TaskReplayReport, TaskState, ValidationEvidenceSet,
+	JoinPolicy, NodeId, NodeResultSet, RecoveryEligibility, ReplayConsistencyStatus,
+	ResultEnvelope, RuntimeError, Task, TaskEvent, TaskId, TaskNode, TaskReplayCursor,
+	TaskReplayReport, TaskState, ValidationEvidenceSet,
 };
-use roku_orchestrator::is_valid_transition;
+use roku_execution_graph_builder::TaskGraphScheduler;
+use roku_orchestrator::{
+	recovery_eligibility_for_state, replay_consistency_status, replayed_state,
+};
 
 use crate::RuntimeService;
 
@@ -45,8 +49,8 @@ impl RuntimeService {
 		let Some(task) = self.get_task(task_id)? else {
 			return Ok(None);
 		};
-		let events = self.list_task_events(task_id)?;
-		Ok(Some(build_replay_report(task, events)))
+		let analysis = self.analyze_task_recovery(&task)?;
+		Ok(Some(build_replay_report(task, analysis)))
 	}
 
 	pub fn list_artifacts(&self, task_id: &TaskId) -> Result<Vec<Artifact>, RuntimeError> {
@@ -380,6 +384,72 @@ impl RuntimeService {
 			.map_err(|_| RuntimeError::new("runtime state lock poisoned"))
 	}
 
+	pub(super) fn analyze_task_recovery(
+		&self,
+		task: &Task,
+	) -> Result<TaskRecoveryAnalysis, RuntimeError> {
+		let events = self.list_task_events(&task.task_id)?;
+		let replayed_state = replayed_state(task.state, &events);
+		let consistency_status = replay_consistency_status(task.state, &events);
+		let transitions_valid = !matches!(
+			consistency_status,
+			ReplayConsistencyStatus::InvalidTransitions
+		);
+		let chain_consistent = !matches!(
+			consistency_status,
+			ReplayConsistencyStatus::BrokenTransitionChain
+		);
+		let snapshot_matches_replay = !matches!(
+			consistency_status,
+			ReplayConsistencyStatus::SnapshotMismatch
+		);
+
+		let (resume_candidates, ready_nodes, is_complete) = if let Some(graph) = &task.graph {
+			let scheduler = TaskGraphScheduler;
+			let ready_nodes = scheduler
+				.replay_ready_nodes(graph, &task.completed_nodes)
+				.map_err(|error| RuntimeError::new(error.to_string()))?;
+			let resume_candidates = scheduler
+				.resume_candidates(graph, &task.completed_nodes)
+				.map_err(|error| RuntimeError::new(error.to_string()))?;
+			let is_complete = scheduler
+				.is_complete(graph, &task.completed_nodes)
+				.map_err(|error| RuntimeError::new(error.to_string()))?;
+			(resume_candidates, ready_nodes, is_complete)
+		} else {
+			(Vec::new(), Vec::new(), false)
+		};
+
+		let mut recovery_eligibility = recovery_eligibility_for_state(task.state);
+		if matches!(recovery_eligibility, RecoveryEligibility::ResumeReady) {
+			recovery_eligibility = if is_complete {
+				RecoveryEligibility::FinalizeReady
+			} else if resume_candidates.is_empty() && ready_nodes.is_empty() {
+				RecoveryEligibility::Blocked
+			} else if resume_candidates
+				.iter()
+				.any(|candidate| candidate.eligibility == RecoveryEligibility::ResumeReady)
+			{
+				RecoveryEligibility::ResumeReady
+			} else {
+				RecoveryEligibility::RequiresManualResume
+			};
+		}
+
+		Ok(TaskRecoveryAnalysis {
+			events,
+			replayed_state,
+			transitions_valid,
+			chain_consistent,
+			snapshot_matches_replay,
+			consistency_status,
+			recovery_eligibility,
+			resume_candidates,
+			ready_nodes,
+			is_complete,
+		})
+	}
+
 	fn resolve_branch_results(
 		&self,
 		task: &Task,
@@ -441,38 +511,39 @@ fn apply_aggregation_mode(
 	}
 }
 
-fn build_replay_report(task: Task, events: Vec<TaskEvent>) -> TaskReplayReport {
-	let replayed_state = events.last().map(|event| event.to).unwrap_or(task.state);
-	let transitions_valid = events
-		.iter()
-		.all(|event| is_valid_transition(event.from, event.to));
-	let chain_consistent = events
-		.windows(2)
-		.all(|window| window[0].to == window[1].from);
-
+fn build_replay_report(task: Task, analysis: TaskRecoveryAnalysis) -> TaskReplayReport {
 	TaskReplayReport {
 		task_id: task.task_id,
 		persisted_state: task.state,
-		replayed_state,
-		event_count: events.len(),
-		transitions_valid,
-		chain_consistent,
-		snapshot_matches_replay: task.state == replayed_state,
-		recoverable: is_recoverable_state(task.state),
-		events,
+		replayed_state: analysis.replayed_state,
+		event_count: analysis.events.len(),
+		transitions_valid: analysis.transitions_valid,
+		chain_consistent: analysis.chain_consistent,
+		snapshot_matches_replay: analysis.snapshot_matches_replay,
+		recoverable: !matches!(
+			analysis.recovery_eligibility,
+			RecoveryEligibility::Blocked | RecoveryEligibility::NotRecoverable
+		),
+		replay_cursor: TaskReplayCursor {
+			replayed_state: analysis.replayed_state,
+			event_count: analysis.events.len(),
+		},
+		consistency_status: analysis.consistency_status,
+		recovery_eligibility: analysis.recovery_eligibility,
+		resume_candidates: analysis.resume_candidates,
+		events: analysis.events,
 	}
 }
 
-fn is_recoverable_state(state: TaskState) -> bool {
-	matches!(
-		state,
-		TaskState::Planning
-			| TaskState::GraphBuilding
-			| TaskState::Delegating
-			| TaskState::Executing
-			| TaskState::WaitingApproval
-			| TaskState::Validating
-			| TaskState::Aggregating
-			| TaskState::Failed
-	)
+pub(super) struct TaskRecoveryAnalysis {
+	pub events: Vec<TaskEvent>,
+	pub replayed_state: TaskState,
+	pub transitions_valid: bool,
+	pub chain_consistent: bool,
+	pub snapshot_matches_replay: bool,
+	pub consistency_status: ReplayConsistencyStatus,
+	pub recovery_eligibility: RecoveryEligibility,
+	pub resume_candidates: Vec<roku_common_types::ResumeCandidate>,
+	pub ready_nodes: Vec<TaskNode>,
+	pub is_complete: bool,
 }

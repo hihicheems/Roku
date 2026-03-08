@@ -15,8 +15,9 @@
 use roku_agent_runtime::{GenericAgentRuntime, RuntimeWorker};
 use roku_common_types::{
 	AggregationMode, ApprovalDecision, ApprovalId, EvidenceItem, JoinPolicy, NodeId,
-	PlanningModeHint, RequestEnvelope, RequestId, ResponseStatus, ResultEnvelope, ResultStatus,
-	Task, TaskEdge, TaskGraph, TaskId, TaskNode, TaskNodeKind, TaskState,
+	PlanningModeHint, RecoveryEligibility, RequestEnvelope, RequestId, ResponseStatus,
+	ResultEnvelope, ResultStatus, Task, TaskEdge, TaskGraph, TaskId, TaskNode, TaskNodeKind,
+	TaskState,
 };
 use roku_supervisor_agent::DefaultSupervisorAgent;
 
@@ -432,6 +433,15 @@ fn service_marks_waiting_approval_replay_report_as_recoverable() {
 	assert!(report.chain_consistent);
 	assert!(report.snapshot_matches_replay);
 	assert!(report.recoverable);
+	assert_eq!(
+		report.recovery_eligibility,
+		RecoveryEligibility::PendingApproval
+	);
+	assert_eq!(report.resume_candidates.len(), 1);
+	assert_eq!(
+		report.resume_candidates[0].eligibility,
+		RecoveryEligibility::RequiresManualResume
+	);
 }
 
 #[test]
@@ -441,6 +451,20 @@ fn service_resume_task_recovers_failed_execution() {
 		.execute_with_mode(sample_request(), RunMode::CapabilityDenied)
 		.expect("runtime service should fail before resume");
 	assert_eq!(response.status, ResponseStatus::Failed);
+	let report = service
+		.get_task_replay_report(&TaskId("task-req-1".to_string()))
+		.expect("replay report lookup should succeed")
+		.expect("replay report should exist");
+	assert_eq!(
+		report.recovery_eligibility,
+		RecoveryEligibility::ResumeReady
+	);
+	assert!(
+		report
+			.resume_candidates
+			.iter()
+			.any(|candidate| { candidate.eligibility == RecoveryEligibility::ResumeReady })
+	);
 
 	let resumed = service
 		.resume_task(&TaskId("task-req-1".to_string()))
@@ -536,6 +560,7 @@ fn validation_collects_results_through_approval_nodes() {
 					capabilities: Vec::new(),
 					join_policy: JoinPolicy::AllParents,
 					aggregation_mode: AggregationMode::CollectAll,
+					..TaskNode::default()
 				},
 				TaskNode {
 					node_id: NodeId("extract-approval".to_string()),
@@ -544,6 +569,7 @@ fn validation_collects_results_through_approval_nodes() {
 					capabilities: Vec::new(),
 					join_policy: JoinPolicy::AllParents,
 					aggregation_mode: AggregationMode::CollectAll,
+					..TaskNode::default()
 				},
 				TaskNode {
 					node_id: NodeId("validate".to_string()),
@@ -552,6 +578,7 @@ fn validation_collects_results_through_approval_nodes() {
 					capabilities: Vec::new(),
 					join_policy: JoinPolicy::AllParents,
 					aggregation_mode: AggregationMode::CollectAll,
+					..TaskNode::default()
 				},
 			],
 			edges: vec![
@@ -650,6 +677,7 @@ fn node_result_set_applies_highest_confidence_aggregation() {
 					capabilities: Vec::new(),
 					join_policy: JoinPolicy::AllParents,
 					aggregation_mode: AggregationMode::CollectAll,
+					..TaskNode::default()
 				},
 				TaskNode {
 					node_id: NodeId("branch-b".to_string()),
@@ -658,6 +686,7 @@ fn node_result_set_applies_highest_confidence_aggregation() {
 					capabilities: Vec::new(),
 					join_policy: JoinPolicy::AllParents,
 					aggregation_mode: AggregationMode::CollectAll,
+					..TaskNode::default()
 				},
 				TaskNode {
 					node_id: NodeId("aggregate".to_string()),
@@ -666,6 +695,7 @@ fn node_result_set_applies_highest_confidence_aggregation() {
 					capabilities: Vec::new(),
 					join_policy: JoinPolicy::AllParents,
 					aggregation_mode: AggregationMode::HighestConfidence,
+					..TaskNode::default()
 				},
 			],
 			edges: vec![
@@ -743,6 +773,7 @@ fn node_result_set_enforces_quorum_policy() {
 					capabilities: Vec::new(),
 					join_policy: JoinPolicy::AllParents,
 					aggregation_mode: AggregationMode::CollectAll,
+					..TaskNode::default()
 				},
 				TaskNode {
 					node_id: NodeId("branch-b".to_string()),
@@ -751,6 +782,7 @@ fn node_result_set_enforces_quorum_policy() {
 					capabilities: Vec::new(),
 					join_policy: JoinPolicy::AllParents,
 					aggregation_mode: AggregationMode::CollectAll,
+					..TaskNode::default()
 				},
 				TaskNode {
 					node_id: NodeId("aggregate".to_string()),
@@ -759,6 +791,7 @@ fn node_result_set_enforces_quorum_policy() {
 					capabilities: Vec::new(),
 					join_policy: JoinPolicy::Quorum(2),
 					aggregation_mode: AggregationMode::CollectAll,
+					..TaskNode::default()
 				},
 			],
 			edges: vec![

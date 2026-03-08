@@ -124,6 +124,7 @@ mod tests {
 			capabilities: vec![capability.to_string()],
 			join_policy: JoinPolicy::default(),
 			aggregation_mode: AggregationMode::default(),
+			..TaskNode::default()
 		}
 	}
 
@@ -303,6 +304,7 @@ mod tests {
 			capabilities: vec!["tool.invoke".to_string()],
 			join_policy: JoinPolicy::default(),
 			aggregation_mode: AggregationMode::default(),
+			..TaskNode::default()
 		};
 		let spec = spec_with_capabilities(vec!["tool.invoke"]);
 
@@ -363,6 +365,7 @@ So, I'll output: "星期日""#
 			capabilities: vec!["tool.invoke".to_string()],
 			join_policy: JoinPolicy::default(),
 			aggregation_mode: AggregationMode::default(),
+			..TaskNode::default()
 		};
 		let spec = spec_with_capabilities(vec!["tool.invoke"]);
 
