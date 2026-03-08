@@ -1,5 +1,44 @@
 # Roku Agent Dev Log
 
+## 2026-03-09 - Session Milestone (Phase 28)
+
+### Completed Modules
+
+- `roku-skill-registry`
+  - Added a dedicated workspace crate with file-backed skill installation, metadata persistence, installed-skill listing, GitHub/raw/zip source resolution, and prompt-context rendering for explicitly referenced installed skills.
+- `roku-agent-runtime`
+  - Added a governed `skill-worker` plus deterministic `skill.install` tool so skill installation now runs through the normal capability/tool/runtime chain instead of a special side path.
+  - Injected installed skill context into live LLM prompts only when the user explicitly references an installed skill by name.
+- `roku-task-planner`
+  - Added a deterministic fast path for `install skill from <url>` style requests so both adaptive and LLM-backed planning produce a single install step with `skill.install` capability.
+- `roku-cmd`
+  - Added `ROKU_SKILL_ROOT` support, defaulted installed skills to project-local `.roku/skills`, ensured the directory is created during bootstrap, and logged the live/stateful skill-registry backend path.
+- `roku-runtime-service`
+  - Added regression coverage proving a runtime request can install a skill and surface the install-success message as the final user-visible response.
+
+### Verification Status
+
+- `just fmt`: passed
+- `just lint`: passed
+- `cargo test -p roku-skill-registry -p roku-runtime-service -p roku-task-planner -p roku-agent-runtime -p roku-cmd`: passed
+  - `roku-skill-registry`: 8 passed
+  - `roku-runtime-service`: 38 passed
+  - `roku-task-planner`: 11 passed
+  - `roku-agent-runtime`: 15 passed
+  - `roku-cmd`: 13 passed
+
+### Remaining Work
+
+- Skill install currently covers the minimal vertical slice, but CLI-native `skill list/install/show` operator commands are still absent.
+- Installed skills can now be referenced deterministically in later prompts, but there is not yet any broader skill discovery, version policy, dependency management, or rollout governance.
+- `TR-10` remains only partially complete because MCP discovery and version-governed tool cataloging are still future work.
+
+### Next Recommended Steps
+
+1. Add CLI/operator surfaces for `skill list` and direct install inspection so debugging does not depend only on runtime requests.
+2. Extend `roku-skill-registry` with validation/smoke-test hooks before publish so bad skill packages fail earlier.
+3. Continue `TR-10` toward tool-catalog governance and MCP-backed discovery once the minimal skill lifecycle is stable.
+
 ## 2026-03-08 - Session Milestone (Phase 27)
 
 ### Completed Modules
