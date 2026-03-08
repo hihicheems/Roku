@@ -21,7 +21,16 @@ load_env_file() {
 }
 
 services() {
-	printf '%s\n' "api-gateway" "telegram-bot"
+	printf '%s\n' "telegram-bot"
+}
+
+optional_interfaces() {
+	printf '%s\n' "api-gateway"
+}
+
+managed_services() {
+	services
+	optional_interfaces
 }
 
 embedded_components() {
@@ -40,7 +49,7 @@ embedded_components() {
 service_exists() {
 	local target="${1:-}"
 	local service
-	for service in $(services); do
+	for service in $(managed_services); do
 		if [[ "$service" == "$target" ]]; then
 			return 0
 		fi
@@ -508,14 +517,20 @@ doctor() {
 	for service in $(services); do
 		service_row "$service"
 	done
-		echo
+	echo
+	printf '%s\n' 'Optional Interfaces'
+	printf '  %-4s %-16s %-5s %-10s %-8s %-8s %-48s %s\n' 'MARK' 'NAME' 'READY' 'STATUS' 'PID' 'UPTIME' 'DETAILS' 'LOG'
+	for service in $(optional_interfaces); do
+		service_row "$service"
+	done
+	echo
 	printf '%s\n' 'Embedded Runtime Components'
 	printf '  %-4s %-30s %-12s %s\n' 'MARK' 'NAME' 'STATUS' 'DETAILS'
 	local component
 	for component in $(embedded_components); do
 		embedded_component_row "$component"
 	done
-		echo
+	echo
 	printf '%s\n' 'Integrations'
 	printf '  %-4s %-20s %-12s %s\n' 'MARK' 'NAME' 'STATUS' 'DETAILS'
 	local database_url
@@ -536,13 +551,13 @@ doctor() {
 		integration_row 'PostgreSQL' 'Unconfigured' 'runtime falls back to in-memory state stores'
 	fi
 	integration_row 'API bind address' 'Configured' "$(api_gateway_bind_addr)"
-		echo
+	echo
 	printf '%s\n' 'Observability Logs'
 	printf '  %-4s %-24s %-12s %s\n' 'MARK' 'COMPONENT' 'STATUS' 'LATEST LOG'
 	for component in roku-cmd roku-connectors-telegram roku-runtime-service roku-llm-adapter; do
 		log_row "$component"
 	done
-		echo
+	echo
 	printf '%s\n' 'Endpoints'
 	printf '  %-4s %-20s %-12s %s\n' 'MARK' 'NAME' 'STATUS' 'DETAILS'
 	local health_url probe
@@ -592,7 +607,7 @@ main() {
 		;;
 	stop-all)
 		local service
-		for service in $(services); do
+		for service in $(managed_services); do
 			stop_service "$service"
 		done
 		;;
@@ -600,7 +615,7 @@ main() {
 		doctor
 		;;
 	list)
-		services
+		managed_services
 		;;
 	''|help|--help|-h)
 		usage

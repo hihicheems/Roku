@@ -1283,6 +1283,50 @@
 2. Revisit structured logging/export sinks now that the Telegram response surface is richer and includes progress receipts.
 3. Expand Telegram UX further only if a stronger progress protocol or artifact actions are needed.
 
+## 2026-03-08 - Session Milestone (Phase 35)
+
+### Completed Modules
+
+- `roku-llm-adapter`
+  - Added explicit OpenRouter `reasoning.exclude=true` request shaping so reasoning payloads are no longer eligible to surface as end-user answers.
+  - Tightened response parsing to accept only assistant `content`, `text`, or `refusal` payloads and reject reasoning-only responses.
+  - Reclassified unreadable success-body payloads as retryable provider failures so malformed provider responses now flow through the existing resilience policy.
+- `roku-agent-runtime`
+  - Added deterministic runtime-grounded replies for current date / weekday / time questions, so short temporal queries no longer depend on model compliance.
+  - Added final-reply sanitization for the generic worker to collapse prompt-leak / meta-analysis outputs into a user-facing answer before they reach Telegram or session memory.
+  - Added runtime logging for deterministic answer paths and output sanitization events.
+- `scripts/dev-services.sh`
+  - Reframed `api-gateway` as an optional interface instead of a default always-on dev service.
+  - Kept `telegram-bot` as the default long-running application service for `start-all`, while retaining manual `api-gateway` control and doctor visibility.
+- `docs/todo-list.md`
+  - Added roadmap items for OpenRouter reasoning suppression, final-reply sanitization, optional interface topology, and a remaining multi-turn Telegram regression harness.
+
+### Verification Status
+
+- `just fmt`: failed because the recipe shell exited non-zero in this environment; formatting was completed with `cargo fmt --all` instead
+- `cargo test -p roku-llm-adapter -p roku-agent-runtime`: passed
+- `cargo check --workspace`: passed
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed
+- `bash -n scripts/dev-services.sh`: passed
+- `./scripts/dev-services.sh doctor`: passed
+- Live smoke:
+  - `cargo run -p roku-cmd -- live-once --planning-mode ReAct '今天周几？'`
+  - Result: `星期日。`
+  - `cargo run -p roku-cmd -- live-once --planning-mode ReAct '沙县小吃是什么？'`
+  - Result: concise knowledge answer about `沙县小吃`
+
+### Remaining Work
+
+- Telegram still lacks a dedicated multi-turn regression harness that reproduces session-memory contamination after planning-mode switches.
+- PostgreSQL backends for task / event / approval / result repositories remain incomplete.
+- Unified coding-provider routing through `roku-llm-adapter` remains open.
+
+### Next Recommended Steps
+
+1. Close `TG-16` with a session-level regression harness that exercises `/react` + follow-up temporal and knowledge questions end-to-end.
+2. Continue `SS-05` / `SS-06` so task, event, approval, and result persistence move onto PostgreSQL.
+3. Close `LLM-08` so coding-provider selection uses the same risk / budget / resilience path as planning and runtime generation.
+
 ## 2026-03-08 - Session Milestone (Phase 34)
 
 ### Completed Modules
