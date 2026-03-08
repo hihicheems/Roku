@@ -356,6 +356,7 @@
 | RS-15 | 增加基于持久化事件的 replay / recovery / partial rerun 主链路 | §8 ResumePoint / §20 replay | TODO |
 | RS-16 | 增加 cancellation / compensation / timeout recovery 主链路 | §8 状态机 / §22 风险缓解 | TODO |
 | RS-17 | 暴露 `task snapshot` 与 `task event timeline` 查询接口，为后续 replay / CLI 运维命令提供 recovery 基线 | §8 ResumePoint / §20 replay | DONE |
+| RS-18 | 增加 `resume_task` 入口，基于 persisted task snapshot + graph + completed nodes 恢复可继续执行的任务，并对等待审批态返回明确挂起响应 | §8 ResumePoint / §15.3 人审闸门 | DONE |
 
 ## roku-cmd
 
@@ -364,7 +365,7 @@
 | CMD-01 | 提供最小 CLI 执行入口并复用 `roku-runtime-service` | §4.1 Connector / CLI | DONE |
 | CMD-02 | 提供 `Normal` / `MissingEvidence` / `CapabilityDenied` / `ApprovalRequired` / `RetryExhausted` 等 run mode | 测试与演练辅助 | DONE |
 | CMD-03 | 增加查询 task / approval / artifact / experiment 的 CLI 子命令 | 运维与诊断 | DONE |
-| CMD-04 | 增加 artifact download / approval decision / resume 等运维命令 | 运行期治理 | TODO |
+| CMD-04 | 增加 artifact download / approval decision / resume 等运维命令 | 运行期治理 | DONE |
 | CMD-05 | 增加配置文件 / 环境变量 / profile 加载能力 | 工程化 | DONE |
 | CMD-06 | 增加 `live-once` / `telegram-bot` 命令，打通 live model 与 Telegram 入口 | §4.1 Connector / CLI | DONE |
 | CMD-07 | 增加日志目录、滚动策略、stderr 开关等环境变量配置并安装全局 logger | §16 可观测性 / 工程化 | DONE |

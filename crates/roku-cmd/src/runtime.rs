@@ -256,6 +256,16 @@ pub(crate) fn replay_task_from_env(task_id: &str) -> Result<String, CommandError
 	.map_err(|error| CommandError::OutputEncoding(error.to_string()))
 }
 
+pub(crate) fn resume_task_from_env(task_id: &str) -> Result<String, CommandError> {
+	let service = build_live_runtime_service_from_env()?;
+	let response = service
+		.resume_task(&TaskId(task_id.to_string()))
+		.map_err(CommandError::Runtime)?;
+
+	serde_json::to_string_pretty(&response)
+		.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+}
+
 pub(crate) fn decide_approval_from_env(
 	approval_id: &str,
 	decision: ApprovalDecision,

@@ -15,7 +15,7 @@
 use roku_agent_runtime::AgentWorker;
 use roku_common_types::{
 	ErrorClass, EvidenceItem, ResponseEnvelope, ResponseStatus, ResultStatus, RuntimeError, Task,
-	TaskNode, TaskNodeKind, TaskState,
+	TaskId, TaskNode, TaskNodeKind, TaskState,
 };
 use roku_execution_graph_builder::TaskGraphScheduler;
 use roku_observability::{AuditCorrelation, AuditRecord};
@@ -72,23 +72,62 @@ impl RuntimeService {
 			}
 		}
 
-		self.record_transition(task, TaskState::Aggregating, "aggregate")?;
-		self.record_transition(task, TaskState::Succeeded, "done")?;
-		let result_count = self.list_results(&task.task_id)?.len();
-		self.complete_experiment_run(task, result_count)?;
-		let artifacts = self
-			.list_artifacts(&task.task_id)?
-			.into_iter()
-			.map(|artifact| artifact.uri)
-			.collect();
-		self.save_task(task.clone())?;
+		self.finalize_task(task, request_id)
+	}
 
-		Ok(ResponseEnvelope {
-			request_id,
-			status: ResponseStatus::Succeeded,
-			message: success_message(task.last_result.as_ref()),
-			artifacts,
-		})
+	pub fn resume_task(&self, task_id: &TaskId) -> Result<ResponseEnvelope, RuntimeError> {
+		let mut task = self
+			.get_task(task_id)?
+			.ok_or_else(|| RuntimeError::new(format!("task not found: {}", task_id.0)))?;
+
+		match task.state {
+			TaskState::Succeeded | TaskState::Cancelled | TaskState::DeadLetter => {
+				return Err(RuntimeError::new(format!(
+					"task is not resumable from state {:?}",
+					task.state
+				)));
+			}
+			TaskState::WaitingApproval => {
+				let approval_id = task.pending_approval_id.clone().ok_or_else(|| {
+					RuntimeError::new("task is waiting for approval but no approval id is stored")
+				})?;
+				return Ok(ResponseEnvelope {
+					request_id: task.request_id.clone(),
+					status: ResponseStatus::PendingApproval,
+					message: format!("approval required for {}", approval_id.0),
+					artifacts: vec![format!("approval://{}", approval_id.0)],
+				});
+			}
+			TaskState::Aggregating => {
+				let request_id = task.request_id.clone();
+				return self.finalize_task(&mut task, request_id);
+			}
+			_ => {}
+		}
+
+		let graph = task
+			.graph
+			.clone()
+			.ok_or_else(|| RuntimeError::new("task graph is missing"))?;
+		let scheduler = TaskGraphScheduler;
+		let is_complete = scheduler
+			.is_complete(&graph, &task.completed_nodes)
+			.map_err(|error| RuntimeError::new(error.to_string()))?;
+		let target_state = if is_complete {
+			TaskState::Validating
+		} else {
+			let ready_nodes = scheduler
+				.ready_nodes(&graph, &task.completed_nodes)
+				.map_err(|error| RuntimeError::new(error.to_string()))?;
+			if ready_nodes.is_empty() {
+				return Err(RuntimeError::new(
+					"task graph has no ready nodes and cannot be resumed",
+				));
+			}
+			classify_resume_state(&ready_nodes)
+		};
+		self.normalize_task_for_resume(&mut task, target_state)?;
+		self.process_task(&mut task, RunMode::Normal)
 	}
 
 	pub(super) fn fail_task(
@@ -299,4 +338,84 @@ impl RuntimeService {
 		self.mark_node_completed(task, node);
 		Ok(())
 	}
+
+	fn finalize_task(
+		&self,
+		task: &mut Task,
+		request_id: roku_common_types::RequestId,
+	) -> Result<ResponseEnvelope, RuntimeError> {
+		if task.state != TaskState::Aggregating {
+			self.record_transition(task, TaskState::Aggregating, "aggregate")?;
+		}
+		self.record_transition(task, TaskState::Succeeded, "done")?;
+		let result_count = self.list_results(&task.task_id)?.len();
+		self.complete_experiment_run(task, result_count)?;
+		let artifacts = self
+			.list_artifacts(&task.task_id)?
+			.into_iter()
+			.map(|artifact| artifact.uri)
+			.collect();
+		self.save_task(task.clone())?;
+
+		Ok(ResponseEnvelope {
+			request_id,
+			status: ResponseStatus::Succeeded,
+			message: success_message(task.last_result.as_ref()),
+			artifacts,
+		})
+	}
+
+	fn normalize_task_for_resume(
+		&self,
+		task: &mut Task,
+		target_state: TaskState,
+	) -> Result<(), RuntimeError> {
+		for next_state in resume_transition_path(task.state, target_state)? {
+			self.record_transition(task, next_state, "resume")?;
+		}
+		Ok(())
+	}
+}
+
+fn classify_resume_state(ready_nodes: &[TaskNode]) -> TaskState {
+	if ready_nodes
+		.iter()
+		.any(|node| matches!(node.kind, TaskNodeKind::Aggregation))
+	{
+		TaskState::Validating
+	} else {
+		TaskState::Executing
+	}
+}
+
+fn resume_transition_path(
+	current_state: TaskState,
+	target_state: TaskState,
+) -> Result<Vec<TaskState>, RuntimeError> {
+	use TaskState::{
+		Aggregating, Delegating, Executing, Failed, GraphBuilding, Planning, Validating,
+	};
+
+	let path = match (current_state, target_state) {
+		(state, target) if state == target => Vec::new(),
+		(Failed, Executing) => vec![Planning, GraphBuilding, Delegating, Executing],
+		(Failed, Validating) => vec![Planning, GraphBuilding, Delegating, Executing, Validating],
+		(Planning, Executing) => vec![GraphBuilding, Delegating, Executing],
+		(Planning, Validating) => vec![GraphBuilding, Delegating, Executing, Validating],
+		(GraphBuilding, Executing) => vec![Delegating, Executing],
+		(GraphBuilding, Validating) => vec![Delegating, Executing, Validating],
+		(Delegating, Executing) => vec![Executing],
+		(Delegating, Validating) => vec![Executing, Validating],
+		(Executing, Validating) => vec![Validating],
+		(Validating, Executing) => vec![Executing],
+		(Aggregating, Aggregating) => Vec::new(),
+		_ => {
+			return Err(RuntimeError::new(format!(
+				"task cannot be resumed from state {:?} toward {:?}",
+				current_state, target_state
+			)));
+		}
+	};
+
+	Ok(path)
 }
