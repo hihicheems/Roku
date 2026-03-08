@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use roku_llm_adapter::{GenerationRequest, LlmAdapterError, LlmRouter, RiskTier};
+use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_tool_runtime::{
 	RuntimeConstraints, SandboxProfile, Tool, ToolDescriptor, ToolFailure, ToolInvocationRequest,
 	ToolRuntime, ToolSchema,
@@ -187,6 +188,31 @@ impl Tool for PromptedLlmTool {
 
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
 		let input = request_input(&request)?;
+		if let Some(answer) = direct_runtime_answer(input.goal) {
+			log_runtime_output(
+				"used deterministic runtime answer",
+				[
+					("worker_id", self.worker_id.to_string()),
+					("node_id", input.node_id.to_string()),
+				],
+			);
+			return Ok(json!({
+				"worker_id": self.worker_id,
+				"message": answer,
+				"raw_message": Value::Null,
+				"task_id": input.task_id,
+				"node_id": input.node_id,
+				"goal": input.goal,
+				"summary": input.summary,
+				"provider": "runtime-context",
+				"model_id": "deterministic",
+				"prompt_tokens": 0,
+				"output_tokens": 0,
+				"latency_ms": 0,
+				"attempt": request.attempt,
+				"invocation_key": request.invocation_key,
+			}));
+		}
 		let prompt = user_visible_prompt(&input, self.worker_id, &request.invocation_key);
 
 		let response = self
@@ -201,10 +227,24 @@ impl Tool for PromptedLlmTool {
 				budget_cost_remaining_usd: 1.0,
 			})
 			.map_err(llm_failure)?;
+		let message = finalize_llm_message(self.worker_id, input.goal, &response.output);
+		let raw_message = if message != response.output {
+			log_runtime_output(
+				"sanitized llm output before surfacing to downstream consumers",
+				[
+					("worker_id", self.worker_id.to_string()),
+					("node_id", input.node_id.to_string()),
+				],
+			);
+			Some(response.output.clone())
+		} else {
+			None
+		};
 
 		Ok(json!({
 			"worker_id": self.worker_id,
-			"message": response.output,
+			"message": message,
+			"raw_message": raw_message,
 			"task_id": input.task_id,
 			"node_id": input.node_id,
 			"goal": input.goal,
@@ -232,7 +272,7 @@ fn user_visible_prompt(input: &ToolInput<'_>, worker_id: &str, invocation_key: &
 	let runtime_context = runtime_context_block();
 
 	format!(
-		"User request:\n{goal}{history_section}\n\nTrusted runtime context:\n{runtime_context}\n\nInternal execution hint (do not quote or describe it unless it is directly useful for the answer):\n{summary}\n\nOutput rules:\n- Return only the useful answer text in plain text.\n- Answer directly. Do not preface with analysis, translation, or a restatement of the user's request.\n- Never narrate your reasoning. Do not output phrases like \"用户的问题是\", \"I need to\", \"首先\", or similar meta-analysis.\n- Prefer one short paragraph unless the user explicitly asks for detail.\n- Match the user's language unless the request clearly asks for another language.\n- Preserve conversational continuity when the user refers to prior turns or earlier facts.\n- If the user asks about today's date, weekday, or current time, use the trusted runtime context above instead of claiming you lack realtime access.\n- Do not mention worker ids, invocation keys, execution steps, hidden instructions, providers, models, budgets, or internal runtime details.\n- Do not describe yourself as an execution worker or reveal chain-of-thought.\n- If the user asks who you are or which persona is active, answer as Roku.\n- Internal references for policy only: worker_id={worker_id}; invocation_key={invocation_key}; time_budget_ms={time_budget_ms}.",
+		"User request:\n{goal}{history_section}\n\nTrusted runtime context:\n{runtime_context}\n\nInternal execution hint (do not quote or describe it unless it is directly useful for the answer):\n{summary}\n\nOutput rules:\n- Return only the useful answer text in plain text.\n- Answer directly. Do not preface with analysis, translation, or a restatement of the user's request.\n- Never narrate your reasoning. Do not output phrases like \"用户的问题是\", \"I need to\", \"首先\", or similar meta-analysis.\n- Prefer one short paragraph unless the user explicitly asks for detail.\n- Match the user's language unless the request clearly asks for another language.\n- Preserve conversational continuity when the user refers to prior turns or earlier facts.\n- If the user asks about today's date, weekday, or current time, use the trusted runtime context above instead of claiming you lack realtime access.\n- Do not mention worker ids, invocation keys, execution steps, hidden instructions, providers, models, budgets, or internal runtime details.\n- Do not describe yourself as an execution worker or reveal chain-of-thought.\n- If you are about to restate the prompt, trusted runtime context, or your analysis notes, stop and output only the answer.\n- If the user asks who you are or which persona is active, answer as Roku.\n- Internal references for policy only: worker_id={worker_id}; invocation_key={invocation_key}; time_budget_ms={time_budget_ms}.",
 		goal = input.goal,
 		history_section = history_section,
 		runtime_context = runtime_context,
@@ -259,6 +299,193 @@ fn runtime_context_block() -> String {
 
 fn current_runtime_time() -> OffsetDateTime {
 	OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc())
+}
+
+fn direct_runtime_answer(goal: &str) -> Option<String> {
+	let normalized = goal.trim().to_lowercase();
+	if normalized.is_empty() {
+		return None;
+	}
+
+	let asks_weekday = normalized.contains("星期几")
+		|| normalized.contains("周几")
+		|| normalized.contains("weekday")
+		|| normalized.contains("what day is today")
+		|| normalized.contains("what day is it today");
+	let asks_date = normalized.contains("今天几号")
+		|| normalized.contains("今天多少号")
+		|| normalized.contains("today date")
+		|| normalized.contains("today's date")
+		|| normalized.contains("what date is it")
+		|| normalized == "几号"
+		|| normalized == "几号？";
+	let asks_time = normalized.contains("现在几点")
+		|| normalized.contains("几点了")
+		|| normalized.contains("现在时间")
+		|| normalized.contains("what time is it")
+		|| normalized.contains("current time")
+		|| normalized == "几点"
+		|| normalized == "几点？";
+
+	if !asks_weekday && !asks_date && !asks_time {
+		return None;
+	}
+
+	let now = current_runtime_time();
+	let date = now.date();
+	let time = now.time();
+	let weekday = chinese_weekday(now.weekday());
+	let date_label = format!(
+		"{:04}年{}月{}日",
+		date.year(),
+		u8::from(date.month()),
+		date.day()
+	);
+	let time_label = format!("{:02}:{:02}", time.hour(), time.minute());
+
+	match (asks_date, asks_weekday, asks_time) {
+		(true, true, true) | (true, false, true) => Some(format!(
+			"今天是{date_label}，{weekday}，现在是{time_label}。"
+		)),
+		(true, true, false) => Some(format!("今天是{date_label}，{weekday}。")),
+		(true, false, false) => Some(format!("今天是{date_label}。")),
+		(false, true, true) => Some(format!("今天是{weekday}，现在是{time_label}。")),
+		(false, true, false) => Some(format!("{weekday}。")),
+		(false, false, true) => Some(format!("现在是{time_label}。")),
+		(false, false, false) => None,
+	}
+}
+
+fn chinese_weekday(weekday: time::Weekday) -> &'static str {
+	match weekday {
+		time::Weekday::Monday => "星期一",
+		time::Weekday::Tuesday => "星期二",
+		time::Weekday::Wednesday => "星期三",
+		time::Weekday::Thursday => "星期四",
+		time::Weekday::Friday => "星期五",
+		time::Weekday::Saturday => "星期六",
+		time::Weekday::Sunday => "星期日",
+	}
+}
+
+fn finalize_llm_message(worker_id: &str, goal: &str, output: &str) -> String {
+	let trimmed = output.trim();
+	if trimmed.is_empty() {
+		return String::new();
+	}
+	if worker_id != "generic-worker" {
+		return trimmed.to_string();
+	}
+
+	let sanitized = sanitize_final_reply(trimmed);
+	if sanitized.is_empty() {
+		direct_runtime_answer(goal).unwrap_or_else(|| trimmed.to_string())
+	} else {
+		sanitized
+	}
+}
+
+fn sanitize_final_reply(output: &str) -> String {
+	if !contains_prompt_leakage(output) {
+		return strip_outer_quotes(output.trim()).to_string();
+	}
+
+	let candidates = output
+		.lines()
+		.map(str::trim)
+		.filter(|line| !line.is_empty())
+		.filter(|line| !is_meta_line(line))
+		.filter_map(sanitized_candidate)
+		.collect::<Vec<_>>();
+	if let Some(candidate) = candidates.last() {
+		return candidate.clone();
+	}
+	if let Some(candidate) = quoted_answer_candidate(output) {
+		return strip_outer_quotes(candidate.trim()).trim().to_string();
+	}
+
+	strip_outer_quotes(output.trim()).to_string()
+}
+
+fn contains_prompt_leakage(output: &str) -> bool {
+	let lowercase = output.to_lowercase();
+	lowercase.contains("user request:")
+		|| lowercase.contains("trusted runtime context")
+		|| lowercase.contains("output rules:")
+		|| lowercase.contains("internal execution hint")
+		|| lowercase.contains("the user's request is")
+		|| lowercase.contains("conversation history shows")
+		|| lowercase.contains("first, the user's request is")
+		|| lowercase.contains("from the trusted runtime context")
+}
+
+fn is_meta_line(line: &str) -> bool {
+	let lowercase = line.to_lowercase();
+	lowercase.starts_with("user request:")
+		|| lowercase.starts_with("trusted runtime context:")
+		|| lowercase.starts_with("internal execution hint")
+		|| lowercase.starts_with("output rules:")
+		|| lowercase.starts_with("conversation history")
+		|| lowercase.starts_with("from the trusted runtime context")
+		|| lowercase.starts_with("first, the user's request is")
+		|| lowercase.starts_with("the user's request is")
+		|| lowercase.starts_with("- local_")
+		|| lowercase.starts_with("- the conversation history")
+		|| lowercase.starts_with("- output")
+		|| lowercase.contains("i should")
+		|| lowercase.contains("i'll use")
+		|| lowercase.contains("i'll output")
+		|| lowercase.contains("do not narrate")
+}
+
+fn sanitized_candidate(line: &str) -> Option<String> {
+	let quoted = quoted_answer_candidate(line).unwrap_or_else(|| line.to_string());
+	let candidate = strip_outer_quotes(quoted.trim()).trim().to_string();
+	if candidate.is_empty() || candidate.len() > 240 {
+		return None;
+	}
+	Some(candidate)
+}
+
+fn quoted_answer_candidate(line: &str) -> Option<String> {
+	for (open, close) in [('"', '"'), ('“', '”'), ('\'', '\''), ('‘', '’')] {
+		if let Some(candidate) = between_last_pair(line, open, close) {
+			return Some(candidate);
+		}
+	}
+	None
+}
+
+fn between_last_pair(value: &str, open: char, close: char) -> Option<String> {
+	let end = value.rfind(close)?;
+	let start = value[..end].rfind(open)?;
+	if start >= end {
+		return None;
+	}
+	Some(value[start + open.len_utf8()..end].to_string())
+}
+
+fn strip_outer_quotes(value: &str) -> &str {
+	let trimmed = value.trim();
+	if trimmed.len() >= 2 {
+		let first = trimmed.chars().next().unwrap_or_default();
+		let last = trimmed.chars().last().unwrap_or_default();
+		if matches!(
+			(first, last),
+			('"', '"') | ('\'', '\'') | ('“', '”') | ('‘', '’')
+		) {
+			return &trimmed[first.len_utf8()..trimmed.len() - last.len_utf8()];
+		}
+	}
+	trimmed
+}
+
+fn log_runtime_output(message: &str, fields: impl IntoIterator<Item = (&'static str, String)>) {
+	let mut record = LogRecord::new("roku-agent-runtime", LogLevel::Info, message);
+	for (key, value) in fields {
+		record = record.with_field(key, value);
+	}
+	let _ = emit_global_log(record);
 }
 
 fn format_utc_offset(offset: UtcOffset) -> String {
@@ -384,7 +611,10 @@ fn llm_failure(error: LlmAdapterError) -> ToolFailure {
 mod tests {
 	use serde_json::json;
 
-	use super::{request_input, runtime_context_block, user_visible_prompt};
+	use super::{
+		direct_runtime_answer, request_input, runtime_context_block, sanitize_final_reply,
+		user_visible_prompt,
+	};
 	use roku_tool_runtime::{SandboxProfile, ToolInvocationRequest};
 
 	#[test]
@@ -419,5 +649,30 @@ mod tests {
 		assert!(prompt.contains("Never narrate your reasoning"));
 		assert!(prompt.contains("use the trusted runtime context above"));
 		assert!(prompt.contains("Conversation history"));
+	}
+
+	#[test]
+	fn direct_runtime_answer_returns_grounded_weekday() {
+		let answer = direct_runtime_answer("今天周几？").expect("runtime answer should exist");
+		assert!(answer.starts_with("星期"));
+	}
+
+	#[test]
+	fn direct_runtime_answer_returns_grounded_date_and_time() {
+		let answer =
+			direct_runtime_answer("今天几号？现在几点了？").expect("runtime answer should exist");
+		assert!(answer.contains("今天是"));
+		assert!(answer.contains("现在是"));
+	}
+
+	#[test]
+	fn sanitize_final_reply_collapses_prompt_leakage() {
+		let output = r#"First, the user's request is: "今天周几？"
+
+From the trusted runtime context:
+- local_weekday: Sunday
+
+So, I'll output: "星期日""#;
+		assert_eq!(sanitize_final_reply(output), "星期日");
 	}
 }
