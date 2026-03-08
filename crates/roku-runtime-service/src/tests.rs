@@ -44,10 +44,7 @@ fn sample_request() -> RequestEnvelope {
 
 #[derive(Clone)]
 struct FileBackedPaths {
-	tasks: PathBuf,
-	events: PathBuf,
-	approvals: PathBuf,
-	results: PathBuf,
+	state_db: PathBuf,
 	artifacts: PathBuf,
 	experiments: PathBuf,
 }
@@ -57,15 +54,12 @@ fn unique_path(suffix: &str) -> PathBuf {
 		.duration_since(UNIX_EPOCH)
 		.expect("clock should be after epoch")
 		.as_nanos();
-	std::env::temp_dir().join(format!("roku-runtime-test-{suffix}-{nanos}.json"))
+	std::env::temp_dir().join(format!("roku-runtime-test-{suffix}-{nanos}"))
 }
 
 fn file_backed_paths(prefix: &str) -> FileBackedPaths {
 	FileBackedPaths {
-		tasks: unique_path(&format!("{prefix}-tasks")),
-		events: unique_path(&format!("{prefix}-events")),
-		approvals: unique_path(&format!("{prefix}-approvals")),
-		results: unique_path(&format!("{prefix}-results")),
+		state_db: unique_path(&format!("{prefix}-state")).join("control-plane.db"),
 		artifacts: unique_path(&format!("{prefix}-artifacts")),
 		experiments: unique_path(&format!("{prefix}-experiments")),
 	}
@@ -76,21 +70,29 @@ fn file_backed_service_with_planner(
 	runtime: GenericAgentRuntime,
 	planner: Box<dyn roku_task_planner::TaskPlanner + Send + Sync>,
 ) -> RuntimeService {
+	let store_config = roku_state_store::SqliteStoreConfig::new(paths.state_db.clone());
 	RuntimeService::new_with_runtime_data_plane_and_metrics(
 		RuntimeDataPlane {
-			task_repo: Box::new(roku_state_store::FileTaskRepository::new(
-				paths.tasks.clone(),
-			)),
-			event_repo: Box::new(roku_state_store::FileEventRepository::new(
-				paths.events.clone(),
-			)),
-			approval_repo: Box::new(roku_state_store::FileApprovalRepository::new(
-				paths.approvals.clone(),
-			)),
-			result_repo: Box::new(roku_state_store::FileResultRepository::new(
-				paths.results.clone(),
-			)),
-			dispatch_queue: Box::new(roku_state_store::InMemoryDispatchQueue::default()),
+			task_repo: Box::new(
+				roku_state_store::SqliteTaskRepository::connect(store_config.clone())
+					.expect("sqlite task repo should open"),
+			),
+			event_repo: Box::new(
+				roku_state_store::SqliteEventRepository::connect(store_config.clone())
+					.expect("sqlite event repo should open"),
+			),
+			approval_repo: Box::new(
+				roku_state_store::SqliteApprovalRepository::connect(store_config.clone())
+					.expect("sqlite approval repo should open"),
+			),
+			result_repo: Box::new(
+				roku_state_store::SqliteResultRepository::connect(store_config.clone())
+					.expect("sqlite result repo should open"),
+			),
+			dispatch_queue: Box::new(
+				roku_state_store::SqliteDispatchQueue::connect(store_config)
+					.expect("sqlite dispatch queue should open"),
+			),
 			artifact_store: roku_artifact_store::ArtifactStore::file_backed(
 				paths.artifacts.clone(),
 			),
@@ -712,7 +714,10 @@ fn service_reconstructs_execution_progress_from_persisted_results_after_restart(
 	assert_eq!(counter.load(Ordering::SeqCst), 1);
 
 	let task_id = TaskId("task-req-1".to_string());
-	let mut task_repo = roku_state_store::FileTaskRepository::new(paths.tasks.clone());
+	let mut task_repo = roku_state_store::SqliteTaskRepository::connect(
+		roku_state_store::SqliteStoreConfig::new(paths.state_db.clone()),
+	)
+	.expect("sqlite task repo should open");
 	let mut persisted_task = task_repo
 		.load_task(&task_id)
 		.expect("task load should succeed")

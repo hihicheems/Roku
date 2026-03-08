@@ -135,14 +135,14 @@ impl InMemoryDispatchQueue {
 
 	fn verify_lease(&self, lease: &DispatchLease) -> Result<(), StoreError> {
 		let Some(entry) = self.leased.get(&lease.entry_id) else {
-			return Err(StoreError::Postgres(format!(
+			return Err(StoreError::Storage(format!(
 				"dispatch lease not found for {}",
 				lease.entry_id
 			)));
 		};
 
 		if entry.lease != *lease {
-			return Err(StoreError::Postgres(format!(
+			return Err(StoreError::Storage(format!(
 				"dispatch lease mismatch for {}",
 				lease.entry_id
 			)));
@@ -192,7 +192,7 @@ impl DispatchQueue for InMemoryDispatchQueue {
 	fn nack(&mut self, lease: &DispatchLease, retry: RetryClaim) -> Result<(), StoreError> {
 		self.verify_lease(lease)?;
 		let Some(mut entry) = self.leased.remove(&lease.entry_id) else {
-			return Err(StoreError::Postgres(format!(
+			return Err(StoreError::Storage(format!(
 				"dispatch lease not found for {}",
 				lease.entry_id
 			)));

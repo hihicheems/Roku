@@ -73,57 +73,76 @@ impl ExperimentRunRepository for InMemoryExperimentRunRepository {
 
 #[derive(Debug, Clone)]
 pub struct FileExperimentRunRepository {
-	path: PathBuf,
+	root: PathBuf,
 }
 
 impl FileExperimentRunRepository {
-	pub fn new(path: impl Into<PathBuf>) -> Self {
-		Self { path: path.into() }
+	pub fn new(root: impl Into<PathBuf>) -> Self {
+		Self { root: root.into() }
 	}
 
-	fn read_all(&self) -> Result<HashMap<String, ExperimentRun>, ExperimentRegistryError> {
-		if !self.path.exists() {
-			return Ok(HashMap::new());
-		}
-		let data = fs::read_to_string(&self.path)?;
-		if data.trim().is_empty() {
-			return Ok(HashMap::new());
-		}
-		Ok(serde_json::from_str(&data)?)
+	fn runs_dir(&self) -> PathBuf {
+		self.root.join("runs")
 	}
 
-	fn write_all(
+	fn path_for_task(&self, task_id: &TaskId) -> PathBuf {
+		self.runs_dir().join(format!("{}.json", task_id.0))
+	}
+
+	fn save_run_record(&self, run: &ExperimentRun) -> Result<(), ExperimentRegistryError> {
+		let path = self.path_for_task(&run.task_id);
+		ensure_parent_dir(&path)?;
+		write_text_atomically(&path, &serde_json::to_string_pretty(run)?)
+	}
+
+	fn load_run_record(
 		&self,
-		runs: &HashMap<String, ExperimentRun>,
-	) -> Result<(), ExperimentRegistryError> {
-		ensure_parent_dir(&self.path)?;
-		let encoded = serde_json::to_string_pretty(runs)?;
-		fs::write(&self.path, encoded)?;
-		Ok(())
+		task_id: &TaskId,
+	) -> Result<Option<ExperimentRun>, ExperimentRegistryError> {
+		let path = self.path_for_task(task_id);
+		if !path.exists() {
+			return Ok(None);
+		}
+		Ok(Some(serde_json::from_str(&fs::read_to_string(path)?)?))
+	}
+
+	fn iter_runs(&self) -> Result<Vec<ExperimentRun>, ExperimentRegistryError> {
+		let runs_dir = self.runs_dir();
+		if !runs_dir.exists() {
+			return Ok(Vec::new());
+		}
+		let mut runs: Vec<ExperimentRun> = Vec::new();
+		for entry in fs::read_dir(runs_dir)? {
+			let entry = entry?;
+			if entry.file_type()?.is_file() {
+				runs.push(serde_json::from_str(&fs::read_to_string(entry.path())?)?);
+			}
+		}
+		runs.sort_by(|left, right| left.run_id.0.cmp(&right.run_id.0));
+		Ok(runs)
 	}
 }
 
 impl ExperimentRunRepository for FileExperimentRunRepository {
 	fn save_run(&mut self, run: ExperimentRun) -> Result<(), ExperimentRegistryError> {
-		let mut runs = self.read_all()?;
-		runs.insert(run.run_id.0.clone(), run);
-		self.write_all(&runs)
+		self.save_run_record(&run)
 	}
 
 	fn load_run(
 		&self,
 		run_id: &ExperimentRunId,
 	) -> Result<Option<ExperimentRun>, ExperimentRegistryError> {
-		let runs = self.read_all()?;
-		Ok(runs.get(&run_id.0).cloned())
+		Ok(self
+			.iter_runs()?
+			.into_iter()
+			.find(|run| run.run_id == *run_id))
 	}
 
 	fn load_by_task(
 		&self,
 		task_id: &TaskId,
 	) -> Result<Option<ExperimentRun>, ExperimentRegistryError> {
-		let runs = self.read_all()?;
-		Ok(runs.values().find(|run| run.task_id == *task_id).cloned())
+		self.load_run_record(task_id)
 	}
 }
 
@@ -131,5 +150,18 @@ fn ensure_parent_dir(path: &Path) -> Result<(), ExperimentRegistryError> {
 	if let Some(parent) = path.parent() {
 		fs::create_dir_all(parent)?;
 	}
+	Ok(())
+}
+
+fn write_text_atomically(path: &Path, content: &str) -> Result<(), ExperimentRegistryError> {
+	ensure_parent_dir(path)?;
+	let temp_path = path.with_extension(format!(
+		"{}.tmp",
+		path.extension()
+			.and_then(|extension| extension.to_str())
+			.unwrap_or("json")
+	));
+	fs::write(&temp_path, content)?;
+	fs::rename(temp_path, path)?;
 	Ok(())
 }

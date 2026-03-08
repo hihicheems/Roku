@@ -15,7 +15,7 @@
 //! Trait-backed state repositories with in-memory and file adapters.
 
 mod dispatch;
-mod postgres;
+mod sqlite;
 
 use std::collections::HashMap;
 use std::fs;
@@ -31,10 +31,10 @@ pub use dispatch::{
 	BackpressureSnapshot, DispatchClaim, DispatchEnvelope, DispatchLease, DispatchQueue,
 	InMemoryDispatchQueue, RetryClaim,
 };
-pub use postgres::{
-	PostgresApprovalRepository, PostgresConversationRepository, PostgresEventRepository,
-	PostgresResultRepository, PostgresSessionPreferenceRepository, PostgresStoreConfig,
-	PostgresTaskRepository,
+pub use sqlite::{
+	SqliteApprovalRepository, SqliteConversationRepository, SqliteDispatchQueue,
+	SqliteEventRepository, SqliteResultRepository, SqliteSessionPreferenceRepository,
+	SqliteStoreConfig, SqliteTaskRepository,
 };
 
 #[derive(Debug, Error)]
@@ -43,8 +43,10 @@ pub enum StoreError {
 	Io(#[from] std::io::Error),
 	#[error("serialization error: {0}")]
 	Serde(#[from] serde_json::Error),
-	#[error("postgres error: {0}")]
-	Postgres(String),
+	#[error("sqlite error: {0}")]
+	Sqlite(#[from] rusqlite::Error),
+	#[error("storage error: {0}")]
+	Storage(String),
 }
 
 pub trait TaskRepository {

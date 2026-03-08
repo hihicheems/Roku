@@ -89,95 +89,162 @@ impl ArtifactRepository for InMemoryArtifactRepository {
 
 #[derive(Debug, Clone)]
 pub struct FileArtifactRepository {
-	path: PathBuf,
+	root: PathBuf,
 }
 
 impl FileArtifactRepository {
-	pub fn new(path: impl Into<PathBuf>) -> Self {
-		Self { path: path.into() }
+	pub fn new(root: impl Into<PathBuf>) -> Self {
+		Self { root: root.into() }
 	}
 
-	fn read_all(&self) -> Result<FileArtifactSnapshot, ArtifactStoreError> {
-		if !self.path.exists() {
-			return Ok(FileArtifactSnapshot::default());
-		}
-		let data = fs::read_to_string(&self.path)?;
-		if data.trim().is_empty() {
-			return Ok(FileArtifactSnapshot::default());
-		}
-		if let Ok(snapshot) = serde_json::from_str::<FileArtifactSnapshot>(&data) {
-			return Ok(snapshot);
-		}
-
-		// Backward compatibility: previous format stored only artifact map.
-		let artifacts = serde_json::from_str::<HashMap<String, Artifact>>(&data)?;
-		Ok(FileArtifactSnapshot {
-			artifacts,
-			contents: HashMap::new(),
-		})
+	fn metadata_dir(&self) -> PathBuf {
+		self.root.join("metadata")
 	}
 
-	fn write_all(&self, snapshot: &FileArtifactSnapshot) -> Result<(), ArtifactStoreError> {
-		ensure_parent_dir(&self.path)?;
-		let encoded = serde_json::to_string_pretty(snapshot)?;
-		fs::write(&self.path, encoded)?;
-		Ok(())
+	fn content_dir(&self) -> PathBuf {
+		self.root.join("content")
+	}
+
+	fn metadata_path(&self, artifact_id: &ArtifactId) -> PathBuf {
+		self.metadata_dir().join(format!("{}.json", artifact_id.0))
+	}
+
+	fn content_path(&self, task_id: &TaskId, artifact_id: &ArtifactId, content: &str) -> PathBuf {
+		let extension = if serde_json::from_str::<serde_json::Value>(content).is_ok() {
+			"json"
+		} else {
+			"md"
+		};
+		self.content_dir()
+			.join(&task_id.0)
+			.join(format!("{}.{}", artifact_id.0, extension))
+	}
+
+	fn load_record(
+		&self,
+		artifact_id: &ArtifactId,
+	) -> Result<Option<FileArtifactRecord>, ArtifactStoreError> {
+		let path = self.metadata_path(artifact_id);
+		if !path.exists() {
+			return Ok(None);
+		}
+		let data = fs::read_to_string(path)?;
+		Ok(Some(serde_json::from_str(&data)?))
+	}
+
+	fn save_record(&self, record: &FileArtifactRecord) -> Result<(), ArtifactStoreError> {
+		let path = self.metadata_path(&record.artifact.artifact_id);
+		ensure_parent_dir(&path)?;
+		write_text_atomically(&path, &serde_json::to_string_pretty(record)?)
+	}
+
+	fn iter_records(&self) -> Result<Vec<FileArtifactRecord>, ArtifactStoreError> {
+		let metadata_dir = self.metadata_dir();
+		if !metadata_dir.exists() {
+			return Ok(Vec::new());
+		}
+		let mut records: Vec<FileArtifactRecord> = Vec::new();
+		for entry in fs::read_dir(metadata_dir)? {
+			let entry = entry?;
+			if entry.file_type()?.is_file() {
+				let data = fs::read_to_string(entry.path())?;
+				records.push(serde_json::from_str(&data)?);
+			}
+		}
+		records.sort_by(|left, right| {
+			left.artifact
+				.artifact_id
+				.0
+				.cmp(&right.artifact.artifact_id.0)
+		});
+		Ok(records)
 	}
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct FileArtifactSnapshot {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FileArtifactRecord {
+	artifact: Artifact,
 	#[serde(default)]
-	artifacts: HashMap<String, Artifact>,
-	#[serde(default)]
-	contents: HashMap<String, String>,
+	content_rel_path: Option<String>,
 }
 
 impl ArtifactRepository for FileArtifactRepository {
 	fn save_artifact(&mut self, artifact: Artifact) -> Result<(), ArtifactStoreError> {
-		let mut snapshot = self.read_all()?;
-		snapshot
-			.artifacts
-			.insert(artifact.artifact_id.0.clone(), artifact);
-		self.write_all(&snapshot)
+		let mut record = self
+			.load_record(&artifact.artifact_id)?
+			.unwrap_or(FileArtifactRecord {
+				artifact: artifact.clone(),
+				content_rel_path: None,
+			});
+		record.artifact = artifact;
+		self.save_record(&record)
 	}
 
 	fn load_artifact(
 		&self,
 		artifact_id: &ArtifactId,
 	) -> Result<Option<Artifact>, ArtifactStoreError> {
-		let snapshot = self.read_all()?;
-		Ok(snapshot.artifacts.get(&artifact_id.0).cloned())
+		Ok(self.load_record(artifact_id)?.map(|record| record.artifact))
 	}
 
 	fn load_by_uri(&self, uri: &str) -> Result<Option<Artifact>, ArtifactStoreError> {
-		let snapshot = self.read_all()?;
-		Ok(snapshot
-			.artifacts
-			.values()
-			.find(|artifact| artifact.uri == uri)
-			.cloned())
+		Ok(self
+			.iter_records()?
+			.into_iter()
+			.find(|record| record.artifact.uri == uri)
+			.map(|record| record.artifact))
 	}
 
 	fn list_by_task(&self, task_id: &TaskId) -> Result<Vec<Artifact>, ArtifactStoreError> {
-		let snapshot = self.read_all()?;
-		Ok(snapshot
-			.artifacts
-			.values()
+		Ok(self
+			.iter_records()?
+			.into_iter()
+			.map(|record| record.artifact)
 			.filter(|artifact| artifact.task_id == *task_id)
-			.cloned()
 			.collect())
 	}
 
 	fn save_content(&mut self, uri: &str, content: String) -> Result<(), ArtifactStoreError> {
-		let mut snapshot = self.read_all()?;
-		snapshot.contents.insert(uri.to_string(), content);
-		self.write_all(&snapshot)
+		let Some(mut record) = self
+			.iter_records()?
+			.into_iter()
+			.find(|record| record.artifact.uri == uri)
+		else {
+			return Ok(());
+		};
+		let content_path = self.content_path(
+			&record.artifact.task_id,
+			&record.artifact.artifact_id,
+			&content,
+		);
+		ensure_parent_dir(&content_path)?;
+		write_text_atomically(&content_path, &content)?;
+		record.content_rel_path = Some(
+			content_path
+				.strip_prefix(&self.root)
+				.unwrap_or(&content_path)
+				.to_string_lossy()
+				.to_string(),
+		);
+		self.save_record(&record)
 	}
 
 	fn load_content_by_uri(&self, uri: &str) -> Result<Option<String>, ArtifactStoreError> {
-		let snapshot = self.read_all()?;
-		Ok(snapshot.contents.get(uri).cloned())
+		let Some(record) = self
+			.iter_records()?
+			.into_iter()
+			.find(|record| record.artifact.uri == uri)
+		else {
+			return Ok(None);
+		};
+		let Some(content_rel_path) = record.content_rel_path else {
+			return Ok(None);
+		};
+		let content_path = self.root.join(content_rel_path);
+		if !content_path.exists() {
+			return Ok(None);
+		}
+		Ok(Some(fs::read_to_string(content_path)?))
 	}
 }
 
@@ -185,5 +252,18 @@ fn ensure_parent_dir(path: &Path) -> Result<(), ArtifactStoreError> {
 	if let Some(parent) = path.parent() {
 		fs::create_dir_all(parent)?;
 	}
+	Ok(())
+}
+
+fn write_text_atomically(path: &Path, content: &str) -> Result<(), ArtifactStoreError> {
+	ensure_parent_dir(path)?;
+	let temp_path = path.with_extension(format!(
+		"{}.tmp",
+		path.extension()
+			.and_then(|extension| extension.to_str())
+			.unwrap_or("data")
+	));
+	fs::write(&temp_path, content)?;
+	fs::rename(temp_path, path)?;
 	Ok(())
 }
