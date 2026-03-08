@@ -1,5 +1,42 @@
 # Roku Agent Dev Log
 
+## 2026-03-09 - Session Milestone (Phase 29)
+
+### Completed Modules
+
+- `roku-cmd`
+  - Added operator-facing `skill install`, `skill list`, and `skill show` commands so skills can be installed and inspected without depending on a live model request path.
+  - Added JSON rendering coverage for install/list/detail outputs so the CLI registry surface is regression-tested.
+- `roku-skill-registry`
+  - Added exact installed-skill lookup helpers for operator surfaces and prompt-context inspection.
+  - Reworked prompt-context rendering so oversized `SKILL.md` files are truncated to the prompt budget instead of failing activation.
+  - Prioritized useful supporting documents such as `references/*.md` ahead of boilerplate files and excluded `LICENSE*` from injected prompt context.
+
+### Verification Status
+
+- `cargo run -p roku-cmd -- skill install https://github.com/anthropics/skills/tree/main/skills/skill-creator`: passed
+  - Installed `skill-creator` into `.roku/skills/installed/skill-creator`
+- `cargo run -p roku-cmd -- skill list`: passed
+- `cargo run -p roku-cmd -- skill show skill-creator`: passed after truncation/prioritization fix
+- `cargo test -p roku-skill-registry -p roku-cmd -p roku-agent-runtime -p roku-runtime-service -p roku-task-planner`: passed
+  - `roku-skill-registry`: 11 passed
+  - `roku-cmd`: 16 passed
+  - `roku-agent-runtime`: 15 passed
+  - `roku-runtime-service`: 38 passed
+  - `roku-task-planner`: 11 passed
+
+### Remaining Work
+
+- Live semantic evaluation with a real OpenRouter model is still pending because this environment does not currently provide `OPENROUTER_API_KEY`.
+- `TR-10` remains open beyond the local skill-registry slice because MCP discovery, version governance, and rollout policy are still missing.
+- Skill validation/smoke-test gates before publish are still absent, so installation currently trusts any structurally valid package.
+
+### Next Recommended Steps
+
+1. Add pre-install validation/smoke-test hooks so broken skill packages fail before registration.
+2. Run a live `live-once` or Telegram verification pass once OpenRouter credentials are available, using `skill-creator` as the acceptance sample.
+3. Continue `TR-10` toward governed tool catalog and MCP discovery once the local skill lifecycle is stable.
+
 ## 2026-03-09 - Session Milestone (Phase 28)
 
 ### Completed Modules

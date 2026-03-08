@@ -213,6 +213,7 @@
 | SR-04 | 支持租户级 / 版本级灰度发布 | §13.2 发布 | TODO |
 | SR-05 | 增加 success rate / failure rate / permission deny rate 统计与熔断 | §13.2 观测 / 回滚 | TODO |
 | SR-06 | 接入 `roku-agent-runtime` / live prompt 链路，让已安装 skill 可被执行与引用 | §13 Tool / Skill / MCP | DONE |
+| SR-07 | 对超大 `SKILL.md` / supporting docs 做 prompt-budget 截断与优先级裁剪，避免安装后无法激活 | §13.2 Skill 生命周期 / 运行稳健性 | DONE |
 
 ## roku-mcp-bridge
 
@@ -388,6 +389,7 @@
 | CMD-18 | 增加 `task replay <task-id>` CLI 命令，基于 persisted task snapshot + event timeline 生成一致性与 recoverable 报告 | §8 ResumePoint / §20 replay | DONE |
 | CMD-19 | 让 `task replay` 直接复用 `roku-runtime-service` 的 replay report，而不是在 CLI 层自行重建状态链规则 | §19 CLI 运维入口 / 降耦 | DONE |
 | CMD-20 | 增加 `ROKU_SKILL_ROOT` 配置、项目内默认 skill 安装目录与 live/stateful runtime 装配日志 | §13.2 Skill 生命周期 / §19 工程化 | DONE |
+| CMD-21 | 增加 `skill install|list|show` CLI 运维命令，直接管理本地 skill registry | §13.2 Skill 生命周期 / CLI 运维入口 | DONE |
 
 ## roku-agent-directory (planned)
 
