@@ -124,6 +124,27 @@ fn service_exposes_task_snapshot_and_event_timeline() {
 }
 
 #[test]
+fn service_builds_replay_report_from_persisted_events() {
+	let service = RuntimeService::default();
+	service
+		.execute(sample_request())
+		.expect("runtime service should succeed");
+
+	let report = service
+		.get_task_replay_report(&TaskId("task-req-1".to_string()))
+		.expect("replay report lookup should succeed")
+		.expect("replay report should exist");
+
+	assert_eq!(report.persisted_state, TaskState::Succeeded);
+	assert_eq!(report.replayed_state, TaskState::Succeeded);
+	assert!(report.transitions_valid);
+	assert!(report.chain_consistent);
+	assert!(report.snapshot_matches_replay);
+	assert!(!report.recoverable);
+	assert!(!report.events.is_empty());
+}
+
+#[test]
 fn service_persists_tool_runtime_evidence_for_execution_nodes() {
 	let service = RuntimeService::default();
 	service
@@ -390,6 +411,26 @@ fn service_resume_task_returns_pending_approval_for_waiting_ticket() {
 
 	assert_eq!(resumed.status, ResponseStatus::PendingApproval);
 	assert_eq!(resumed.artifacts, vec![approval_artifact]);
+}
+
+#[test]
+fn service_marks_waiting_approval_replay_report_as_recoverable() {
+	let service = RuntimeService::default();
+	service
+		.execute_with_mode(sample_request(), RunMode::ApprovalRequired)
+		.expect("runtime service should create approval ticket");
+
+	let report = service
+		.get_task_replay_report(&TaskId("task-req-1".to_string()))
+		.expect("replay report lookup should succeed")
+		.expect("replay report should exist");
+
+	assert_eq!(report.persisted_state, TaskState::WaitingApproval);
+	assert_eq!(report.replayed_state, TaskState::WaitingApproval);
+	assert!(report.transitions_valid);
+	assert!(report.chain_consistent);
+	assert!(report.snapshot_matches_replay);
+	assert!(report.recoverable);
 }
 
 #[test]

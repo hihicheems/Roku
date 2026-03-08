@@ -22,12 +22,11 @@ use roku_api_gateway::{Gateway, RawRequest};
 use roku_artifact_store::ArtifactStore;
 use roku_common_types::{
 	ApprovalDecision, ApprovalId, ArtifactId, PlanningModeHint, ResponseEnvelope, RuntimeError,
-	TaskId, TaskState,
+	TaskId,
 };
 use roku_experiment_registry::ExperimentRegistry;
 use roku_llm_adapter::{OpenRouterConfig, build_openrouter_router_with_metrics};
 use roku_observability::{InMemoryAuditSink, LogLevel, LogRecord, Metrics, emit_global_log};
-use roku_orchestrator::is_valid_transition;
 pub use roku_runtime_service::RunMode;
 use roku_runtime_service::RuntimeService;
 use roku_state_store::{
@@ -224,36 +223,13 @@ pub(crate) fn show_experiment_from_env(task_id: &str) -> Result<String, CommandE
 pub(crate) fn replay_task_from_env(task_id: &str) -> Result<String, CommandError> {
 	let service = build_stateful_runtime_service_from_env()?;
 	let task_id = TaskId(task_id.to_string());
-	let task = service
-		.get_task(&task_id)
+	let report = service
+		.get_task_replay_report(&task_id)
 		.map_err(CommandError::Runtime)?
 		.ok_or_else(|| CommandError::Usage(format!("task not found: {}", task_id.0)))?;
-	let events = service
-		.list_task_events(&task_id)
-		.map_err(CommandError::Runtime)?;
 
-	let replayed_state = events.last().map(|event| event.to).unwrap_or(task.state);
-	let transitions_valid = events
-		.iter()
-		.all(|event| is_valid_transition(event.from, event.to));
-	let chain_consistent = events
-		.windows(2)
-		.all(|window| window[0].to == window[1].from);
-	let snapshot_matches_replay = task.state == replayed_state;
-	let recoverable = is_recoverable_state(task.state);
-
-	serde_json::to_string_pretty(&json!({
-		"task_id": task.task_id.0,
-		"persisted_state": format!("{:?}", task.state),
-		"replayed_state": format!("{:?}", replayed_state),
-		"event_count": events.len(),
-		"transitions_valid": transitions_valid,
-		"chain_consistent": chain_consistent,
-		"snapshot_matches_replay": snapshot_matches_replay,
-		"recoverable": recoverable,
-		"events": events,
-	}))
-	.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+	serde_json::to_string_pretty(&report)
+		.map_err(|error| CommandError::OutputEncoding(error.to_string()))
 }
 
 pub(crate) fn resume_task_from_env(task_id: &str) -> Result<String, CommandError> {
@@ -399,20 +375,6 @@ impl RuntimeDataPlaneConfig {
 			experiment_registry_path,
 		}
 	}
-}
-
-fn is_recoverable_state(state: TaskState) -> bool {
-	matches!(
-		state,
-		TaskState::Planning
-			| TaskState::GraphBuilding
-			| TaskState::Delegating
-			| TaskState::Executing
-			| TaskState::WaitingApproval
-			| TaskState::Validating
-			| TaskState::Aggregating
-			| TaskState::Failed
-	)
 }
 
 fn build_request(

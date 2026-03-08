@@ -139,6 +139,19 @@ pub struct TaskEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskReplayReport {
+	pub task_id: TaskId,
+	pub persisted_state: TaskState,
+	pub replayed_state: TaskState,
+	pub event_count: usize,
+	pub transitions_valid: bool,
+	pub chain_consistent: bool,
+	pub snapshot_matches_replay: bool,
+	pub recoverable: bool,
+	pub events: Vec<TaskEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
 	pub task_id: TaskId,
 	pub request_id: RequestId,

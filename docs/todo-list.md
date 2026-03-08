@@ -357,6 +357,7 @@
 | RS-16 | 增加 cancellation / compensation / timeout recovery 主链路 | §8 状态机 / §22 风险缓解 | TODO |
 | RS-17 | 暴露 `task snapshot` 与 `task event timeline` 查询接口，为后续 replay / CLI 运维命令提供 recovery 基线 | §8 ResumePoint / §20 replay | DONE |
 | RS-18 | 增加 `resume_task` 入口，基于 persisted task snapshot + graph + completed nodes 恢复可继续执行的任务，并对等待审批态返回明确挂起响应 | §8 ResumePoint / §15.3 人审闸门 | DONE |
+| RS-19 | 暴露统一 `task replay report` 查询接口，收敛事件链一致性与 recoverable 判定，避免 CLI / Gateway 重复实现编排规则 | §8 ResumePoint / §19 运维接口 | DONE |
 
 ## roku-cmd
 
@@ -380,6 +381,7 @@
 | CMD-16 | 为 live / stateful runtime 默认装配 file-backed artifact-store 与 experiment-registry，并提供路径级环境变量配置 | §12 Artifact / Experiment / §19 工程化 | DONE |
 | CMD-17 | 增加 `artifact list|content|download` 与 `experiment show` CLI 命令，打通 artifact / experiment 运维查询链路 | §12 Artifact / Experiment / CLI 运维入口 | DONE |
 | CMD-18 | 增加 `task replay <task-id>` CLI 命令，基于 persisted task snapshot + event timeline 生成一致性与 recoverable 报告 | §8 ResumePoint / §20 replay | DONE |
+| CMD-19 | 让 `task replay` 直接复用 `roku-runtime-service` 的 replay report，而不是在 CLI 层自行重建状态链规则 | §19 CLI 运维入口 / 降耦 | DONE |
 
 ## roku-agent-directory (planned)
 
