@@ -231,7 +231,10 @@ fn service_persists_tool_runtime_evidence_for_execution_nodes() {
 	assert!(!results.is_empty());
 	let execution_results = results
 		.iter()
-		.filter(|result| result.producer != "aggregation:aggregation-gate")
+		.filter(|result| {
+			!result.producer.starts_with("aggregation:")
+				&& !result.producer.starts_with("validation:")
+		})
 		.collect::<Vec<_>>();
 	assert!(!execution_results.is_empty());
 	assert!(execution_results.iter().all(|result| {
@@ -252,6 +255,10 @@ fn service_persists_tool_runtime_evidence_for_execution_nodes() {
 				.evidence
 				.iter()
 				.any(|item| item.kind == "aggregation")
+	}));
+	assert!(results.iter().any(|result| {
+		result.producer == "validation:validation-gate"
+			&& result.evidence.iter().any(|item| item.kind == "validation")
 	}));
 	assert!(
 		results
@@ -744,6 +751,140 @@ fn service_reconstructs_execution_progress_from_persisted_results_after_restart(
 
 	assert_eq!(response.status, ResponseStatus::Succeeded);
 	assert_eq!(counter.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn service_reconstructs_approval_and_validation_progress_from_persistence() {
+	let service = RuntimeService::default();
+	let task = Task {
+		task_id: TaskId("task-reconstruct-validation".to_string()),
+		request_id: RequestId("req-reconstruct-validation".to_string()),
+		session_id: "session-reconstruct-validation".to_string(),
+		goal: "recover validation progress".to_string(),
+		state: TaskState::Failed,
+		attempts: 0,
+		planning_mode_hint: None,
+		conversation_history: Vec::new(),
+		completed_nodes: Vec::new(),
+		next_node_index: 0,
+		pending_approval_id: None,
+		last_result: None,
+		compensation_records: Vec::new(),
+		graph: Some(TaskGraph {
+			task_id: TaskId("task-reconstruct-validation".to_string()),
+			nodes: vec![
+				TaskNode {
+					node_id: NodeId("step-1".to_string()),
+					kind: TaskNodeKind::Execution,
+					description: "step 1".to_string(),
+					capabilities: vec!["data.read".to_string()],
+					join_policy: JoinPolicy::AllParents,
+					aggregation_mode: AggregationMode::CollectAll,
+					..TaskNode::default()
+				},
+				TaskNode {
+					node_id: NodeId("step-1-approval".to_string()),
+					kind: TaskNodeKind::Approval,
+					description: "approval".to_string(),
+					capabilities: vec!["approve.action".to_string()],
+					join_policy: JoinPolicy::AllParents,
+					aggregation_mode: AggregationMode::CollectAll,
+					..TaskNode::default()
+				},
+				TaskNode {
+					node_id: NodeId("validation-gate".to_string()),
+					kind: TaskNodeKind::Validation,
+					description: "validation".to_string(),
+					capabilities: vec!["validate.result".to_string()],
+					join_policy: JoinPolicy::AllParents,
+					aggregation_mode: AggregationMode::CollectAll,
+					..TaskNode::default()
+				},
+				TaskNode {
+					node_id: NodeId("aggregation-gate".to_string()),
+					kind: TaskNodeKind::Aggregation,
+					description: "aggregation".to_string(),
+					capabilities: vec!["aggregate.result".to_string()],
+					join_policy: JoinPolicy::AllParents,
+					aggregation_mode: AggregationMode::CollectAll,
+					..TaskNode::default()
+				},
+			],
+			edges: vec![
+				TaskEdge {
+					from: NodeId("step-1".to_string()),
+					to: NodeId("step-1-approval".to_string()),
+				},
+				TaskEdge {
+					from: NodeId("step-1-approval".to_string()),
+					to: NodeId("validation-gate".to_string()),
+				},
+				TaskEdge {
+					from: NodeId("validation-gate".to_string()),
+					to: NodeId("aggregation-gate".to_string()),
+				},
+			],
+		}),
+	};
+	service
+		.save_result(ResultEnvelope {
+			task_id: task.task_id.clone(),
+			node_id: NodeId("step-1".to_string()),
+			producer: "agent-step-1".to_string(),
+			schema_version: "result.v1".to_string(),
+			status: ResultStatus::Ok,
+			payload: r#"{"message":"step 1 complete"}"#.to_string(),
+			evidence: vec![EvidenceItem {
+				kind: "tool".to_string(),
+				value: "data.execute".to_string(),
+			}],
+			confidence: 0.9,
+		})
+		.expect("execution result should persist");
+	service
+		.save_approval_ticket(roku_common_types::ApprovalTicket {
+			approval_id: ApprovalId("approval-reconstruct".to_string()),
+			task_id: task.task_id.clone(),
+			request_id: task.request_id.clone(),
+			node_id: NodeId("step-1-approval".to_string()),
+			summary: "approval".to_string(),
+			status: ApprovalStatus::Approved,
+			decided_by: Some("reviewer".to_string()),
+			comment: Some("approved".to_string()),
+		})
+		.expect("approval ticket should persist");
+	service
+		.save_result(ResultEnvelope {
+			task_id: task.task_id.clone(),
+			node_id: NodeId("validation-gate".to_string()),
+			producer: "validation:validation-gate".to_string(),
+			schema_version: "result.v1".to_string(),
+			status: ResultStatus::Ok,
+			payload: r#"{"message":"validated 1 result(s)"}"#.to_string(),
+			evidence: vec![EvidenceItem {
+				kind: "validation".to_string(),
+				value: "accepted=1".to_string(),
+			}],
+			confidence: 1.0,
+		})
+		.expect("validation result should persist");
+
+	let reconstructed = service
+		.reconstruct_task_progress(&task)
+		.expect("task progress should reconstruct");
+	assert_eq!(
+		reconstructed.completed_nodes,
+		vec![
+			NodeId("step-1".to_string()),
+			NodeId("step-1-approval".to_string()),
+			NodeId("validation-gate".to_string()),
+		]
+	);
+	let analysis = service
+		.analyze_task_recovery(&task)
+		.expect("recovery analysis should succeed");
+	assert_eq!(analysis.ready_nodes.len(), 1);
+	assert_eq!(analysis.ready_nodes[0].node_id.0, "aggregation-gate");
 }
 
 #[test]

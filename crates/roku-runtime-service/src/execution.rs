@@ -453,6 +453,33 @@ impl RuntimeService {
 				)
 				.map_err(|error| RuntimeError::new(error.to_string()))?;
 		}
+		let validated_node_ids = evidence_sets
+			.iter()
+			.map(|evidence_set| evidence_set.result.node_id.0.clone())
+			.collect::<Vec<_>>();
+		let validated_messages = evidence_sets
+			.iter()
+			.map(|evidence_set| result_message(&evidence_set.result))
+			.collect::<Vec<_>>();
+		self.save_result(ResultEnvelope {
+			task_id: task.task_id.clone(),
+			node_id: node.node_id.clone(),
+			producer: format!("validation:{}", node.node_id.0),
+			schema_version: "result.v1".to_string(),
+			status: ResultStatus::Ok,
+			payload: serde_json::json!({
+				"message": format!("validated {} result(s)", validated_node_ids.len()),
+				"node_id": node.node_id.0,
+				"validated_node_ids": validated_node_ids,
+				"validated_messages": validated_messages,
+			})
+			.to_string(),
+			evidence: vec![EvidenceItem {
+				kind: "validation".to_string(),
+				value: format!("accepted={}", evidence_sets.len()),
+			}],
+			confidence: 1.0,
+		})?;
 		self.mark_node_completed(task, node);
 
 		Ok(None)

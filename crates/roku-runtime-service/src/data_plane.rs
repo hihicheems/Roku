@@ -13,10 +13,10 @@
 // limitations under the License.
 
 use roku_common_types::{
-	AggregationMode, ApprovalTicket, Artifact, ArtifactId, ErrorClass, ExperimentMetric,
-	ExperimentRun, JoinPolicy, NodeId, NodeResultSet, RecoveryEligibility, ReplayConsistencyStatus,
-	ResultEnvelope, ResultStatus, RuntimeError, Task, TaskEvent, TaskId, TaskNode, TaskNodeKind,
-	TaskReplayCursor, TaskReplayReport, TaskState, ValidationEvidenceSet,
+	AggregationMode, ApprovalStatus, ApprovalTicket, Artifact, ArtifactId, ErrorClass,
+	ExperimentMetric, ExperimentRun, JoinPolicy, NodeId, NodeResultSet, RecoveryEligibility,
+	ReplayConsistencyStatus, ResultEnvelope, ResultStatus, RuntimeError, Task, TaskEvent, TaskId,
+	TaskNode, TaskNodeKind, TaskReplayCursor, TaskReplayReport, TaskState, ValidationEvidenceSet,
 };
 use roku_execution_graph_builder::TaskGraphScheduler;
 use roku_orchestrator::{
@@ -96,6 +96,17 @@ impl RuntimeService {
 		state
 			.artifact_store
 			.load_content_by_uri(&artifact.uri)
+			.map_err(|error| RuntimeError::new(error.to_string()))
+	}
+
+	pub(super) fn list_approval_tickets_for_task(
+		&self,
+		task_id: &TaskId,
+	) -> Result<Vec<ApprovalTicket>, RuntimeError> {
+		let state = self.lock_state()?;
+		state
+			.approval_repo
+			.list_tickets_for_task(task_id)
 			.map_err(|error| RuntimeError::new(error.to_string()))
 	}
 
@@ -535,12 +546,22 @@ impl RuntimeService {
 			.iter()
 			.map(|node_id| node_id.0.clone())
 			.collect::<HashSet<_>>();
-		let pending_approval_node_id = if let Some(approval_id) = &task.pending_approval_id {
-			self.get_approval(approval_id)?
-				.map(|ticket| ticket.node_id.0)
-		} else {
-			None
-		};
+		let approval_tickets = self.list_approval_tickets_for_task(&task.task_id)?;
+		let approved_approval_node_ids = approval_tickets
+			.iter()
+			.filter(|ticket| ticket.status == ApprovalStatus::Approved)
+			.map(|ticket| ticket.node_id.0.clone())
+			.collect::<HashSet<_>>();
+		let pending_ticket = approval_tickets
+			.iter()
+			.find(|ticket| ticket.status == ApprovalStatus::Pending)
+			.cloned();
+		let pending_approval_node_id = pending_ticket
+			.as_ref()
+			.map(|ticket| ticket.node_id.0.clone());
+		reconstructed.pending_approval_id = pending_ticket
+			.as_ref()
+			.map(|ticket| ticket.approval_id.clone());
 
 		reconstructed.completed_nodes = graph
 			.nodes
@@ -549,7 +570,14 @@ impl RuntimeService {
 				TaskNodeKind::Execution => {
 					successful_result_by_node_id.contains_key(&node.node_id.0)
 				}
-				_ => snapshot_completed.contains(&node.node_id.0),
+				TaskNodeKind::Approval => {
+					approved_approval_node_ids.contains(&node.node_id.0)
+						|| snapshot_completed.contains(&node.node_id.0)
+				}
+				TaskNodeKind::Validation | TaskNodeKind::Aggregation => {
+					successful_result_by_node_id.contains_key(&node.node_id.0)
+						|| snapshot_completed.contains(&node.node_id.0)
+				}
 			})
 			.filter(|node| pending_approval_node_id.as_ref() != Some(&node.node_id.0))
 			.map(|node| node.node_id.clone())
@@ -578,10 +606,18 @@ impl RuntimeService {
 			.ok_or_else(|| RuntimeError::new("task graph is missing"))?;
 		let state = self.lock_state()?;
 
+		let node_kind = graph
+			.nodes
+			.iter()
+			.find(|node| node.node_id == *node_id)
+			.map(|node| node.kind)
+			.ok_or_else(|| RuntimeError::new(format!("unknown node in graph: {}", node_id.0)))?;
+
 		if let Some(result) = state
 			.result_repo
 			.load_result(&task.task_id, node_id)
 			.map_err(|error| RuntimeError::new(error.to_string()))?
+			&& !matches!(node_kind, TaskNodeKind::Approval | TaskNodeKind::Validation)
 		{
 			return Ok(vec![result]);
 		}
