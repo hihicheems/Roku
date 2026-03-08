@@ -1,5 +1,34 @@
 # Roku Agent Dev Log
 
+## 2026-03-08 - Session Milestone (Phase 24)
+
+### Completed Modules
+
+- `roku-cmd`
+  - Added `artifact list <task-id>`, `artifact content <task-id> <artifact-id>`, and `artifact download <task-id> <artifact-id> --output <path>` commands for operator-side artifact inspection and payload export.
+  - Added `experiment show <task-id>` for persisted experiment run inspection.
+  - Added `task replay <task-id>` to produce a replay report from the persisted task snapshot and event timeline, including state-chain consistency and recoverable-state classification.
+- runtime bootstrap
+  - Switched live/stateful runtime bootstrap to file-backed `ArtifactStore` and `ExperimentRegistry` by default, so artifact and experiment inspection can survive process restarts even when orchestration state itself is not fully PostgreSQL-backed.
+  - Added configurable data-plane paths via `ROKU_RUNTIME_DATA_DIR`, `ROKU_ARTIFACT_STORE_PATH`, and `ROKU_EXPERIMENT_REGISTRY_PATH`.
+
+### Verification Status
+
+- `cargo test -p roku-cmd`: passed
+  - 12 unit tests passed, including the updated CLI parser coverage for artifact download flags
+
+### Remaining Work
+
+- `CMD-04` still needs explicit resume commands on top of the current replay report baseline.
+- Replay currently validates and reports persisted state; it does not yet reconstruct runnable execution from persisted artifacts/results/task events.
+- Artifact and experiment persistence is file-backed by default; PostgreSQL-backed variants remain future work if these data products must live in the same durability tier as orchestration state.
+
+### Next Recommended Steps
+
+1. Implement `CMD-04` resume commands using the current replay report as the operator-facing preflight signal.
+2. Implement `RS-15` persisted replay/recovery so a failed or interrupted task can be rebuilt into a runnable resume point.
+3. Add end-to-end restart/replay coverage that exercises persisted task state plus file-backed artifact/experiment data.
+
 ## 2026-03-08 - Session Milestone (Phase 23)
 
 ### Completed Modules

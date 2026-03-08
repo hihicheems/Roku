@@ -363,7 +363,7 @@
 | --- | --- | --- | --- |
 | CMD-01 | 提供最小 CLI 执行入口并复用 `roku-runtime-service` | §4.1 Connector / CLI | DONE |
 | CMD-02 | 提供 `Normal` / `MissingEvidence` / `CapabilityDenied` / `ApprovalRequired` / `RetryExhausted` 等 run mode | 测试与演练辅助 | DONE |
-| CMD-03 | 增加查询 task / approval / artifact / experiment 的 CLI 子命令 | 运维与诊断 | TODO |
+| CMD-03 | 增加查询 task / approval / artifact / experiment 的 CLI 子命令 | 运维与诊断 | DONE |
 | CMD-04 | 增加 artifact download / approval decision / resume 等运维命令 | 运行期治理 | TODO |
 | CMD-05 | 增加配置文件 / 环境变量 / profile 加载能力 | 工程化 | DONE |
 | CMD-06 | 增加 `live-once` / `telegram-bot` 命令，打通 live model 与 Telegram 入口 | §4.1 Connector / CLI | DONE |
@@ -376,6 +376,9 @@
 | CMD-13 | 让 live runtime bootstrap 优先装配 PostgreSQL-backed orchestration state store，并在日志中显式输出 backend 选择 | §6.1 PostgreSQL / §19 state-store / §16 可观测性 | DONE |
 | CMD-14 | 增加 `task show <task-id>` 与 `approval show <approval-id>` CLI 命令，直接查询持久化 task snapshot / event timeline / approval ticket | §19 CLI 运维入口 / §8 ResumePoint | DONE |
 | CMD-15 | 增加 `approval approve|reject <approval-id> --actor ... [--comment ...]` CLI 命令，支撑最小审批决策闭环 | §15.3 人审闸门 / CLI 运维入口 | DONE |
+| CMD-16 | 为 live / stateful runtime 默认装配 file-backed artifact-store 与 experiment-registry，并提供路径级环境变量配置 | §12 Artifact / Experiment / §19 工程化 | DONE |
+| CMD-17 | 增加 `artifact list|content|download` 与 `experiment show` CLI 命令，打通 artifact / experiment 运维查询链路 | §12 Artifact / Experiment / CLI 运维入口 | DONE |
+| CMD-18 | 增加 `task replay <task-id>` CLI 命令，基于 persisted task snapshot + event timeline 生成一致性与 recoverable 报告 | §8 ResumePoint / §20 replay | DONE |
 
 ## roku-agent-directory (planned)
 

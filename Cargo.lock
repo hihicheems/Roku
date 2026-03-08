@@ -1445,6 +1445,7 @@ dependencies = [
  "roku-experiment-registry",
  "roku-llm-adapter",
  "roku-observability",
+ "roku-orchestrator",
  "roku-runtime-service",
  "roku-state-store",
  "roku-task-planner",
