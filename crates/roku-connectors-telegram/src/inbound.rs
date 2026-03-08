@@ -56,6 +56,7 @@ pub enum TelegramInteraction {
 		request: RequestEnvelope,
 	},
 	SessionCommand(TelegramSessionCommand),
+	SessionCommandRequest(TelegramSessionCommandRequest),
 	ApprovalDecision(TelegramApprovalAction),
 }
 
@@ -72,6 +73,12 @@ pub struct TelegramSessionCommand {
 	pub chat_id: i64,
 	pub session_id: String,
 	pub planning_mode: Option<PlanningModeHint>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TelegramSessionCommandRequest {
+	pub command: TelegramSessionCommand,
+	pub request: RequestEnvelope,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -104,7 +111,21 @@ impl TelegramConnector {
 			return self.approval_action_from_callback(callback_query);
 		}
 
-		if let Some(command) = self.session_command_from_message(&update)? {
+		if let Some((command, inline_goal)) = self.session_command_from_message(&update)? {
+			if let Some(goal) = inline_goal {
+				let request = self.request_from_message(
+					update.update_id,
+					update
+						.message
+						.ok_or(TelegramConnectorError::MissingMessage)?,
+					goal,
+					command.planning_mode,
+				)?;
+				return Ok(TelegramInteraction::SessionCommandRequest(
+					TelegramSessionCommandRequest { command, request },
+				));
+			}
+
 			return Ok(TelegramInteraction::SessionCommand(command));
 		}
 
@@ -122,16 +143,28 @@ impl TelegramConnector {
 		let message = update
 			.message
 			.ok_or(TelegramConnectorError::MissingMessage)?;
+		let text = message
+			.text
+			.clone()
+			.ok_or(TelegramConnectorError::MissingText)?;
+		self.request_from_message(update.update_id, message, text, None)
+	}
+
+	fn request_from_message(
+		&self,
+		update_id: u64,
+		message: TelegramMessage,
+		goal: String,
+		planning_mode_hint: Option<PlanningModeHint>,
+	) -> Result<RequestEnvelope, TelegramConnectorError> {
 		if message.from.as_ref().is_some_and(|user| user.is_bot) {
 			return Err(TelegramConnectorError::BotOriginIgnored);
 		}
-		let text = message.text.ok_or(TelegramConnectorError::MissingText)?;
-
 		Ok(RequestEnvelope {
-			request_id: RequestId(format!("tg-{}", update.update_id)),
+			request_id: RequestId(format!("tg-{update_id}")),
 			session_id: message.chat.id.to_string(),
-			goal: text,
-			planning_mode_hint: None,
+			goal,
+			planning_mode_hint,
 			conversation_history: Vec::new(),
 		})
 	}
@@ -139,7 +172,7 @@ impl TelegramConnector {
 	fn session_command_from_message(
 		&self,
 		update: &TelegramUpdate,
-	) -> Result<Option<TelegramSessionCommand>, TelegramConnectorError> {
+	) -> Result<Option<(TelegramSessionCommand, Option<String>)>, TelegramConnectorError> {
 		let message = update
 			.message
 			.as_ref()
@@ -224,7 +257,10 @@ fn callback_actor(user: &TelegramUser) -> String {
 	format!("telegram-user-{}", user.id)
 }
 
-fn session_command_from_text(chat_id: i64, text: &str) -> Option<TelegramSessionCommand> {
+fn session_command_from_text(
+	chat_id: i64,
+	text: &str,
+) -> Option<(TelegramSessionCommand, Option<String>)> {
 	let trimmed = text.trim();
 	let command = trimmed.split_whitespace().next()?;
 	let command = command.strip_prefix('/')?;
@@ -239,12 +275,21 @@ fn session_command_from_text(chat_id: i64, text: &str) -> Option<TelegramSession
 		"auto" => None,
 		_ => return None,
 	};
+	let command_prefix_len = command.len().saturating_add(1);
+	let inline_goal = trimmed
+		.get(command_prefix_len..)
+		.map(str::trim)
+		.filter(|value| !value.is_empty())
+		.map(std::string::ToString::to_string);
 
-	Some(TelegramSessionCommand {
-		chat_id,
-		session_id: chat_id.to_string(),
-		planning_mode,
-	})
+	Some((
+		TelegramSessionCommand {
+			chat_id,
+			session_id: chat_id.to_string(),
+			planning_mode,
+		},
+		inline_goal,
+	))
 }
 
 fn normalize_command(command: &str) -> String {
@@ -365,6 +410,9 @@ mod tests {
 			TelegramInteraction::SessionCommand(_) => {
 				panic!("callback query should not become a session command")
 			}
+			TelegramInteraction::SessionCommandRequest(_) => {
+				panic!("callback query should not become an inline session command request")
+			}
 		}
 	}
 
@@ -463,6 +511,83 @@ mod tests {
 				assert_eq!(command.planning_mode, None);
 			}
 			other => panic!("expected session command, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn into_interaction_maps_inline_session_command_to_request() {
+		let connector = TelegramConnector;
+		let interaction = connector
+			.interaction_from_update(TelegramUpdate {
+				update_id: 45,
+				message: Some(TelegramMessage {
+					message_id: 10,
+					chat: TelegramChat {
+						id: 1003,
+						title: None,
+						kind: "private".to_string(),
+					},
+					from: Some(TelegramUser {
+						id: 12,
+						is_bot: false,
+						username: Some("jojo".to_string()),
+					}),
+					text: Some("/react 你好".to_string()),
+				}),
+				callback_query: None,
+			})
+			.expect("inline command request should be recognized");
+
+		match interaction {
+			TelegramInteraction::SessionCommandRequest(command_request) => {
+				assert_eq!(command_request.command.chat_id, 1003);
+				assert_eq!(command_request.command.session_id, "1003");
+				assert_eq!(
+					command_request.command.planning_mode,
+					Some(PlanningModeHint::ReAct)
+				);
+				assert_eq!(command_request.request.request_id.0, "tg-45");
+				assert_eq!(command_request.request.goal, "你好");
+				assert_eq!(
+					command_request.request.planning_mode_hint,
+					Some(PlanningModeHint::ReAct)
+				);
+			}
+			other => panic!("expected inline session command request, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn inline_auto_command_clears_session_and_executes_message() {
+		let connector = TelegramConnector;
+		let interaction = connector
+			.interaction_from_update(TelegramUpdate {
+				update_id: 46,
+				message: Some(TelegramMessage {
+					message_id: 11,
+					chat: TelegramChat {
+						id: 1004,
+						title: None,
+						kind: "private".to_string(),
+					},
+					from: Some(TelegramUser {
+						id: 13,
+						is_bot: false,
+						username: None,
+					}),
+					text: Some("/auto 继续刚才的话题".to_string()),
+				}),
+				callback_query: None,
+			})
+			.expect("inline auto command should be recognized");
+
+		match interaction {
+			TelegramInteraction::SessionCommandRequest(command_request) => {
+				assert_eq!(command_request.command.planning_mode, None);
+				assert_eq!(command_request.request.goal, "继续刚才的话题");
+				assert_eq!(command_request.request.planning_mode_hint, None);
+			}
+			other => panic!("expected inline auto command request, got {other:?}"),
 		}
 	}
 }

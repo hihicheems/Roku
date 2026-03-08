@@ -9,7 +9,7 @@ pub use client::{TelegramBotClient, TelegramBotConfig, TelegramTransportError};
 pub use inbound::{
 	TelegramApprovalAction, TelegramCallbackQuery, TelegramChat, TelegramConnector,
 	TelegramConnectorError, TelegramInteraction, TelegramMessage, TelegramSessionCommand,
-	TelegramUpdate, TelegramUser,
+	TelegramSessionCommandRequest, TelegramUpdate, TelegramUser,
 };
 pub use outbound::{
 	TelegramInlineKeyboardButton, TelegramOutboundMessage, TelegramParseMode, TelegramReplyMarkup,

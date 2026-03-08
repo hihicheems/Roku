@@ -189,6 +189,58 @@ impl TelegramPollingRunner {
 						command.planning_mode,
 					))
 			}
+			Ok(TelegramInteraction::SessionCommandRequest(command_request)) => {
+				log_telegram(
+					LogLevel::Info,
+					"received session command request",
+					[
+						("update_type", "session_command_request".to_string()),
+						("chat_id", command_request.command.chat_id.to_string()),
+						(
+							"planning_mode",
+							command_request
+								.command
+								.planning_mode
+								.map(|mode| mode.to_string())
+								.unwrap_or_else(|| "Auto".to_string()),
+						),
+						("request_id", command_request.request.request_id.0.clone()),
+						("goal", truncate_for_log(&command_request.request.goal, 160)),
+					],
+				);
+				handler
+					.update_session_planning_mode(
+						&command_request.command.session_id,
+						command_request.command.planning_mode,
+					)
+					.map_err(|error| {
+						TelegramTransportError::Api(format!(
+							"failed to persist telegram inline session command: {}",
+							error.message
+						))
+					})?;
+				if self.progress_notices_enabled
+					&& let Err(error) =
+						self.client
+							.send_message(&TelegramOutboundMessage::progress_notice(
+								command_request.command.chat_id,
+								&command_request.request,
+							)) {
+					log_telegram(
+						LogLevel::Warn,
+						"failed to send progress notice",
+						[
+							("chat_id", command_request.command.chat_id.to_string()),
+							("request_id", command_request.request.request_id.0.clone()),
+							("error", error.to_string()),
+						],
+					);
+				}
+				self.dispatch_response(
+					command_request.command.chat_id,
+					handler.handle_request(command_request.request),
+				)
+			}
 			Ok(TelegramInteraction::ApprovalDecision(action)) => {
 				log_telegram(
 					LogLevel::Info,
