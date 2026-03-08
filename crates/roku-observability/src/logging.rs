@@ -8,6 +8,8 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+use time::macros::format_description;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LogLevel {
@@ -186,17 +188,18 @@ fn write_record(
 		.map(|state| state.current_bytes.saturating_add(required_bytes) > config.max_file_bytes)
 		.unwrap_or(false);
 	if needs_rotation {
-		rotate_component_logs(&config.base_dir, component, config.max_backup_files)?;
 		writers.insert(
 			component.to_string(),
 			open_component_writer(&config.base_dir, component)?,
 		);
+		prune_component_logs(&config.base_dir, component, config.max_backup_files)?;
 	}
 	if !writers.contains_key(component) {
 		writers.insert(
 			component.to_string(),
 			open_component_writer(&config.base_dir, component)?,
 		);
+		prune_component_logs(&config.base_dir, component, config.max_backup_files)?;
 	}
 
 	let state = writers
@@ -210,7 +213,7 @@ fn write_record(
 }
 
 fn open_component_writer(base_dir: &Path, component: &str) -> std::io::Result<ComponentWriter> {
-	let log_path = current_log_path(base_dir, component);
+	let log_path = next_component_log_path(base_dir, component);
 	if let Some(parent) = log_path.parent() {
 		fs::create_dir_all(parent)?;
 	}
@@ -225,42 +228,51 @@ fn open_component_writer(base_dir: &Path, component: &str) -> std::io::Result<Co
 	})
 }
 
-fn rotate_component_logs(
+fn prune_component_logs(
 	base_dir: &Path,
 	component: &str,
 	max_backup_files: usize,
 ) -> std::io::Result<()> {
 	let component_dir = base_dir.join(component);
 	fs::create_dir_all(&component_dir)?;
-	let current_path = current_log_path(base_dir, component);
-	if max_backup_files == 0 {
-		let _ = fs::remove_file(&current_path);
-		return Ok(());
-	}
-	let oldest_backup = rotated_log_path(base_dir, component, max_backup_files);
-	if oldest_backup.exists() {
-		fs::remove_file(&oldest_backup)?;
-	}
-	for index in (1..max_backup_files).rev() {
-		let source = rotated_log_path(base_dir, component, index);
-		if source.exists() {
-			fs::rename(&source, rotated_log_path(base_dir, component, index + 1))?;
+	let mut log_paths = component_log_paths(&component_dir)?;
+	let max_total_files = max_backup_files.saturating_add(1).max(1);
+	while log_paths.len() > max_total_files {
+		if let Some(path) = log_paths.first().cloned() {
+			let _ = fs::remove_file(path);
 		}
-	}
-	if current_path.exists() {
-		fs::rename(current_path, rotated_log_path(base_dir, component, 1))?;
+		log_paths.remove(0);
 	}
 	Ok(())
 }
 
-fn current_log_path(base_dir: &Path, component: &str) -> PathBuf {
-	base_dir.join(component).join("current.log")
+fn component_log_paths(component_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+	let mut paths = fs::read_dir(component_dir)?
+		.filter_map(|entry| entry.ok().map(|entry| entry.path()))
+		.filter(|path| path.extension().is_some_and(|extension| extension == "log"))
+		.collect::<Vec<_>>();
+	paths.sort();
+	Ok(paths)
 }
 
-fn rotated_log_path(base_dir: &Path, component: &str, index: usize) -> PathBuf {
-	base_dir
-		.join(component)
-		.join(format!("current.log.{index}"))
+fn next_component_log_path(base_dir: &Path, component: &str) -> PathBuf {
+	let component_dir = base_dir.join(component);
+	let timestamp = timestamped_log_name();
+	let candidate = component_dir.join(format!("{timestamp}.log"));
+	if !candidate.exists() {
+		return candidate;
+	}
+
+	let epoch_millis = now_unix_ms();
+	component_dir.join(format!("{timestamp}-{epoch_millis}.log"))
+}
+
+fn timestamped_log_name() -> String {
+	let format =
+		format_description!("[year][month][day]T[hour][minute][second][subsecond digits:3]Z");
+	OffsetDateTime::now_utc()
+		.format(&format)
+		.unwrap_or_else(|_| format!("epoch-{}", now_unix_ms()))
 }
 
 fn format_stderr_record(record: &LogRecord) -> String {
@@ -349,10 +361,20 @@ mod tests {
 			.expect("log write should succeed");
 		thread::sleep(std::time::Duration::from_millis(50));
 
-		let log_path = dir.join("roku-cmd").join("current.log");
+		let log_path = component_log_paths(&dir.join("roku-cmd"))
+			.expect("log directory should be readable")
+			.into_iter()
+			.last()
+			.expect("one log file should be present");
 		let content = fs::read_to_string(&log_path).expect("log file should be readable");
 		assert!(content.contains("\"component\":\"roku-cmd\""));
 		assert!(content.contains("\"message\":\"started\""));
+		assert!(
+			log_path
+				.file_name()
+				.and_then(|value| value.to_str())
+				.is_some_and(|value| value.contains('T'))
+		);
 		let _ = fs::remove_dir_all(dir);
 	}
 
@@ -377,16 +399,15 @@ mod tests {
 		}
 		thread::sleep(std::time::Duration::from_millis(100));
 
-		assert!(
-			dir.join("roku-runtime-service")
-				.join("current.log")
-				.exists()
-		);
-		assert!(
-			dir.join("roku-runtime-service")
-				.join("current.log.1")
-				.exists()
-		);
+		let log_paths = component_log_paths(&dir.join("roku-runtime-service"))
+			.expect("runtime log directory should be readable");
+		assert!(log_paths.len() >= 2);
+		assert!(log_paths.len() <= 3);
+		assert!(log_paths.iter().all(|path| {
+			path.file_name()
+				.and_then(|value| value.to_str())
+				.is_some_and(|value| value.ends_with(".log"))
+		}));
 		let _ = fs::remove_dir_all(dir);
 	}
 }
