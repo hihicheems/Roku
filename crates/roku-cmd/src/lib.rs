@@ -22,7 +22,7 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use roku_common_types::PlanningModeHint;
+use roku_common_types::{ApprovalDecision, PlanningModeHint};
 use roku_observability::{
 	AsyncRotatingFileLogSink, FanoutLogSink, FileLogConfig, LogSink, StderrLogSink,
 	install_global_log_sink,
@@ -34,7 +34,8 @@ pub use runtime::{RunMode, run_live_once_from_env, run_once, run_with_mode};
 use crate::api::run_api_gateway_from_env;
 use crate::bot::run_telegram_bot_from_env;
 use crate::runtime::{
-	ExecutionRequestOptions, run_live_once_with_options_from_env, run_with_mode_and_options,
+	ExecutionRequestOptions, decide_approval_from_env, run_live_once_with_options_from_env,
+	run_with_mode_and_options, show_approval_from_env, show_task_from_env,
 };
 
 #[derive(Debug, Error)]
@@ -47,6 +48,8 @@ pub enum CommandError {
 	ApiGatewayBootstrap(String),
 	#[error("failed to bootstrap state store: {0}")]
 	StateStoreBootstrap(String),
+	#[error("failed to encode command output: {0}")]
+	OutputEncoding(String),
 	#[error(transparent)]
 	Runtime(#[from] roku_common_types::RuntimeError),
 	#[error(transparent)]
@@ -86,6 +89,8 @@ where
 			run_api_gateway_from_env()?;
 			Ok(None)
 		}
+		Some("task") => execute_task_command(&args[1..]).map(Some),
+		Some("approval") => execute_approval_command(&args[1..]).map(Some),
 		Some("--help") | Some("-h") | Some("help") => Ok(Some(help_text().to_string())),
 		Some(command) => Err(CommandError::Usage(format!(
 			"unknown command: {command}\n\n{}",
@@ -95,7 +100,7 @@ where
 }
 
 pub fn help_text() -> &'static str {
-	"Usage:\n  roku-cmd once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd live-once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n\nCommands:\n  once         Run the deterministic in-process pipeline.\n  live-once    Run the OpenRouter-backed live pipeline from environment.\n  telegram-bot Start the Telegram polling bot using environment configuration.\n  api-gateway  Start the Actix HTTP gateway using environment configuration.\n\nPlanning Modes:\n  react | taskdecomposition | treesearch | iterativerefinement"
+	"Usage:\n  roku-cmd once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd live-once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n  roku-cmd task show <task-id>\n  roku-cmd approval show <approval-id>\n  roku-cmd approval approve <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd approval reject <approval-id> --actor <actor> [--comment <text>]\n\nCommands:\n  once         Run the deterministic in-process pipeline.\n  live-once    Run the OpenRouter-backed live pipeline from environment.\n  telegram-bot Start the Telegram polling bot using environment configuration.\n  api-gateway  Start the Actix HTTP gateway using environment configuration.\n  task show    Render a persisted task snapshot with its event timeline.\n  approval     Show or decide an approval ticket from persisted state.\n\nPlanning Modes:\n  react | taskdecomposition | treesearch | iterativerefinement"
 }
 
 fn join_goal(parts: &[String]) -> Result<String, CommandError> {
@@ -180,6 +185,113 @@ fn parse_planning_mode_hint(value: &str) -> Result<PlanningModeHint, CommandErro
 			help_text()
 		))),
 	}
+}
+
+fn execute_task_command(parts: &[String]) -> Result<String, CommandError> {
+	match parts {
+		[command, task_id] if command.eq_ignore_ascii_case("show") => show_task_from_env(task_id),
+		_ => Err(CommandError::Usage(format!(
+			"invalid task command\n\n{}",
+			help_text()
+		))),
+	}
+}
+
+fn execute_approval_command(parts: &[String]) -> Result<String, CommandError> {
+	match parts.first().map(String::as_str) {
+		Some(command) if command.eq_ignore_ascii_case("show") => {
+			let approval_id = parts.get(1).ok_or_else(|| {
+				CommandError::Usage(format!(
+					"missing approval id for approval show\n\n{}",
+					help_text()
+				))
+			})?;
+			show_approval_from_env(approval_id)
+		}
+		Some(command)
+			if command.eq_ignore_ascii_case("approve")
+				|| command.eq_ignore_ascii_case("reject") =>
+		{
+			let approval_id = parts.get(1).ok_or_else(|| {
+				CommandError::Usage(format!(
+					"missing approval id for approval decision\n\n{}",
+					help_text()
+				))
+			})?;
+			let options = parse_approval_decision_options(&parts[2..])?;
+			decide_approval_from_env(
+				approval_id,
+				ApprovalDecision {
+					actor: options.actor,
+					approved: command.eq_ignore_ascii_case("approve"),
+					comment: options.comment,
+				},
+			)
+		}
+		_ => Err(CommandError::Usage(format!(
+			"invalid approval command\n\n{}",
+			help_text()
+		))),
+	}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ApprovalDecisionOptions {
+	actor: String,
+	comment: Option<String>,
+}
+
+fn parse_approval_decision_options(
+	parts: &[String],
+) -> Result<ApprovalDecisionOptions, CommandError> {
+	let mut actor = None;
+	let mut comment = None;
+	let mut index = 0usize;
+
+	while index < parts.len() {
+		let current = &parts[index];
+		if let Some(value) = current.strip_prefix("--actor=") {
+			actor = Some(parse_non_empty_flag("--actor", value)?);
+			index += 1;
+			continue;
+		}
+		if current == "--actor" {
+			let value = parts
+				.get(index + 1)
+				.ok_or_else(|| CommandError::Usage("missing value for --actor".to_string()))?;
+			actor = Some(parse_non_empty_flag("--actor", value)?);
+			index += 2;
+			continue;
+		}
+		if let Some(value) = current.strip_prefix("--comment=") {
+			comment = Some(parse_non_empty_flag("--comment", value)?);
+			index += 1;
+			continue;
+		}
+		if current == "--comment" {
+			let value = parts
+				.get(index + 1)
+				.ok_or_else(|| CommandError::Usage("missing value for --comment".to_string()))?;
+			comment = Some(parse_non_empty_flag("--comment", value)?);
+			index += 2;
+			continue;
+		}
+
+		return Err(CommandError::Usage(format!(
+			"unknown approval decision flag: {current}\n\n{}",
+			help_text()
+		)));
+	}
+
+	Ok(ApprovalDecisionOptions {
+		actor: actor.ok_or_else(|| {
+			CommandError::Usage(format!(
+				"missing required --actor for approval decision\n\n{}",
+				help_text()
+			))
+		})?,
+		comment,
+	})
 }
 
 fn configure_logging_from_env() -> Result<(), CommandError> {
@@ -282,6 +394,8 @@ mod tests {
 		let help = output.expect("help output should exist");
 		assert!(help.contains("telegram-bot"));
 		assert!(help.contains("api-gateway"));
+		assert!(help.contains("task show"));
+		assert!(help.contains("approval show"));
 	}
 
 	#[test]
@@ -314,5 +428,29 @@ mod tests {
 		.expect_err("unknown mode should fail");
 
 		assert!(error.to_string().contains("unknown planning mode"));
+	}
+
+	#[test]
+	fn parse_approval_decision_options_supports_actor_and_comment() {
+		let options = parse_approval_decision_options(&[
+			"--actor".to_string(),
+			"reviewer".to_string(),
+			"--comment=looks good".to_string(),
+		])
+		.expect("approval options should parse");
+
+		assert_eq!(options.actor, "reviewer");
+		assert_eq!(options.comment.as_deref(), Some("looks good"));
+	}
+
+	#[test]
+	fn parse_approval_decision_options_requires_actor() {
+		let error = parse_approval_decision_options(&[
+			"--comment".to_string(),
+			"missing actor".to_string(),
+		])
+		.expect_err("actor should be required");
+
+		assert!(error.to_string().contains("missing required --actor"));
 	}
 }

@@ -17,7 +17,9 @@ use std::sync::Arc;
 use roku_agent_runtime::GenericAgentRuntime;
 use roku_api_gateway::{Gateway, RawRequest};
 use roku_artifact_store::ArtifactStore;
-use roku_common_types::{PlanningModeHint, ResponseEnvelope, RuntimeError};
+use roku_common_types::{
+	ApprovalDecision, ApprovalId, PlanningModeHint, ResponseEnvelope, RuntimeError, TaskId,
+};
 use roku_experiment_registry::ExperimentRegistry;
 use roku_llm_adapter::{OpenRouterConfig, build_openrouter_router_with_metrics};
 use roku_observability::{InMemoryAuditSink, LogLevel, LogRecord, Metrics, emit_global_log};
@@ -28,6 +30,7 @@ use roku_state_store::{
 	PostgresStoreConfig, PostgresTaskRepository,
 };
 use roku_task_planner::llm::LlmTaskPlanner;
+use serde_json::json;
 
 use crate::CommandError;
 
@@ -90,41 +93,20 @@ pub(crate) fn run_live_once_with_options_from_env(
 
 pub(crate) fn build_live_runtime_service_from_env() -> Result<RuntimeService, CommandError> {
 	let config = OpenRouterConfig::from_env()?;
-	let store_config = PostgresStoreConfig::from_env()
-		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?;
 	let metrics = Arc::new(Metrics::default());
 	let runtime_router = build_openrouter_router_with_metrics(config.clone(), metrics.clone())?;
 	let planner_router = build_openrouter_router_with_metrics(config, metrics.clone())?;
 	let runtime = GenericAgentRuntime::with_llm_router(runtime_router);
 	let planner = Box::new(LlmTaskPlanner::new(planner_router));
+	let store_config = PostgresStoreConfig::from_env()
+		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?;
 
 	if let Some(store_config) = store_config {
-		let _ = emit_global_log(
-			LogRecord::new(
-				"roku-cmd",
-				LogLevel::Info,
-				"using postgres-backed orchestration state store",
-			)
-			.with_field("schema", store_config.schema.clone()),
-		);
-
 		return Ok(RuntimeService::new_with_data_plane_and_runtime_and_metrics(
-			Box::new(
-				PostgresTaskRepository::connect(store_config.clone())
-					.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?,
-			),
-			Box::new(
-				PostgresEventRepository::connect(store_config.clone())
-					.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?,
-			),
-			Box::new(
-				PostgresApprovalRepository::connect(store_config.clone())
-					.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?,
-			),
-			Box::new(
-				PostgresResultRepository::connect(store_config)
-					.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?,
-			),
+			Box::new(connect_postgres_task_repository(&store_config)?),
+			Box::new(connect_postgres_event_repository(&store_config)?),
+			Box::new(connect_postgres_approval_repository(&store_config)?),
+			Box::new(connect_postgres_result_repository(&store_config)?),
 			ArtifactStore::default(),
 			ExperimentRegistry::default(),
 			Arc::new(InMemoryAuditSink::default()),
@@ -134,13 +116,113 @@ pub(crate) fn build_live_runtime_service_from_env() -> Result<RuntimeService, Co
 		));
 	}
 
-	let _ = emit_global_log(LogRecord::new(
-		"roku-cmd",
-		LogLevel::Info,
-		"using in-memory orchestration state store",
-	));
+	log_state_store_backend("in-memory", None);
 
 	Ok(RuntimeService::in_memory_with_agent_runtime_planner_and_metrics(runtime, planner, metrics))
+}
+
+pub(crate) fn show_task_from_env(task_id: &str) -> Result<String, CommandError> {
+	let service = build_stateful_runtime_service_from_env()?;
+	let task_id = TaskId(task_id.to_string());
+	let task = service
+		.get_task(&task_id)
+		.map_err(CommandError::Runtime)?
+		.ok_or_else(|| CommandError::Usage(format!("task not found: {}", task_id.0)))?;
+	let events = service
+		.list_task_events(&task_id)
+		.map_err(CommandError::Runtime)?;
+
+	serde_json::to_string_pretty(&json!({
+		"task": task,
+		"events": events,
+	}))
+	.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+}
+
+pub(crate) fn show_approval_from_env(approval_id: &str) -> Result<String, CommandError> {
+	let service = build_stateful_runtime_service_from_env()?;
+	let approval_id = ApprovalId(approval_id.to_string());
+	let ticket = service
+		.get_approval(&approval_id)
+		.map_err(CommandError::Runtime)?
+		.ok_or_else(|| CommandError::Usage(format!("approval not found: {}", approval_id.0)))?;
+
+	serde_json::to_string_pretty(&ticket)
+		.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+}
+
+pub(crate) fn decide_approval_from_env(
+	approval_id: &str,
+	decision: ApprovalDecision,
+) -> Result<String, CommandError> {
+	let service = build_live_runtime_service_from_env()?;
+	let response = service
+		.decide_approval(&ApprovalId(approval_id.to_string()), decision)
+		.map_err(CommandError::Runtime)?;
+
+	serde_json::to_string_pretty(&response)
+		.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+}
+
+fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandError> {
+	let store_config = PostgresStoreConfig::from_env()
+		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?;
+
+	if let Some(store_config) = store_config {
+		return Ok(RuntimeService::new_with_data_plane(
+			Box::new(connect_postgres_task_repository(&store_config)?),
+			Box::new(connect_postgres_event_repository(&store_config)?),
+			Box::new(connect_postgres_approval_repository(&store_config)?),
+			Box::new(connect_postgres_result_repository(&store_config)?),
+			ArtifactStore::default(),
+			ExperimentRegistry::default(),
+			Arc::new(InMemoryAuditSink::default()),
+		));
+	}
+
+	log_state_store_backend("in-memory", None);
+	Ok(RuntimeService::default())
+}
+
+fn connect_postgres_task_repository(
+	config: &PostgresStoreConfig,
+) -> Result<PostgresTaskRepository, CommandError> {
+	log_state_store_backend("postgres", Some(config.schema.as_str()));
+	PostgresTaskRepository::connect(config.clone())
+		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))
+}
+
+fn connect_postgres_event_repository(
+	config: &PostgresStoreConfig,
+) -> Result<PostgresEventRepository, CommandError> {
+	PostgresEventRepository::connect(config.clone())
+		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))
+}
+
+fn connect_postgres_approval_repository(
+	config: &PostgresStoreConfig,
+) -> Result<PostgresApprovalRepository, CommandError> {
+	PostgresApprovalRepository::connect(config.clone())
+		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))
+}
+
+fn connect_postgres_result_repository(
+	config: &PostgresStoreConfig,
+) -> Result<PostgresResultRepository, CommandError> {
+	PostgresResultRepository::connect(config.clone())
+		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))
+}
+
+fn log_state_store_backend(kind: &str, schema: Option<&str>) {
+	let mut record = LogRecord::new(
+		"roku-cmd",
+		LogLevel::Info,
+		format!("using {kind} orchestration state store"),
+	);
+	if let Some(schema) = schema {
+		record = record.with_field("schema", schema.to_string());
+	}
+	let _ = emit_global_log(record);
 }
 
 fn build_request(

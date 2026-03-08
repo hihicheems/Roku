@@ -1,5 +1,32 @@
 # Roku Agent Dev Log
 
+## 2026-03-08 - Session Milestone (Phase 23)
+
+### Completed Modules
+
+- `roku-cmd`
+  - Added `task show <task-id>` to render a persisted task snapshot together with its event timeline.
+  - Added `approval show <approval-id>` for operator-side approval inspection without requiring the live OpenRouter execution path.
+  - Added `approval approve|reject <approval-id> --actor ... [--comment ...]` to close the minimal approval decision loop from CLI.
+  - Split runtime bootstrap behavior so read-only state inspection commands can use the persisted state-store path without first requiring OpenRouter configuration.
+
+### Verification Status
+
+- `cargo test -p roku-cmd`: passed
+  - 10 unit tests passed, including the new approval decision parser coverage
+
+### Remaining Work
+
+- Extend CLI inspection beyond task/approval into artifact and experiment queries.
+- Add CLI-level resume and artifact download commands on top of the new persistent task and approval surfaces.
+- Back the CLI query/decision flow with richer restart-safe persistence for artifact and experiment stores.
+
+### Next Recommended Steps
+
+1. Implement `CMD-03` artifact / experiment inspection commands.
+2. Implement `CMD-04` artifact download and explicit resume commands.
+3. Continue `RS-15` so CLI resume can rebuild more than the current task snapshot + event timeline baseline.
+
 ## 2026-03-08 - Session Milestone (Phase 22)
 
 ### Completed Modules

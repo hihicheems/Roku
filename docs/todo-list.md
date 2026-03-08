@@ -374,6 +374,8 @@
 | CMD-11 | 将 `doctor` 升级为分组面板视图，区分常驻服务、内嵌组件、集成配置、日志与端点 | §19 Rust 工程结构 / 运维诊断 | DONE |
 | CMD-12 | 将 `api-gateway` 收敛为可选接口层，默认不随 `start-all` 启动，但保留 `doctor` 可见性与手动启动能力 | §4.1 Gateway 运行形态 / 运维诊断 | DONE |
 | CMD-13 | 让 live runtime bootstrap 优先装配 PostgreSQL-backed orchestration state store，并在日志中显式输出 backend 选择 | §6.1 PostgreSQL / §19 state-store / §16 可观测性 | DONE |
+| CMD-14 | 增加 `task show <task-id>` 与 `approval show <approval-id>` CLI 命令，直接查询持久化 task snapshot / event timeline / approval ticket | §19 CLI 运维入口 / §8 ResumePoint | DONE |
+| CMD-15 | 增加 `approval approve|reject <approval-id> --actor ... [--comment ...]` CLI 命令，支撑最小审批决策闭环 | §15.3 人审闸门 / CLI 运维入口 | DONE |
 
 ## roku-agent-directory (planned)
 
