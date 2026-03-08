@@ -19,4 +19,5 @@ roku-observability = { path = "../roku-observability" }
 roku-runtime-service = { path = "../roku-runtime-service" }
 roku-state-store = { path = "../roku-state-store" }
 roku-task-planner = { path = "../roku-task-planner" }
+serde_json = "1"
 thiserror = "2"
