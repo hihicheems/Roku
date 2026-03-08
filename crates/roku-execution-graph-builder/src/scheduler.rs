@@ -17,6 +17,7 @@ use std::fmt;
 
 use roku_common_types::{
 	NodeId, RecoveryEligibility, RerunPolicy, ResumeCandidate, TaskGraph, TaskNode,
+	TaskNodeDispatchPolicy,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,16 +47,19 @@ impl TaskGraphScheduler {
 		completed: &[NodeId],
 	) -> Result<Vec<TaskNode>, GraphScheduleError> {
 		self.ensure_valid(graph)?;
+		let automatic_node_ids = automatic_node_ids(graph);
 
 		let completed_ids = completed
 			.iter()
+			.filter(|node_id| automatic_node_ids.contains(&node_id.0))
 			.map(|node_id| node_id.0.clone())
 			.collect::<HashSet<_>>();
-		let dependencies = dependency_map(graph)?;
+		let dependencies = dependency_map(graph, &automatic_node_ids)?;
 
 		Ok(graph
 			.nodes
 			.iter()
+			.filter(|node| node.dispatch_policy == TaskNodeDispatchPolicy::Automatic)
 			.filter(|node| !completed_ids.contains(&node.node_id.0))
 			.filter(|node| {
 				dependencies.get(&node.node_id.0).is_none_or(|parents| {
@@ -71,15 +75,22 @@ impl TaskGraphScheduler {
 		graph: &TaskGraph,
 	) -> Result<Vec<Vec<NodeId>>, GraphScheduleError> {
 		self.validate_edges(graph)?;
+		let automatic_node_ids = automatic_node_ids(graph);
 
-		let outgoing = outgoing_map(graph)?;
+		let outgoing = outgoing_map(graph, &automatic_node_ids)?;
 		let mut indegree = graph
 			.nodes
 			.iter()
+			.filter(|node| automatic_node_ids.contains(&node.node_id.0))
 			.map(|node| (node.node_id.0.clone(), 0usize))
 			.collect::<HashMap<_, _>>();
 
 		for edge in &graph.edges {
+			if !automatic_node_ids.contains(&edge.from.0)
+				|| !automatic_node_ids.contains(&edge.to.0)
+			{
+				continue;
+			}
 			let target = indegree
 				.get_mut(&edge.to.0)
 				.ok_or_else(|| GraphScheduleError::UnknownNode(edge.to.0.clone()))?;
@@ -89,6 +100,7 @@ impl TaskGraphScheduler {
 		let mut queue = graph
 			.nodes
 			.iter()
+			.filter(|node| automatic_node_ids.contains(&node.node_id.0))
 			.filter(|node| indegree.get(&node.node_id.0) == Some(&0))
 			.map(|node| node.node_id.0.clone())
 			.collect::<VecDeque<_>>();
@@ -119,7 +131,7 @@ impl TaskGraphScheduler {
 			layers.push(layer);
 		}
 
-		if processed != graph.nodes.len() {
+		if processed != automatic_node_ids.len() {
 			return Err(GraphScheduleError::CycleDetected);
 		}
 
@@ -132,14 +144,17 @@ impl TaskGraphScheduler {
 		completed: &[NodeId],
 	) -> Result<bool, GraphScheduleError> {
 		self.ensure_valid(graph)?;
+		let automatic_node_ids = automatic_node_ids(graph);
 		let completed_ids = completed
 			.iter()
+			.filter(|node_id| automatic_node_ids.contains(&node_id.0))
 			.map(|node_id| node_id.0.clone())
 			.collect::<HashSet<_>>();
 
 		Ok(graph
 			.nodes
 			.iter()
+			.filter(|node| node.dispatch_policy == TaskNodeDispatchPolicy::Automatic)
 			.all(|node| completed_ids.contains(&node.node_id.0)))
 	}
 
@@ -199,7 +214,19 @@ impl TaskGraphScheduler {
 	}
 }
 
-fn dependency_map(graph: &TaskGraph) -> Result<HashMap<String, Vec<String>>, GraphScheduleError> {
+fn automatic_node_ids(graph: &TaskGraph) -> HashSet<String> {
+	graph
+		.nodes
+		.iter()
+		.filter(|node| node.dispatch_policy == TaskNodeDispatchPolicy::Automatic)
+		.map(|node| node.node_id.0.clone())
+		.collect()
+}
+
+fn dependency_map(
+	graph: &TaskGraph,
+	eligible_node_ids: &HashSet<String>,
+) -> Result<HashMap<String, Vec<String>>, GraphScheduleError> {
 	let known_nodes = graph
 		.nodes
 		.iter()
@@ -214,6 +241,9 @@ fn dependency_map(graph: &TaskGraph) -> Result<HashMap<String, Vec<String>>, Gra
 		if !known_nodes.contains(&edge.to.0) {
 			return Err(GraphScheduleError::UnknownNode(edge.to.0.clone()));
 		}
+		if !eligible_node_ids.contains(&edge.from.0) || !eligible_node_ids.contains(&edge.to.0) {
+			continue;
+		}
 		dependencies
 			.entry(edge.to.0.clone())
 			.or_default()
@@ -223,7 +253,10 @@ fn dependency_map(graph: &TaskGraph) -> Result<HashMap<String, Vec<String>>, Gra
 	Ok(dependencies)
 }
 
-fn outgoing_map(graph: &TaskGraph) -> Result<HashMap<String, Vec<String>>, GraphScheduleError> {
+fn outgoing_map(
+	graph: &TaskGraph,
+	eligible_node_ids: &HashSet<String>,
+) -> Result<HashMap<String, Vec<String>>, GraphScheduleError> {
 	let known_nodes = graph
 		.nodes
 		.iter()
@@ -237,6 +270,9 @@ fn outgoing_map(graph: &TaskGraph) -> Result<HashMap<String, Vec<String>>, Graph
 		}
 		if !known_nodes.contains(&edge.to.0) {
 			return Err(GraphScheduleError::UnknownNode(edge.to.0.clone()));
+		}
+		if !eligible_node_ids.contains(&edge.from.0) || !eligible_node_ids.contains(&edge.to.0) {
+			continue;
 		}
 		outgoing
 			.entry(edge.from.0.clone())
@@ -260,7 +296,9 @@ fn recovery_eligibility_for_node(node: &TaskNode) -> RecoveryEligibility {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use roku_common_types::{TaskEdge, TaskGraph, TaskId, TaskNode, TaskNodeKind};
+	use roku_common_types::{
+		TaskEdge, TaskGraph, TaskId, TaskNode, TaskNodeDispatchPolicy, TaskNodeKind,
+	};
 
 	fn node(id: &str, kind: TaskNodeKind) -> TaskNode {
 		TaskNode {
@@ -268,6 +306,7 @@ mod tests {
 			kind,
 			description: id.to_string(),
 			capabilities: Vec::new(),
+			dispatch_policy: TaskNodeDispatchPolicy::Automatic,
 			join_policy: roku_common_types::JoinPolicy::AllParents,
 			aggregation_mode: roku_common_types::AggregationMode::CollectAll,
 			recovery_anchor: roku_common_types::NodeRecoveryAnchor {
@@ -287,6 +326,13 @@ mod tests {
 			} else {
 				roku_common_types::RerunPolicy::SafeToRerun
 			},
+		}
+	}
+
+	fn manual_node(id: &str, kind: TaskNodeKind) -> TaskNode {
+		TaskNode {
+			dispatch_policy: TaskNodeDispatchPolicy::ManualRecovery,
+			..node(id, kind)
 		}
 	}
 
@@ -398,6 +444,44 @@ mod tests {
 		assert_eq!(
 			candidates[0].eligibility,
 			RecoveryEligibility::RequiresManualResume
+		);
+	}
+
+	#[test]
+	fn ready_nodes_ignore_manual_recovery_helpers() {
+		let scheduler = TaskGraphScheduler;
+		let graph = TaskGraph {
+			task_id: TaskId("task-helpers".to_string()),
+			nodes: vec![
+				node("step", TaskNodeKind::Execution),
+				manual_node("step-retry", TaskNodeKind::Retry),
+				node("validation", TaskNodeKind::Validation),
+			],
+			edges: vec![
+				TaskEdge {
+					from: NodeId("step".to_string()),
+					to: NodeId("step-retry".to_string()),
+				},
+				TaskEdge {
+					from: NodeId("step".to_string()),
+					to: NodeId("validation".to_string()),
+				},
+			],
+		};
+
+		let ready = scheduler
+			.ready_nodes(&graph, &[NodeId("step".to_string())])
+			.expect("graph should be schedulable");
+
+		assert_eq!(ready.len(), 1);
+		assert_eq!(ready[0].node_id, NodeId("validation".to_string()));
+		assert!(
+			scheduler
+				.is_complete(
+					&graph,
+					&[NodeId("step".to_string()), NodeId("validation".to_string()),],
+				)
+				.expect("graph should be schedulable")
 		);
 	}
 }
