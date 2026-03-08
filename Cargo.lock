@@ -1416,6 +1416,7 @@ dependencies = [
  "roku-common-types",
  "roku-experiment-registry",
  "roku-observability",
+ "roku-planning-engine",
  "roku-runtime-service",
  "roku-state-store",
  "roku-task-planner",

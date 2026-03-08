@@ -1,5 +1,6 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use actix_web::{App, web};
@@ -10,11 +11,16 @@ use roku_api_gateway::{
 };
 use roku_cmd::{RunMode, run_once, run_with_mode};
 use roku_common_types::{
-	ApprovalDecision, ApprovalId, ApprovalStatus, Artifact, ArtifactId, ExperimentRun,
-	RequestEnvelope, RequestId, ResponseStatus, RuntimeError, TaskId, TaskReplayReport, TaskState,
+	ApprovalDecision, ApprovalId, ApprovalStatus, Artifact, ArtifactId, EvidenceItem,
+	ExperimentRun, PlanOutline, PlanStep, RequestEnvelope, RequestId, ResponseStatus,
+	ResultEnvelope, ResultStatus, RuntimeError, TaskId, TaskNode, TaskReplayReport, TaskState,
 };
-use roku_runtime_service::RuntimeService;
-use roku_state_store::TaskRepository;
+use roku_planning_engine::PlanningDecision;
+use roku_runtime_service::{RuntimeDataPlane, RuntimeService};
+use roku_state_store::{
+	DispatchClaim, DispatchEnvelope, DispatchLease, DispatchQueue, RetryClaim, StoreError,
+	TaskRepository,
+};
 
 fn unique_path(suffix: &str) -> PathBuf {
 	let nanos = SystemTime::now()
@@ -40,9 +46,21 @@ fn file_backed_paths(prefix: &str) -> FileBackedPaths {
 }
 
 fn file_backed_runtime_service(paths: &FileBackedPaths) -> RuntimeService {
+	file_backed_runtime_service_with_runtime_and_planner(
+		paths,
+		roku_agent_runtime::GenericAgentRuntime::default(),
+		Box::new(roku_task_planner::AdaptiveTaskPlanner),
+	)
+}
+
+fn file_backed_runtime_service_with_runtime_and_planner(
+	paths: &FileBackedPaths,
+	runtime: roku_agent_runtime::GenericAgentRuntime,
+	planner: Box<dyn roku_task_planner::TaskPlanner + Send + Sync>,
+) -> RuntimeService {
 	let store_config = roku_state_store::SqliteStoreConfig::new(paths.state_db.clone());
 	RuntimeService::new_with_runtime_data_plane_and_metrics(
-		roku_runtime_service::RuntimeDataPlane {
+		RuntimeDataPlane {
 			task_repo: Box::new(
 				roku_state_store::SqliteTaskRepository::connect(store_config.clone())
 					.expect("sqlite task repo should open"),
@@ -71,10 +89,260 @@ fn file_backed_runtime_service(paths: &FileBackedPaths) -> RuntimeService {
 			),
 		},
 		Arc::new(roku_observability::InMemoryAuditSink::default()),
-		roku_agent_runtime::GenericAgentRuntime::default(),
+		runtime,
 		Arc::new(roku_observability::Metrics::default()),
-		Box::new(roku_task_planner::AdaptiveTaskPlanner),
+		planner,
 	)
+}
+
+fn in_memory_runtime_service_with_runtime_queue_and_planner(
+	runtime: roku_agent_runtime::GenericAgentRuntime,
+	queue: Box<dyn DispatchQueue + Send>,
+	planner: Box<dyn roku_task_planner::TaskPlanner + Send + Sync>,
+) -> RuntimeService {
+	RuntimeService::new_with_runtime_data_plane_and_metrics(
+		RuntimeDataPlane {
+			task_repo: Box::new(roku_state_store::InMemoryTaskRepository::default()),
+			event_repo: Box::new(roku_state_store::InMemoryEventRepository::default()),
+			approval_repo: Box::new(roku_state_store::InMemoryApprovalRepository::default()),
+			result_repo: Box::new(roku_state_store::InMemoryResultRepository::default()),
+			dispatch_queue: queue,
+			artifact_store: roku_artifact_store::ArtifactStore::default(),
+			experiment_registry: roku_experiment_registry::ExperimentRegistry::default(),
+		},
+		Arc::new(roku_observability::InMemoryAuditSink::default()),
+		runtime,
+		Arc::new(roku_observability::Metrics::default()),
+		planner,
+	)
+}
+
+struct SingleStepPlanner;
+
+impl roku_task_planner::TaskPlanner for SingleStepPlanner {
+	fn build_outline(
+		&self,
+		request: &RequestEnvelope,
+		_decision: &PlanningDecision,
+	) -> PlanOutline {
+		PlanOutline {
+			goal: request.goal.clone(),
+			steps: vec![PlanStep {
+				step_id: "single-step".to_string(),
+				summary: "single-step".to_string(),
+				required_capabilities: Vec::new(),
+				requires_approval: false,
+				depends_on: Vec::new(),
+				branch: None,
+				loop_control: None,
+			}],
+		}
+	}
+}
+
+struct FixedApprovalPlanner;
+
+impl roku_task_planner::TaskPlanner for FixedApprovalPlanner {
+	fn build_outline(
+		&self,
+		request: &RequestEnvelope,
+		_decision: &PlanningDecision,
+	) -> PlanOutline {
+		PlanOutline {
+			goal: request.goal.clone(),
+			steps: vec![PlanStep {
+				step_id: "single-step".to_string(),
+				summary: "single-step".to_string(),
+				required_capabilities: Vec::new(),
+				requires_approval: true,
+				depends_on: Vec::new(),
+				branch: None,
+				loop_control: None,
+			}],
+		}
+	}
+}
+
+#[derive(Clone)]
+struct CountingWorker {
+	executions: Arc<AtomicUsize>,
+}
+
+impl roku_agent_runtime::RuntimeWorker for CountingWorker {
+	fn worker_id(&self) -> &'static str {
+		"counting-worker"
+	}
+
+	fn supports(&self, _capabilities: &[String]) -> bool {
+		true
+	}
+
+	fn execute(
+		&self,
+		spec: &roku_common_types::AgentInstanceSpec,
+		node: &TaskNode,
+	) -> ResultEnvelope {
+		self.executions.fetch_add(1, Ordering::SeqCst);
+		ResultEnvelope {
+			task_id: spec.context.task_id.clone(),
+			node_id: node.node_id.clone(),
+			producer: spec.instance_id.clone(),
+			schema_version: "result.v1".to_string(),
+			status: ResultStatus::Ok,
+			payload: r#"{"message":"counted execution completed"}"#.to_string(),
+			evidence: vec![EvidenceItem {
+				kind: "runtime".to_string(),
+				value: "counting-worker".to_string(),
+			}],
+			confidence: 0.95,
+		}
+	}
+}
+
+#[derive(Clone)]
+struct ProviderWorker {
+	available: bool,
+}
+
+impl roku_agent_runtime::RuntimeWorker for ProviderWorker {
+	fn worker_id(&self) -> &'static str {
+		"provider-worker"
+	}
+
+	fn supports(&self, _capabilities: &[String]) -> bool {
+		true
+	}
+
+	fn execute(
+		&self,
+		spec: &roku_common_types::AgentInstanceSpec,
+		node: &TaskNode,
+	) -> ResultEnvelope {
+		if self.available {
+			ResultEnvelope {
+				task_id: spec.context.task_id.clone(),
+				node_id: node.node_id.clone(),
+				producer: spec.instance_id.clone(),
+				schema_version: "result.v1".to_string(),
+				status: ResultStatus::Ok,
+				payload: r#"{"message":"provider recovered"}"#.to_string(),
+				evidence: vec![EvidenceItem {
+					kind: "runtime".to_string(),
+					value: "provider-worker".to_string(),
+				}],
+				confidence: 0.9,
+			}
+		} else {
+			ResultEnvelope {
+				task_id: spec.context.task_id.clone(),
+				node_id: node.node_id.clone(),
+				producer: spec.instance_id.clone(),
+				schema_version: "result.v1".to_string(),
+				status: ResultStatus::Error,
+				payload:
+					r#"{"error_code":"provider_unavailable","message":"provider unavailable"}"#
+						.to_string(),
+				evidence: vec![EvidenceItem {
+					kind: "tool_error".to_string(),
+					value: "provider_unavailable".to_string(),
+				}],
+				confidence: 0.0,
+			}
+		}
+	}
+}
+
+#[derive(Default)]
+struct DuplicateDispatchQueueState {
+	current: Option<DispatchEnvelope>,
+	remaining_duplicates: usize,
+	lease_sequence: u64,
+}
+
+#[derive(Clone, Default)]
+struct DuplicateDispatchQueue {
+	state: Arc<Mutex<DuplicateDispatchQueueState>>,
+}
+
+impl DispatchQueue for DuplicateDispatchQueue {
+	fn publish(&mut self, envelope: DispatchEnvelope) -> Result<(), StoreError> {
+		let mut state = self.state.lock().map_err(|_| {
+			StoreError::Storage("duplicate dispatch queue lock poisoned".to_string())
+		})?;
+		state.current = Some(envelope);
+		state.remaining_duplicates = 2;
+		Ok(())
+	}
+
+	fn claim(
+		&mut self,
+		consumer_id: &str,
+		now_unix_ms: u64,
+	) -> Result<Option<DispatchClaim>, StoreError> {
+		let mut state = self.state.lock().map_err(|_| {
+			StoreError::Storage("duplicate dispatch queue lock poisoned".to_string())
+		})?;
+		let Some(envelope) = state.current.clone() else {
+			return Ok(None);
+		};
+		if state.remaining_duplicates == 0 {
+			state.current = None;
+			return Ok(None);
+		}
+		state.remaining_duplicates = state.remaining_duplicates.saturating_sub(1);
+		state.lease_sequence = state.lease_sequence.saturating_add(1);
+		Ok(Some(DispatchClaim {
+			envelope,
+			lease: DispatchLease {
+				entry_id: "duplicate-entry".to_string(),
+				consumer_id: consumer_id.to_string(),
+				lease_token: format!("dup-lease-{}", state.lease_sequence),
+				expires_at_unix_ms: now_unix_ms.saturating_add(1_000),
+			},
+		}))
+	}
+
+	fn ack(&mut self, _lease: &DispatchLease) -> Result<(), StoreError> {
+		Ok(())
+	}
+
+	fn nack(&mut self, _lease: &DispatchLease, _retry: RetryClaim) -> Result<(), StoreError> {
+		Ok(())
+	}
+
+	fn renew_lease(
+		&mut self,
+		_lease: &DispatchLease,
+		now_unix_ms: u64,
+	) -> Result<Option<DispatchLease>, StoreError> {
+		Ok(Some(DispatchLease {
+			entry_id: "duplicate-entry".to_string(),
+			consumer_id: "duplicate-consumer".to_string(),
+			lease_token: "duplicate-renewed".to_string(),
+			expires_at_unix_ms: now_unix_ms.saturating_add(1_000),
+		}))
+	}
+
+	fn backpressure(&self) -> roku_state_store::BackpressureSnapshot {
+		roku_state_store::BackpressureSnapshot {
+			queued: 0,
+			leased: 0,
+			max_in_flight: 1,
+			available_slots: 1,
+		}
+	}
+}
+
+fn counting_runtime(executions: Arc<AtomicUsize>) -> roku_agent_runtime::GenericAgentRuntime {
+	let mut runtime = roku_agent_runtime::GenericAgentRuntime::default();
+	runtime.register_worker(100, CountingWorker { executions });
+	runtime
+}
+
+fn provider_runtime(available: bool) -> roku_agent_runtime::GenericAgentRuntime {
+	let mut runtime = roku_agent_runtime::GenericAgentRuntime::default();
+	runtime.register_worker(100, ProviderWorker { available });
+	runtime
 }
 
 #[test]
@@ -299,6 +567,168 @@ fn e2e_replay_snapshot_compaction_preserves_restart_recovery() {
 		)
 		.expect("approval should resume task after compaction");
 	assert!(matches!(resumed.status, ResponseStatus::Succeeded));
+}
+
+#[test]
+fn e2e_duplicate_delivery_executes_node_once() {
+	let executions = Arc::new(AtomicUsize::new(0));
+	let service = in_memory_runtime_service_with_runtime_queue_and_planner(
+		counting_runtime(executions.clone()),
+		Box::new(DuplicateDispatchQueue::default()),
+		Box::new(SingleStepPlanner),
+	);
+
+	let response = service
+		.execute(RequestEnvelope {
+			request_id: RequestId("req-duplicate-delivery".to_string()),
+			session_id: "duplicate-delivery-session".to_string(),
+			goal: "exercise duplicate dispatch delivery".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		})
+		.expect("duplicate delivery run should succeed");
+
+	assert!(matches!(response.status, ResponseStatus::Succeeded));
+	assert_eq!(executions.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn e2e_sqlite_lease_expiry_requeues_to_another_consumer() {
+	let paths = file_backed_paths("lease-expiry");
+	let store_config = roku_state_store::SqliteStoreConfig::new(paths.state_db.clone());
+	let mut queue = roku_state_store::SqliteDispatchQueue::with_limits(store_config, 1, 10)
+		.expect("sqlite dispatch queue should open");
+	queue
+		.publish(DispatchEnvelope {
+			entry_id: "lease-expiry-entry".to_string(),
+			task_id: TaskId("task-lease-expiry".to_string()),
+			node_id: roku_common_types::NodeId("node-lease-expiry".to_string()),
+			attempt: 1,
+			payload: "lease-expiry".to_string(),
+		})
+		.expect("dispatch publish should succeed");
+
+	let first = queue
+		.claim("worker-a", 100)
+		.expect("first claim should succeed")
+		.expect("entry should be claimable");
+	assert_eq!(first.lease.consumer_id, "worker-a");
+
+	let blocked = queue
+		.claim("worker-b", 105)
+		.expect("second claim should succeed before expiry");
+	assert!(blocked.is_none());
+
+	let reclaimed = queue
+		.claim("worker-b", 111)
+		.expect("claim after expiry should succeed")
+		.expect("expired lease should be requeued");
+	assert_eq!(reclaimed.envelope.entry_id, first.envelope.entry_id);
+	assert_eq!(reclaimed.lease.consumer_id, "worker-b");
+}
+
+#[test]
+fn e2e_provider_loss_is_reported_and_recoverable_after_restart() {
+	let paths = file_backed_paths("provider-loss");
+	let unavailable_service = file_backed_runtime_service_with_runtime_and_planner(
+		&paths,
+		provider_runtime(false),
+		Box::new(SingleStepPlanner),
+	);
+	let task_id = TaskId("task-req-provider-loss".to_string());
+
+	let failed = unavailable_service
+		.execute(RequestEnvelope {
+			request_id: RequestId("req-provider-loss".to_string()),
+			session_id: "provider-loss-session".to_string(),
+			goal: "exercise provider loss".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		})
+		.expect("provider loss run should return a failure response");
+	assert!(matches!(failed.status, ResponseStatus::Failed));
+	assert!(failed.message.contains("provider unavailable"));
+
+	let restarted_service = file_backed_runtime_service_with_runtime_and_planner(
+		&paths,
+		provider_runtime(true),
+		Box::new(SingleStepPlanner),
+	);
+	let replay = restarted_service
+		.get_task_replay_report(&task_id)
+		.expect("replay report lookup should succeed")
+		.expect("replay report should exist");
+	assert!(replay.recoverable);
+	assert!(matches!(
+		replay.recovery_eligibility,
+		roku_common_types::RecoveryEligibility::ResumeReady
+	));
+
+	let resumed = restarted_service
+		.resume_task(&task_id)
+		.expect("restart should resume after provider recovery");
+	assert!(matches!(resumed.status, ResponseStatus::Succeeded));
+}
+
+#[test]
+fn e2e_restart_stress_preserves_progress_without_duplicate_execution() {
+	let paths = file_backed_paths("restart-stress");
+	let executions = Arc::new(AtomicUsize::new(0));
+	let service = file_backed_runtime_service_with_runtime_and_planner(
+		&paths,
+		counting_runtime(executions.clone()),
+		Box::new(FixedApprovalPlanner),
+	);
+	let pending = service
+		.execute(RequestEnvelope {
+			request_id: RequestId("req-restart-stress".to_string()),
+			session_id: "restart-stress-session".to_string(),
+			goal: "exercise restart stress".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		})
+		.expect("approval-gated run should pause");
+	assert!(matches!(pending.status, ResponseStatus::PendingApproval));
+	assert_eq!(executions.load(Ordering::SeqCst), 1);
+
+	let task_id = TaskId("task-req-restart-stress".to_string());
+	let approval_id = ApprovalId(
+		pending.artifacts[0]
+			.trim_start_matches("approval://")
+			.to_string(),
+	);
+
+	for _ in 0..3 {
+		let restarted_service = file_backed_runtime_service_with_runtime_and_planner(
+			&paths,
+			counting_runtime(executions.clone()),
+			Box::new(FixedApprovalPlanner),
+		);
+		let task = restarted_service
+			.get_task(&task_id)
+			.expect("task lookup should succeed after restart")
+			.expect("task should exist after restart");
+		assert_eq!(task.state, TaskState::WaitingApproval);
+		assert_eq!(executions.load(Ordering::SeqCst), 1);
+	}
+
+	let restarted_service = file_backed_runtime_service_with_runtime_and_planner(
+		&paths,
+		counting_runtime(executions.clone()),
+		Box::new(FixedApprovalPlanner),
+	);
+	let resumed = restarted_service
+		.decide_approval(
+			&approval_id,
+			ApprovalDecision {
+				actor: "reviewer".to_string(),
+				approved: true,
+				comment: Some("survived repeated restarts".to_string()),
+			},
+		)
+		.expect("approval should resume after restart stress");
+	assert!(matches!(resumed.status, ResponseStatus::Succeeded));
+	assert_eq!(executions.load(Ordering::SeqCst), 1);
 }
 
 #[actix_web::test]
