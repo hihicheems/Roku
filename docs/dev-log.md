@@ -1,5 +1,37 @@
 # Roku Agent Dev Log
 
+## 2026-03-08 - Session Milestone (Phase 26)
+
+### Completed Modules
+
+- `roku-common-types`
+  - Added a shared `TaskReplayReport` contract so replay/recovery surfaces can return a typed report instead of ad-hoc CLI-local JSON assembly.
+- `roku-runtime-service`
+  - Added `get_task_replay_report`, which rebuilds replay state from the persisted task snapshot plus event timeline and centralizes transition-validity, chain-consistency, snapshot-match, and recoverable-state classification.
+  - Added regression coverage for both completed tasks and waiting-approval tasks to ensure replay reports stay aligned with persisted state and recovery semantics.
+- `roku-cmd`
+  - Refactored `task replay <task-id>` to delegate replay-report construction to `roku-runtime-service` rather than reimplementing orchestration rules in the CLI layer.
+
+### Verification Status
+
+- `just fmt`: passed
+- `just lint`: passed
+- targeted `cargo test -p roku-runtime-service -p roku-cmd`: passed
+  - `roku-runtime-service`: 28 passed
+  - `roku-cmd`: 12 passed
+
+### Remaining Work
+
+- `RS-15` still needs true event-stream-driven partial rerun, not just replay reporting and snapshot-backed resume.
+- Replay reports currently summarize persisted state, but do not yet expose per-node recovery anchors or branch-local rerun points.
+- API / Telegram surfaces still need to consume the new replay report if operator-side recovery inspection should be available outside the CLI.
+
+### Next Recommended Steps
+
+1. Extend `TaskReplayReport` with per-node recovery anchors once branch-local replay is ready.
+2. Reuse the replay report in HTTP/API diagnostic surfaces so operator tooling does not fork query logic again.
+3. Continue `RS-15` toward partial rerun and event-stream-first recovery.
+
 ## 2026-03-08 - Session Milestone (Phase 25)
 
 ### Completed Modules

@@ -15,8 +15,9 @@
 use roku_common_types::{
 	AggregationMode, ApprovalTicket, Artifact, ArtifactId, ExperimentMetric, ExperimentRun,
 	JoinPolicy, NodeId, NodeResultSet, ResultEnvelope, RuntimeError, Task, TaskEvent, TaskId,
-	TaskNode, TaskState, ValidationEvidenceSet,
+	TaskNode, TaskReplayReport, TaskState, ValidationEvidenceSet,
 };
+use roku_orchestrator::is_valid_transition;
 
 use crate::RuntimeService;
 
@@ -35,6 +36,17 @@ impl RuntimeService {
 			.event_repo
 			.list_events(task_id)
 			.map_err(|error| RuntimeError::new(error.to_string()))
+	}
+
+	pub fn get_task_replay_report(
+		&self,
+		task_id: &TaskId,
+	) -> Result<Option<TaskReplayReport>, RuntimeError> {
+		let Some(task) = self.get_task(task_id)? else {
+			return Ok(None);
+		};
+		let events = self.list_task_events(task_id)?;
+		Ok(Some(build_replay_report(task, events)))
 	}
 
 	pub fn list_artifacts(&self, task_id: &TaskId) -> Result<Vec<Artifact>, RuntimeError> {
@@ -427,4 +439,40 @@ fn apply_aggregation_mode(
 			}
 		}
 	}
+}
+
+fn build_replay_report(task: Task, events: Vec<TaskEvent>) -> TaskReplayReport {
+	let replayed_state = events.last().map(|event| event.to).unwrap_or(task.state);
+	let transitions_valid = events
+		.iter()
+		.all(|event| is_valid_transition(event.from, event.to));
+	let chain_consistent = events
+		.windows(2)
+		.all(|window| window[0].to == window[1].from);
+
+	TaskReplayReport {
+		task_id: task.task_id,
+		persisted_state: task.state,
+		replayed_state,
+		event_count: events.len(),
+		transitions_valid,
+		chain_consistent,
+		snapshot_matches_replay: task.state == replayed_state,
+		recoverable: is_recoverable_state(task.state),
+		events,
+	}
+}
+
+fn is_recoverable_state(state: TaskState) -> bool {
+	matches!(
+		state,
+		TaskState::Planning
+			| TaskState::GraphBuilding
+			| TaskState::Delegating
+			| TaskState::Executing
+			| TaskState::WaitingApproval
+			| TaskState::Validating
+			| TaskState::Aggregating
+			| TaskState::Failed
+	)
 }
