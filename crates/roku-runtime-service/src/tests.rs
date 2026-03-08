@@ -19,9 +19,14 @@ use roku_common_types::{
 	ResultEnvelope, ResultStatus, Task, TaskEdge, TaskGraph, TaskId, TaskNode, TaskNodeKind,
 	TaskState,
 };
+use roku_state_store::{
+	DispatchClaim, DispatchEnvelope, DispatchLease, DispatchQueue, RetryClaim, StoreError,
+};
 use roku_supervisor_agent::DefaultSupervisorAgent;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
-use crate::{RunMode, RuntimeService, compact_approval_id};
+use crate::{RunMode, RuntimeDataPlane, RuntimeService, compact_approval_id};
 
 fn sample_request() -> RequestEnvelope {
 	RequestEnvelope {
@@ -826,4 +831,134 @@ fn node_result_set_enforces_quorum_policy() {
 		)
 		.expect_err("quorum should reject incomplete branches");
 	assert!(error.message.contains("join policy"));
+}
+
+#[derive(Default)]
+struct RecordingDispatchState {
+	published: Vec<String>,
+	claimed: Vec<String>,
+	acked: Vec<String>,
+	queued: VecDeque<DispatchEnvelope>,
+	lease_sequence: u64,
+}
+
+#[derive(Clone, Default)]
+struct RecordingDispatchQueue {
+	state: Arc<Mutex<RecordingDispatchState>>,
+}
+
+impl RecordingDispatchQueue {
+	fn snapshot(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
+		let state = self
+			.state
+			.lock()
+			.expect("dispatch state lock should succeed");
+		(
+			state.published.clone(),
+			state.claimed.clone(),
+			state.acked.clone(),
+		)
+	}
+}
+
+impl DispatchQueue for RecordingDispatchQueue {
+	fn publish(&mut self, envelope: DispatchEnvelope) -> Result<(), StoreError> {
+		let mut state = self
+			.state
+			.lock()
+			.expect("dispatch state lock should succeed");
+		state.published.push(envelope.node_id.0.clone());
+		state.queued.push_back(envelope);
+		Ok(())
+	}
+
+	fn claim(
+		&mut self,
+		consumer_id: &str,
+		now_unix_ms: u64,
+	) -> Result<Option<DispatchClaim>, StoreError> {
+		let mut state = self
+			.state
+			.lock()
+			.expect("dispatch state lock should succeed");
+		let Some(envelope) = state.queued.pop_front() else {
+			return Ok(None);
+		};
+		state.claimed.push(envelope.node_id.0.clone());
+		state.lease_sequence = state.lease_sequence.saturating_add(1);
+		Ok(Some(DispatchClaim {
+			envelope: envelope.clone(),
+			lease: DispatchLease {
+				entry_id: envelope.entry_id,
+				consumer_id: consumer_id.to_string(),
+				lease_token: format!("lease-{}", state.lease_sequence),
+				expires_at_unix_ms: now_unix_ms.saturating_add(1),
+			},
+		}))
+	}
+
+	fn ack(&mut self, lease: &DispatchLease) -> Result<(), StoreError> {
+		let mut state = self
+			.state
+			.lock()
+			.expect("dispatch state lock should succeed");
+		state.acked.push(lease.entry_id.clone());
+		Ok(())
+	}
+
+	fn nack(&mut self, _lease: &DispatchLease, _retry: RetryClaim) -> Result<(), StoreError> {
+		Ok(())
+	}
+
+	fn renew_lease(
+		&mut self,
+		_lease: &DispatchLease,
+		_now_unix_ms: u64,
+	) -> Result<Option<DispatchLease>, StoreError> {
+		Ok(None)
+	}
+
+	fn backpressure(&self) -> roku_state_store::BackpressureSnapshot {
+		let state = self
+			.state
+			.lock()
+			.expect("dispatch state lock should succeed");
+		roku_state_store::BackpressureSnapshot {
+			queued: state.queued.len(),
+			leased: 0,
+			max_in_flight: usize::MAX,
+			available_slots: usize::MAX,
+		}
+	}
+}
+
+#[test]
+fn service_routes_ready_nodes_through_dispatch_queue() {
+	let dispatch = RecordingDispatchQueue::default();
+	let snapshot = dispatch.clone();
+	let service = RuntimeService::new_with_runtime_data_plane_and_metrics(
+		RuntimeDataPlane {
+			task_repo: Box::new(roku_state_store::InMemoryTaskRepository::default()),
+			event_repo: Box::new(roku_state_store::InMemoryEventRepository::default()),
+			approval_repo: Box::new(roku_state_store::InMemoryApprovalRepository::default()),
+			result_repo: Box::new(roku_state_store::InMemoryResultRepository::default()),
+			dispatch_queue: Box::new(dispatch),
+			artifact_store: roku_artifact_store::ArtifactStore::default(),
+			experiment_registry: roku_experiment_registry::ExperimentRegistry::default(),
+		},
+		Arc::new(roku_observability::InMemoryAuditSink::default()),
+		GenericAgentRuntime::default(),
+		Arc::new(roku_observability::Metrics::default()),
+		Box::new(roku_task_planner::AdaptiveTaskPlanner),
+	);
+
+	let response = service
+		.execute(sample_request())
+		.expect("runtime service should succeed");
+	assert_eq!(response.status, ResponseStatus::Succeeded);
+
+	let (published, claimed, acked) = snapshot.snapshot();
+	assert_eq!(published.len(), claimed.len());
+	assert_eq!(claimed.len(), acked.len());
+	assert!(published.len() >= 2);
 }

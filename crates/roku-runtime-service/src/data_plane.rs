@@ -20,8 +20,10 @@ use roku_common_types::{
 };
 use roku_execution_graph_builder::TaskGraphScheduler;
 use roku_orchestrator::{
-	recovery_eligibility_for_state, replay_consistency_status, replayed_state,
+	build_idempotency_key, recovery_eligibility_for_state, replay_consistency_status,
+	replayed_state,
 };
+use roku_state_store::{DispatchEnvelope, DispatchLease};
 
 use crate::RuntimeService;
 
@@ -223,6 +225,51 @@ impl RuntimeService {
 			.map_err(|error| RuntimeError::new(error.to_string()))?;
 		self.metrics.inc_experiments_failed();
 		Ok(())
+	}
+
+	pub(super) fn enqueue_ready_nodes(
+		&self,
+		task: &Task,
+		ready_nodes: &[TaskNode],
+	) -> Result<(), RuntimeError> {
+		let mut state = self.lock_state()?;
+		for node in ready_nodes {
+			state
+				.dispatch_queue
+				.publish(DispatchEnvelope {
+					entry_id: build_idempotency_key(
+						&task.task_id,
+						&node.node_id.0,
+						task.attempts.saturating_add(1),
+					),
+					task_id: task.task_id.clone(),
+					node_id: node.node_id.clone(),
+					attempt: task.attempts.saturating_add(1),
+					payload: node.description.clone(),
+				})
+				.map_err(|error| RuntimeError::new(error.to_string()))?;
+		}
+		Ok(())
+	}
+
+	pub(super) fn claim_dispatched_node(
+		&self,
+		task_id: &TaskId,
+	) -> Result<Option<roku_state_store::DispatchClaim>, RuntimeError> {
+		let mut state = self.lock_state()?;
+		let consumer_id = format!("runtime-{}", task_id.0);
+		state
+			.dispatch_queue
+			.claim(&consumer_id, 0)
+			.map_err(|error| RuntimeError::new(error.to_string()))
+	}
+
+	pub(super) fn ack_dispatched_node(&self, lease: &DispatchLease) -> Result<(), RuntimeError> {
+		let mut state = self.lock_state()?;
+		state
+			.dispatch_queue
+			.ack(lease)
+			.map_err(|error| RuntimeError::new(error.to_string()))
 	}
 
 	#[cfg(test)]

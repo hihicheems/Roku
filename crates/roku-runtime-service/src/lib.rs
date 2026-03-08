@@ -38,8 +38,9 @@ use roku_observability::{
 };
 use roku_orchestrator::Orchestrator;
 use roku_state_store::{
-	ApprovalRepository, EventRepository, InMemoryApprovalRepository, InMemoryEventRepository,
-	InMemoryResultRepository, InMemoryTaskRepository, ResultRepository, TaskRepository,
+	ApprovalRepository, EventRepository, InMemoryApprovalRepository, InMemoryDispatchQueue,
+	InMemoryEventRepository, InMemoryResultRepository, InMemoryTaskRepository, ResultRepository,
+	TaskRepository,
 };
 use roku_supervisor_agent::{DefaultSupervisorAgent, SupervisorAgent};
 use roku_task_planner::{AdaptiveTaskPlanner, TaskPlanner};
@@ -63,8 +64,19 @@ struct RuntimeState {
 	event_repo: Box<dyn EventRepository + Send>,
 	approval_repo: Box<dyn ApprovalRepository + Send>,
 	result_repo: Box<dyn ResultRepository + Send>,
+	dispatch_queue: Box<dyn roku_state_store::DispatchQueue + Send>,
 	artifact_store: ArtifactStore,
 	experiment_registry: ExperimentRegistry,
+}
+
+pub struct RuntimeDataPlane {
+	pub task_repo: Box<dyn TaskRepository + Send>,
+	pub event_repo: Box<dyn EventRepository + Send>,
+	pub approval_repo: Box<dyn ApprovalRepository + Send>,
+	pub result_repo: Box<dyn ResultRepository + Send>,
+	pub dispatch_queue: Box<dyn roku_state_store::DispatchQueue + Send>,
+	pub artifact_store: ArtifactStore,
+	pub experiment_registry: ExperimentRegistry,
 }
 
 pub struct RuntimeService {
@@ -88,13 +100,16 @@ impl RuntimeService {
 		result_repo: Box<dyn ResultRepository + Send>,
 		audit_sink: Arc<dyn AuditSink>,
 	) -> Self {
-		Self::new_with_data_plane_and_runtime_and_metrics(
-			task_repo,
-			event_repo,
-			approval_repo,
-			result_repo,
-			ArtifactStore::default(),
-			ExperimentRegistry::default(),
+		Self::new_with_runtime_data_plane_and_metrics(
+			RuntimeDataPlane {
+				task_repo,
+				event_repo,
+				approval_repo,
+				result_repo,
+				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				artifact_store: ArtifactStore::default(),
+				experiment_registry: ExperimentRegistry::default(),
+			},
 			audit_sink,
 			GenericAgentRuntime::default(),
 			Arc::new(Metrics::default()),
@@ -111,13 +126,16 @@ impl RuntimeService {
 		experiment_registry: ExperimentRegistry,
 		audit_sink: Arc<dyn AuditSink>,
 	) -> Self {
-		Self::new_with_data_plane_and_runtime_and_metrics(
-			task_repo,
-			event_repo,
-			approval_repo,
-			result_repo,
-			artifact_store,
-			experiment_registry,
+		Self::new_with_runtime_data_plane_and_metrics(
+			RuntimeDataPlane {
+				task_repo,
+				event_repo,
+				approval_repo,
+				result_repo,
+				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				artifact_store,
+				experiment_registry,
+			},
 			audit_sink,
 			GenericAgentRuntime::default(),
 			Arc::new(Metrics::default()),
@@ -135,13 +153,16 @@ impl RuntimeService {
 		audit_sink: Arc<dyn AuditSink>,
 		runtime: GenericAgentRuntime,
 	) -> Self {
-		Self::new_with_data_plane_and_runtime_and_metrics(
-			task_repo,
-			event_repo,
-			approval_repo,
-			result_repo,
-			artifact_store,
-			experiment_registry,
+		Self::new_with_runtime_data_plane_and_metrics(
+			RuntimeDataPlane {
+				task_repo,
+				event_repo,
+				approval_repo,
+				result_repo,
+				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				artifact_store,
+				experiment_registry,
+			},
 			audit_sink,
 			runtime,
 			Arc::new(Metrics::default()),
@@ -161,6 +182,40 @@ impl RuntimeService {
 		metrics: Arc<Metrics>,
 		planner: Box<dyn TaskPlanner + Send + Sync>,
 	) -> Self {
+		Self::new_with_runtime_data_plane_and_metrics(
+			RuntimeDataPlane {
+				task_repo,
+				event_repo,
+				approval_repo,
+				result_repo,
+				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				artifact_store,
+				experiment_registry,
+			},
+			audit_sink,
+			runtime,
+			metrics,
+			planner,
+		)
+	}
+
+	pub fn new_with_runtime_data_plane_and_metrics(
+		data_plane: RuntimeDataPlane,
+		audit_sink: Arc<dyn AuditSink>,
+		runtime: GenericAgentRuntime,
+		metrics: Arc<Metrics>,
+		planner: Box<dyn TaskPlanner + Send + Sync>,
+	) -> Self {
+		let RuntimeDataPlane {
+			task_repo,
+			event_repo,
+			approval_repo,
+			result_repo,
+			dispatch_queue,
+			artifact_store,
+			experiment_registry,
+		} = data_plane;
+
 		Self {
 			orchestrator: Orchestrator::default(),
 			supervisor: Box::new(DefaultSupervisorAgent::default()),
@@ -177,6 +232,7 @@ impl RuntimeService {
 				event_repo,
 				approval_repo,
 				result_repo,
+				dispatch_queue,
 				artifact_store,
 				experiment_registry,
 			}),
@@ -188,13 +244,16 @@ impl RuntimeService {
 	}
 
 	pub fn in_memory_with_agent_runtime(runtime: GenericAgentRuntime) -> Self {
-		Self::new_with_data_plane_and_runtime_and_metrics(
-			Box::new(InMemoryTaskRepository::default()),
-			Box::new(InMemoryEventRepository::default()),
-			Box::new(InMemoryApprovalRepository::default()),
-			Box::new(InMemoryResultRepository::default()),
-			ArtifactStore::default(),
-			ExperimentRegistry::default(),
+		Self::new_with_runtime_data_plane_and_metrics(
+			RuntimeDataPlane {
+				task_repo: Box::new(InMemoryTaskRepository::default()),
+				event_repo: Box::new(InMemoryEventRepository::default()),
+				approval_repo: Box::new(InMemoryApprovalRepository::default()),
+				result_repo: Box::new(InMemoryResultRepository::default()),
+				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				artifact_store: ArtifactStore::default(),
+				experiment_registry: ExperimentRegistry::default(),
+			},
 			Arc::new(InMemoryAuditSink::default()),
 			runtime,
 			Arc::new(Metrics::default()),
@@ -206,13 +265,16 @@ impl RuntimeService {
 		runtime: GenericAgentRuntime,
 		metrics: Arc<Metrics>,
 	) -> Self {
-		Self::new_with_data_plane_and_runtime_and_metrics(
-			Box::new(InMemoryTaskRepository::default()),
-			Box::new(InMemoryEventRepository::default()),
-			Box::new(InMemoryApprovalRepository::default()),
-			Box::new(InMemoryResultRepository::default()),
-			ArtifactStore::default(),
-			ExperimentRegistry::default(),
+		Self::new_with_runtime_data_plane_and_metrics(
+			RuntimeDataPlane {
+				task_repo: Box::new(InMemoryTaskRepository::default()),
+				event_repo: Box::new(InMemoryEventRepository::default()),
+				approval_repo: Box::new(InMemoryApprovalRepository::default()),
+				result_repo: Box::new(InMemoryResultRepository::default()),
+				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				artifact_store: ArtifactStore::default(),
+				experiment_registry: ExperimentRegistry::default(),
+			},
 			Arc::new(InMemoryAuditSink::default()),
 			runtime,
 			metrics,
@@ -225,13 +287,16 @@ impl RuntimeService {
 		planner: Box<dyn TaskPlanner + Send + Sync>,
 		metrics: Arc<Metrics>,
 	) -> Self {
-		Self::new_with_data_plane_and_runtime_and_metrics(
-			Box::new(InMemoryTaskRepository::default()),
-			Box::new(InMemoryEventRepository::default()),
-			Box::new(InMemoryApprovalRepository::default()),
-			Box::new(InMemoryResultRepository::default()),
-			ArtifactStore::default(),
-			ExperimentRegistry::default(),
+		Self::new_with_runtime_data_plane_and_metrics(
+			RuntimeDataPlane {
+				task_repo: Box::new(InMemoryTaskRepository::default()),
+				event_repo: Box::new(InMemoryEventRepository::default()),
+				approval_repo: Box::new(InMemoryApprovalRepository::default()),
+				result_repo: Box::new(InMemoryResultRepository::default()),
+				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				artifact_store: ArtifactStore::default(),
+				experiment_registry: ExperimentRegistry::default(),
+			},
 			Arc::new(InMemoryAuditSink::default()),
 			runtime,
 			metrics,
