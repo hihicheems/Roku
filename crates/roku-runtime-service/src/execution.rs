@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use roku_agent_runtime::AgentWorker;
+use std::collections::HashMap;
+
 use roku_common_types::{
 	ErrorClass, EvidenceItem, RecoveryEligibility, ResponseEnvelope, ResponseStatus, ResultStatus,
 	RuntimeError, Task, TaskId, TaskNode, TaskNodeKind, TaskState,
@@ -48,25 +50,45 @@ impl RuntimeService {
 					"task graph has no ready nodes but is not complete",
 				));
 			}
+			let ready_nodes_by_id = ready_nodes
+				.iter()
+				.cloned()
+				.map(|node| (node.node_id.0.clone(), node))
+				.collect::<HashMap<_, _>>();
+			self.enqueue_ready_nodes(task, &ready_nodes)?;
 
-			for node in ready_nodes {
+			while let Some(claim) = self.claim_dispatched_node(&task.task_id)? {
+				let node = ready_nodes_by_id
+					.get(&claim.envelope.node_id.0)
+					.ok_or_else(|| {
+						RuntimeError::new(format!(
+							"dispatched node {} is not ready for task {}",
+							claim.envelope.node_id.0, task.task_id.0
+						))
+					})?;
 				match node.kind {
 					TaskNodeKind::Execution => {
-						if let Some(response) = self.process_execution_node(task, &node, mode)? {
+						if let Some(response) = self.process_execution_node(task, node, mode)? {
+							self.ack_dispatched_node(&claim.lease)?;
 							return Ok(response);
 						}
+						self.ack_dispatched_node(&claim.lease)?;
 					}
 					TaskNodeKind::Approval => {
-						return self.process_approval_node(task, &node);
+						let response = self.process_approval_node(task, node)?;
+						self.ack_dispatched_node(&claim.lease)?;
+						return Ok(response);
 					}
 					TaskNodeKind::Validation => {
-						let report = self.process_validation_node(task, &node, mode)?;
+						let report = self.process_validation_node(task, node, mode)?;
+						self.ack_dispatched_node(&claim.lease)?;
 						if let Some(response) = report {
 							return Ok(response);
 						}
 					}
 					TaskNodeKind::Aggregation => {
-						self.process_aggregation_node(task, &node)?;
+						self.process_aggregation_node(task, node)?;
+						self.ack_dispatched_node(&claim.lease)?;
 					}
 				}
 			}

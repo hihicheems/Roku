@@ -1507,6 +1507,32 @@
 2. Revisit structured logging/export sinks now that the Telegram response surface is richer and includes progress receipts.
 3. Expand Telegram UX further only if a stronger progress protocol or artifact actions are needed.
 
+## 2026-03-08 - Session Milestone (Phase 36)
+
+### Completed Modules
+
+- `roku-runtime-service`
+  - Routed ready-node scheduling through the shared `DispatchQueue` abstraction instead of iterating scheduler output directly inside the execution loop.
+  - Added dispatch publish/claim/ack helpers so resumed and fresh execution now share the same lease-shaped dispatch boundary even though the worker loop is still in-process and synchronous.
+  - Added regression coverage with a recording queue to prove runtime execution actually publishes, claims, and acknowledges node work through the dispatch interface.
+
+### Verification Status
+
+- `cargo test -p roku-runtime-service`: passed
+- `just fmt`: passed
+
+### Remaining Work
+
+- `RS-15` is still incomplete: recovery preflight can identify runnable nodes, but task reconstruction is not yet event-stream-first and partial rerun orchestration is still missing.
+- `OR-08` remains incomplete because the runtime is only wired to the abstraction; there is still no Redis / NATS / JetStream-backed dispatch adapter.
+- `OR-06` / `RS-16` cancellation, compensation, and timeout-recovery state flows are still missing.
+
+### Next Recommended Steps
+
+1. Extend dispatch wiring from in-process scheduling to restart-aware replay so reconstructed runnable nodes are republished through the same queue contract.
+2. Implement cancellation / timeout state transitions before adding a remote queue backend, so lease loss and abort semantics have a stable orchestrator contract.
+3. Add duplicate-delivery and replay-after-restart tests once dispatch and recovery start sharing the same persisted reconstruction path.
+
 ## 2026-03-08 - Session Milestone (Phase 35)
 
 ### Completed Modules
