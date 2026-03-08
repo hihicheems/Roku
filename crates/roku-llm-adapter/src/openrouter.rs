@@ -210,7 +210,7 @@ impl LlmProvider for OpenRouterProvider {
 					],
 				);
 			})
-			.map_err(ProviderCallError::non_retryable)?;
+			.map_err(classify_parse_error)?;
 		let latency_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
 		let served_model = parsed.served_model_id.as_deref().unwrap_or(&model.model_id);
 		log_openrouter(
@@ -249,6 +249,10 @@ fn classify_status_error(status_code: u16, response_body: String) -> ProviderCal
 		408 | 409 | 429 | 500..=599 => ProviderCallError::retryable(message),
 		_ => ProviderCallError::non_retryable(message),
 	}
+}
+
+fn classify_parse_error(message: String) -> ProviderCallError {
+	ProviderCallError::retryable(format!("unreadable provider response: {message}"))
 }
 
 pub fn build_openrouter_router(
@@ -300,9 +304,11 @@ fn build_request_body<'a>(
 		models: config.request_fallback_chain(&model.model_id),
 		messages,
 		max_tokens: request.expected_output_tokens,
+		reasoning: OpenRouterReasoningConfig { exclude: true },
 	}
 }
 
+#[derive(Debug)]
 struct ParsedOpenRouterResponse {
 	output: String,
 	prompt_tokens: u64,
@@ -313,18 +319,26 @@ struct ParsedOpenRouterResponse {
 fn parse_response(response_body: &str) -> Result<ParsedOpenRouterResponse, String> {
 	let response: Value = serde_json::from_str(response_body)
 		.map_err(|error| format!("invalid response json: {error}"))?;
-	let message = response
+	let choice = response
 		.get("choices")
 		.and_then(Value::as_array)
 		.and_then(|choices| choices.first())
-		.and_then(|choice| choice.get("message"))
-		.ok_or_else(|| "openrouter response contained no message payload".to_string())?;
-	let output = extract_content_text(message).ok_or_else(|| {
-		format!(
-			"openrouter response message contained no readable text: {}",
-			truncate_for_log(&message.to_string(), 400)
-		)
-	})?;
+		.ok_or_else(|| "openrouter response contained no choice payload".to_string())?;
+	let output = choice
+		.get("message")
+		.and_then(extract_message_text)
+		.or_else(|| {
+			choice
+				.get("text")
+				.and_then(Value::as_str)
+				.map(str::to_string)
+		})
+		.ok_or_else(|| {
+			format!(
+				"openrouter response contained no readable assistant content: {}",
+				truncate_for_log(&choice.to_string(), 400)
+			)
+		})?;
 
 	let prompt_tokens = response
 		.get("usage")
@@ -356,12 +370,39 @@ struct OpenAiChatCompletionRequest<'a> {
 	models: Vec<String>,
 	messages: Vec<OpenAiChatCompletionMessage<'a>>,
 	max_tokens: u64,
+	reasoning: OpenRouterReasoningConfig,
 }
 
 #[derive(Debug, Serialize)]
 struct OpenAiChatCompletionMessage<'a> {
 	role: &'static str,
 	content: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenRouterReasoningConfig {
+	exclude: bool,
+}
+
+fn extract_message_text(message: &Value) -> Option<String> {
+	match message {
+		Value::Object(object) => object
+			.get("content")
+			.and_then(extract_content_text)
+			.or_else(|| {
+				object
+					.get("refusal")
+					.and_then(Value::as_str)
+					.map(str::to_string)
+			})
+			.or_else(|| {
+				object
+					.get("text")
+					.and_then(Value::as_str)
+					.map(str::to_string)
+			}),
+		other => extract_content_text(other),
+	}
 }
 
 fn extract_content_text(content: &Value) -> Option<String> {
@@ -389,8 +430,7 @@ fn extract_content_text(content: &Value) -> Option<String> {
 					.get("refusal")
 					.and_then(Value::as_str)
 					.map(str::to_string)
-			})
-			.or_else(|| object.get("reasoning").and_then(extract_content_text)),
+			}),
 		_ => None,
 	}
 }
@@ -593,6 +633,7 @@ mod tests {
 		assert_eq!(body["messages"][0]["role"], "system");
 		assert_eq!(body["messages"][0]["content"], "You are Roku.");
 		assert_eq!(body["messages"][1]["role"], "user");
+		assert_eq!(body["reasoning"]["exclude"], true);
 	}
 
 	#[test]
@@ -641,23 +682,17 @@ mod tests {
 	}
 
 	#[test]
-	fn parse_response_falls_back_to_reasoning_when_content_is_null() {
-		let parsed = parse_response(
+	fn parse_response_rejects_reasoning_only_payloads() {
+		let error = parse_response(
 			r#"{
 				"model":"deepseek/deepseek-chat",
 				"choices":[{"message":{"role":"assistant","content":null,"reasoning":"hello from reasoning"}}],
 				"usage":{"prompt_tokens":9,"completion_tokens":3}
 			}"#,
 		)
-		.expect("reasoning fallback should parse");
+		.expect_err("reasoning-only payloads must not be surfaced as assistant output");
 
-		assert_eq!(parsed.output, "hello from reasoning");
-		assert_eq!(parsed.prompt_tokens, 9);
-		assert_eq!(parsed.output_tokens, 3);
-		assert_eq!(
-			parsed.served_model_id.as_deref(),
-			Some("deepseek/deepseek-chat")
-		);
+		assert!(error.contains("no readable assistant content"));
 	}
 
 	#[test]

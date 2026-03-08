@@ -1398,6 +1398,7 @@ version = "0.1.0"
 dependencies = [
  "roku-common-types",
  "roku-llm-adapter",
+ "roku-observability",
  "roku-tool-runtime",
  "serde_json",
  "time",

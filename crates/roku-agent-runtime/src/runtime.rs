@@ -297,4 +297,63 @@ mod tests {
 		assert_eq!(payload_value(&result)["message"], "live answer from llm");
 		assert_eq!(result.evidence[1].value, "general.execute");
 	}
+
+	struct MetaLlmProvider;
+
+	impl LlmProvider for MetaLlmProvider {
+		fn provider_name(&self) -> &'static str {
+			"meta-provider"
+		}
+
+		fn complete(
+			&self,
+			_model: &ModelProfile,
+			_request: &GenerationRequest,
+		) -> Result<ProviderResponse, ProviderCallError> {
+			Ok(ProviderResponse {
+				output: r#"First, the user's request is: "今天周几？"
+
+From the trusted runtime context:
+- local_weekday: Sunday
+
+So, I'll output: "星期日""#
+					.to_string(),
+				prompt_tokens: 48,
+				output_tokens: 64,
+				latency_ms: 50,
+			})
+		}
+	}
+
+	#[test]
+	fn llm_router_runtime_sanitizes_prompt_leakage_for_final_reply() {
+		let mut router = LlmRouter::new(RoutingPolicy {
+			max_request_cost_usd: 1.0,
+			max_latency_ms: 5_000,
+		});
+		router.register_provider(MetaLlmProvider);
+		router.register_model(ModelProfile {
+			model_id: "meta-model".to_string(),
+			provider: "meta-provider".to_string(),
+			max_context_tokens: 16_000,
+			cost_per_1k_tokens_usd: 0.0,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		});
+
+		let runtime = GenericAgentRuntime::with_llm_router(router);
+		let node = TaskNode {
+			node_id: NodeId("node-meta".to_string()),
+			kind: TaskNodeKind::Execution,
+			description: "Goal: 今天周几？\nStep: Execute primary action".to_string(),
+			capabilities: vec!["tool.invoke".to_string()],
+			join_policy: JoinPolicy::default(),
+			aggregation_mode: AggregationMode::default(),
+		};
+		let spec = spec_with_capabilities(vec!["tool.invoke"]);
+
+		let result = runtime.execute(&spec, &node);
+		assert_eq!(result.status, ResultStatus::Ok);
+		assert_eq!(payload_value(&result)["message"], "星期日。");
+	}
 }
