@@ -55,7 +55,7 @@
 | OR-05 | 增加基于持久化事件的任务重建 / replay 能力 | §8 / §20.2 验收重点 | TODO |
 | OR-06 | 增加取消、补偿与中断恢复状态流 | §8 状态机 / §22 风险缓解 | DONE |
 | OR-07 | 增加 node-level deadline / budget snapshot enforcement | §8.4 / §14 预算治理 | DONE |
-| OR-08 | 接入本地 SQLite dispatch plane 的 lease / ack / retry / renewal 协议 | §14.3 背压与资源隔离 | TODO |
+| OR-08 | 接入本地 SQLite dispatch plane 的 lease / ack / retry / renewal 协议 | §14.3 背压与资源隔离 | DONE |
 
 ## roku-supervisor-agent (planned)
 
@@ -106,7 +106,7 @@
 | GB-05 | 提供 ready-node scheduler、执行层次划分与 cycle detection | §8 Task Graph / 调度 | DONE |
 | GB-06 | 为 graph builder 注入 recovery point / resume point / partial rerun anchor | §8.1 ResumePoint | DONE |
 | GB-07 | 自动注入 approval / aggregation / retry / dead-letter 辅助节点 | §8.2 / §15.3 人审闸门 | DONE |
-| GB-08 | 增加条件边、条件分支和受控回环 DAG 编译能力 | §8.2 条件分支 / 回环有限图 | TODO |
+| GB-08 | 增加条件边、条件分支和受控回环 DAG 编译能力 | §8.2 条件分支 / 回环有限图 | DONE |
 | GB-09 | 为每个节点写入预算、deadline、capability requirement snapshot | §8.4 / §14 | DONE |
 
 ## roku-agent-instance-factory
@@ -285,7 +285,7 @@
 | SS-05 | 增加 SQLite task backend | §6.1 Local State Store / §21 Phase 4+ | DONE |
 | SS-06 | 增加 SQLite event / approval / result backend | §6.1 Local State Store | DONE |
 | SS-06A | 增加 SQLite session preference / conversation memory backend | §6.1 Local State Store / §12 Memory | DONE |
-| SS-07 | 增加 SQLite migration / bootstrap / repository index 设计 | 生产级持久化边界 | TODO |
+| SS-07 | 增加 SQLite migration / bootstrap / repository index 设计 | 生产级持久化边界 | DONE |
 | SS-08 | 增加 local-first dispatch 抽象（in-memory / SQLite） | §6.1 Local State Store / §14.3 | DONE |
 | SS-09 | 增加 ack、lease、backpressure、retry claim 语义 | §14.3 背压与资源隔离 | DONE |
 | SS-10 | 增加 SQLite-backed replay / snapshot / compaction 能力，以支撑大规模任务恢复 | §8 ResumePoint / §20 replay | TODO |

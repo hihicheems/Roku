@@ -16,8 +16,8 @@ use std::collections::{HashMap, HashSet};
 
 use roku_common_types::{
 	AggregationMode, JoinPolicy, NodeBudgetSnapshot, NodeId, NodeRecoveryAnchor, PlanOutline,
-	RerunPolicy, RetryPolicy, TaskEdge, TaskGraph, TaskId, TaskNode, TaskNodeDispatchPolicy,
-	TaskNodeKind,
+	RerunPolicy, RetryPolicy, TaskEdge, TaskEdgeCondition, TaskGraph, TaskId, TaskNode,
+	TaskNodeDispatchPolicy, TaskNodeKind,
 };
 use thiserror::Error;
 
@@ -61,6 +61,7 @@ impl ExecutionGraphBuilder {
 		let mut seen_steps = HashSet::new();
 		let mut execution_nodes = HashMap::new();
 		let mut terminal_nodes = HashMap::new();
+		let mut terminal_node_kinds = HashMap::new();
 
 		for step in &outline.steps {
 			if !seen_steps.insert(step.step_id.clone()) {
@@ -100,6 +101,7 @@ impl ExecutionGraphBuilder {
 			edges.push(TaskEdge {
 				from: execution_node_id.clone(),
 				to: retry_node_id.clone(),
+				condition: TaskEdgeCondition::OnFailureRetryable,
 			});
 
 			let dead_letter_node_id = NodeId(format!("{}-dead-letter", step.step_id));
@@ -119,6 +121,7 @@ impl ExecutionGraphBuilder {
 			edges.push(TaskEdge {
 				from: retry_node_id,
 				to: dead_letter_node_id,
+				condition: TaskEdgeCondition::OnFailureExhausted,
 			});
 
 			let terminal_node_id = if cfg.include_approval_gate && step.requires_approval {
@@ -139,9 +142,12 @@ impl ExecutionGraphBuilder {
 				edges.push(TaskEdge {
 					from: execution_node_id,
 					to: approval_node_id.clone(),
+					condition: TaskEdgeCondition::OnSuccess,
 				});
+				terminal_node_kinds.insert(step.step_id.clone(), TaskNodeKind::Approval);
 				approval_node_id
 			} else {
+				terminal_node_kinds.insert(step.step_id.clone(), TaskNodeKind::Execution);
 				execution_node_id
 			};
 			terminal_nodes.insert(step.step_id.clone(), terminal_node_id);
@@ -158,9 +164,14 @@ impl ExecutionGraphBuilder {
 						dependency: dependency.clone(),
 					}
 				})?;
+				let dependency_kind = terminal_node_kinds
+					.get(dependency)
+					.copied()
+					.unwrap_or(TaskNodeKind::Execution);
 				edges.push(TaskEdge {
 					from: dependency_terminal.clone(),
 					to: execution_node_id.clone(),
+					condition: completion_edge_condition(dependency_kind),
 				});
 			}
 		}
@@ -183,9 +194,16 @@ impl ExecutionGraphBuilder {
 			));
 
 			for terminal_node in terminal_step_nodes(outline, &terminal_nodes) {
+				let terminal_kind = terminal_step_kind(
+					outline,
+					&terminal_nodes,
+					&terminal_node_kinds,
+					&terminal_node,
+				);
 				edges.push(TaskEdge {
 					from: terminal_node,
 					to: validation_id.clone(),
+					condition: completion_edge_condition(terminal_kind),
 				});
 			}
 			validation_node_id = Some(validation_id);
@@ -210,9 +228,16 @@ impl ExecutionGraphBuilder {
 			let aggregation_parents = validation_node_id.into_iter().collect::<Vec<_>>();
 			if aggregation_parents.is_empty() {
 				for terminal_node in terminal_step_nodes(outline, &terminal_nodes) {
+					let terminal_kind = terminal_step_kind(
+						outline,
+						&terminal_nodes,
+						&terminal_node_kinds,
+						&terminal_node,
+					);
 					edges.push(TaskEdge {
 						from: terminal_node,
 						to: aggregation_id.clone(),
+						condition: completion_edge_condition(terminal_kind),
 					});
 				}
 			} else {
@@ -220,6 +245,7 @@ impl ExecutionGraphBuilder {
 					edges.push(TaskEdge {
 						from: parent,
 						to: aggregation_id.clone(),
+						condition: TaskEdgeCondition::OnSuccess,
 					});
 				}
 			}
@@ -231,6 +257,27 @@ impl ExecutionGraphBuilder {
 			edges,
 		})
 	}
+}
+
+fn completion_edge_condition(kind: TaskNodeKind) -> TaskEdgeCondition {
+	match kind {
+		TaskNodeKind::Approval => TaskEdgeCondition::OnApproved,
+		_ => TaskEdgeCondition::OnSuccess,
+	}
+}
+
+fn terminal_step_kind(
+	outline: &PlanOutline,
+	terminal_nodes: &HashMap<String, NodeId>,
+	terminal_node_kinds: &HashMap<String, TaskNodeKind>,
+	node_id: &NodeId,
+) -> TaskNodeKind {
+	outline
+		.steps
+		.iter()
+		.find(|step| terminal_nodes.get(&step.step_id) == Some(node_id))
+		.and_then(|step| terminal_node_kinds.get(&step.step_id).copied())
+		.unwrap_or(TaskNodeKind::Execution)
 }
 
 struct NodeMetadata {
@@ -366,7 +413,9 @@ fn terminal_step_nodes(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use roku_common_types::{PlanOutline, PlanStep, TaskId, TaskNodeDispatchPolicy, TaskNodeKind};
+	use roku_common_types::{
+		PlanOutline, PlanStep, TaskEdgeCondition, TaskId, TaskNodeDispatchPolicy, TaskNodeKind,
+	};
 
 	#[test]
 	fn compile_outline_to_graph() {
@@ -382,6 +431,8 @@ mod tests {
 						required_capabilities: vec![],
 						requires_approval: true,
 						depends_on: Vec::new(),
+						branch: None,
+						loop_control: None,
 					}],
 				},
 				&GraphBuildConfig::default(),
@@ -421,11 +472,24 @@ mod tests {
 				.any(|node| node.kind == TaskNodeKind::Aggregation)
 		);
 		assert!(graph.edges.iter().any(|edge| {
-			edge.from == NodeId("s1".to_string()) && edge.to == NodeId("s1-retry".to_string())
+			edge.from == NodeId("s1".to_string())
+				&& edge.to == NodeId("s1-retry".to_string())
+				&& edge.condition == TaskEdgeCondition::OnFailureRetryable
 		}));
 		assert!(graph.edges.iter().any(|edge| {
 			edge.from == NodeId("s1-retry".to_string())
 				&& edge.to == NodeId("s1-dead-letter".to_string())
+				&& edge.condition == TaskEdgeCondition::OnFailureExhausted
+		}));
+		assert!(graph.edges.iter().any(|edge| {
+			edge.from == NodeId("s1".to_string())
+				&& edge.to == NodeId("s1-approval".to_string())
+				&& edge.condition == TaskEdgeCondition::OnSuccess
+		}));
+		assert!(graph.edges.iter().any(|edge| {
+			edge.from == NodeId("s1-approval".to_string())
+				&& edge.to == NodeId("validation-gate".to_string())
+				&& edge.condition == TaskEdgeCondition::OnApproved
 		}));
 	}
 
@@ -444,6 +508,8 @@ mod tests {
 							required_capabilities: vec![],
 							requires_approval: false,
 							depends_on: Vec::new(),
+							branch: None,
+							loop_control: None,
 						},
 						PlanStep {
 							step_id: "analyze-a".to_string(),
@@ -451,6 +517,8 @@ mod tests {
 							required_capabilities: vec![],
 							requires_approval: false,
 							depends_on: vec!["fetch".to_string()],
+							branch: None,
+							loop_control: None,
 						},
 						PlanStep {
 							step_id: "analyze-b".to_string(),
@@ -458,6 +526,8 @@ mod tests {
 							required_capabilities: vec![],
 							requires_approval: false,
 							depends_on: vec!["fetch".to_string()],
+							branch: None,
+							loop_control: None,
 						},
 					],
 				},
@@ -481,6 +551,46 @@ mod tests {
 	}
 
 	#[test]
+	fn compile_dependency_edges_with_success_conditions() {
+		let builder = ExecutionGraphBuilder;
+		let graph = builder
+			.compile(
+				TaskId("t-conditions".to_string()),
+				&PlanOutline {
+					goal: "conditions".to_string(),
+					steps: vec![
+						PlanStep {
+							step_id: "extract".to_string(),
+							summary: "extract".to_string(),
+							required_capabilities: vec![],
+							requires_approval: false,
+							depends_on: Vec::new(),
+							branch: None,
+							loop_control: None,
+						},
+						PlanStep {
+							step_id: "analyze".to_string(),
+							summary: "analyze".to_string(),
+							required_capabilities: vec![],
+							requires_approval: false,
+							depends_on: vec!["extract".to_string()],
+							branch: None,
+							loop_control: None,
+						},
+					],
+				},
+				&GraphBuildConfig::default(),
+			)
+			.expect("graph compilation should succeed");
+
+		assert!(graph.edges.iter().any(|edge| {
+			edge.from == NodeId("extract".to_string())
+				&& edge.to == NodeId("analyze".to_string())
+				&& edge.condition == TaskEdgeCondition::OnSuccess
+		}));
+	}
+
+	#[test]
 	fn reject_outline_with_missing_dependency() {
 		let builder = ExecutionGraphBuilder;
 		let error = builder
@@ -494,6 +604,8 @@ mod tests {
 						required_capabilities: vec![],
 						requires_approval: false,
 						depends_on: vec!["unknown".to_string()],
+						branch: None,
+						loop_control: None,
 					}],
 				},
 				&GraphBuildConfig::default(),

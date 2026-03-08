@@ -662,6 +662,8 @@ fn service_reconstructs_execution_progress_from_persisted_results_after_restart(
 					required_capabilities: Vec::new(),
 					requires_approval: true,
 					depends_on: Vec::new(),
+					branch: None,
+					loop_control: None,
 				}],
 			}
 		}
@@ -819,14 +821,17 @@ fn service_reconstructs_approval_and_validation_progress_from_persistence() {
 				TaskEdge {
 					from: NodeId("step-1".to_string()),
 					to: NodeId("step-1-approval".to_string()),
+					condition: roku_common_types::TaskEdgeCondition::OnSuccess,
 				},
 				TaskEdge {
 					from: NodeId("step-1-approval".to_string()),
 					to: NodeId("validation-gate".to_string()),
+					condition: roku_common_types::TaskEdgeCondition::OnApproved,
 				},
 				TaskEdge {
 					from: NodeId("validation-gate".to_string()),
 					to: NodeId("aggregation-gate".to_string()),
+					condition: roku_common_types::TaskEdgeCondition::OnSuccess,
 				},
 			],
 		}),
@@ -1098,10 +1103,12 @@ fn validation_collects_results_through_approval_nodes() {
 				TaskEdge {
 					from: NodeId("extract".to_string()),
 					to: NodeId("extract-approval".to_string()),
+					condition: roku_common_types::TaskEdgeCondition::OnSuccess,
 				},
 				TaskEdge {
 					from: NodeId("extract-approval".to_string()),
 					to: NodeId("validate".to_string()),
+					condition: roku_common_types::TaskEdgeCondition::OnApproved,
 				},
 			],
 		}),
@@ -1216,10 +1223,12 @@ fn node_result_set_applies_highest_confidence_aggregation() {
 				TaskEdge {
 					from: NodeId("branch-a".to_string()),
 					to: NodeId("aggregate".to_string()),
+					condition: roku_common_types::TaskEdgeCondition::OnSuccess,
 				},
 				TaskEdge {
 					from: NodeId("branch-b".to_string()),
 					to: NodeId("aggregate".to_string()),
+					condition: roku_common_types::TaskEdgeCondition::OnSuccess,
 				},
 			],
 		}),
@@ -1313,10 +1322,12 @@ fn node_result_set_enforces_quorum_policy() {
 				TaskEdge {
 					from: NodeId("branch-a".to_string()),
 					to: NodeId("aggregate".to_string()),
+					condition: roku_common_types::TaskEdgeCondition::OnSuccess,
 				},
 				TaskEdge {
 					from: NodeId("branch-b".to_string()),
 					to: NodeId("aggregate".to_string()),
+					condition: roku_common_types::TaskEdgeCondition::OnSuccess,
 				},
 			],
 		}),
