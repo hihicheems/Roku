@@ -245,6 +245,7 @@
 | AG-08 | 增加 request-id / trace-id 透传与全链路 correlation | §16 Trace 与日志 | TODO |
 | AG-09 | 增加异步任务观察、流式响应或 callback 机制 | §9 请求生命周期 / 长任务治理 | TODO |
 | AG-10 | 增加 OpenAPI / schema 文档与 API versioning 策略 | §19.1 / §20 验收 | TODO |
+| AG-11 | 在 `roku-cmd` 中补齐 `api-gateway` 常驻服务启动入口，并纳入开发态 service registry | §4.1 Connector / Gateway 运行形态 | DONE |
 
 ## roku-connectors-telegram
 
@@ -263,6 +264,7 @@
 | TG-11 | 让 Telegram 请求携带 session-level planning override 与 recent conversation history | §9 请求生命周期 / §12 Memory | DONE |
 | TG-12 | 默认仅向 Telegram 用户展示最终 answer 文本；request/status/artifact 元信息改为可配置扩展输出 | §4.1 Connector / Telegram 交互体验 | DONE |
 | TG-13 | 将 progress notice 默认降到日志侧，通过环境变量显式开启用户可见进度提示 | §4.1 Connector / 长任务体验 | DONE |
+| TG-14 | 支持单条命令式输入（如 `/react 你好`），并兼容原有两步式会话策略切换 | §7.3 Planning Strategy 模式 / Telegram 交互 | DONE |
 
 ## roku-state-store
 
@@ -323,7 +325,8 @@
 | OB-09 | 增加 tool / provider cost、latency、timeout、deny-rate 指标 | §16 Tool / Budget / Validation 指标 | TODO |
 | OB-10 | 增加外部 SIEM / audit sink 对接 | §15.2 审计模型 | TODO |
 | OB-11 | 增加可配置的全局 `LogSink` 抽象与 fanout 组合 | §16 Trace 与日志 / 工程化 | DONE |
-| OB-12 | 增加异步滚动文件日志 sink，默认按 `logs/<component>/current.log` 落盘 | §16 Trace 与日志 / Connector 运行治理 | DONE |
+| OB-12 | 增加异步滚动文件日志 sink，默认按 `logs/<component>/<timestamp>.log` 落盘 | §16 Trace 与日志 / Connector 运行治理 | DONE |
+| OB-13 | 将开发态 service stdout 日志改为按启动时间命名，并让 doctor 展示最新日志路径 | §16 Trace 与日志 / 工程化 | DONE |
 
 ## roku-runtime-service
 
@@ -362,6 +365,7 @@
 | CMD-08 | 增加 CLI 级 planning mode override 参数，便于本地验证四种 planning 策略 | §7.3 / 测试与演练辅助 | DONE |
 | CMD-09 | 增加 `scripts/dev-services.sh`，统一管理开发态常驻服务的 pid、stdout log 与运行目录 | §19 Rust 工程结构 / 工程化 | DONE |
 | CMD-10 | 在 `justfile` 中增加 `start-all` / `stop-all` / `doctor` / `start` / `stop` / `status` recipe | §19 Rust 工程结构 / 运维诊断 | DONE |
+| CMD-11 | 将 `doctor` 升级为分组面板视图，区分常驻服务、内嵌组件、集成配置、日志与端点 | §19 Rust 工程结构 / 运维诊断 | DONE |
 
 ## roku-agent-directory (planned)
 

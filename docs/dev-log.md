@@ -1,5 +1,45 @@
 # Roku Agent Dev Log
 
+## 2026-03-08 - Session Milestone (Phase 20)
+
+### Completed Modules
+
+- `roku-cmd` / `roku-api-gateway`
+  - Added a long-running `api-gateway` command so the workspace now has both Telegram polling and HTTP ingress service shapes.
+  - Reused the existing `roku-api-gateway` routes and `RuntimeServiceExecutor` boundary instead of adding a second gateway path.
+- `scripts/dev-services.sh`
+  - Expanded the dev service registry from a single `telegram-bot` process to `api-gateway + telegram-bot`.
+  - Reworked `doctor` into a grouped panel that reports application services, embedded runtime components, integrations, observability logs, and health endpoints.
+  - Changed dev-service stdout logs to timestamped files.
+- `roku-connectors-telegram`
+  - Added inline strategy+goal parsing such as `/react 你好` and `/auto 继续`.
+  - Preserved the original two-step session command flow where `/react` only updates the session mode.
+- `roku-observability`
+  - Replaced `current.log` component files with timestamped `<timestamp>.log` files while preserving async write and size-based retention.
+
+### Verification Status
+
+- `cargo fmt --all`: passed
+- `cargo test -p roku-connectors-telegram -p roku-observability -p roku-cmd`: passed
+- `cargo check --workspace`: passed
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed
+- `./scripts/dev-services.sh doctor`: passed
+  - grouped panel renders application services, embedded components, integrations, observability logs, and endpoints
+- `source .env && (cargo run -p roku-cmd -- api-gateway > /tmp/roku-api-gateway-smoke.log 2>&1 & pid=$!; sleep 5; curl -sf http://127.0.0.1:8787/health; exit_code=$?; kill $pid; wait $pid 2>/dev/null || true; exit $exit_code)`: passed outside sandbox
+  - `/health` response: `{"status":"ok"}`
+
+### Remaining Work
+
+- Add PostgreSQL task/event/result backends so both `api-gateway` and `telegram-bot` can restart on persisted orchestration state instead of only session memory.
+- Extend doctor to surface live request counters / queue depth once runtime metrics are exported beyond in-process counters.
+- Continue expanding validation-plane coverage for complex multi-agent task graphs and independent verification flows.
+
+### Next Recommended Steps
+
+1. Implement PostgreSQL task/event/result repositories and wire them into the live runtime bootstrap path.
+2. Add richer `doctor` probes for database connectivity and gateway request metrics.
+3. Extend Telegram output modes so approvals/artifacts can be selectively surfaced without reintroducing noisy default replies.
+
 ## 2026-03-08 - Session Milestone (Phase 19)
 
 ### Completed Modules
