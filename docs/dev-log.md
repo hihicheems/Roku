@@ -1507,6 +1507,35 @@
 2. Revisit structured logging/export sinks now that the Telegram response surface is richer and includes progress receipts.
 3. Expand Telegram UX further only if a stronger progress protocol or artifact actions are needed.
 
+## 2026-03-08 - Session Milestone (Phase 39)
+
+### Completed Modules
+
+- `roku-agent-instance-factory`
+  - Started enforcing graph-authored node budget snapshots when deriving worker policy bindings, so node-level token and time budgets now cap the profile defaults instead of being stored as passive metadata only.
+- `roku-runtime-service`
+  - Added node deadline/time-budget enforcement in the live execution path by converting over-budget execution results into timeout-classified recovery events.
+  - Reused the timeout recovery flow for retryable timeout overruns, so deadline breaches now enter `TimeoutRecovering` instead of silently succeeding or collapsing into a generic dependency failure.
+  - Tightened replay reconstruction so only successful execution results count as completed execution progress; failed results remain visible as `last_result` without being mistaken for completed nodes.
+- `docs/todo-list.md`
+  - Marked `OR-07` as done.
+
+### Verification Status
+
+- `cargo test -p roku-agent-instance-factory -p roku-runtime-service`: passed
+
+### Remaining Work
+
+- `RS-15` / `OR-05` still need fuller event-stream-first reconstruction and partial rerun orchestration.
+- `GB-07` / `GB-08` are still open: helper-node injection and conditional/loop graph compilation are missing.
+- `SS-10` and `E2E-08` are still open: replay compaction plus duplicate-delivery / lease-expiry / provider-loss chaos coverage still need to land.
+
+### Next Recommended Steps
+
+1. Finish `RS-15` by deriving more non-execution progress from persisted events instead of relying on snapshot state for validation/aggregation/approval completion.
+2. Add duplicate-delivery and lease-expiry chaos tests so dispatch and recovery are stressed under restart and contention.
+3. Finish `GB-07` / `GB-08` so replay can target richer helper-node and conditional graph shapes.
+
 ## 2026-03-08 - Session Milestone (Phase 38)
 
 ### Completed Modules

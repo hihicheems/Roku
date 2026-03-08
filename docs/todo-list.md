@@ -54,7 +54,7 @@
 | OR-04 | 输出幂等键构造函数 `task_id + node_id + attempt` | §8.4 状态变更要求 | DONE |
 | OR-05 | 增加基于持久化事件的任务重建 / replay 能力 | §8 / §20.2 验收重点 | TODO |
 | OR-06 | 增加取消、补偿与中断恢复状态流 | §8 状态机 / §22 风险缓解 | DONE |
-| OR-07 | 增加 node-level deadline / budget snapshot enforcement | §8.4 / §14 预算治理 | TODO |
+| OR-07 | 增加 node-level deadline / budget snapshot enforcement | §8.4 / §14 预算治理 | DONE |
 | OR-08 | 接入真实 dispatch plane（Redis / NATS / JetStream）后的 lease / ack / retry 协议 | §14.3 背压与资源隔离 | TODO |
 
 ## roku-supervisor-agent (planned)
