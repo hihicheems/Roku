@@ -14,13 +14,29 @@
 
 use roku_common_types::{
 	AggregationMode, ApprovalTicket, Artifact, ArtifactId, ExperimentMetric, ExperimentRun,
-	JoinPolicy, NodeId, NodeResultSet, ResultEnvelope, RuntimeError, Task, TaskId, TaskNode,
-	TaskState, ValidationEvidenceSet,
+	JoinPolicy, NodeId, NodeResultSet, ResultEnvelope, RuntimeError, Task, TaskEvent, TaskId,
+	TaskNode, TaskState, ValidationEvidenceSet,
 };
 
 use crate::RuntimeService;
 
 impl RuntimeService {
+	pub fn get_task(&self, task_id: &TaskId) -> Result<Option<Task>, RuntimeError> {
+		let state = self.lock_state()?;
+		state
+			.task_repo
+			.load_task(task_id)
+			.map_err(|error| RuntimeError::new(error.to_string()))
+	}
+
+	pub fn list_task_events(&self, task_id: &TaskId) -> Result<Vec<TaskEvent>, RuntimeError> {
+		let state = self.lock_state()?;
+		state
+			.event_repo
+			.list_events(task_id)
+			.map_err(|error| RuntimeError::new(error.to_string()))
+	}
+
 	pub fn list_artifacts(&self, task_id: &TaskId) -> Result<Vec<Artifact>, RuntimeError> {
 		let state = self.lock_state()?;
 		state

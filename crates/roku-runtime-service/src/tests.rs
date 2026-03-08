@@ -92,6 +92,38 @@ fn service_succeeds_for_happy_path() {
 }
 
 #[test]
+fn service_exposes_task_snapshot_and_event_timeline() {
+	let service = RuntimeService::default();
+	service
+		.execute(sample_request())
+		.expect("runtime service should succeed");
+
+	let task_id = TaskId("task-req-1".to_string());
+	let task = service
+		.get_task(&task_id)
+		.expect("task lookup should succeed")
+		.expect("task should exist");
+	let events = service
+		.list_task_events(&task_id)
+		.expect("event lookup should succeed");
+
+	assert_eq!(task.state, TaskState::Succeeded);
+	assert!(!events.is_empty());
+	assert_eq!(
+		events.first().expect("event should exist").from,
+		TaskState::Queued
+	);
+	assert_eq!(
+		events.first().expect("event should exist").to,
+		TaskState::Planning
+	);
+	assert_eq!(
+		events.last().expect("event should exist").to,
+		TaskState::Succeeded
+	);
+}
+
+#[test]
 fn service_persists_tool_runtime_evidence_for_execution_nodes() {
 	let service = RuntimeService::default();
 	service
