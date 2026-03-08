@@ -2042,6 +2042,32 @@
 2. Move final completion assessment into `roku-supervisor-agent` for `SA-04`, now that graph completion semantics are richer.
 3. Expand `E2E-08` against the SQLite dispatch plane once event-first recovery is in place.
 
+## 2026-03-08 - Session Checkpoint (E2E-08)
+
+### Completed Modules
+
+- `roku-runtime-service`
+  - Hardened dispatch processing against duplicate claims by acknowledging already-completed nodes instead of re-executing them when the same dispatch entry is delivered again.
+- `roku-e2e`
+  - Added the remaining `E2E-08` chaos matrix coverage: duplicate-delivery idempotency, SQLite lease-expiry requeue, provider-loss recovery/reporting across restart, and repeated restart stress without duplicate execution.
+  - Kept the existing timeout-recovery and replay/restart scenarios as part of the same local-first control-plane verification surface.
+- `docs/todo-list.md`
+  - Marked `E2E-08` done.
+
+### Verification Status
+
+- `cargo test -p roku-e2e --test e2e`: passed
+
+### Remaining Work
+
+- `E2E-07` and `E2E-10` are still open in `roku-e2e`.
+- Phase 1 control-plane recovery work is no longer blocked on the `E2E-08` chaos matrix.
+
+### Next Recommended Steps
+
+1. Run `just fmt`, `just lint`, and the targeted crate test set before committing the finished `E2E-08` slice.
+2. Re-check the Phase 1 DoD against the remaining non-Phase-1 backlog so follow-up work does not drift into Phase 2 prematurely.
+
 ## 2026-03-08 - Session Milestone (Phase 43)
 
 ### Completed Modules

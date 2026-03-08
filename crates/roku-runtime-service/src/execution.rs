@@ -67,6 +67,14 @@ impl RuntimeService {
 							claim.envelope.node_id.0, task.task_id.0
 						))
 					})?;
+				if task
+					.completed_nodes
+					.iter()
+					.any(|completed| completed == &node.node_id)
+				{
+					self.ack_dispatched_node(&claim.lease)?;
+					continue;
+				}
 				match node.kind {
 					TaskNodeKind::Execution => {
 						if let Some(response) = self.process_execution_node(task, node, mode)? {
