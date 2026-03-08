@@ -10,6 +10,7 @@
 - 表格中的状态只使用 `DONE` / `TODO`。
 - `DONE` 表示当前仓库里已有相应实现，并且已纳入现有开发主线；`TODO` 表示尚未完成或仅有很薄的骨架。
 - 带 `(planned)` 的 crate 标题表示该 crate 已被设计文档明确需要，但当前尚未独立建立或尚未进入 workspace。
+- `tmp/phase-1-control-plane-recovery.md` 对应的 Phase 1 闭环已在 2026-03-08 完成；当前剩余 `TODO` 默认为后续阶段或扩展项，不再阻塞 Phase 2 入口判断。
 
 ## workspace
 
