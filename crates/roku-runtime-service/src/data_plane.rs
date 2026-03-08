@@ -15,8 +15,9 @@
 use roku_common_types::{
 	AggregationMode, ApprovalStatus, ApprovalTicket, Artifact, ArtifactId, ErrorClass,
 	ExperimentMetric, ExperimentRun, JoinPolicy, NodeId, NodeResultSet, RecoveryEligibility,
-	ReplayConsistencyStatus, ResultEnvelope, ResultStatus, RuntimeError, Task, TaskEvent, TaskId,
-	TaskNode, TaskNodeKind, TaskReplayCursor, TaskReplayReport, TaskState, ValidationEvidenceSet,
+	ReplayConsistencyStatus, ResultEnvelope, ResultStatus, RuntimeError, Task, TaskEvent,
+	TaskEventKind, TaskId, TaskNode, TaskNodeKind, TaskReplayCursor, TaskReplayReport, TaskState,
+	ValidationEvidenceSet,
 };
 use roku_execution_graph_builder::TaskGraphScheduler;
 use roku_orchestrator::{
@@ -157,6 +158,30 @@ impl RuntimeService {
 		state
 			.result_repo
 			.save_result(result)
+			.map_err(|error| RuntimeError::new(error.to_string()))
+	}
+
+	pub(super) fn append_node_event(
+		&self,
+		task: &Task,
+		node: &TaskNode,
+		kind: TaskEventKind,
+		reason: impl Into<String>,
+	) -> Result<(), RuntimeError> {
+		let mut state = self.lock_state()?;
+		state
+			.event_repo
+			.append_event(TaskEvent {
+				task_id: task.task_id.clone(),
+				from: task.state,
+				to: task.state,
+				reason: reason.into(),
+				error_class: None,
+				kind,
+				node_id: Some(node.node_id.clone()),
+				node_kind: Some(node.kind),
+				attempt: Some(task.attempts),
+			})
 			.map_err(|error| RuntimeError::new(error.to_string()))
 	}
 
@@ -530,22 +555,18 @@ impl RuntimeService {
 		};
 
 		let mut reconstructed = task.clone();
-		let successful_result_by_node_id = self
-			.list_results(&task.task_id)?
-			.into_iter()
-			.filter(|result| matches!(result.status, ResultStatus::Ok))
-			.map(|result| (result.node_id.0.clone(), result))
-			.collect::<HashMap<_, _>>();
-		let last_result_by_node_id = self
-			.list_results(&task.task_id)?
-			.into_iter()
-			.map(|result| (result.node_id.0.clone(), result))
-			.collect::<HashMap<_, _>>();
-		let snapshot_completed = task
-			.completed_nodes
+		let events = self.list_task_events(&task.task_id)?;
+		let results = self.list_results(&task.task_id)?;
+		let successful_result_by_node_id = results
 			.iter()
-			.map(|node_id| node_id.0.clone())
-			.collect::<HashSet<_>>();
+			.filter(|result| matches!(result.status, ResultStatus::Ok))
+			.cloned()
+			.map(|result| (result.node_id.0.clone(), result))
+			.collect::<HashMap<_, _>>();
+		let last_result_by_node_id = results
+			.into_iter()
+			.map(|result| (result.node_id.0.clone(), result))
+			.collect::<HashMap<_, _>>();
 		let approval_tickets = self.list_approval_tickets_for_task(&task.task_id)?;
 		let approved_approval_node_ids = approval_tickets
 			.iter()
@@ -563,28 +584,67 @@ impl RuntimeService {
 			.as_ref()
 			.map(|ticket| ticket.approval_id.clone());
 
-		reconstructed.completed_nodes = graph
-			.nodes
-			.iter()
-			.filter(|node| match node.kind {
-				TaskNodeKind::Execution => {
-					successful_result_by_node_id.contains_key(&node.node_id.0)
+		let mut event_completed = Vec::new();
+		let mut event_completed_set = HashSet::new();
+		for event in &events {
+			if !matches!(
+				event.kind,
+				TaskEventKind::NodeCompleted | TaskEventKind::ApprovalApproved
+			) {
+				continue;
+			}
+			let Some(node_id) = &event.node_id else {
+				continue;
+			};
+			if pending_approval_node_id.as_ref() == Some(&node_id.0) {
+				continue;
+			}
+			if event_completed_set.insert(node_id.0.clone()) {
+				event_completed.push(node_id.clone());
+			}
+		}
+
+		if event_completed.is_empty() {
+			event_completed = graph
+				.nodes
+				.iter()
+				.filter(|node| match node.kind {
+					TaskNodeKind::Execution => {
+						successful_result_by_node_id.contains_key(&node.node_id.0)
+					}
+					TaskNodeKind::Approval => approved_approval_node_ids.contains(&node.node_id.0),
+					TaskNodeKind::Validation
+					| TaskNodeKind::Aggregation
+					| TaskNodeKind::Retry
+					| TaskNodeKind::DeadLetter => successful_result_by_node_id.contains_key(&node.node_id.0),
+				})
+				.filter(|node| pending_approval_node_id.as_ref() != Some(&node.node_id.0))
+				.map(|node| node.node_id.clone())
+				.collect();
+		} else {
+			for node in &graph.nodes {
+				if pending_approval_node_id.as_ref() == Some(&node.node_id.0)
+					|| event_completed_set.contains(&node.node_id.0)
+				{
+					continue;
 				}
-				TaskNodeKind::Approval => {
-					approved_approval_node_ids.contains(&node.node_id.0)
-						|| snapshot_completed.contains(&node.node_id.0)
+				let inferred_complete = match node.kind {
+					TaskNodeKind::Execution => {
+						successful_result_by_node_id.contains_key(&node.node_id.0)
+					}
+					TaskNodeKind::Approval => approved_approval_node_ids.contains(&node.node_id.0),
+					TaskNodeKind::Validation
+					| TaskNodeKind::Aggregation
+					| TaskNodeKind::Retry
+					| TaskNodeKind::DeadLetter => successful_result_by_node_id.contains_key(&node.node_id.0),
+				};
+				if inferred_complete {
+					event_completed.push(node.node_id.clone());
+					event_completed_set.insert(node.node_id.0.clone());
 				}
-				TaskNodeKind::Validation
-				| TaskNodeKind::Aggregation
-				| TaskNodeKind::Retry
-				| TaskNodeKind::DeadLetter => {
-					successful_result_by_node_id.contains_key(&node.node_id.0)
-						|| snapshot_completed.contains(&node.node_id.0)
-				}
-			})
-			.filter(|node| pending_approval_node_id.as_ref() != Some(&node.node_id.0))
-			.map(|node| node.node_id.clone())
-			.collect();
+			}
+		}
+		reconstructed.completed_nodes = event_completed;
 		reconstructed.next_node_index = reconstructed.completed_nodes.len();
 		if let Some(last_result) = graph
 			.nodes

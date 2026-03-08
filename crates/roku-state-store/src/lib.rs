@@ -583,6 +583,10 @@ mod tests {
 			to: TaskState::Planning,
 			reason: "start".to_string(),
 			error_class: None,
+			kind: roku_common_types::TaskEventKind::StateTransition,
+			node_id: None,
+			node_kind: None,
+			attempt: Some(0),
 		}
 	}
 
