@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_common_types::PlanStep;
+use roku_common_types::{PlanBranch, PlanLoopControl, PlanStep};
 use roku_planning_engine::PlanningDecision;
 
 pub(crate) fn build_react_steps(goal: &str, decision: &PlanningDecision) -> Vec<PlanStep> {
@@ -23,6 +23,8 @@ pub(crate) fn build_react_steps(goal: &str, decision: &PlanningDecision) -> Vec<
 			required_capabilities: vec!["tool.invoke".to_string()],
 			requires_approval: false,
 			depends_on: Vec::new(),
+			branch: None,
+			loop_control: None,
 		}];
 	}
 
@@ -39,6 +41,8 @@ pub(crate) fn build_react_steps(goal: &str, decision: &PlanningDecision) -> Vec<
 			required_capabilities: vec!["information.read".to_string()],
 			requires_approval: false,
 			depends_on: Vec::new(),
+			branch: None,
+			loop_control: None,
 		},
 		PlanStep {
 			step_id: "act-primary".to_string(),
@@ -46,6 +50,8 @@ pub(crate) fn build_react_steps(goal: &str, decision: &PlanningDecision) -> Vec<
 			required_capabilities: vec!["tool.invoke".to_string()],
 			requires_approval: false,
 			depends_on: vec!["observe-context".to_string()],
+			branch: None,
+			loop_control: None,
 		},
 	]
 }
@@ -98,6 +104,8 @@ pub(crate) fn build_decomposition_steps(goal: &str, decision: &PlanningDecision)
 			required_capabilities: vec!["information.read".to_string()],
 			requires_approval: false,
 			depends_on: Vec::new(),
+			branch: None,
+			loop_control: None,
 		},
 		PlanStep {
 			step_id: "branch-data".to_string(),
@@ -105,6 +113,11 @@ pub(crate) fn build_decomposition_steps(goal: &str, decision: &PlanningDecision)
 			required_capabilities: vec!["data.read".to_string(), "tool.invoke".to_string()],
 			requires_approval: false,
 			depends_on: vec!["decompose-goal".to_string()],
+			branch: Some(PlanBranch {
+				branch_group: "task-decomposition".to_string(),
+				branch_label: "data".to_string(),
+			}),
+			loop_control: None,
 		},
 		PlanStep {
 			step_id: "branch-analysis".to_string(),
@@ -112,6 +125,11 @@ pub(crate) fn build_decomposition_steps(goal: &str, decision: &PlanningDecision)
 			required_capabilities: vec!["research.analyze".to_string(), "tool.invoke".to_string()],
 			requires_approval: false,
 			depends_on: vec!["decompose-goal".to_string()],
+			branch: Some(PlanBranch {
+				branch_group: "task-decomposition".to_string(),
+				branch_label: "analysis".to_string(),
+			}),
+			loop_control: None,
 		},
 	];
 	if decision.max_branches >= 3 {
@@ -121,6 +139,11 @@ pub(crate) fn build_decomposition_steps(goal: &str, decision: &PlanningDecision)
 			required_capabilities: vec!["risk.review".to_string()],
 			requires_approval: false,
 			depends_on: vec!["decompose-goal".to_string()],
+			branch: Some(PlanBranch {
+				branch_group: "task-decomposition".to_string(),
+				branch_label: "risk".to_string(),
+			}),
+			loop_control: None,
 		});
 	}
 
@@ -134,6 +157,8 @@ pub(crate) fn build_decomposition_steps(goal: &str, decision: &PlanningDecision)
 		required_capabilities: vec!["result.merge".to_string()],
 		requires_approval: false,
 		depends_on: merge_dependencies,
+		branch: None,
+		loop_control: None,
 	});
 	steps
 }
@@ -145,6 +170,8 @@ pub(crate) fn build_tree_search_steps(goal: &str, decision: &PlanningDecision) -
 		required_capabilities: vec!["information.read".to_string()],
 		requires_approval: false,
 		depends_on: Vec::new(),
+		branch: None,
+		loop_control: None,
 	}];
 
 	let mut branch_ids = Vec::new();
@@ -156,6 +183,11 @@ pub(crate) fn build_tree_search_steps(goal: &str, decision: &PlanningDecision) -
 			required_capabilities: vec!["research.search".to_string(), "tool.invoke".to_string()],
 			requires_approval: false,
 			depends_on: vec!["search-root".to_string()],
+			branch: Some(PlanBranch {
+				branch_group: "tree-search".to_string(),
+				branch_label: format!("branch-{branch}"),
+			}),
+			loop_control: None,
 		});
 		branch_ids.push(branch_id);
 	}
@@ -165,6 +197,8 @@ pub(crate) fn build_tree_search_steps(goal: &str, decision: &PlanningDecision) -
 		required_capabilities: vec!["research.evaluate".to_string()],
 		requires_approval: false,
 		depends_on: branch_ids,
+		branch: None,
+		loop_control: None,
 	});
 	steps
 }
@@ -177,6 +211,8 @@ pub(crate) fn build_refinement_steps(goal: &str, decision: &PlanningDecision) ->
 		required_capabilities: vec!["research.draft".to_string()],
 		requires_approval: false,
 		depends_on: Vec::new(),
+		branch: None,
+		loop_control: None,
 	}];
 	let mut previous_step_id = draft_id;
 	for iteration in 1..=decision.max_iterations {
@@ -188,6 +224,12 @@ pub(crate) fn build_refinement_steps(goal: &str, decision: &PlanningDecision) ->
 			required_capabilities: vec!["review.critique".to_string()],
 			requires_approval: false,
 			depends_on: vec![previous_step_id.clone()],
+			branch: None,
+			loop_control: Some(PlanLoopControl {
+				loop_id: "iterative-refinement".to_string(),
+				iteration,
+				max_iterations: decision.max_iterations,
+			}),
 		});
 		steps.push(PlanStep {
 			step_id: improve_id.clone(),
@@ -195,6 +237,12 @@ pub(crate) fn build_refinement_steps(goal: &str, decision: &PlanningDecision) ->
 			required_capabilities: vec!["research.improve".to_string()],
 			requires_approval: false,
 			depends_on: vec![critique_id],
+			branch: None,
+			loop_control: Some(PlanLoopControl {
+				loop_id: "iterative-refinement".to_string(),
+				iteration,
+				max_iterations: decision.max_iterations,
+			}),
 		});
 		previous_step_id = improve_id;
 	}
@@ -205,6 +253,8 @@ pub(crate) fn build_refinement_steps(goal: &str, decision: &PlanningDecision) ->
 		required_capabilities: vec!["review.finalize".to_string()],
 		requires_approval: true,
 		depends_on: vec![previous_step_id],
+		branch: None,
+		loop_control: None,
 	});
 	steps
 }
@@ -254,6 +304,16 @@ mod tests {
 			.find(|step| step.step_id == "merge-branches")
 			.expect("merge step should exist");
 		assert_eq!(merge.depends_on.len(), 3);
+		assert_eq!(
+			outline
+				.steps
+				.iter()
+				.find(|step| step.step_id == "branch-data")
+				.and_then(|step| step.branch.as_ref())
+				.expect("branch metadata should exist")
+				.branch_group,
+			"task-decomposition"
+		);
 	}
 
 	#[test]
@@ -304,6 +364,16 @@ mod tests {
 			.expect("final review should exist");
 		assert_eq!(final_review.depends_on, vec!["improve-2".to_string()]);
 		assert!(final_review.requires_approval);
+		assert_eq!(
+			outline
+				.steps
+				.iter()
+				.find(|step| step.step_id == "critique-1")
+				.and_then(|step| step.loop_control.as_ref())
+				.expect("loop metadata should exist")
+				.max_iterations,
+			2
+		);
 	}
 
 	#[test]

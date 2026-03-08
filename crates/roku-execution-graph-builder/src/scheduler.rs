@@ -16,8 +16,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
 use roku_common_types::{
-	NodeId, RecoveryEligibility, RerunPolicy, ResumeCandidate, TaskGraph, TaskNode,
-	TaskNodeDispatchPolicy,
+	NodeId, RecoveryEligibility, RerunPolicy, ResumeCandidate, TaskEdgeCondition, TaskGraph,
+	TaskNode, TaskNodeDispatchPolicy,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +86,9 @@ impl TaskGraphScheduler {
 			.collect::<HashMap<_, _>>();
 
 		for edge in &graph.edges {
+			if !edge_is_active_for_automatic_schedule(edge.condition) {
+				continue;
+			}
 			if !automatic_node_ids.contains(&edge.from.0)
 				|| !automatic_node_ids.contains(&edge.to.0)
 			{
@@ -241,6 +244,9 @@ fn dependency_map(
 		if !known_nodes.contains(&edge.to.0) {
 			return Err(GraphScheduleError::UnknownNode(edge.to.0.clone()));
 		}
+		if !edge_is_active_for_automatic_schedule(edge.condition) {
+			continue;
+		}
 		if !eligible_node_ids.contains(&edge.from.0) || !eligible_node_ids.contains(&edge.to.0) {
 			continue;
 		}
@@ -271,6 +277,9 @@ fn outgoing_map(
 		if !known_nodes.contains(&edge.to.0) {
 			return Err(GraphScheduleError::UnknownNode(edge.to.0.clone()));
 		}
+		if !edge_is_active_for_automatic_schedule(edge.condition) {
+			continue;
+		}
 		if !eligible_node_ids.contains(&edge.from.0) || !eligible_node_ids.contains(&edge.to.0) {
 			continue;
 		}
@@ -293,11 +302,19 @@ fn recovery_eligibility_for_node(node: &TaskNode) -> RecoveryEligibility {
 	}
 }
 
+fn edge_is_active_for_automatic_schedule(condition: TaskEdgeCondition) -> bool {
+	matches!(
+		condition,
+		TaskEdgeCondition::Always | TaskEdgeCondition::OnSuccess | TaskEdgeCondition::OnApproved
+	)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
 	use roku_common_types::{
-		TaskEdge, TaskGraph, TaskId, TaskNode, TaskNodeDispatchPolicy, TaskNodeKind,
+		TaskEdge, TaskEdgeCondition, TaskGraph, TaskId, TaskNode, TaskNodeDispatchPolicy,
+		TaskNodeKind,
 	};
 
 	fn node(id: &str, kind: TaskNodeKind) -> TaskNode {
@@ -350,10 +367,12 @@ mod tests {
 				TaskEdge {
 					from: NodeId("extract".to_string()),
 					to: NodeId("analyze".to_string()),
+					condition: TaskEdgeCondition::Always,
 				},
 				TaskEdge {
 					from: NodeId("analyze".to_string()),
 					to: NodeId("validate".to_string()),
+					condition: TaskEdgeCondition::Always,
 				},
 			],
 		};
@@ -385,10 +404,12 @@ mod tests {
 				TaskEdge {
 					from: NodeId("extract-a".to_string()),
 					to: NodeId("join".to_string()),
+					condition: TaskEdgeCondition::Always,
 				},
 				TaskEdge {
 					from: NodeId("extract-b".to_string()),
 					to: NodeId("join".to_string()),
+					condition: TaskEdgeCondition::Always,
 				},
 			],
 		};
@@ -414,10 +435,12 @@ mod tests {
 				TaskEdge {
 					from: NodeId("a".to_string()),
 					to: NodeId("b".to_string()),
+					condition: TaskEdgeCondition::Always,
 				},
 				TaskEdge {
 					from: NodeId("b".to_string()),
 					to: NodeId("a".to_string()),
+					condition: TaskEdgeCondition::Always,
 				},
 			],
 		};
@@ -461,10 +484,12 @@ mod tests {
 				TaskEdge {
 					from: NodeId("step".to_string()),
 					to: NodeId("step-retry".to_string()),
+					condition: TaskEdgeCondition::OnFailureRetryable,
 				},
 				TaskEdge {
 					from: NodeId("step".to_string()),
 					to: NodeId("validation".to_string()),
+					condition: TaskEdgeCondition::OnSuccess,
 				},
 			],
 		};
@@ -482,6 +507,33 @@ mod tests {
 					&[NodeId("step".to_string()), NodeId("validation".to_string()),],
 				)
 				.expect("graph should be schedulable")
+		);
+	}
+
+	#[test]
+	fn automatic_scheduler_ignores_failure_only_edges() {
+		let scheduler = TaskGraphScheduler;
+		let graph = TaskGraph {
+			task_id: TaskId("task-conditions".to_string()),
+			nodes: vec![
+				node("extract", TaskNodeKind::Execution),
+				node("validate", TaskNodeKind::Validation),
+			],
+			edges: vec![TaskEdge {
+				from: NodeId("extract".to_string()),
+				to: NodeId("validate".to_string()),
+				condition: TaskEdgeCondition::OnFailureRetryable,
+			}],
+		};
+
+		let ready = scheduler
+			.ready_nodes(&graph, &[NodeId("extract".to_string())])
+			.expect("graph should be schedulable");
+
+		assert!(
+			ready
+				.iter()
+				.any(|node| node.node_id == NodeId("validate".to_string()))
 		);
 	}
 }

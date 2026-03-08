@@ -1916,6 +1916,38 @@
 2. Push `RS-15` / `OR-05` further toward event-derived branch-local partial rerun on top of the richer helper-node graph.
 3. Expand `E2E-08` chaos coverage around duplicate delivery, lease expiry, and restart contention once failure-path routing metadata exists.
 
+## 2026-03-08 - Session Milestone (Phase 44)
+
+### Completed Modules
+
+- `roku-common-types`
+  - Added `PlanBranch`, `PlanLoopControl`, and `TaskEdgeCondition`, and extended `PlanStep` / `TaskEdge` so plan outlines and compiled graphs can carry explicit branch, loop, success, approval, and failure routing semantics.
+- `roku-task-planner`
+  - Enriched deterministic strategy generation so task decomposition and tree-search branches emit branch metadata, while iterative refinement emits bounded loop metadata for critique/improve iterations.
+  - Updated the LLM planner prompt and normalization path so branch/loop metadata can round-trip through structured JSON output without producing invalid or partial contracts.
+- `roku-execution-graph-builder`
+  - Wired conditional edge compilation into the graph builder: execution-to-retry now uses `OnFailureRetryable`, retry-to-dead-letter uses `OnFailureExhausted`, approval gates activate on `OnSuccess`, and downstream dependencies now distinguish `OnSuccess` vs `OnApproved`.
+  - Taught the scheduler to ignore failure-only edges during automatic scheduling so recovery-path helpers do not block the happy path.
+- `docs/todo-list.md`
+  - Marked `GB-08` done.
+  - Marked `OR-08` and `SS-07` done to reflect the earlier SQLite dispatch and bootstrap/index work already landed in Phase 43.
+
+### Verification Status
+
+- `cargo test -p roku-execution-graph-builder -p roku-task-planner -p roku-runtime-service`: passed
+
+### Remaining Work
+
+- `RS-15` / `OR-05` still need true event-stream-first task reconstruction and branch-local partial rerun, rather than snapshot-assisted recovery plus replay diagnostics.
+- `SA-04` still needs supervisor-owned final completion assessment and result aggregation policy.
+- `SS-10` and `E2E-08` still need replay compaction plus duplicate-delivery / lease-expiry / provider-loss / restart-stress coverage.
+
+### Next Recommended Steps
+
+1. Finish `RS-15` / `OR-05` by reconstructing runnable nodes from persisted events first and using snapshots/results only as accelerators or cross-checks.
+2. Move final completion assessment into `roku-supervisor-agent` for `SA-04`, now that graph completion semantics are richer.
+3. Expand `E2E-08` against the SQLite dispatch plane once event-first recovery is in place.
+
 ## 2026-03-08 - Session Milestone (Phase 43)
 
 ### Completed Modules

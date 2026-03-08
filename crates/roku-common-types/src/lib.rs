@@ -260,6 +260,23 @@ pub struct PlanStep {
 	pub requires_approval: bool,
 	#[serde(default)]
 	pub depends_on: Vec<String>,
+	#[serde(default)]
+	pub branch: Option<PlanBranch>,
+	#[serde(default)]
+	pub loop_control: Option<PlanLoopControl>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PlanBranch {
+	pub branch_group: String,
+	pub branch_label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PlanLoopControl {
+	pub loop_id: String,
+	pub iteration: u8,
+	pub max_iterations: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -370,6 +387,18 @@ pub struct TaskNode {
 pub struct TaskEdge {
 	pub from: NodeId,
 	pub to: NodeId,
+	#[serde(default)]
+	pub condition: TaskEdgeCondition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TaskEdgeCondition {
+	#[default]
+	Always,
+	OnSuccess,
+	OnApproved,
+	OnFailureRetryable,
+	OnFailureExhausted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

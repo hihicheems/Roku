@@ -84,7 +84,16 @@ JSON schema:
       "summary": "string",
       "required_capabilities": ["string"],
       "requires_approval": false,
-      "depends_on": ["string"]
+	      "depends_on": ["string"],
+	      "branch": {{
+	        "branch_group": "string",
+	        "branch_label": "string"
+	      }},
+	      "loop_control": {{
+	        "loop_id": "string",
+	        "iteration": 1,
+	        "max_iterations": 3
+	      }}
     }}
   ]
 }}
@@ -170,6 +179,31 @@ fn normalize_outline(outline: PlanOutline, goal: &str) -> Option<PlanOutline> {
 		} else {
 			step.required_capabilities
 		};
+		let branch = step.branch.and_then(|branch| {
+			let branch_group = branch.branch_group.trim().to_string();
+			let branch_label = branch.branch_label.trim().to_string();
+			if branch_group.is_empty() || branch_label.is_empty() {
+				None
+			} else {
+				Some(roku_common_types::PlanBranch {
+					branch_group,
+					branch_label,
+				})
+			}
+		});
+		let loop_control = step.loop_control.and_then(|loop_control| {
+			let loop_id = loop_control.loop_id.trim().to_string();
+			if loop_id.is_empty() || loop_control.max_iterations == 0 || loop_control.iteration == 0
+			{
+				None
+			} else {
+				Some(roku_common_types::PlanLoopControl {
+					loop_id,
+					iteration: loop_control.iteration,
+					max_iterations: loop_control.max_iterations,
+				})
+			}
+		});
 		let action = if let Some(action) = step
 			.summary
 			.lines()
@@ -189,6 +223,8 @@ fn normalize_outline(outline: PlanOutline, goal: &str) -> Option<PlanOutline> {
 			required_capabilities,
 			requires_approval: step.requires_approval,
 			depends_on,
+			branch,
+			loop_control,
 		});
 	}
 
@@ -314,6 +350,57 @@ mod tests {
 		assert_eq!(
 			outline.steps[1].depends_on,
 			vec!["collect-context".to_string()]
+		);
+	}
+
+	#[test]
+	fn llm_planner_normalizes_branch_and_loop_metadata() {
+		let planner = planner_with_output(
+			r#"{
+				"goal":"ignored by normalization",
+				"steps":[
+					{
+						"step_id":"branch-a",
+						"summary":"Explore candidate branch",
+						"required_capabilities":["research.search"],
+						"requires_approval":false,
+						"depends_on":[],
+						"branch":{
+							"branch_group":" tree-search ",
+							"branch_label":" branch-a "
+						}
+					},
+					{
+						"step_id":"improve-1",
+						"summary":"Improve the draft",
+						"required_capabilities":["research.improve"],
+						"requires_approval":false,
+						"depends_on":["branch-a"],
+						"loop_control":{
+							"loop_id":" refine-loop ",
+							"iteration":1,
+							"max_iterations":3
+						}
+					}
+				]
+			}"#,
+		);
+
+		let outline = planner.build_outline(&request(), &decision());
+		assert_eq!(
+			outline.steps[0].branch,
+			Some(roku_common_types::PlanBranch {
+				branch_group: "tree-search".to_string(),
+				branch_label: "branch-a".to_string(),
+			})
+		);
+		assert_eq!(
+			outline.steps[1].loop_control,
+			Some(roku_common_types::PlanLoopControl {
+				loop_id: "refine-loop".to_string(),
+				iteration: 1,
+				max_iterations: 3,
+			})
 		);
 	}
 
