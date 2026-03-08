@@ -22,12 +22,13 @@ use roku_common_types::{
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_state_store::{
 	ConversationRepository, InMemoryConversationRepository, InMemorySessionPreferenceRepository,
-	PostgresConversationRepository, PostgresSessionPreferenceRepository, PostgresStoreConfig,
-	SessionPreferenceRepository, StoreError,
+	SessionPreferenceRepository, SqliteConversationRepository, SqliteSessionPreferenceRepository,
+	SqliteStoreConfig, StoreError,
 };
 
 use crate::CommandError;
 use crate::runtime::build_live_runtime_service_from_env;
+use crate::storage::LocalStorageLayout;
 
 pub fn run_telegram_bot_from_env() -> Result<(), CommandError> {
 	let service = Arc::new(build_live_runtime_service_from_env()?);
@@ -122,35 +123,27 @@ struct TelegramSessionState {
 
 impl TelegramSessionState {
 	fn from_env() -> Result<Self, CommandError> {
-		if let Some(config) = PostgresStoreConfig::from_env()
-			.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?
-		{
-			let _ = emit_global_log(
-				LogRecord::new(
-					"roku-cmd",
-					LogLevel::Info,
-					"using postgres-backed telegram session state",
-				)
-				.with_field("schema", config.schema.clone()),
-			);
-			return Ok(Self::new(
-				Box::new(
-					PostgresSessionPreferenceRepository::connect(config.clone())
-						.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?,
-				),
-				Box::new(
-					PostgresConversationRepository::connect(config)
-						.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?,
-				),
-			));
-		}
-
-		let _ = emit_global_log(LogRecord::new(
-			"roku-cmd",
-			LogLevel::Info,
-			"using in-memory telegram session state",
-		));
-		Ok(Self::default())
+		let layout = LocalStorageLayout::from_env();
+		layout.ensure_dirs().map_err(CommandError::Io)?;
+		let config = SqliteStoreConfig::new(layout.sqlite_path.clone());
+		let _ = emit_global_log(
+			LogRecord::new(
+				"roku-cmd",
+				LogLevel::Info,
+				"using sqlite-backed telegram session state",
+			)
+			.with_field("path", layout.sqlite_path.display().to_string()),
+		);
+		Ok(Self::new(
+			Box::new(
+				SqliteSessionPreferenceRepository::connect(config.clone())
+					.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?,
+			),
+			Box::new(
+				SqliteConversationRepository::connect(config)
+					.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?,
+			),
+		))
 	}
 
 	fn new(

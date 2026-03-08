@@ -12,9 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use roku_agent_runtime::GenericAgentRuntime;
@@ -30,13 +29,14 @@ use roku_observability::{InMemoryAuditSink, LogLevel, LogRecord, Metrics, emit_g
 pub use roku_runtime_service::RunMode;
 use roku_runtime_service::RuntimeService;
 use roku_state_store::{
-	PostgresApprovalRepository, PostgresEventRepository, PostgresResultRepository,
-	PostgresStoreConfig, PostgresTaskRepository,
+	SqliteApprovalRepository, SqliteDispatchQueue, SqliteEventRepository, SqliteResultRepository,
+	SqliteStoreConfig, SqliteTaskRepository,
 };
 use roku_task_planner::llm::LlmTaskPlanner;
 use serde_json::json;
 
 use crate::CommandError;
+use crate::storage::LocalStorageLayout;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExecutionRequestOptions {
@@ -102,34 +102,21 @@ pub(crate) fn build_live_runtime_service_from_env() -> Result<RuntimeService, Co
 	let planner_router = build_openrouter_router_with_metrics(config, metrics.clone())?;
 	let runtime = GenericAgentRuntime::with_llm_router(runtime_router);
 	let planner = Box::new(LlmTaskPlanner::new(planner_router));
-	let store_config = PostgresStoreConfig::from_env()
-		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?;
-	let (artifact_store, experiment_registry) = build_runtime_data_plane_from_env();
+	let layout = LocalStorageLayout::from_env();
+	layout.ensure_dirs().map_err(CommandError::Io)?;
+	let store_config = sqlite_store_config(&layout);
+	let (artifact_store, experiment_registry) = build_runtime_data_plane(&layout);
 
-	if let Some(store_config) = store_config {
-		return Ok(RuntimeService::new_with_data_plane_and_runtime_and_metrics(
-			Box::new(connect_postgres_task_repository(&store_config)?),
-			Box::new(connect_postgres_event_repository(&store_config)?),
-			Box::new(connect_postgres_approval_repository(&store_config)?),
-			Box::new(connect_postgres_result_repository(&store_config)?),
+	Ok(RuntimeService::new_with_runtime_data_plane_and_metrics(
+		roku_runtime_service::RuntimeDataPlane {
+			task_repo: Box::new(connect_sqlite_task_repository(&store_config)?),
+			event_repo: Box::new(connect_sqlite_event_repository(&store_config)?),
+			approval_repo: Box::new(connect_sqlite_approval_repository(&store_config)?),
+			result_repo: Box::new(connect_sqlite_result_repository(&store_config)?),
+			dispatch_queue: Box::new(connect_sqlite_dispatch_queue(&store_config)?),
 			artifact_store,
 			experiment_registry,
-			Arc::new(InMemoryAuditSink::default()),
-			runtime,
-			metrics,
-			planner,
-		));
-	}
-
-	log_state_store_backend("in-memory", None);
-
-	Ok(RuntimeService::new_with_data_plane_and_runtime_and_metrics(
-		Box::new(roku_state_store::InMemoryTaskRepository::default()),
-		Box::new(roku_state_store::InMemoryEventRepository::default()),
-		Box::new(roku_state_store::InMemoryApprovalRepository::default()),
-		Box::new(roku_state_store::InMemoryResultRepository::default()),
-		artifact_store,
-		experiment_registry,
+		},
 		Arc::new(InMemoryAuditSink::default()),
 		runtime,
 		metrics,
@@ -256,82 +243,80 @@ pub(crate) fn decide_approval_from_env(
 }
 
 fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandError> {
-	let store_config = PostgresStoreConfig::from_env()
-		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?;
-	let (artifact_store, experiment_registry) = build_runtime_data_plane_from_env();
+	let layout = LocalStorageLayout::from_env();
+	layout.ensure_dirs().map_err(CommandError::Io)?;
+	let store_config = sqlite_store_config(&layout);
+	let (artifact_store, experiment_registry) = build_runtime_data_plane(&layout);
 
-	if let Some(store_config) = store_config {
-		return Ok(RuntimeService::new_with_data_plane(
-			Box::new(connect_postgres_task_repository(&store_config)?),
-			Box::new(connect_postgres_event_repository(&store_config)?),
-			Box::new(connect_postgres_approval_repository(&store_config)?),
-			Box::new(connect_postgres_result_repository(&store_config)?),
+	Ok(RuntimeService::new_with_runtime_data_plane_and_metrics(
+		roku_runtime_service::RuntimeDataPlane {
+			task_repo: Box::new(connect_sqlite_task_repository(&store_config)?),
+			event_repo: Box::new(connect_sqlite_event_repository(&store_config)?),
+			approval_repo: Box::new(connect_sqlite_approval_repository(&store_config)?),
+			result_repo: Box::new(connect_sqlite_result_repository(&store_config)?),
+			dispatch_queue: Box::new(connect_sqlite_dispatch_queue(&store_config)?),
 			artifact_store,
 			experiment_registry,
-			Arc::new(InMemoryAuditSink::default()),
-		));
-	}
-
-	log_state_store_backend("in-memory", None);
-	Ok(RuntimeService::new_with_data_plane(
-		Box::new(roku_state_store::InMemoryTaskRepository::default()),
-		Box::new(roku_state_store::InMemoryEventRepository::default()),
-		Box::new(roku_state_store::InMemoryApprovalRepository::default()),
-		Box::new(roku_state_store::InMemoryResultRepository::default()),
-		artifact_store,
-		experiment_registry,
+		},
 		Arc::new(InMemoryAuditSink::default()),
+		GenericAgentRuntime::default(),
+		Arc::new(Metrics::default()),
+		Box::new(roku_task_planner::AdaptiveTaskPlanner),
 	))
 }
 
-fn connect_postgres_task_repository(
-	config: &PostgresStoreConfig,
-) -> Result<PostgresTaskRepository, CommandError> {
-	log_state_store_backend("postgres", Some(config.schema.as_str()));
-	PostgresTaskRepository::connect(config.clone())
+fn connect_sqlite_task_repository(
+	config: &SqliteStoreConfig,
+) -> Result<SqliteTaskRepository, CommandError> {
+	log_state_store_backend("sqlite", &config.path);
+	SqliteTaskRepository::connect(config.clone())
 		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))
 }
 
-fn connect_postgres_event_repository(
-	config: &PostgresStoreConfig,
-) -> Result<PostgresEventRepository, CommandError> {
-	PostgresEventRepository::connect(config.clone())
+fn connect_sqlite_event_repository(
+	config: &SqliteStoreConfig,
+) -> Result<SqliteEventRepository, CommandError> {
+	SqliteEventRepository::connect(config.clone())
 		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))
 }
 
-fn connect_postgres_approval_repository(
-	config: &PostgresStoreConfig,
-) -> Result<PostgresApprovalRepository, CommandError> {
-	PostgresApprovalRepository::connect(config.clone())
+fn connect_sqlite_approval_repository(
+	config: &SqliteStoreConfig,
+) -> Result<SqliteApprovalRepository, CommandError> {
+	SqliteApprovalRepository::connect(config.clone())
 		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))
 }
 
-fn connect_postgres_result_repository(
-	config: &PostgresStoreConfig,
-) -> Result<PostgresResultRepository, CommandError> {
-	PostgresResultRepository::connect(config.clone())
+fn connect_sqlite_result_repository(
+	config: &SqliteStoreConfig,
+) -> Result<SqliteResultRepository, CommandError> {
+	SqliteResultRepository::connect(config.clone())
 		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))
 }
 
-fn log_state_store_backend(kind: &str, schema: Option<&str>) {
+fn connect_sqlite_dispatch_queue(
+	config: &SqliteStoreConfig,
+) -> Result<SqliteDispatchQueue, CommandError> {
+	SqliteDispatchQueue::connect(config.clone())
+		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))
+}
+
+fn log_state_store_backend(kind: &str, path: &Path) {
 	let mut record = LogRecord::new(
 		"roku-cmd",
 		LogLevel::Info,
 		format!("using {kind} orchestration state store"),
 	);
-	if let Some(schema) = schema {
-		record = record.with_field("schema", schema.to_string());
-	}
+	record = record.with_field("path", path.display().to_string());
 	let _ = emit_global_log(record);
 }
 
-fn build_runtime_data_plane_from_env() -> (ArtifactStore, ExperimentRegistry) {
-	let config = RuntimeDataPlaneConfig::from_env();
-	log_data_plane_backend("artifact-store", &config.artifact_store_path);
-	log_data_plane_backend("experiment-registry", &config.experiment_registry_path);
+fn build_runtime_data_plane(layout: &LocalStorageLayout) -> (ArtifactStore, ExperimentRegistry) {
+	log_data_plane_backend("artifact-store", &layout.artifact_root);
+	log_data_plane_backend("experiment-registry", &layout.experiment_root);
 	(
-		ArtifactStore::file_backed(config.artifact_store_path),
-		ExperimentRegistry::file_backed(config.experiment_registry_path),
+		ArtifactStore::file_backed(layout.artifact_root.clone()),
+		ExperimentRegistry::file_backed(layout.experiment_root.clone()),
 	)
 }
 
@@ -340,41 +325,14 @@ fn log_data_plane_backend(component: &str, path: &Path) {
 		LogRecord::new(
 			"roku-cmd",
 			LogLevel::Info,
-			format!("using file-backed {component}"),
+			format!("using local file-backed {component}"),
 		)
 		.with_field("path", path.display().to_string()),
 	);
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RuntimeDataPlaneConfig {
-	artifact_store_path: PathBuf,
-	experiment_registry_path: PathBuf,
-}
-
-impl RuntimeDataPlaneConfig {
-	fn from_env() -> Self {
-		let base_dir = env::var("ROKU_RUNTIME_DATA_DIR")
-			.ok()
-			.filter(|value| !value.trim().is_empty())
-			.map(PathBuf::from)
-			.unwrap_or_else(|| PathBuf::from("state"));
-		let artifact_store_path = env::var("ROKU_ARTIFACT_STORE_PATH")
-			.ok()
-			.filter(|value| !value.trim().is_empty())
-			.map(PathBuf::from)
-			.unwrap_or_else(|| base_dir.join("artifacts.json"));
-		let experiment_registry_path = env::var("ROKU_EXPERIMENT_REGISTRY_PATH")
-			.ok()
-			.filter(|value| !value.trim().is_empty())
-			.map(PathBuf::from)
-			.unwrap_or_else(|| base_dir.join("experiments.json"));
-
-		Self {
-			artifact_store_path,
-			experiment_registry_path,
-		}
-	}
+fn sqlite_store_config(layout: &LocalStorageLayout) -> SqliteStoreConfig {
+	SqliteStoreConfig::new(layout.sqlite_path.clone())
 }
 
 fn build_request(

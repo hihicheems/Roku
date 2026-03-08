@@ -130,7 +130,7 @@ mod tests {
 			.duration_since(UNIX_EPOCH)
 			.expect("clock should be after epoch")
 			.as_nanos();
-		std::env::temp_dir().join(format!("roku-artifact-{suffix}-{nanos}.json"))
+		std::env::temp_dir().join(format!("roku-artifact-{suffix}-{nanos}"))
 	}
 
 	#[test]
@@ -173,6 +173,6 @@ mod tests {
 			.expect("artifact content should exist");
 		assert_eq!(content, "payload");
 
-		let _ = std::fs::remove_file(path);
+		let _ = std::fs::remove_dir_all(path);
 	}
 }

@@ -55,7 +55,7 @@
 | OR-05 | 增加基于持久化事件的任务重建 / replay 能力 | §8 / §20.2 验收重点 | TODO |
 | OR-06 | 增加取消、补偿与中断恢复状态流 | §8 状态机 / §22 风险缓解 | DONE |
 | OR-07 | 增加 node-level deadline / budget snapshot enforcement | §8.4 / §14 预算治理 | DONE |
-| OR-08 | 接入真实 dispatch plane（Redis / NATS / JetStream）后的 lease / ack / retry 协议 | §14.3 背压与资源隔离 | TODO |
+| OR-08 | 接入本地 SQLite dispatch plane 的 lease / ack / retry / renewal 协议 | §14.3 背压与资源隔离 | TODO |
 
 ## roku-supervisor-agent (planned)
 
@@ -282,13 +282,13 @@
 | SS-04 | 为 task / approval / result 增加 roundtrip 测试 | §20 测试策略 | DONE |
 | SS-04A | 增加 `SessionPreferenceRepository` / `ConversationRepository` trait 与 in-memory adapter | §12 Memory / §19 state-store | DONE |
 | SS-04B | 增加 session preference / conversation history 的 file-backed adapter | §12 Memory / 原型持久化基线 | DONE |
-| SS-05 | 增加 PostgreSQL task backend | §6.1 PostgreSQL / §21 Phase 4+ | DONE |
-| SS-06 | 增加 PostgreSQL event / approval / result backend | §6.1 PostgreSQL | DONE |
-| SS-06A | 增加 PostgreSQL session preference / conversation memory backend | §6.1 PostgreSQL / §12 Memory | DONE |
-| SS-07 | 增加 migration / bootstrap / repository index 设计 | 生产级持久化边界 | TODO |
-| SS-08 | 增加 Redis / NATS / JetStream 风格 dispatch 抽象 | §6.1 NATS JetStream / §14.3 | DONE |
+| SS-05 | 增加 SQLite task backend | §6.1 Local State Store / §21 Phase 4+ | DONE |
+| SS-06 | 增加 SQLite event / approval / result backend | §6.1 Local State Store | DONE |
+| SS-06A | 增加 SQLite session preference / conversation memory backend | §6.1 Local State Store / §12 Memory | DONE |
+| SS-07 | 增加 SQLite migration / bootstrap / repository index 设计 | 生产级持久化边界 | TODO |
+| SS-08 | 增加 local-first dispatch 抽象（in-memory / SQLite） | §6.1 Local State Store / §14.3 | DONE |
 | SS-09 | 增加 ack、lease、backpressure、retry claim 语义 | §14.3 背压与资源隔离 | DONE |
-| SS-10 | 增加 replay / snapshot / compaction 能力，以支撑大规模任务恢复 | §8 ResumePoint / §20 replay | TODO |
+| SS-10 | 增加 SQLite-backed replay / snapshot / compaction 能力，以支撑大规模任务恢复 | §8 ResumePoint / §20 replay | TODO |
 
 ## roku-artifact-store
 
@@ -376,10 +376,10 @@
 | CMD-10 | 在 `justfile` 中增加 `start-all` / `stop-all` / `doctor` / `start` / `stop` / `status` recipe | §19 Rust 工程结构 / 运维诊断 | DONE |
 | CMD-11 | 将 `doctor` 升级为分组面板视图，区分常驻服务、内嵌组件、集成配置、日志与端点 | §19 Rust 工程结构 / 运维诊断 | DONE |
 | CMD-12 | 将 `api-gateway` 收敛为可选接口层，默认不随 `start-all` 启动，但保留 `doctor` 可见性与手动启动能力 | §4.1 Gateway 运行形态 / 运维诊断 | DONE |
-| CMD-13 | 让 live runtime bootstrap 优先装配 PostgreSQL-backed orchestration state store，并在日志中显式输出 backend 选择 | §6.1 PostgreSQL / §19 state-store / §16 可观测性 | DONE |
+| CMD-13 | 让 live runtime bootstrap 默认装配 SQLite-backed orchestration state store，并在日志中显式输出本地 backend 路径 | §6.1 Local State Store / §19 state-store / §16 可观测性 | DONE |
 | CMD-14 | 增加 `task show <task-id>` 与 `approval show <approval-id>` CLI 命令，直接查询持久化 task snapshot / event timeline / approval ticket | §19 CLI 运维入口 / §8 ResumePoint | DONE |
 | CMD-15 | 增加 `approval approve|reject <approval-id> --actor ... [--comment ...]` CLI 命令，支撑最小审批决策闭环 | §15.3 人审闸门 / CLI 运维入口 | DONE |
-| CMD-16 | 为 live / stateful runtime 默认装配 file-backed artifact-store 与 experiment-registry，并提供路径级环境变量配置 | §12 Artifact / Experiment / §19 工程化 | DONE |
+| CMD-16 | 为 live / stateful runtime 默认装配本地 artifact-store 与 experiment-registry，并提供 `~/.roku` 子目录级环境变量配置 | §12 Artifact / Experiment / §19 工程化 | DONE |
 | CMD-17 | 增加 `artifact list|content|download` 与 `experiment show` CLI 命令，打通 artifact / experiment 运维查询链路 | §12 Artifact / Experiment / CLI 运维入口 | DONE |
 | CMD-18 | 增加 `task replay <task-id>` CLI 命令，基于 persisted task snapshot + event timeline 生成一致性与 recoverable 报告 | §8 ResumePoint / §20 replay | DONE |
 | CMD-19 | 让 `task replay` 直接复用 `roku-runtime-service` 的 replay report，而不是在 CLI 层自行重建状态链规则 | §19 CLI 运维入口 / 降耦 | DONE |

@@ -17,6 +17,7 @@
 mod api;
 mod bot;
 mod runtime;
+mod storage;
 
 use std::env;
 use std::path::PathBuf;
@@ -39,6 +40,7 @@ use crate::runtime::{
 	run_with_mode_and_options, show_approval_from_env, show_artifact_content_from_env,
 	show_artifacts_from_env, show_experiment_from_env, show_task_from_env,
 };
+use crate::storage::LocalStorageLayout;
 
 #[derive(Debug, Error)]
 pub enum CommandError {
@@ -393,11 +395,9 @@ fn parse_download_output_path(parts: &[String]) -> Result<PathBuf, CommandError>
 }
 
 fn configure_logging_from_env() -> Result<(), CommandError> {
-	let base_dir = env::var("ROKU_LOG_DIR")
-		.ok()
-		.filter(|value| !value.trim().is_empty())
-		.map(PathBuf::from)
-		.unwrap_or_else(|| PathBuf::from("logs"));
+	let layout = LocalStorageLayout::from_env();
+	layout.ensure_dirs()?;
+	let base_dir = layout.log_dir;
 	let max_file_bytes = env_var_u64("ROKU_LOG_MAX_FILE_BYTES")?.unwrap_or(8_u64 * 1024 * 1024);
 	let max_backup_files = env_var_usize("ROKU_LOG_MAX_BACKUP_FILES")?.unwrap_or(5);
 	let stderr_enabled = env_var_bool("ROKU_LOG_STDERR")?.unwrap_or(true);

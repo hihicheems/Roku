@@ -1915,3 +1915,40 @@
 1. Continue `GB-08` by adding conditional edge contracts so the new retry/dead-letter helper nodes can participate in explicit failure-path routing instead of staying passive graph structure.
 2. Push `RS-15` / `OR-05` further toward event-derived branch-local partial rerun on top of the richer helper-node graph.
 3. Expand `E2E-08` chaos coverage around duplicate delivery, lease expiry, and restart contention once failure-path routing metadata exists.
+
+## 2026-03-08 - Session Milestone (Phase 43)
+
+### Completed Modules
+
+- `roku-state-store`
+  - Removed the PostgreSQL-backed repository layer and replaced it with a local-first SQLite control-plane store.
+  - Added SQLite adapters for task, event, approval, result, session preference, and conversation repositories.
+  - Added `SqliteDispatchQueue`, so live orchestration now has a persisted local dispatch plane with publish / claim / ack / nack / lease renewal / backpressure semantics instead of relying on in-memory dispatch alone.
+  - Applied SQLite bootstrap pragmas oriented toward desktop/CLI reliability: WAL mode, `synchronous=NORMAL`, `foreign_keys=ON`, `busy_timeout`, `temp_store=MEMORY`, `wal_autocheckpoint`, and schema version markers.
+- `roku-cmd`
+  - Reworked live and stateful runtime bootstrap around a configurable `~/.roku`-style local storage layout.
+  - Added `LocalStorageLayout` so `ROKU_HOME`, `ROKU_SQLITE_PATH`, artifact roots, experiment roots, log roots, and other local directories resolve together and are created up front.
+  - Switched Telegram session state from PostgreSQL/in-memory fallback logic to the shared SQLite local control-plane store.
+- `roku-artifact-store`
+  - Reworked file-backed storage from a single snapshot JSON file into a directory-backed layout with per-artifact metadata JSON and per-artifact content files under a local root.
+- `roku-experiment-registry`
+  - Reworked file-backed persistence into a directory-backed local run store so experiment state aligns with the new `~/.roku/experiments` layout.
+- `docs / scripts / config`
+  - Updated `.env.example` to advertise the new local-first defaults and subdirectories under `~/.roku`.
+  - Updated `scripts/dev-services.sh`, `tmp/agent-design-doc.md`, `tmp/phase-1-control-plane-recovery.md`, and `docs/todo-list.md` so the storage/distribution story now centers on SQLite plus local JSON/Markdown rather than PostgreSQL/NATS/JetStream.
+
+### Verification Status
+
+- `cargo test -p roku-state-store -p roku-artifact-store -p roku-experiment-registry -p roku-cmd -p roku-runtime-service -p roku-e2e`: passed
+
+### Remaining Work
+
+- `GB-08` still needs conditional edge and controlled-loop contracts so retry/dead-letter helpers become active failure-path routing instead of passive structure.
+- `RS-15` / `OR-05` still need true event-stream-first reconstruction and branch-local partial rerun orchestration; the new SQLite store is now the durability layer for that work.
+- `SA-04`, `SS-10`, and `E2E-08` remain open.
+
+### Next Recommended Steps
+
+1. Build `GB-08` on top of the richer helper-node graph so failure routing becomes explicit and replay can distinguish happy-path vs recovery-path edges.
+2. Use the new SQLite-backed event and dispatch durability to finish `RS-15` / `OR-05` with event-first recovery and branch-local partial rerun.
+3. Add chaos coverage for duplicate delivery, lease expiry, provider loss, and restart contention against the SQLite dispatch plane.

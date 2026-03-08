@@ -142,7 +142,7 @@ mod tests {
 			.duration_since(UNIX_EPOCH)
 			.expect("clock should be after epoch")
 			.as_nanos();
-		std::env::temp_dir().join(format!("roku-experiment-{suffix}-{nanos}.json"))
+		std::env::temp_dir().join(format!("roku-experiment-{suffix}-{nanos}"))
 	}
 
 	#[test]
@@ -195,6 +195,6 @@ mod tests {
 		assert_eq!(loaded.status, ExperimentStatus::Failed);
 		assert_eq!(loaded.failure_reason.as_deref(), Some("validation failed"));
 
-		let _ = std::fs::remove_file(path);
+		let _ = std::fs::remove_dir_all(path);
 	}
 }
