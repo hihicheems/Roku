@@ -16,7 +16,7 @@
 
 use roku_common_types::{
 	ErrorClass, RecoveryEligibility, ReplayConsistencyStatus, RequestEnvelope, RuntimeError, Task,
-	TaskEvent, TaskId, TaskState,
+	TaskEvent, TaskEventKind, TaskId, TaskState,
 };
 
 #[derive(Debug, Clone)]
@@ -85,6 +85,10 @@ impl Orchestrator {
 			to: next,
 			reason: reason.into(),
 			error_class,
+			kind: TaskEventKind::StateTransition,
+			node_id: None,
+			node_kind: None,
+			attempt: Some(task.attempts),
 		};
 		task.state = next;
 		Ok(event)
@@ -208,7 +212,9 @@ pub fn is_valid_transition(from: TaskState, to: TaskState) -> bool {
 
 pub fn replayed_state(persisted_state: TaskState, events: &[TaskEvent]) -> TaskState {
 	events
-		.last()
+		.iter()
+		.rev()
+		.find(|event| event.kind == TaskEventKind::StateTransition)
 		.map(|event| event.to)
 		.unwrap_or(persisted_state)
 }
@@ -219,12 +225,17 @@ pub fn replay_consistency_status(
 ) -> ReplayConsistencyStatus {
 	let transitions_valid = events
 		.iter()
+		.filter(|event| event.kind == TaskEventKind::StateTransition)
 		.all(|event| is_valid_transition(event.from, event.to));
 	if !transitions_valid {
 		return ReplayConsistencyStatus::InvalidTransitions;
 	}
 
 	let chain_consistent = events
+		.iter()
+		.filter(|event| event.kind == TaskEventKind::StateTransition)
+		.cloned()
+		.collect::<Vec<_>>()
 		.windows(2)
 		.all(|window| window[0].to == window[1].from);
 	if !chain_consistent {
@@ -261,7 +272,7 @@ pub fn recovery_eligibility_for_state(state: TaskState) -> RecoveryEligibility {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use roku_common_types::{RequestEnvelope, RequestId};
+	use roku_common_types::{NodeId, RequestEnvelope, RequestId};
 
 	#[test]
 	fn transition_rules_are_enforced() {
@@ -340,11 +351,48 @@ mod tests {
 			to: TaskState::Planning,
 			reason: "start".to_string(),
 			error_class: None,
+			kind: TaskEventKind::StateTransition,
+			node_id: None,
+			node_kind: None,
+			attempt: Some(0),
 		}];
 
 		assert_eq!(
 			replay_consistency_status(TaskState::Queued, &events),
 			ReplayConsistencyStatus::SnapshotMismatch
+		);
+	}
+
+	#[test]
+	fn replayed_state_ignores_trailing_node_events() {
+		let events = vec![
+			TaskEvent {
+				task_id: TaskId("task-1".to_string()),
+				from: TaskState::Queued,
+				to: TaskState::Planning,
+				reason: "start".to_string(),
+				error_class: None,
+				kind: TaskEventKind::StateTransition,
+				node_id: None,
+				node_kind: None,
+				attempt: Some(0),
+			},
+			TaskEvent {
+				task_id: TaskId("task-1".to_string()),
+				from: TaskState::Planning,
+				to: TaskState::Planning,
+				reason: "node complete".to_string(),
+				error_class: None,
+				kind: TaskEventKind::NodeCompleted,
+				node_id: Some(NodeId("node-1".to_string())),
+				node_kind: Some(roku_common_types::TaskNodeKind::Execution),
+				attempt: Some(0),
+			},
+		];
+
+		assert_eq!(
+			replayed_state(TaskState::Planning, &events),
+			TaskState::Planning
 		);
 	}
 

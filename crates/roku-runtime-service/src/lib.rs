@@ -28,7 +28,7 @@ use roku_artifact_store::ArtifactStore;
 use roku_capability_auth::CapabilityAuthority;
 use roku_common_types::{
 	ApprovalDecision, ApprovalId, ApprovalStatus, ApprovalTicket, ErrorClass, RequestEnvelope,
-	ResponseEnvelope, ResponseStatus, RuntimeError, Task, TaskNode, TaskState,
+	ResponseEnvelope, ResponseStatus, RuntimeError, Task, TaskEventKind, TaskNode, TaskState,
 };
 use roku_execution_graph_builder::{ExecutionGraphBuilder, GraphBuildConfig};
 use roku_experiment_registry::ExperimentRegistry;
@@ -483,9 +483,35 @@ impl RuntimeService {
 		task.pending_approval_id = None;
 		if decision.approved {
 			self.mark_node_completed_by_id(&mut task, &ticket.node_id);
+			if let Some(graph_node) = task.graph.as_ref().and_then(|graph| {
+				graph
+					.nodes
+					.iter()
+					.find(|node| node.node_id == ticket.node_id)
+			}) {
+				self.append_node_event(
+					&task,
+					graph_node,
+					TaskEventKind::ApprovalApproved,
+					"approval granted",
+				)?;
+			}
 			self.record_transition(&mut task, TaskState::Executing, "approval granted")?;
 			self.process_task(&mut task, RunMode::Normal)
 		} else {
+			if let Some(graph_node) = task.graph.as_ref().and_then(|graph| {
+				graph
+					.nodes
+					.iter()
+					.find(|node| node.node_id == ticket.node_id)
+			}) {
+				self.append_node_event(
+					&task,
+					graph_node,
+					TaskEventKind::ApprovalRejected,
+					"approval rejected",
+				)?;
+			}
 			self.metrics.inc_failures();
 			let terminal_state =
 				self.fail_task(&mut task, "approval rejected", ErrorClass::NonRetriable)?;
@@ -524,6 +550,12 @@ impl RuntimeService {
 
 		self.record_transition(task, TaskState::WaitingApproval, "approval required")?;
 		task.pending_approval_id = Some(approval_id.clone());
+		self.append_node_event(
+			task,
+			node,
+			TaskEventKind::ApprovalPending,
+			"approval required",
+		)?;
 		self.metrics.inc_approvals_created();
 		self.save_approval_ticket(ticket)?;
 		self.save_task(task.clone())?;

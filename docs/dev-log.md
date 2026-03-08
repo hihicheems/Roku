@@ -1916,6 +1916,37 @@
 2. Push `RS-15` / `OR-05` further toward event-derived branch-local partial rerun on top of the richer helper-node graph.
 3. Expand `E2E-08` chaos coverage around duplicate delivery, lease expiry, and restart contention once failure-path routing metadata exists.
 
+## 2026-03-08 - Session Milestone (Phase 45)
+
+### Completed Modules
+
+- `roku-common-types`
+  - Extended `TaskEvent` with explicit event kinds plus optional node metadata so the runtime can persist node lifecycle facts alongside coarse task-state transitions.
+- `roku-runtime-service`
+  - Added node lifecycle event persistence for execution, approval, validation, and aggregation progress, so recovery can rebuild runnable progress from the event stream instead of trusting stale task snapshots.
+  - Reworked recovery reconstruction to treat persisted node events as the primary source for completed-node recovery, while approval tickets and result rows now act as cross-checks and compatibility fallbacks.
+  - Kept replay reporting and `resume_task` on the same recovery-analysis path, and added regression coverage proving node-event recovery still works even when neither snapshot progress nor node results are available.
+- `roku-orchestrator`
+  - Taught replay-state consistency helpers to ignore non-transition node lifecycle events when rebuilding the coarse task state chain.
+- `docs/todo-list.md`
+  - Marked `RS-15` and `OR-05` done.
+
+### Verification Status
+
+- `cargo test -p roku-runtime-service -p roku-orchestrator -p roku-state-store -p roku-e2e`: passed
+
+### Remaining Work
+
+- `SA-04` still needs supervisor-owned final completion assessment and richer result acceptance policy.
+- `SS-10` still needs SQLite-backed replay compaction / snapshot acceleration for larger event histories.
+- `E2E-08` still needs the remaining chaos matrix: duplicate delivery, lease expiry, provider loss, and restart stress.
+
+### Next Recommended Steps
+
+1. Move final completion policy fully into `roku-supervisor-agent` for `SA-04`, now that runtime recovery no longer depends on snapshot-local completion bookkeeping.
+2. Add `SS-10` replay compaction or snapshot acceleration on top of the richer event stream.
+3. Expand `E2E-08` against duplicate-delivery and lease-expiry scenarios on the SQLite dispatch plane.
+
 ## 2026-03-08 - Session Milestone (Phase 44)
 
 ### Completed Modules

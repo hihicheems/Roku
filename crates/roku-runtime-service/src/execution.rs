@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use roku_common_types::{
 	ApprovalStatus, CompensationAction, CompensationRecord, CompensationStatus, ErrorClass,
 	EvidenceItem, RecoveryEligibility, ResponseEnvelope, ResponseStatus, ResultEnvelope,
-	ResultStatus, RuntimeError, Task, TaskId, TaskNode, TaskNodeKind, TaskState,
+	ResultStatus, RuntimeError, Task, TaskEventKind, TaskId, TaskNode, TaskNodeKind, TaskState,
 };
 use roku_execution_graph_builder::TaskGraphScheduler;
 use roku_observability::{AuditCorrelation, AuditRecord};
@@ -398,6 +398,12 @@ impl RuntimeService {
 
 		task.last_result = Some(result);
 		self.mark_node_completed(task, node);
+		self.append_node_event(
+			task,
+			node,
+			TaskEventKind::NodeCompleted,
+			"execution completed",
+		)?;
 		Ok(None)
 	}
 
@@ -487,6 +493,12 @@ impl RuntimeService {
 			confidence: 1.0,
 		})?;
 		self.mark_node_completed(task, node);
+		self.append_node_event(
+			task,
+			node,
+			TaskEventKind::NodeCompleted,
+			"validation completed",
+		)?;
 
 		Ok(None)
 	}
@@ -551,6 +563,12 @@ impl RuntimeService {
 		self.metrics.inc_artifacts();
 		task.last_result = Some(aggregation_result);
 		self.mark_node_completed(task, node);
+		self.append_node_event(
+			task,
+			node,
+			TaskEventKind::NodeCompleted,
+			"aggregation completed",
+		)?;
 		Ok(())
 	}
 

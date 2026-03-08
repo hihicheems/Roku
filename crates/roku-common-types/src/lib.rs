@@ -139,6 +139,24 @@ pub struct TaskEvent {
 	pub to: TaskState,
 	pub reason: String,
 	pub error_class: Option<ErrorClass>,
+	#[serde(default)]
+	pub kind: TaskEventKind,
+	#[serde(default)]
+	pub node_id: Option<NodeId>,
+	#[serde(default)]
+	pub node_kind: Option<TaskNodeKind>,
+	#[serde(default)]
+	pub attempt: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TaskEventKind {
+	#[default]
+	StateTransition,
+	NodeCompleted,
+	ApprovalPending,
+	ApprovalApproved,
+	ApprovalRejected,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

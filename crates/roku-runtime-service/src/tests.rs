@@ -17,7 +17,7 @@ use roku_common_types::{
 	AggregationMode, ApprovalDecision, ApprovalId, ApprovalStatus, CompensationAction,
 	CompensationStatus, ErrorClass, EvidenceItem, JoinPolicy, NodeId, PlanningModeHint,
 	RecoveryEligibility, RequestEnvelope, RequestId, ResponseStatus, ResultEnvelope, ResultStatus,
-	Task, TaskEdge, TaskGraph, TaskId, TaskNode, TaskNodeKind, TaskState,
+	Task, TaskEdge, TaskEventKind, TaskGraph, TaskId, TaskNode, TaskNodeKind, TaskState,
 };
 use roku_state_store::{
 	DispatchClaim, DispatchEnvelope, DispatchLease, DispatchQueue, RetryClaim, StoreError,
@@ -895,6 +895,91 @@ fn service_reconstructs_approval_and_validation_progress_from_persistence() {
 		.expect("recovery analysis should succeed");
 	assert_eq!(analysis.ready_nodes.len(), 1);
 	assert_eq!(analysis.ready_nodes[0].node_id.0, "aggregation-gate");
+}
+
+#[test]
+fn service_reconstructs_progress_from_node_events_without_snapshot_or_results() {
+	let service = RuntimeService::default();
+	let task = Task {
+		task_id: TaskId("task-event-recovery".to_string()),
+		request_id: RequestId("req-event-recovery".to_string()),
+		session_id: "session-event-recovery".to_string(),
+		goal: "recover from node events".to_string(),
+		state: TaskState::Failed,
+		attempts: 0,
+		planning_mode_hint: None,
+		conversation_history: Vec::new(),
+		completed_nodes: Vec::new(),
+		next_node_index: 0,
+		pending_approval_id: None,
+		last_result: None,
+		compensation_records: Vec::new(),
+		graph: Some(TaskGraph {
+			task_id: TaskId("task-event-recovery".to_string()),
+			nodes: vec![
+				TaskNode {
+					node_id: NodeId("step-1".to_string()),
+					kind: TaskNodeKind::Execution,
+					description: "step 1".to_string(),
+					capabilities: vec!["data.read".to_string()],
+					join_policy: JoinPolicy::AllParents,
+					aggregation_mode: AggregationMode::CollectAll,
+					..TaskNode::default()
+				},
+				TaskNode {
+					node_id: NodeId("validation-gate".to_string()),
+					kind: TaskNodeKind::Validation,
+					description: "validation".to_string(),
+					capabilities: vec!["validate.result".to_string()],
+					join_policy: JoinPolicy::AllParents,
+					aggregation_mode: AggregationMode::CollectAll,
+					..TaskNode::default()
+				},
+			],
+			edges: vec![TaskEdge {
+				from: NodeId("step-1".to_string()),
+				to: NodeId("validation-gate".to_string()),
+				condition: roku_common_types::TaskEdgeCondition::OnSuccess,
+			}],
+		}),
+	};
+	let execution_node = task
+		.graph
+		.as_ref()
+		.expect("graph should exist")
+		.nodes
+		.first()
+		.expect("execution node should exist")
+		.clone();
+	service
+		.append_node_event(
+			&task,
+			&execution_node,
+			TaskEventKind::NodeCompleted,
+			"execution completed before restart",
+		)
+		.expect("node event should persist");
+
+	let reconstructed = service
+		.reconstruct_task_progress(&task)
+		.expect("task progress should reconstruct from events");
+	assert_eq!(
+		reconstructed.completed_nodes,
+		vec![NodeId("step-1".to_string())]
+	);
+
+	let analysis = service
+		.analyze_task_recovery(&task)
+		.expect("recovery analysis should succeed");
+	assert_eq!(analysis.ready_nodes.len(), 1);
+	assert_eq!(
+		analysis.ready_nodes[0].node_id,
+		NodeId("validation-gate".to_string())
+	);
+	assert_eq!(
+		analysis.recovery_eligibility,
+		RecoveryEligibility::ResumeReady
+	);
 }
 
 #[test]
