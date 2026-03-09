@@ -56,6 +56,15 @@ pub trait SkillArchiveFetcher: Send + Sync {
 	fn fetch(&self, source: &SkillSource) -> Result<DownloadedArchive, SkillRegistryError>;
 }
 
+#[derive(Clone, Default)]
+struct DisabledSkillArchiveFetcher;
+
+impl SkillArchiveFetcher for DisabledSkillArchiveFetcher {
+	fn fetch(&self, _source: &SkillSource) -> Result<DownloadedArchive, SkillRegistryError> {
+		Err(SkillRegistryError::RegistryDisabled)
+	}
+}
+
 #[derive(Debug, Clone)]
 pub struct DownloadedArchive {
 	pub archive_url: String,
@@ -83,7 +92,7 @@ impl SkillRegistry {
 	pub fn disabled() -> Self {
 		Self {
 			backend: SkillRegistryBackend::Disabled,
-			fetcher: Arc::new(HttpSkillArchiveFetcher::default()),
+			fetcher: Arc::new(DisabledSkillArchiveFetcher),
 		}
 	}
 
@@ -647,7 +656,11 @@ fn render_skill_context_for_query(
 	query: &str,
 	max_chars: usize,
 ) -> Result<String, SkillRegistryError> {
-	let keywords = query_keywords(query);
+	let keywords = if should_focus_query_context(query) {
+		query_keywords(query)
+	} else {
+		Vec::new()
+	};
 	render_skill_context_with_keywords(root, record, max_chars, &keywords)
 }
 
@@ -897,29 +910,29 @@ fn focused_excerpt(content: &str, max_chars: usize, keywords: &[String]) -> Opti
 		.take(3)
 		.map(|(index, _)| index)
 		.collect::<Vec<_>>();
-	let priority_selected = lines
-		.iter()
-		.enumerate()
-		.filter_map(|(index, line)| {
-			(line.contains("`text`")
-				|| line.contains("`without_skill/outputs/`")
-				|| line.contains("`old_skill/outputs/`")
-				|| line
-					.to_ascii_lowercase()
-					.contains("grading.json expectations array must use the fields"))
-			.then_some(index)
-		})
-		.collect::<Vec<_>>();
-	if !priority_selected.is_empty() {
-		selected = priority_selected;
+	let needs_schema_line = keywords.iter().any(|keyword| {
+		matches!(
+			*keyword,
+			"grading" | "json" | "expectation" | "expectations" | "field" | "fields"
+		)
+	});
+	if needs_schema_line {
+		selected.extend(lines.iter().enumerate().filter_map(|(index, line)| {
+			(line.contains("`text`") && line.contains("`passed`") && line.contains("`evidence`"))
+				.then_some(index)
+		}));
 	}
-	for (index, line) in lines.iter().enumerate() {
-		if line.contains("`text`")
-			|| line.contains("`without_skill/outputs/`")
-			|| line.contains("`old_skill/outputs/`")
-		{
-			selected.push(index);
-		}
+	let needs_baseline_lines = keywords.iter().any(|keyword| {
+		matches!(
+			*keyword,
+			"baseline" | "creating" | "improving" | "existing" | "new"
+		)
+	});
+	if needs_baseline_lines {
+		selected.extend(lines.iter().enumerate().filter_map(|(index, line)| {
+			(line.contains("`without_skill/outputs/`") || line.contains("`old_skill/outputs/`"))
+				.then_some(index)
+		}));
 	}
 	selected.sort_unstable();
 	selected.dedup();
@@ -1050,6 +1063,27 @@ fn query_keywords(query: &str) -> Vec<String> {
 			}
 			acc
 		})
+}
+
+fn should_focus_query_context(query: &str) -> bool {
+	let normalized = query.to_ascii_lowercase();
+	[
+		"according to",
+		"what exact",
+		"which exact",
+		"exact field",
+		"field names",
+		"schema",
+		"baseline",
+		"expectation",
+		"directory",
+		"path",
+		"command",
+		"根据",
+		"精确",
+	]
+	.iter()
+	.any(|marker| normalized.contains(marker) || query.contains(marker))
 }
 
 fn query_stopwords() -> &'static [&'static str] {
@@ -1362,6 +1396,39 @@ mod tests {
 		assert!(!context.contains("is_current_best"));
 	}
 
+	#[test]
+	fn summary_queries_keep_high_level_skill_overview() {
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let registry = SkillRegistry::file_backed(root.path().join("skills")).with_fetcher(
+			Arc::new(StaticArchiveFetcher {
+				archive: DownloadedArchive {
+					archive_url: "https://example.com/archive.zip".to_string(),
+					bytes: skill_creator_summary_archive_bytes(),
+					resolved_reference: Some("main".to_string()),
+				},
+			}),
+		);
+		registry
+			.install_from_url(
+				"https://github.com/anthropics/skills/tree/main/skills/skill-creator",
+				"test-suite",
+			)
+			.expect("install should succeed");
+
+		let context = registry
+			.render_prompt_context_for_query(
+				"Use the skill-creator skill. Summarize the core loop it recommends for creating and iterating on a skill.",
+				8_000,
+			)
+			.expect("context should render")
+			.expect("context should exist");
+
+		assert!(
+			context.contains("At a high level, the process of creating a skill goes like this")
+		);
+		assert!(context.contains("Write a draft of the skill"));
+	}
+
 	fn test_skill_archive_bytes() -> Vec<u8> {
 		build_skill_archive_bytes(&[
 			(
@@ -1437,6 +1504,32 @@ When grading each run, the grading.json expectations array must use the fields `
 "#,
 			),
 		])
+	}
+
+	fn skill_creator_summary_archive_bytes() -> Vec<u8> {
+		build_skill_archive_bytes(&[(
+			"skills-main/skills/skill-creator/SKILL.md",
+			br#"---
+name: skill-creator
+description: Build and evaluate new skills.
+---
+
+# Skill Creator
+
+At a high level, the process of creating a skill goes like this:
+
+- Decide what you want the skill to do
+- Write a draft of the skill
+- Run a few test prompts
+- Help the user evaluate the results
+- Rewrite the skill based on feedback
+- Repeat until you're satisfied
+
+Baseline run notes:
+- Creating a new skill: no skill at all. Save to `without_skill/outputs/`.
+- Improving an existing skill: snapshot the old version first, then save baseline outputs to `old_skill/outputs/`.
+"#,
+		)])
 	}
 
 	fn build_skill_archive_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {

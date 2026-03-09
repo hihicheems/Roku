@@ -24,6 +24,7 @@ use roku_common_types::{
 const PROFILE_RESEARCH: &str = "research";
 const PROFILE_DATA: &str = "data";
 const PROFILE_REVIEW: &str = "review";
+const PROFILE_SKILL: &str = "skill";
 const PROFILE_GENERAL: &str = "general";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +219,13 @@ fn default_profiles() -> Vec<CapabilityProfile> {
 			8_000,
 			20_000,
 		),
+		CapabilityProfile::new(
+			PROFILE_SKILL,
+			vec!["skill.".to_string()],
+			vec!["skill.install".to_string()],
+			10_000,
+			120_000,
+		),
 		CapabilityProfile::new(PROFILE_GENERAL, Vec::new(), Vec::new(), 8_000, 20_000),
 	]
 }
@@ -351,6 +359,19 @@ mod tests {
 		let spec = factory.build_from_profile(&task_id, DefaultProfile::Review);
 		assert!(spec.instance_id.starts_with("agent-review-"));
 		assert!(spec.capabilities.contains(&"review.check".to_string()));
+	}
+
+	#[test]
+	fn select_skill_profile_for_skill_capabilities() {
+		let factory = AgentInstanceFactory::default();
+		let task_id = TaskId("task-skill".to_string());
+		let node = execution_node("node-s1", vec!["skill.install"]);
+
+		let spec = factory.build_for_node(&task_id, &node);
+
+		assert!(spec.instance_id.starts_with("agent-skill-"));
+		assert!(spec.capabilities.contains(&"skill.install".to_string()));
+		assert!(spec.policy_bindings.time_budget_ms >= 45_000);
 	}
 
 	#[test]

@@ -274,7 +274,7 @@ mod tests {
 		let state = web::Data::new(GatewayAppState::new(Arc::new(NoopExecutor)));
 		let app = test::init_service(
 			App::new()
-				.app_data(state)
+				.app_data(state.clone())
 				.app_data(web::JsonConfig::default().limit(8 * 1024))
 				.configure(configure_routes),
 		)
@@ -298,7 +298,7 @@ mod tests {
 		let state = web::Data::new(GatewayAppState::new(Arc::new(NoopExecutor)));
 		let app = test::init_service(
 			App::new()
-				.app_data(state)
+				.app_data(state.clone())
 				.app_data(web::JsonConfig::default().limit(8 * 1024))
 				.configure(configure_routes),
 		)
@@ -340,8 +340,8 @@ mod tests {
 		let _: Option<ExperimentResponse> = None;
 	}
 
-	#[actix_web::test]
-	async fn task_replay_route_returns_runtime_report() {
+	#[::core::prelude::v1::test]
+	fn task_replay_route_returns_runtime_report() {
 		let service = RuntimeService::default();
 		service
 			.execute(RequestEnvelope {
@@ -352,25 +352,28 @@ mod tests {
 				conversation_history: Vec::new(),
 			})
 			.expect("runtime execution should succeed");
-		let state = web::Data::new(GatewayAppState::new(Arc::new(RuntimeServiceExecutor::new(
-			Arc::new(service),
-		))));
-		let app = test::init_service(
-			App::new()
-				.app_data(state)
-				.app_data(web::JsonConfig::default().limit(8 * 1024))
-				.configure(configure_routes),
-		)
-		.await;
 
-		let request = test::TestRequest::get()
-			.uri("/v1/tasks/task-req-1/replay")
-			.to_request();
-		let response: TaskReplayReport = test::call_and_read_body_json(&app, request).await;
+		actix_web::rt::System::new().block_on(async move {
+			let state = web::Data::new(GatewayAppState::new(Arc::new(
+				RuntimeServiceExecutor::new(Arc::new(service)),
+			)));
+			let app = test::init_service(
+				App::new()
+					.app_data(state)
+					.app_data(web::JsonConfig::default().limit(8 * 1024))
+					.configure(configure_routes),
+			)
+			.await;
 
-		assert_eq!(response.task_id.0, "task-req-1");
-		assert_eq!(response.persisted_state, TaskState::Succeeded);
-		assert!(response.transitions_valid);
-		assert!(response.snapshot_matches_replay);
+			let request = test::TestRequest::get()
+				.uri("/v1/tasks/task-req-1/replay")
+				.to_request();
+			let response: TaskReplayReport = test::call_and_read_body_json(&app, request).await;
+
+			assert_eq!(response.task_id.0, "task-req-1");
+			assert_eq!(response.persisted_state, TaskState::Succeeded);
+			assert!(response.transitions_valid);
+			assert!(response.snapshot_matches_replay);
+		});
 	}
 }
