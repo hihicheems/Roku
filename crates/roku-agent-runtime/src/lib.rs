@@ -16,7 +16,9 @@
 
 mod result;
 mod runtime;
+mod tool_config;
 mod tools;
 mod workers;
 
 pub use runtime::{AgentWorker, GenericAgentRuntime, RuntimeWorker};
+pub use tool_config::{BuiltinToolRole, ConfiguredTool, ToolCatalogConfig, ToolCatalogConfigError};

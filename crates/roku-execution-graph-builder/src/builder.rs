@@ -80,10 +80,14 @@ impl ExecutionGraphBuilder {
 						selector,
 					}
 				})?;
+			let (resource_token_budget_hint, resource_time_budget_hint) =
+				resource_budget_hints(&step.resource_selectors, catalog);
 			let execution_metadata = default_node_metadata(
 				&execution_node_id,
 				TaskNodeKind::Execution,
 				&resolved_capabilities,
+				resource_token_budget_hint,
+				resource_time_budget_hint,
 			);
 			nodes.push(build_task_node(
 				execution_node_id.clone(),
@@ -101,6 +105,8 @@ impl ExecutionGraphBuilder {
 				&retry_node_id,
 				TaskNodeKind::Retry,
 				&[String::from("control.retry")],
+				0,
+				0,
 			);
 			nodes.push(build_task_node(
 				retry_node_id.clone(),
@@ -122,6 +128,8 @@ impl ExecutionGraphBuilder {
 				&dead_letter_node_id,
 				TaskNodeKind::DeadLetter,
 				&[String::from("control.dead_letter")],
+				0,
+				0,
 			);
 			nodes.push(build_task_node(
 				dead_letter_node_id.clone(),
@@ -144,6 +152,8 @@ impl ExecutionGraphBuilder {
 					&approval_node_id,
 					TaskNodeKind::Approval,
 					&[String::from("approve.action")],
+					0,
+					0,
 				);
 				nodes.push(build_task_node(
 					approval_node_id.clone(),
@@ -198,6 +208,8 @@ impl ExecutionGraphBuilder {
 				&validation_id,
 				TaskNodeKind::Validation,
 				&[String::from("validate.result")],
+				0,
+				0,
 			);
 			nodes.push(build_task_node(
 				validation_id.clone(),
@@ -231,6 +243,8 @@ impl ExecutionGraphBuilder {
 				&aggregation_id,
 				TaskNodeKind::Aggregation,
 				&[String::from("aggregate.result")],
+				0,
+				0,
 			);
 			nodes.push(build_task_node(
 				aggregation_id.clone(),
@@ -355,11 +369,13 @@ fn default_node_metadata(
 	node_id: &NodeId,
 	kind: TaskNodeKind,
 	capabilities: &[String],
+	resource_token_budget_hint: u64,
+	resource_time_budget_hint: u64,
 ) -> NodeMetadata {
 	let (deadline_ms, retry_policy, rerun_policy, requires_manual_resume, allows_partial_rerun) =
 		match kind {
 			TaskNodeKind::Execution => (
-				execution_deadline_ms(capabilities),
+				execution_deadline_ms(capabilities, resource_time_budget_hint),
 				RetryPolicy {
 					max_attempts: 2,
 					retry_on_timeout: true,
@@ -419,7 +435,11 @@ fn default_node_metadata(
 			allows_partial_rerun,
 		},
 		budget_snapshot: NodeBudgetSnapshot {
-			token_budget: execution_token_budget(node_id, capability_count),
+			token_budget: execution_token_budget(
+				node_id,
+				capability_count,
+				resource_token_budget_hint,
+			),
 			time_budget_ms: deadline_ms,
 		},
 		deadline_ms,
@@ -429,23 +449,44 @@ fn default_node_metadata(
 	}
 }
 
-fn execution_deadline_ms(capabilities: &[String]) -> u64 {
-	if capabilities
+fn execution_deadline_ms(capabilities: &[String], resource_time_budget_hint: u64) -> u64 {
+	let base = if capabilities
 		.iter()
 		.any(|capability| capability == "skill.install" || capability == "skill.ensure_installed")
 	{
 		120_000
 	} else {
 		45_000
-	}
+	};
+	base.max(resource_time_budget_hint)
 }
 
-fn execution_token_budget(node_id: &NodeId, capability_count: u64) -> u64 {
-	if node_id.0 == "use-installed-skill" {
-		4_000
+fn execution_token_budget(
+	node_id: &NodeId,
+	capability_count: u64,
+	resource_token_budget_hint: u64,
+) -> u64 {
+	let base = if node_id.0 == "use-installed-skill" || capability_count == 0 {
+		10_000
 	} else {
 		1_000u64.saturating_add(capability_count.saturating_mul(250))
-	}
+	};
+	base.max(resource_token_budget_hint)
+}
+
+fn resource_budget_hints(
+	resource_selectors: &[ResourceSelector],
+	catalog: &ResourceCatalog,
+) -> (u64, u64) {
+	resource_selectors
+		.iter()
+		.filter_map(|selector| catalog.descriptor(selector))
+		.fold((0, 0), |(max_tokens, max_latency), descriptor| {
+			(
+				max_tokens.max(descriptor.cost.estimated_tokens),
+				max_latency.max(descriptor.cost.estimated_latency_ms),
+			)
+		})
 }
 
 fn terminal_step_nodes(
@@ -516,6 +557,7 @@ mod tests {
 			node.kind == TaskNodeKind::Retry
 				&& node.dispatch_policy == TaskNodeDispatchPolicy::ManualRecovery
 		}));
+		assert_eq!(graph.nodes[0].budget_snapshot.token_budget, 10_000);
 		assert!(
 			graph
 				.nodes
@@ -618,7 +660,60 @@ mod tests {
 			.iter()
 			.find(|node| node.node_id == NodeId("use-installed-skill".to_string()))
 			.expect("skill usage node should exist");
+		assert_eq!(node.budget_snapshot.token_budget, 10_000);
+	}
+
+	#[test]
+	fn resource_cost_hints_expand_execution_budget_for_selected_tools() {
+		let builder = ExecutionGraphBuilder;
+		let catalog = ResourceCatalog::new(vec![roku_resource_catalog::CatalogDescriptor {
+			selector: ResourceSelector::tool("inventory.describe"),
+			kind: roku_resource_catalog::ResourceKind::Tool,
+			name: "inventory.describe".to_string(),
+			role: Some("inventory".to_string()),
+			description: "Describe local inventory".to_string(),
+			discoverable: true,
+			tags: Vec::new(),
+			examples: Vec::new(),
+			input_schema: Vec::new(),
+			risk: roku_resource_catalog::ResourceRisk::Low,
+			cost: roku_resource_catalog::ResourceCost {
+				estimated_tokens: 4_000,
+				estimated_latency_ms: 12_000,
+			},
+			required_capabilities: vec!["inventory.read".to_string()],
+			summary: "Describe local inventory".to_string(),
+			key_commands: Vec::new(),
+			use_cases: Vec::new(),
+		}]);
+		let graph = builder
+			.compile(
+				TaskId("t-inventory".to_string()),
+				&PlanOutline {
+					goal: "describe local inventory".to_string(),
+					steps: vec![PlanStep {
+						step_id: "inventory-step".to_string(),
+						summary: "use inventory tool".to_string(),
+						resource_selectors: vec![ResourceSelector::tool("inventory.describe")],
+						required_capabilities: Vec::new(),
+						requires_approval: false,
+						depends_on: Vec::new(),
+						branch: None,
+						loop_control: None,
+					}],
+				},
+				&catalog,
+				&GraphBuildConfig::default(),
+			)
+			.expect("graph compilation should succeed");
+
+		let node = graph
+			.nodes
+			.iter()
+			.find(|node| node.node_id == NodeId("inventory-step".to_string()))
+			.expect("inventory node should exist");
 		assert_eq!(node.budget_snapshot.token_budget, 4_000);
+		assert_eq!(node.budget_snapshot.time_budget_ms, 45_000);
 	}
 
 	#[test]

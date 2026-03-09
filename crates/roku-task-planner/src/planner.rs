@@ -18,9 +18,9 @@ use roku_resource_catalog::ResourceCatalog;
 
 use crate::selection::{ResourceSelectionEngine, SelectionRoute};
 use crate::strategies::{
-	build_conversation_steps, build_decomposition_steps, build_react_steps, build_refinement_steps,
-	build_selected_skill_steps, build_selected_tool_steps, build_skill_install_steps,
-	build_tree_search_steps,
+	PlannerToolbox, build_conversation_steps, build_decomposition_steps, build_react_steps,
+	build_refinement_steps, build_selected_skill_steps, build_selected_tool_steps,
+	build_skill_install_steps, build_tree_search_steps,
 };
 
 pub trait TaskPlanner {
@@ -30,12 +30,15 @@ pub trait TaskPlanner {
 #[derive(Clone)]
 pub struct AdaptiveTaskPlanner {
 	selector: ResourceSelectionEngine,
+	toolbox: PlannerToolbox,
 }
 
 impl AdaptiveTaskPlanner {
 	pub fn with_resource_catalog(catalog: ResourceCatalog) -> Self {
+		let toolbox = PlannerToolbox::from_catalog(&catalog);
 		Self {
 			selector: ResourceSelectionEngine::new(catalog),
+			toolbox,
 		}
 	}
 }
@@ -53,7 +56,7 @@ impl TaskPlanner for AdaptiveTaskPlanner {
 			SelectionRoute::InstallSkill {
 				source_url,
 				if_missing,
-			} => build_skill_install_steps(&request.goal, &source_url, if_missing),
+			} => build_skill_install_steps(&request.goal, &source_url, if_missing, &self.toolbox),
 			SelectionRoute::UseSkill { selector } => {
 				build_selected_skill_steps(&request.goal, selector)
 			}
@@ -61,13 +64,15 @@ impl TaskPlanner for AdaptiveTaskPlanner {
 				build_selected_tool_steps(&request.goal, &selectors)
 			}
 			SelectionRoute::PlannerDefault => match decision.mode {
-				PlanningMode::ReAct => build_react_steps(&request.goal, decision),
+				PlanningMode::ReAct => build_react_steps(&request.goal, decision, &self.toolbox),
 				PlanningMode::TaskDecomposition => {
-					build_decomposition_steps(&request.goal, decision)
+					build_decomposition_steps(&request.goal, decision, &self.toolbox)
 				}
-				PlanningMode::TreeSearch => build_tree_search_steps(&request.goal, decision),
+				PlanningMode::TreeSearch => {
+					build_tree_search_steps(&request.goal, decision, &self.toolbox)
+				}
 				PlanningMode::IterativeRefinement => {
-					build_refinement_steps(&request.goal, decision)
+					build_refinement_steps(&request.goal, decision, &self.toolbox)
 				}
 			},
 		};

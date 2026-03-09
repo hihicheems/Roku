@@ -16,7 +16,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use roku_agent_runtime::GenericAgentRuntime;
+use roku_agent_runtime::{GenericAgentRuntime, ToolCatalogConfig};
 use roku_api_gateway::{Gateway, RawRequest};
 use roku_artifact_store::ArtifactStore;
 use roku_common_types::{
@@ -103,10 +103,12 @@ pub(crate) fn build_live_runtime_service_from_env() -> Result<RuntimeService, Co
 	let planner_router = build_openrouter_router_with_metrics(config, metrics.clone())?;
 	let layout = LocalStorageLayout::from_env();
 	layout.ensure_dirs().map_err(CommandError::Io)?;
+	let tool_config = load_tool_catalog_config(&layout)?;
 	let skill_registry = build_skill_registry(&layout);
-	let runtime = GenericAgentRuntime::with_llm_router_and_skill_registry(
+	let runtime = GenericAgentRuntime::with_llm_router_skill_registry_and_tool_config(
 		runtime_router,
 		skill_registry.clone(),
+		tool_config,
 	);
 	let planner = Box::new(LlmTaskPlanner::with_resource_catalog(
 		planner_router,
@@ -294,8 +296,10 @@ pub(crate) fn decide_approval_from_env(
 fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandError> {
 	let layout = LocalStorageLayout::from_env();
 	layout.ensure_dirs().map_err(CommandError::Io)?;
+	let tool_config = load_tool_catalog_config(&layout)?;
 	let skill_registry = build_skill_registry(&layout);
-	let runtime = GenericAgentRuntime::with_skill_registry(skill_registry);
+	let runtime =
+		GenericAgentRuntime::with_skill_registry_and_tool_config(skill_registry, tool_config);
 	let planner = Box::new(
 		roku_task_planner::AdaptiveTaskPlanner::with_resource_catalog(
 			runtime.resource_catalog().clone(),
@@ -325,6 +329,15 @@ fn build_skill_registry_from_env() -> Result<SkillRegistry, CommandError> {
 	let layout = LocalStorageLayout::from_env();
 	layout.ensure_dirs().map_err(CommandError::Io)?;
 	Ok(build_skill_registry(&layout))
+}
+
+fn load_tool_catalog_config(
+	layout: &LocalStorageLayout,
+) -> Result<ToolCatalogConfig, CommandError> {
+	if !layout.tool_config_path.exists() {
+		return Ok(ToolCatalogConfig::default());
+	}
+	ToolCatalogConfig::from_path(&layout.tool_config_path).map_err(CommandError::from)
 }
 
 fn connect_sqlite_task_repository(

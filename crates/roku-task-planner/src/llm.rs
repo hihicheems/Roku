@@ -20,14 +20,15 @@ use roku_resource_catalog::ResourceCatalog;
 use crate::planner::{AdaptiveTaskPlanner, TaskPlanner};
 use crate::selection::{ResourceSelectionEngine, SelectionRoute};
 use crate::strategies::{
-	build_conversation_steps, build_selected_skill_steps, build_selected_tool_steps,
-	build_skill_install_steps,
+	PlannerToolbox, build_conversation_steps, build_selected_skill_steps,
+	build_selected_tool_steps, build_skill_install_steps,
 };
 
 pub struct LlmTaskPlanner {
 	router: LlmRouter,
 	selector: ResourceSelectionEngine,
 	fallback: AdaptiveTaskPlanner,
+	toolbox: PlannerToolbox,
 }
 
 impl LlmTaskPlanner {
@@ -36,10 +37,12 @@ impl LlmTaskPlanner {
 	}
 
 	pub fn with_resource_catalog(router: LlmRouter, catalog: ResourceCatalog) -> Self {
+		let toolbox = PlannerToolbox::from_catalog(&catalog);
 		Self {
 			router,
 			selector: ResourceSelectionEngine::new(catalog.clone()),
 			fallback: AdaptiveTaskPlanner::with_resource_catalog(catalog),
+			toolbox,
 		}
 	}
 }
@@ -56,7 +59,12 @@ impl TaskPlanner for LlmTaskPlanner {
 				if_missing,
 			} => PlanOutline {
 				goal: request.goal.clone(),
-				steps: build_skill_install_steps(&request.goal, &source_url, if_missing),
+				steps: build_skill_install_steps(
+					&request.goal,
+					&source_url,
+					if_missing,
+					&self.toolbox,
+				),
 			},
 			SelectionRoute::UseSkill { selector } => PlanOutline {
 				goal: request.goal.clone(),

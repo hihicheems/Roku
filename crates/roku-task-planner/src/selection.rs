@@ -18,6 +18,7 @@ use roku_resource_catalog::{CatalogMatch, ResourceCatalog, ResourceKind};
 use roku_skill_registry::SkillSource;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
 
 const MIN_TOOL_SCORE: f32 = 0.60;
 const MIN_SKILL_SCORE: f32 = 0.72;
@@ -50,7 +51,6 @@ impl ResourceSelectionEngine {
 	}
 
 	pub(crate) fn select_without_llm(&self, request: &RequestEnvelope) -> SelectionRoute {
-		let query = selection_query(request);
 		if let Some(source_url) = extract_skill_source_url(&request.goal) {
 			return SelectionRoute::InstallSkill {
 				source_url,
@@ -58,8 +58,10 @@ impl ResourceSelectionEngine {
 			};
 		}
 
-		let tool_matches = self.catalog.retrieve(&query, Some(ResourceKind::Tool), 4);
-		let skill_matches = self.catalog.retrieve(&query, Some(ResourceKind::Skill), 4);
+		let query = request.goal.trim();
+		let tool_matches =
+			discoverable_tool_matches(self.catalog.retrieve(query, Some(ResourceKind::Tool), 4));
+		let skill_matches = self.catalog.retrieve(query, Some(ResourceKind::Skill), 4);
 		if is_conversation(request, &tool_matches, &skill_matches) {
 			return SelectionRoute::Conversation;
 		}
@@ -89,14 +91,7 @@ impl ResourceSelectionEngine {
 			return deterministic;
 		}
 
-		let query = selection_query(request);
-		let tool_matches = self.catalog.retrieve(&query, Some(ResourceKind::Tool), 4);
-		let skill_matches = self.catalog.retrieve(&query, Some(ResourceKind::Skill), 4);
-		let candidates = tool_matches
-			.iter()
-			.chain(skill_matches.iter())
-			.take(6)
-			.collect::<Vec<_>>();
+		let candidates = selection_candidates(&self.catalog, request);
 		if candidates.is_empty() {
 			return SelectionRoute::PlannerDefault;
 		}
@@ -159,20 +154,98 @@ struct SelectionChoice {
 	confidence: f32,
 }
 
-fn selection_query(request: &RequestEnvelope) -> String {
+#[derive(Debug, Clone)]
+struct SelectionCandidate {
+	entry: CatalogMatch,
+	source: CandidateSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateSource {
+	CurrentGoal,
+	RecentUserHistory,
+}
+
+impl CandidateSource {
+	fn as_str(self) -> &'static str {
+		match self {
+			Self::CurrentGoal => "current_goal",
+			Self::RecentUserHistory => "recent_user_history",
+		}
+	}
+}
+
+fn selection_candidates(
+	catalog: &ResourceCatalog,
+	request: &RequestEnvelope,
+) -> Vec<SelectionCandidate> {
+	let mut merged = merge_candidates(
+		discoverable_tool_matches(catalog.retrieve(&request.goal, Some(ResourceKind::Tool), 4))
+			.into_iter()
+			.chain(catalog.retrieve(&request.goal, Some(ResourceKind::Skill), 4))
+			.collect(),
+		CandidateSource::CurrentGoal,
+		HashMap::new(),
+	);
+
+	if let Some(history_query) = recent_user_history_query(request) {
+		merged = merge_candidates(
+			discoverable_tool_matches(catalog.retrieve(
+				&history_query,
+				Some(ResourceKind::Tool),
+				4,
+			))
+			.into_iter()
+			.chain(catalog.retrieve(&history_query, Some(ResourceKind::Skill), 4))
+			.collect(),
+			CandidateSource::RecentUserHistory,
+			merged,
+		);
+	}
+
+	let mut ranked = merged.into_values().collect::<Vec<_>>();
+	ranked.sort_by(|left, right| right.entry.score.total_cmp(&left.entry.score));
+	ranked.truncate(6);
+	ranked
+}
+
+fn merge_candidates(
+	entries: Vec<CatalogMatch>,
+	source: CandidateSource,
+	mut merged: HashMap<String, SelectionCandidate>,
+) -> HashMap<String, SelectionCandidate> {
+	for entry in entries {
+		let key = entry.descriptor.selector.display_key();
+		match merged.get_mut(&key) {
+			Some(existing) if entry.score > existing.entry.score => {
+				*existing = SelectionCandidate { entry, source };
+			}
+			Some(_) => {}
+			None => {
+				merged.insert(key, SelectionCandidate { entry, source });
+			}
+		}
+	}
+
+	merged
+}
+
+fn recent_user_history_query(request: &RequestEnvelope) -> Option<String> {
 	let history = request
 		.conversation_history
 		.iter()
 		.rev()
-		.take(4)
-		.map(|turn| format!("{}: {}", role_label(turn.role), turn.content))
-		.collect::<Vec<_>>()
-		.join("\n");
+		.filter(|turn| turn.role == ConversationRole::User)
+		.take(2)
+		.map(|turn| turn.content.trim())
+		.filter(|content| !content.is_empty())
+		.collect::<Vec<_>>();
 	if history.is_empty() {
-		request.goal.clone()
-	} else {
-		format!("{}\n{}", request.goal, history)
+		return None;
 	}
+
+	let history = history.into_iter().rev().collect::<Vec<_>>().join("\n");
+	Some(format!("{}\n{}", request.goal.trim(), history))
 }
 
 fn explicit_skill_selector(goal: &str, matches: &[CatalogMatch]) -> Option<ResourceSelector> {
@@ -213,6 +286,10 @@ fn is_conversation(
 	tool_matches: &[CatalogMatch],
 	skill_matches: &[CatalogMatch],
 ) -> bool {
+	if is_direct_assistant_ping(&request.goal) {
+		return true;
+	}
+
 	let top_score = tool_matches
 		.first()
 		.map(|entry| entry.score)
@@ -223,6 +300,8 @@ fn is_conversation(
 	let normalized = goal.to_ascii_lowercase();
 	let chatty = [
 		"你好",
+		"嗨",
+		"hey",
 		"hi",
 		"hello",
 		"thanks",
@@ -234,21 +313,22 @@ fn is_conversation(
 	.iter()
 	.any(|pattern| normalized.contains(pattern) || goal.contains(pattern));
 
-	chatty && top_score < MIN_TOOL_SCORE
+	chatty && (!has_task_intent(goal) || top_score < MIN_TOOL_SCORE)
 }
 
-fn selection_prompt(request: &RequestEnvelope, candidates: &[&CatalogMatch]) -> String {
+fn selection_prompt(request: &RequestEnvelope, candidates: &[SelectionCandidate]) -> String {
 	let candidates_json = candidates
 		.iter()
 		.map(|entry| {
 			json!({
-				"selector": entry.descriptor.selector.display_key(),
-				"kind": format!("{:?}", entry.descriptor.kind),
-				"name": entry.descriptor.name,
-				"description": entry.descriptor.description,
-				"summary": entry.descriptor.summary,
-				"examples": entry.descriptor.examples,
-				"score": entry.score,
+				"selector": entry.entry.descriptor.selector.display_key(),
+				"kind": format!("{:?}", entry.entry.descriptor.kind),
+				"name": entry.entry.descriptor.name,
+				"description": entry.entry.descriptor.description,
+				"summary": entry.entry.descriptor.summary,
+				"examples": entry.entry.descriptor.examples,
+				"score": entry.entry.score,
+				"source": entry.source.as_str(),
 			})
 		})
 		.collect::<Vec<_>>();
@@ -275,6 +355,9 @@ Rules:
 - Choose `tools` when one or two tools should be used.
 - Choose `planner_default` when generic planning should continue without an explicit skill/tool selection.
 - Selectors must come from the candidate list exactly.
+- Prefer candidates with `"source": "current_goal"`.
+- Use `"source": "recent_user_history"` only when the current user turn is clearly a follow-up, rewrite, clarification, or continuation of that earlier user request.
+- If the current user turn starts a new topic, ignore stale history candidates and choose `conversation` or `planner_default`.
 
 User goal:
 {goal}
@@ -317,6 +400,13 @@ fn parse_selector(value: &str) -> Option<ResourceSelector> {
 	None
 }
 
+fn discoverable_tool_matches(matches: Vec<CatalogMatch>) -> Vec<CatalogMatch> {
+	matches
+		.into_iter()
+		.filter(|entry| entry.descriptor.discoverable)
+		.collect()
+}
+
 fn extract_skill_source_url(goal: &str) -> Option<String> {
 	goal.split_whitespace().find_map(|token| {
 		SkillSource::parse(token.trim_matches(|character: char| {
@@ -338,10 +428,286 @@ fn normalize(value: &str) -> String {
 		.to_ascii_lowercase()
 }
 
+fn is_direct_assistant_ping(goal: &str) -> bool {
+	let trimmed = goal.trim();
+	if trimmed.is_empty() {
+		return true;
+	}
+
+	let normalized = normalize(trimmed);
+	if normalized.is_empty() {
+		return false;
+	}
+
+	if normalized == "roku" {
+		return true;
+	}
+
+	let mentions_roku = normalized.contains("roku");
+	if !mentions_roku {
+		return false;
+	}
+
+	let compact = trimmed
+		.chars()
+		.filter(|character| !character.is_whitespace() && !character.is_ascii_punctuation())
+		.collect::<String>()
+		.to_ascii_lowercase();
+	if compact == "roku" {
+		return true;
+	}
+
+	let token_count = trimmed.split_whitespace().count();
+	token_count <= 4 && !has_task_intent(trimmed)
+}
+
+fn has_task_intent(goal: &str) -> bool {
+	let normalized = goal.to_ascii_lowercase();
+	[
+		"install",
+		"setup",
+		"use ",
+		"create",
+		"build",
+		"generate",
+		"analyze",
+		"analyse",
+		"review",
+		"search",
+		"find",
+		"summarize",
+		"debug",
+		"fix",
+		"帮我",
+		"请帮",
+		"安装",
+		"装一个",
+		"使用",
+		"创建",
+		"新建",
+		"生成",
+		"分析",
+		"总结",
+		"检索",
+		"搜索",
+		"修复",
+		"排查",
+	]
+	.iter()
+	.any(|pattern| normalized.contains(pattern) || goal.contains(pattern))
+}
+
 fn role_label(role: ConversationRole) -> &'static str {
 	match role {
 		ConversationRole::User => "user",
 		ConversationRole::Assistant => "assistant",
 		ConversationRole::System => "system",
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use roku_common_types::RequestId;
+	use roku_llm_adapter::{
+		GenerationRequest, LlmProvider, ModelProfile, ProviderCallError, ProviderResponse,
+		RiskTier, RoutingPolicy,
+	};
+	use roku_resource_catalog::{CatalogDescriptor, ResourceCatalog, ResourceCost, ResourceRisk};
+	use std::sync::{Arc, Mutex};
+
+	fn request(goal: &str) -> RequestEnvelope {
+		RequestEnvelope {
+			request_id: RequestId("req-1".to_string()),
+			session_id: "session-1".to_string(),
+			goal: goal.to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		}
+	}
+
+	struct CapturingProvider {
+		prompt: Arc<Mutex<Option<String>>>,
+		output: &'static str,
+	}
+
+	impl LlmProvider for CapturingProvider {
+		fn provider_name(&self) -> &'static str {
+			"selection-test-provider"
+		}
+
+		fn complete(
+			&self,
+			_model: &ModelProfile,
+			request: &GenerationRequest,
+		) -> Result<ProviderResponse, ProviderCallError> {
+			*self
+				.prompt
+				.lock()
+				.expect("capturing provider prompt lock must not be poisoned") = Some(request.prompt.clone());
+			Ok(ProviderResponse {
+				output: self.output.to_string(),
+				prompt_tokens: 64,
+				output_tokens: 32,
+				latency_ms: 25,
+			})
+		}
+	}
+
+	fn selection_router(prompt: Arc<Mutex<Option<String>>>, output: &'static str) -> LlmRouter {
+		let mut router = LlmRouter::new(RoutingPolicy::default());
+		router.register_provider(CapturingProvider { prompt, output });
+		router.register_model(ModelProfile {
+			model_id: "selection-test-model".to_string(),
+			provider: "selection-test-provider".to_string(),
+			max_context_tokens: 8_000,
+			cost_per_1k_tokens_usd: 0.01,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		});
+		router
+	}
+
+	fn tool_descriptor(name: &str, description: &str) -> CatalogDescriptor {
+		tool_descriptor_with_discoverable(name, description, true)
+	}
+
+	fn tool_descriptor_with_discoverable(
+		name: &str,
+		description: &str,
+		discoverable: bool,
+	) -> CatalogDescriptor {
+		CatalogDescriptor {
+			selector: ResourceSelector::tool(name),
+			kind: ResourceKind::Tool,
+			name: name.to_string(),
+			role: None,
+			discoverable,
+			description: description.to_string(),
+			tags: Vec::new(),
+			examples: Vec::new(),
+			input_schema: Vec::new(),
+			risk: ResourceRisk::Low,
+			cost: ResourceCost::default(),
+			required_capabilities: Vec::new(),
+			summary: description.to_string(),
+			key_commands: Vec::new(),
+			use_cases: Vec::new(),
+		}
+	}
+
+	fn selection_engine() -> ResourceSelectionEngine {
+		ResourceSelectionEngine::new(ResourceCatalog::new(vec![
+			tool_descriptor(
+				"inventory.describe",
+				"Describe Roku's local inventory including installed skills, discoverable tools, and capability families, then reformat it for the user.",
+			),
+			tool_descriptor(
+				"research.synthesize",
+				"Research a topic and synthesize findings",
+			),
+			tool_descriptor_with_discoverable(
+				"skill.ensure_installed",
+				"Install a skill package from a supported source URL",
+				false,
+			),
+		]))
+	}
+
+	#[test]
+	fn routes_bare_roku_ping_to_conversation() {
+		let selection = selection_engine().select_without_llm(&request("roku"));
+		assert_eq!(selection, SelectionRoute::Conversation);
+	}
+
+	#[test]
+	fn routes_greeting_with_roku_to_conversation() {
+		let selection = selection_engine().select_without_llm(&request("你好 roku"));
+		assert_eq!(selection, SelectionRoute::Conversation);
+	}
+
+	#[test]
+	fn selects_inventory_tool_for_inventory_queries() {
+		let selection =
+			selection_engine().select_without_llm(&request("现在有哪些 tool 和 capability？"));
+		assert_eq!(
+			selection,
+			SelectionRoute::UseTools {
+				selectors: vec![ResourceSelector::tool("inventory.describe")],
+			}
+		);
+	}
+
+	#[test]
+	fn selects_inventory_tool_for_format_followup() {
+		let mut request = request("用无序列表列一下");
+		request.conversation_history = vec![
+			roku_common_types::ConversationTurn {
+				role: ConversationRole::User,
+				content: "列出 skill、tool".to_string(),
+				created_at_unix_ms: 0,
+			},
+			roku_common_types::ConversationTurn {
+				role: ConversationRole::Assistant,
+				content: "已安装的 skills: xlsx。可用工具: data.execute。能力类别: data.read."
+					.to_string(),
+				created_at_unix_ms: 0,
+			},
+		];
+		let selection = selection_engine().select_without_llm(&request);
+		assert_eq!(selection, SelectionRoute::PlannerDefault);
+	}
+
+	#[test]
+	fn llm_selector_receives_recent_user_history_as_secondary_candidates() {
+		let mut request = request("用无序列表列一下");
+		request.conversation_history = vec![
+			roku_common_types::ConversationTurn {
+				role: ConversationRole::User,
+				content: "列出 skill、tool".to_string(),
+				created_at_unix_ms: 0,
+			},
+			roku_common_types::ConversationTurn {
+				role: ConversationRole::Assistant,
+				content: "已安装的 skills: xlsx。可用工具: inventory.describe.".to_string(),
+				created_at_unix_ms: 0,
+			},
+		];
+		let prompt = Arc::new(Mutex::new(None));
+		let router = selection_router(
+			prompt.clone(),
+			r#"{"route":"tools","selectors":["tool:inventory.describe"],"confidence":0.95}"#,
+		);
+
+		let selection = selection_engine().select_with_llm(&request, &router);
+
+		assert_eq!(
+			selection,
+			SelectionRoute::UseTools {
+				selectors: vec![ResourceSelector::tool("inventory.describe")],
+			}
+		);
+		let prompt = prompt
+			.lock()
+			.expect("captured prompt lock must not be poisoned")
+			.clone()
+			.expect("selection prompt should be captured");
+		assert!(prompt.contains(r#""source": "recent_user_history""#));
+		assert!(prompt.contains("列出 skill、tool"));
+	}
+
+	#[test]
+	fn keeps_explicit_skill_url_install_routing() {
+		let selection = selection_engine().select_without_llm(&request(
+			"install https://github.com/anthropics/skills/tree/main/skills/claude-api",
+		));
+		assert_eq!(
+			selection,
+			SelectionRoute::InstallSkill {
+				source_url: "https://github.com/anthropics/skills/tree/main/skills/claude-api"
+					.to_string(),
+				if_missing: true,
+			}
+		);
 	}
 }

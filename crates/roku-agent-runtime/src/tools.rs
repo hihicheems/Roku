@@ -14,101 +14,34 @@
 
 use std::sync::Arc;
 
+use crate::tool_config::{BuiltinToolRole, ConfiguredTool, ToolCatalogConfig};
 use roku_common_types::ResourceSelector;
 use roku_llm_adapter::{GenerationRequest, LlmAdapterError, LlmRouter, RiskTier};
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
-use roku_resource_catalog::{
-	CatalogDescriptor, ResourceCatalog, ResourceCost, ResourceKind, ResourceRisk,
-};
+use roku_resource_catalog::{CatalogDescriptor, ResourceCatalog, ResourceKind};
 use roku_skill_registry::SkillRegistry;
 use roku_tool_runtime::{
 	RuntimeConstraints, SandboxProfile, Tool, ToolDescriptor, ToolFailure, ToolInvocationRequest,
 	ToolRuntime, ToolSchema,
 };
+use serde::Serialize;
 use serde_json::{Value, json};
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 
-pub(crate) const RESEARCH_TOOL_NAME: &str = "research.synthesize";
-pub(crate) const DATA_TOOL_NAME: &str = "data.execute";
-pub(crate) const REVIEW_TOOL_NAME: &str = "review.assess";
-pub(crate) const GENERAL_TOOL_NAME: &str = "general.execute";
-pub(crate) const SKILL_TOOL_NAME: &str = "skill.ensure_installed";
 pub(crate) const LEGACY_SKILL_TOOL_NAME: &str = "skill.install";
 const LLM_TOOL_TIMEOUT_MS: u64 = 45_000;
 const MAX_SKILL_PROMPT_CONTEXT_CHARS: usize = 16_000;
 
-pub(crate) fn build_resource_catalog(skill_registry: &SkillRegistry) -> ResourceCatalog {
-	let mut entries = vec![
-		tool_catalog_descriptor(
-			SKILL_TOOL_NAME,
-			"Install a skill package from a supported source URL.",
-			vec![
-				"install".to_string(),
-				"skills".to_string(),
-				"registry".to_string(),
-			],
-			vec!["Install the claude-api skill from a GitHub URL.".to_string()],
-			vec!["source_url".to_string()],
-			ResourceRisk::Medium,
-			ResourceCost {
-				estimated_tokens: 0,
-				estimated_latency_ms: 120_000,
-			},
-			vec!["skill.ensure_installed".to_string()],
-		),
-		tool_catalog_descriptor(
-			RESEARCH_TOOL_NAME,
-			"Research a topic, read context, and synthesize grounded findings.",
-			vec![
-				"research".to_string(),
-				"analysis".to_string(),
-				"information".to_string(),
-			],
-			vec!["Summarize the latest requirements from the project docs.".to_string()],
-			vec!["goal".to_string(), "summary".to_string()],
-			ResourceRisk::Low,
-			ResourceCost {
-				estimated_tokens: 600,
-				estimated_latency_ms: 30_000,
-			},
-			vec!["information.read".to_string()],
-		),
-		tool_catalog_descriptor(
-			DATA_TOOL_NAME,
-			"Transform datasets, aggregate metrics, or run structured data processing.",
-			vec![
-				"data".to_string(),
-				"metrics".to_string(),
-				"pipeline".to_string(),
-			],
-			vec!["Aggregate the experiment results into a compact table.".to_string()],
-			vec!["goal".to_string(), "summary".to_string()],
-			ResourceRisk::Low,
-			ResourceCost {
-				estimated_tokens: 700,
-				estimated_latency_ms: 35_000,
-			},
-			vec!["data.read".to_string()],
-		),
-		tool_catalog_descriptor(
-			REVIEW_TOOL_NAME,
-			"Review a draft, assess correctness, and call out residual risks.",
-			vec![
-				"review".to_string(),
-				"validation".to_string(),
-				"risk".to_string(),
-			],
-			vec!["Review the proposed plan and list the main risks.".to_string()],
-			vec!["goal".to_string(), "summary".to_string()],
-			ResourceRisk::Medium,
-			ResourceCost {
-				estimated_tokens: 500,
-				estimated_latency_ms: 20_000,
-			},
-			vec!["review.check".to_string()],
-		),
-	];
+pub(crate) fn build_resource_catalog(
+	skill_registry: &SkillRegistry,
+	tool_config: &ToolCatalogConfig,
+) -> ResourceCatalog {
+	let mut entries = tool_config
+		.tools
+		.iter()
+		.map(tool_catalog_descriptor)
+		.collect::<Vec<_>>();
 	if let Ok(skill_entries) = skill_registry.catalog_descriptors() {
 		entries.extend(skill_entries);
 	}
@@ -116,47 +49,27 @@ pub(crate) fn build_resource_catalog(skill_registry: &SkillRegistry) -> Resource
 	ResourceCatalog::new(entries)
 }
 
-pub(crate) fn build_builtin_tool_runtime(skill_registry: SkillRegistry) -> ToolRuntime {
+pub(crate) fn build_builtin_tool_runtime(
+	skill_registry: SkillRegistry,
+	tool_config: &ToolCatalogConfig,
+) -> ToolRuntime {
 	let mut runtime = ToolRuntime::default();
 	runtime
-		.register_tool(SkillInstallTool::new(skill_registry.clone()))
-		.expect("skill ensure tool must register successfully");
-	runtime
-		.register_tool(SkillInstallTool::legacy(skill_registry))
+		.register_tool(SkillInstallTool::legacy(skill_registry.clone()))
 		.expect("skill install tool must register successfully");
-	for tool in [
-		WorkerReportTool::new(
-			RESEARCH_TOOL_NAME,
-			"research-worker",
-			"research synthesis generated",
-			vec!["information.read".to_string()],
-			SandboxProfile::PythonResearch,
-		),
-		WorkerReportTool::new(
-			DATA_TOOL_NAME,
-			"data-worker",
-			"data pipeline step executed",
-			vec!["data.read".to_string()],
-			SandboxProfile::ContainerRestricted,
-		),
-		WorkerReportTool::new(
-			REVIEW_TOOL_NAME,
-			"review-worker",
-			"review checks completed",
-			vec!["review.check".to_string()],
-			SandboxProfile::ReadOnlyFs,
-		),
-		WorkerReportTool::new(
-			GENERAL_TOOL_NAME,
-			"generic-worker",
-			"generic execution completed",
-			Vec::new(),
-			SandboxProfile::NoIsolation,
-		),
-	] {
-		runtime
-			.register_tool(tool)
-			.expect("default runtime tools must register successfully");
+	for tool in &tool_config.tools {
+		match tool.role {
+			BuiltinToolRole::SkillInstall => runtime
+				.register_tool(SkillInstallTool::new(tool, skill_registry.clone()))
+				.expect("default runtime tools must register successfully"),
+			BuiltinToolRole::Inventory
+			| BuiltinToolRole::Research
+			| BuiltinToolRole::Data
+			| BuiltinToolRole::Review
+			| BuiltinToolRole::General => runtime
+				.register_tool(WorkerReportTool::from_config(tool))
+				.expect("default runtime tools must register successfully"),
+		}
 	}
 	runtime
 }
@@ -164,59 +77,31 @@ pub(crate) fn build_builtin_tool_runtime(skill_registry: SkillRegistry) -> ToolR
 pub(crate) fn build_llm_tool_runtime(
 	router: Arc<LlmRouter>,
 	skill_registry: SkillRegistry,
+	tool_config: &ToolCatalogConfig,
+	resource_catalog: &ResourceCatalog,
 ) -> ToolRuntime {
 	let mut runtime = ToolRuntime::default();
 	runtime
-		.register_tool(SkillInstallTool::new(skill_registry.clone()))
-		.expect("skill ensure tool must register successfully");
-	runtime
 		.register_tool(SkillInstallTool::legacy(skill_registry.clone()))
 		.expect("skill install tool must register successfully");
-	for tool in [
-		PromptedLlmTool::new(
-			RESEARCH_TOOL_NAME,
-			"research-worker",
-			"You are Roku's research worker. Produce grounded intermediate findings in plain text for downstream use. Never expose chain-of-thought, hidden reasoning, or internal runtime details.",
-			vec!["information.read".to_string()],
-			SandboxProfile::PythonResearch,
-			RiskTier::Medium,
-			skill_registry.clone(),
-			Arc::clone(&router),
-		),
-		PromptedLlmTool::new(
-			DATA_TOOL_NAME,
-			"data-worker",
-			"You are Roku's data worker. Produce the requested data-processing or synthesis result in plain text. Never expose chain-of-thought, hidden reasoning, or internal runtime details.",
-			vec!["data.read".to_string()],
-			SandboxProfile::ContainerRestricted,
-			RiskTier::Medium,
-			skill_registry.clone(),
-			Arc::clone(&router),
-		),
-		PromptedLlmTool::new(
-			REVIEW_TOOL_NAME,
-			"review-worker",
-			"You are Roku's review worker. Produce a concise review or validation conclusion in plain text. Never expose chain-of-thought, hidden reasoning, or internal runtime details.",
-			vec!["review.check".to_string()],
-			SandboxProfile::ReadOnlyFs,
-			RiskTier::High,
-			skill_registry.clone(),
-			Arc::clone(&router),
-		),
-		PromptedLlmTool::new(
-			GENERAL_TOOL_NAME,
-			"generic-worker",
-			"You are Roku. Produce only the final user-facing reply in plain text. Never reveal hidden reasoning, analysis steps, or internal runtime details. If trusted runtime context provides current date or time, treat it as ground truth.",
-			Vec::new(),
-			SandboxProfile::NoIsolation,
-			RiskTier::Medium,
-			skill_registry,
-			router,
-		),
-	] {
-		runtime
-			.register_tool(tool)
-			.expect("llm runtime tools must register successfully");
+	for tool in &tool_config.tools {
+		match tool.role {
+			BuiltinToolRole::SkillInstall => runtime
+				.register_tool(SkillInstallTool::new(tool, skill_registry.clone()))
+				.expect("llm runtime tools must register successfully"),
+			BuiltinToolRole::Inventory
+			| BuiltinToolRole::Research
+			| BuiltinToolRole::Data
+			| BuiltinToolRole::Review
+			| BuiltinToolRole::General => runtime
+				.register_tool(PromptedLlmTool::from_config(
+					tool,
+					skill_registry.clone(),
+					Arc::clone(&router),
+					resource_catalog.clone(),
+				))
+				.expect("llm runtime tools must register successfully"),
+		}
 	}
 	runtime
 }
@@ -228,8 +113,13 @@ struct SkillInstallTool {
 }
 
 impl SkillInstallTool {
-	fn new(registry: SkillRegistry) -> Self {
-		Self::with_name(SKILL_TOOL_NAME, "skill.ensure_installed", registry)
+	fn new(tool: &ConfiguredTool, registry: SkillRegistry) -> Self {
+		let required_capability = tool
+			.required_capabilities
+			.first()
+			.cloned()
+			.unwrap_or_else(|| "skill.ensure_installed".to_string());
+		Self::with_name(&tool.name, &required_capability, registry)
 	}
 
 	fn legacy(registry: SkillRegistry) -> Self {
@@ -295,17 +185,16 @@ struct WorkerReportTool {
 }
 
 impl WorkerReportTool {
-	fn new(
-		name: &str,
-		worker_id: &'static str,
-		message: &'static str,
-		required_capabilities: Vec<String>,
-		sandbox_profile: SandboxProfile,
-	) -> Self {
+	fn from_config(tool: &ConfiguredTool) -> Self {
 		Self {
-			descriptor: tool_descriptor(name, required_capabilities, sandbox_profile, 5_000),
-			worker_id,
-			message,
+			descriptor: tool_descriptor(
+				&tool.name,
+				tool.required_capabilities.clone(),
+				sandbox_profile_for_role(tool.role),
+				5_000,
+			),
+			worker_id: worker_id_for_role(tool.role),
+			message: completion_message_for_role(tool.role),
 		}
 	}
 }
@@ -340,31 +229,29 @@ struct PromptedLlmTool {
 	risk_tier: RiskTier,
 	skill_registry: SkillRegistry,
 	router: Arc<LlmRouter>,
+	resource_catalog: ResourceCatalog,
 }
 
 impl PromptedLlmTool {
-	fn new(
-		name: &str,
-		worker_id: &'static str,
-		system_prompt: &'static str,
-		required_capabilities: Vec<String>,
-		sandbox_profile: SandboxProfile,
-		risk_tier: RiskTier,
+	fn from_config(
+		tool: &ConfiguredTool,
 		skill_registry: SkillRegistry,
 		router: Arc<LlmRouter>,
+		resource_catalog: ResourceCatalog,
 	) -> Self {
 		Self {
 			descriptor: tool_descriptor(
-				name,
-				required_capabilities,
-				sandbox_profile,
+				&tool.name,
+				tool.required_capabilities.clone(),
+				sandbox_profile_for_role(tool.role),
 				LLM_TOOL_TIMEOUT_MS,
 			),
-			worker_id,
-			system_prompt,
-			risk_tier,
+			worker_id: worker_id_for_role(tool.role),
+			system_prompt: system_prompt_for_role(tool.role),
+			risk_tier: risk_tier_for_role(tool.role),
 			skill_registry,
 			router,
+			resource_catalog,
 		}
 	}
 }
@@ -406,36 +293,15 @@ impl Tool for PromptedLlmTool {
 			.skill_registry
 			.render_prompt_context_for_query(&skill_query, skill_prompt_context_budget(&input))
 			.map_err(|error| ToolFailure::terminal(error.to_string()))?;
-		if let Some(answer) = direct_skill_context_answer(&skill_query, skill_context.as_deref()) {
-			log_runtime_output(
-				"used deterministic installed skill answer",
-				[
-					("worker_id", self.worker_id.to_string()),
-					("node_id", input.node_id.to_string()),
-				],
-			);
-			return Ok(json!({
-				"worker_id": self.worker_id,
-				"message": answer,
-				"raw_message": Value::Null,
-				"task_id": input.task_id,
-				"node_id": input.node_id,
-				"goal": input.goal,
-				"summary": input.summary,
-				"provider": "installed-skill-context",
-				"model_id": "deterministic",
-				"prompt_tokens": 0,
-				"output_tokens": 0,
-				"latency_ms": 0,
-				"attempt": request.attempt,
-				"invocation_key": request.invocation_key,
-			}));
-		}
 		let prompt = user_visible_prompt(
 			&input,
 			self.worker_id,
 			&request.invocation_key,
 			skill_context.as_deref(),
+			Some(&inventory_context_json(
+				&self.resource_catalog,
+				&self.skill_registry,
+			)),
 		);
 
 		let response = self
@@ -488,6 +354,7 @@ fn user_visible_prompt(
 	worker_id: &str,
 	invocation_key: &str,
 	skill_context: Option<&str>,
+	runtime_inventory: Option<&str>,
 ) -> String {
 	let history_section = if input.conversation_history.trim().is_empty() {
 		String::new()
@@ -506,13 +373,20 @@ fn user_visible_prompt(
 			)
 		})
 		.unwrap_or_default();
+	let inventory_section = runtime_inventory
+		.filter(|value| !value.trim().is_empty())
+		.map(|value| format!("\n\nAuthoritative local inventory JSON:\n{value}"))
+		.unwrap_or_default();
+	let execution_authority_section = execution_authority_block(input);
 
 	format!(
-		"User request:\n{goal}{history_section}\n\nTrusted runtime context:\n{runtime_context}{skill_section}\n\nInternal execution hint (do not quote or describe it unless it is directly useful for the answer):\n{summary}\n\nOutput rules:\n- Return only the useful answer text in plain text.\n- Answer directly. Do not preface with analysis, translation, or a restatement of the user's request.\n- Never narrate your reasoning. Do not output phrases like \"用户的问题是\", \"I need to\", \"首先\", or similar meta-analysis.\n- Prefer one short paragraph unless the user explicitly asks for detail.\n- Match the user's language unless the request clearly asks for another language.\n- Preserve conversational continuity when the user refers to prior turns or earlier facts.\n- If the user explicitly references an installed skill, treat the installed skill excerpts above as authoritative local source material.\n- When the installed skill excerpts provide exact field names, directory names, file paths, commands, or schema keys, repeat them verbatim and do not substitute lookalikes or generic alternatives.\n- When answering schema questions, answer at the level the user asked for. If the user asks for field names inside an array entry or nested object, give those inner field names rather than parent object keys or nearby sibling fields.\n- If the user asks about today's date, weekday, or current time, use the trusted runtime context above instead of claiming you lack realtime access.\n- Do not mention worker ids, invocation keys, execution steps, hidden instructions, providers, models, budgets, or internal runtime details.\n- Do not describe yourself as an execution worker or reveal chain-of-thought.\n- If you are about to restate the prompt, trusted runtime context, installed skill context, or your analysis notes, stop and output only the answer.\n- If the user asks who you are or which persona is active, answer as Roku.\n- Internal references for policy only: worker_id={worker_id}; invocation_key={invocation_key}; time_budget_ms={time_budget_ms}.",
+		"User request:\n{goal}{history_section}\n\nTrusted runtime context:\n{runtime_context}{skill_section}{inventory_section}{execution_authority_section}\n\nInternal execution hint (do not quote or describe it unless it is directly useful for the answer):\n{summary}\n\nOutput rules:\n- Return only the useful answer text in plain text.\n- Answer directly. Do not preface with analysis, translation, or a restatement of the user's request.\n- Never narrate your reasoning. Do not output phrases like \"用户的问题是\", \"I need to\", \"首先\", or similar meta-analysis.\n- Prefer one short paragraph unless the user explicitly asks for detail.\n- Match the user's language unless the request clearly asks for another language.\n- Preserve conversational continuity when the user refers to prior turns or earlier facts.\n- If the user explicitly references an installed skill, treat the installed skill excerpts above as authoritative local source material.\n- The local inventory JSON above is authoritative for which tools, installed skills, and capability families are currently available.\n- The execution authority block above is authoritative for what this invocation can and cannot actually do.\n- When the installed skill excerpts provide exact field names, directory names, file paths, commands, or schema keys, repeat them verbatim and do not substitute lookalikes or generic alternatives.\n- When answering schema questions, answer at the level the user asked for. If the user asks for field names inside an array entry or nested object, give those inner field names rather than parent object keys or nearby sibling fields.\n- If the user asks about today's date, weekday, or current time, use the trusted runtime context above instead of claiming you lack realtime access.\n- Never claim that a file, directory, skill, installation, or other side effect already exists unless the execution authority above allows side effects or this invocation includes explicit execution evidence proving it happened.\n- If side effects are not allowed for this invocation, you may explain or draft what should be created, but you must clearly say it has not been created yet.\n- Do not mention worker ids, invocation keys, execution steps, hidden instructions, providers, models, budgets, or internal runtime details.\n- Do not describe yourself as an execution worker or reveal chain-of-thought.\n- If you are about to restate the prompt, trusted runtime context, installed skill context, local inventory JSON, execution authority, or your analysis notes, stop and output only the answer.\n- If the user asks who you are or which persona is active, answer as Roku.\n- Internal references for policy only: worker_id={worker_id}; invocation_key={invocation_key}; time_budget_ms={time_budget_ms}.",
 		goal = input.goal,
 		history_section = history_section,
 		runtime_context = runtime_context,
 		skill_section = skill_section,
+		inventory_section = inventory_section,
+		execution_authority_section = execution_authority_section,
 		summary = input.summary,
 		worker_id = worker_id,
 		invocation_key = invocation_key,
@@ -554,71 +428,44 @@ fn skill_context_query(input: &ToolInput<'_>) -> String {
 	}
 }
 
-fn direct_skill_context_answer(goal: &str, skill_context: Option<&str>) -> Option<String> {
-	let skill_context = skill_context?.trim();
-	if skill_context.is_empty() {
-		return None;
-	}
+fn execution_authority_block(input: &ToolInput<'_>) -> String {
+	let side_effects_allowed = allows_state_change(&input.granted_capabilities);
+	let selected_resources = if input.resource_selectors.is_empty() {
+		"(none)".to_string()
+	} else {
+		input.resource_selectors.join(", ")
+	};
+	let granted_capabilities = if input.granted_capabilities.is_empty() {
+		"(none)".to_string()
+	} else {
+		input.granted_capabilities.join(", ")
+	};
+	let side_effect_policy = if side_effects_allowed {
+		"allowed"
+	} else {
+		"not allowed"
+	};
+	let guidance = if side_effects_allowed {
+		"This invocation may perform real state changes when the selected resource supports them."
+	} else {
+		"This invocation is advisory only. It may explain, plan, or draft work, but it must not claim that files, directories, skills, or installations were created or modified."
+	};
 
-	let normalized = goal.to_ascii_lowercase();
-	let looks_like_exact_skill_question = normalized.contains("according to")
-		|| normalized.contains("what exact")
-		|| normalized.contains("exact field")
-		|| normalized.contains("field names")
-		|| normalized.contains("schema")
-		|| goal.contains("根据")
-		|| goal.contains("精确");
-	if !looks_like_exact_skill_question {
-		return None;
-	}
+	format!(
+		"\n\nExecution authority:\n- selected_resources: {selected_resources}\n- granted_capabilities: {granted_capabilities}\n- side_effects_allowed: {side_effect_policy}\n- guidance: {guidance}"
+	)
+}
 
-	let lines = skill_context
-		.lines()
-		.map(str::trim)
-		.filter(|line| !line.is_empty())
-		.filter(|line| {
-			!line.starts_with("Installed skill guidance explicitly referenced by the user:")
-				&& !line.starts_with("### ")
-				&& !line.starts_with("Description:")
-				&& !line.starts_with("Version:")
-				&& !line.starts_with("Source:")
-				&& !line.starts_with("Entrypoint (`")
-				&& !line.starts_with("Supporting document (`")
-				&& !line.starts_with("```")
-		})
-		.collect::<Vec<_>>();
-	if lines.is_empty() {
-		return None;
-	}
-
-	let exact_field_line = lines.iter().copied().find(|line| {
-		line.contains("`text`") || line.contains("`passed`") || line.contains("`evidence`")
-	});
-	let new_skill_line = lines
-		.iter()
-		.copied()
-		.find(|line| line.contains("Creating a new skill") && line.contains("`without_skill"));
-	let improving_skill_line = lines
-		.iter()
-		.copied()
-		.find(|line| line.contains("Improving an existing skill") && line.contains("`old_skill"));
-	if exact_field_line.is_some() || new_skill_line.is_some() || improving_skill_line.is_some() {
-		let mut selected = Vec::new();
-		if let Some(line) = exact_field_line {
-			selected.push(line);
-		}
-		if let Some(line) = new_skill_line {
-			selected.push(line);
-		}
-		if let Some(line) = improving_skill_line {
-			selected.push(line);
-		}
-		if !selected.is_empty() {
-			return Some(selected.join("\n"));
-		}
-	}
-
-	Some(lines.join("\n"))
+fn allows_state_change(granted_capabilities: &[String]) -> bool {
+	granted_capabilities.iter().any(|capability| {
+		let capability = capability.to_ascii_lowercase();
+		capability.contains("write")
+			|| capability.contains("install")
+			|| capability.contains("create")
+			|| capability.contains("modify")
+			|| capability.contains("delete")
+			|| capability.contains("update")
+	})
 }
 
 fn runtime_context_block() -> String {
@@ -694,6 +541,17 @@ fn direct_runtime_answer(goal: &str) -> Option<String> {
 	}
 }
 
+fn inventory_context_json(
+	resource_catalog: &ResourceCatalog,
+	skill_registry: &SkillRegistry,
+) -> String {
+	serde_json::to_string_pretty(&RuntimeInventory::from_runtime(
+		resource_catalog,
+		skill_registry,
+	))
+	.unwrap_or_else(|_| "{}".to_string())
+}
+
 fn chinese_weekday(weekday: time::Weekday) -> &'static str {
 	match weekday {
 		time::Weekday::Monday => "星期一",
@@ -703,6 +561,79 @@ fn chinese_weekday(weekday: time::Weekday) -> &'static str {
 		time::Weekday::Friday => "星期五",
 		time::Weekday::Saturday => "星期六",
 		time::Weekday::Sunday => "星期日",
+	}
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeInventory {
+	tools: Vec<InventoryTool>,
+	skills: Vec<InventorySkill>,
+	capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct InventoryTool {
+	name: String,
+	role: Option<String>,
+	description: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct InventorySkill {
+	name: String,
+	description: String,
+}
+
+impl RuntimeInventory {
+	fn from_runtime(resource_catalog: &ResourceCatalog, skill_registry: &SkillRegistry) -> Self {
+		let mut tools = resource_catalog
+			.entries()
+			.iter()
+			.filter(|entry| entry.kind == ResourceKind::Tool && entry.discoverable)
+			.map(|entry| InventoryTool {
+				name: entry.name.clone(),
+				role: entry.role.clone(),
+				description: short_description(&entry.description, 120),
+			})
+			.collect::<Vec<_>>();
+		tools.sort_by(|left, right| left.name.cmp(&right.name));
+
+		let mut capabilities = resource_catalog
+			.entries()
+			.iter()
+			.filter(|entry| entry.kind == ResourceKind::Tool && entry.discoverable)
+			.flat_map(|entry| entry.required_capabilities.iter().cloned())
+			.collect::<Vec<_>>();
+		capabilities.sort();
+		capabilities.dedup();
+
+		let mut skills = skill_registry
+			.list_skills()
+			.unwrap_or_default()
+			.into_iter()
+			.map(|record| InventorySkill {
+				name: record.descriptor.name,
+				description: short_description(&record.descriptor.description, 120),
+			})
+			.collect::<Vec<_>>();
+		skills.sort_by(|left, right| left.name.cmp(&right.name));
+
+		Self {
+			tools,
+			skills,
+			capabilities,
+		}
+	}
+}
+
+fn short_description(value: &str, max_chars: usize) -> String {
+	let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+	let mut chars = compact.chars();
+	let truncated = chars.by_ref().take(max_chars).collect::<String>();
+	if chars.next().is_some() {
+		format!("{truncated}...")
+	} else {
+		truncated
 	}
 }
 
@@ -862,6 +793,7 @@ struct ToolInput<'a> {
 	goal: &'a str,
 	summary: &'a str,
 	conversation_history: &'a str,
+	granted_capabilities: Vec<String>,
 	resource_selectors: Vec<String>,
 	budget_tokens: u64,
 	time_budget_ms: u64,
@@ -892,6 +824,17 @@ fn request_input(request: &ToolInvocationRequest) -> Result<ToolInput<'_>, ToolF
 		conversation_history: input
 			.get("conversation_history")
 			.and_then(Value::as_str)
+			.unwrap_or_default(),
+		granted_capabilities: input
+			.get("granted_capabilities")
+			.and_then(Value::as_array)
+			.map(|values| {
+				values
+					.iter()
+					.filter_map(Value::as_str)
+					.map(str::to_string)
+					.collect::<Vec<_>>()
+			})
 			.unwrap_or_default(),
 		resource_selectors: input
 			.get("resource_selectors")
@@ -947,30 +890,90 @@ fn tool_descriptor(
 	}
 }
 
-fn tool_catalog_descriptor(
-	name: &str,
-	description: &str,
-	tags: Vec<String>,
-	examples: Vec<String>,
-	input_schema: Vec<String>,
-	risk: ResourceRisk,
-	cost: ResourceCost,
-	required_capabilities: Vec<String>,
-) -> CatalogDescriptor {
+fn tool_catalog_descriptor(tool: &ConfiguredTool) -> CatalogDescriptor {
 	CatalogDescriptor {
-		selector: ResourceSelector::tool(name),
+		selector: ResourceSelector::tool(&tool.name),
 		kind: ResourceKind::Tool,
-		name: name.to_string(),
-		description: description.to_string(),
-		tags,
-		examples,
-		input_schema,
-		risk,
-		cost,
-		required_capabilities,
-		summary: description.to_string(),
+		name: tool.name.clone(),
+		role: Some(tool.role.as_str().to_string()),
+		description: tool.description.clone(),
+		discoverable: tool.discoverable,
+		tags: tool.tags.clone(),
+		examples: tool.examples.clone(),
+		input_schema: tool.input_schema.clone(),
+		risk: tool.risk,
+		cost: tool.cost.clone(),
+		required_capabilities: tool.required_capabilities.clone(),
+		summary: tool.description.clone(),
 		key_commands: Vec::new(),
 		use_cases: Vec::new(),
+	}
+}
+
+fn worker_id_for_role(role: BuiltinToolRole) -> &'static str {
+	match role {
+		BuiltinToolRole::SkillInstall => "skill-worker",
+		BuiltinToolRole::Inventory => "inventory-worker",
+		BuiltinToolRole::Research => "research-worker",
+		BuiltinToolRole::Data => "data-worker",
+		BuiltinToolRole::Review => "review-worker",
+		BuiltinToolRole::General => "generic-worker",
+	}
+}
+
+fn sandbox_profile_for_role(role: BuiltinToolRole) -> SandboxProfile {
+	match role {
+		BuiltinToolRole::SkillInstall => SandboxProfile::ReadOnlyFs,
+		BuiltinToolRole::Inventory => SandboxProfile::NoIsolation,
+		BuiltinToolRole::Research => SandboxProfile::PythonResearch,
+		BuiltinToolRole::Data => SandboxProfile::ContainerRestricted,
+		BuiltinToolRole::Review => SandboxProfile::ReadOnlyFs,
+		BuiltinToolRole::General => SandboxProfile::NoIsolation,
+	}
+}
+
+fn completion_message_for_role(role: BuiltinToolRole) -> &'static str {
+	match role {
+		BuiltinToolRole::SkillInstall => "skill installation completed",
+		BuiltinToolRole::Inventory => "inventory summary generated",
+		BuiltinToolRole::Research => "research synthesis generated",
+		BuiltinToolRole::Data => "data pipeline step executed",
+		BuiltinToolRole::Review => "review checks completed",
+		BuiltinToolRole::General => "generic execution completed",
+	}
+}
+
+fn system_prompt_for_role(role: BuiltinToolRole) -> &'static str {
+	match role {
+		BuiltinToolRole::SkillInstall => {
+			"You install skills from explicit source URLs and report the result."
+		}
+		BuiltinToolRole::Inventory => {
+			"You are Roku's inventory worker. Use only the authoritative local inventory JSON in the prompt to describe installed skills, discoverable tools, and capability families. Adapt the formatting to the user's request and conversation history, including list or bullet formatting when asked. Do not invent tools, skills, or capabilities that are not present in the inventory JSON."
+		}
+		BuiltinToolRole::Research => {
+			"You are Roku's research worker. Produce grounded intermediate findings in plain text for downstream use. Never expose chain-of-thought, hidden reasoning, or internal runtime details."
+		}
+		BuiltinToolRole::Data => {
+			"You are Roku's data worker. Produce the requested data-processing or synthesis result in plain text. Never expose chain-of-thought, hidden reasoning, or internal runtime details."
+		}
+		BuiltinToolRole::Review => {
+			"You are Roku's review worker. Produce a concise review or validation conclusion in plain text. Never expose chain-of-thought, hidden reasoning, or internal runtime details."
+		}
+		BuiltinToolRole::General => {
+			"You are Roku. Produce only the final user-facing reply in plain text. Never reveal hidden reasoning, analysis steps, or internal runtime details. If trusted runtime context provides current date or time, treat it as ground truth."
+		}
+	}
+}
+
+fn risk_tier_for_role(role: BuiltinToolRole) -> RiskTier {
+	match role {
+		BuiltinToolRole::Review => RiskTier::High,
+		BuiltinToolRole::Inventory
+		| BuiltinToolRole::Research
+		| BuiltinToolRole::Data
+		| BuiltinToolRole::General => RiskTier::Medium,
+		BuiltinToolRole::SkillInstall => RiskTier::Low,
 	}
 }
 
@@ -1012,10 +1015,11 @@ mod tests {
 	use std::sync::{Arc, Mutex};
 
 	use super::{
-		GENERAL_TOOL_NAME, PromptedLlmTool, direct_runtime_answer, direct_skill_context_answer,
-		first_url_in_text, request_input, runtime_context_block, sanitize_final_reply,
+		PromptedLlmTool, build_resource_catalog, direct_runtime_answer, first_url_in_text,
+		inventory_context_json, request_input, runtime_context_block, sanitize_final_reply,
 		user_visible_prompt,
 	};
+	use crate::tool_config::{BuiltinToolRole, ToolCatalogConfig};
 	use roku_llm_adapter::{
 		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderCallError,
 		ProviderResponse, RiskTier, RoutingPolicy,
@@ -1043,6 +1047,7 @@ mod tests {
 				"goal": "今天是星期几？",
 				"summary": "Execute primary action",
 				"conversation_history": "user: 你好",
+				"granted_capabilities": ["inventory.read"],
 				"budget_tokens": 2048_u64,
 				"time_budget_ms": 45_000_u64
 			}),
@@ -1051,12 +1056,21 @@ mod tests {
 		};
 
 		let input = request_input(&request).expect("tool input should parse");
-		let prompt = user_visible_prompt(&input, "generic-worker", "invoke-1", None);
+		let prompt = user_visible_prompt(
+			&input,
+			"generic-worker",
+			"invoke-1",
+			None,
+			Some("- tool `general.execute` (general): Handle direct conversation."),
+		);
 
 		assert!(prompt.contains("Trusted runtime context"));
 		assert!(prompt.contains("Never narrate your reasoning"));
 		assert!(prompt.contains("use the trusted runtime context above"));
 		assert!(prompt.contains("Conversation history"));
+		assert!(prompt.contains("Authoritative local inventory JSON"));
+		assert!(prompt.contains("Execution authority"));
+		assert!(prompt.contains("side_effects_allowed"));
 	}
 
 	#[test]
@@ -1085,27 +1099,27 @@ So, I'll output: "星期日""#;
 	}
 
 	#[test]
-	fn direct_skill_context_answer_returns_authoritative_excerpt_lines() {
-		let answer = direct_skill_context_answer(
-			"Use the skill-creator skill. According to that skill, what exact field names must grading.json expectations use, and how do baseline runs differ?",
-			Some(
-				"Installed skill guidance explicitly referenced by the user:\n\n### skill: skill-creator\nDescription: Build and evaluate new skills.\nVersion: main\nSource: https://example.com\n\nEntrypoint (`SKILL.md`):\n- Creating a new skill: no skill at all. Save to `without_skill/outputs/`.\n- Improving an existing skill: snapshot the old version first, then save baseline outputs to `old_skill/outputs/`.\nThe grading.json expectations array must use the fields `text`, `passed`, and `evidence`.\n",
-			),
-		)
-		.expect("direct skill answer should exist");
-
-		assert!(answer.contains("`without_skill/outputs/`"));
-		assert!(answer.contains("`old_skill/outputs/`"));
-		assert!(answer.contains("`text`, `passed`, and `evidence`"));
-		assert!(!answer.contains("### skill:"));
-	}
-
-	#[test]
 	fn first_url_in_text_extracts_wrapped_skill_url() {
 		let goal = "Please install skill from (https://github.com/anthropics/skills/tree/main/skills/claude-api).";
 		assert_eq!(
 			first_url_in_text(goal),
 			Some("https://github.com/anthropics/skills/tree/main/skills/claude-api")
+		);
+	}
+
+	#[test]
+	fn resource_catalog_keeps_skill_install_descriptor_for_runtime_resolution() {
+		let tool_config = ToolCatalogConfig::default();
+		let skill_install_tool = tool_config
+			.tool_for_role(BuiltinToolRole::SkillInstall)
+			.expect("skill install tool should exist");
+		let catalog = build_resource_catalog(&SkillRegistry::disabled(), &tool_config);
+
+		assert!(
+			catalog
+				.entries()
+				.iter()
+				.any(|entry| entry.name == skill_install_tool.name)
 		);
 	}
 
@@ -1117,6 +1131,21 @@ So, I'll output: "星期日""#;
 	impl SkillArchiveFetcher for StaticArchiveFetcher {
 		fn fetch(&self, _source: &SkillSource) -> Result<DownloadedArchive, SkillRegistryError> {
 			Ok(self.archive.clone())
+		}
+	}
+
+	struct RoutedArchiveFetcher {
+		archives: std::collections::HashMap<String, DownloadedArchive>,
+	}
+
+	impl SkillArchiveFetcher for RoutedArchiveFetcher {
+		fn fetch(&self, source: &SkillSource) -> Result<DownloadedArchive, SkillRegistryError> {
+			self.archives
+				.get(source.original_url())
+				.cloned()
+				.ok_or_else(|| {
+					SkillRegistryError::UnsupportedSourceUrl(source.original_url().to_string())
+				})
 		}
 	}
 
@@ -1146,6 +1175,7 @@ So, I'll output: "星期日""#;
 
 	#[test]
 	fn prompted_tool_injects_installed_skill_context_when_referenced() {
+		let tool_config = ToolCatalogConfig::default();
 		let root = tempfile::tempdir().expect("temp root should exist");
 		let registry = SkillRegistry::file_backed(root.path().join("skills")).with_fetcher(
 			Arc::new(StaticArchiveFetcher {
@@ -1179,17 +1209,12 @@ So, I'll output: "星期日""#;
 			max_risk_tier: RiskTier::Critical,
 			route_priority: 100,
 		});
+		let general_tool = tool_config
+			.tool_for_role(BuiltinToolRole::General)
+			.expect("general tool should exist");
+		let catalog = build_resource_catalog(&registry, &tool_config);
 
-		let tool = PromptedLlmTool::new(
-			GENERAL_TOOL_NAME,
-			"generic-worker",
-			"system",
-			Vec::new(),
-			SandboxProfile::NoIsolation,
-			RiskTier::Medium,
-			registry,
-			Arc::new(router),
-		);
+		let tool = PromptedLlmTool::from_config(general_tool, registry, Arc::new(router), catalog);
 		tool.invoke(ToolInvocationRequest {
 			invocation_key: "invoke-1".to_string(),
 			input: json!({
@@ -1198,6 +1223,7 @@ So, I'll output: "星期日""#;
 				"goal": "Please use the claude-api skill for this request.",
 				"summary": "Execute primary action",
 				"conversation_history": "",
+				"granted_capabilities": [],
 				"budget_tokens": 2048_u64,
 				"time_budget_ms": 45_000_u64
 			}),
@@ -1215,35 +1241,237 @@ So, I'll output: "星期日""#;
 		assert!(prompt.contains("### skill: claude-api"));
 	}
 
+	#[test]
+	fn inventory_context_json_lists_all_installed_skills_and_discoverable_tools() {
+		let tool_config = ToolCatalogConfig::default();
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let registry = SkillRegistry::file_backed(root.path().join("skills")).with_fetcher(
+			Arc::new(RoutedArchiveFetcher {
+				archives: [
+					(
+						"https://github.com/anthropics/skills/tree/main/skills/claude-api"
+							.to_string(),
+						DownloadedArchive {
+							archive_url: "https://example.com/claude-api.zip".to_string(),
+							bytes: test_skill_archive_bytes(),
+							resolved_reference: Some("main".to_string()),
+						},
+					),
+					(
+						"https://github.com/anthropics/skills/tree/main/skills/skill-creator"
+							.to_string(),
+						DownloadedArchive {
+							archive_url: "https://example.com/skill-creator.zip".to_string(),
+							bytes: test_skill_archive_bytes_for(
+								"skill-creator",
+								"Build and evaluate new skills.",
+								"Use this skill to create and iterate on Codex skills.",
+							),
+							resolved_reference: Some("main".to_string()),
+						},
+					),
+					(
+						"https://github.com/anthropics/skills/tree/main/skills/xlsx".to_string(),
+						DownloadedArchive {
+							archive_url: "https://example.com/xlsx.zip".to_string(),
+							bytes: test_skill_archive_bytes_for(
+								"xlsx",
+								"Read and write XLSX spreadsheets.",
+								"Use this skill when the user needs spreadsheet import/export work.",
+							),
+							resolved_reference: Some("main".to_string()),
+						},
+					),
+				]
+				.into_iter()
+				.collect(),
+			}),
+		);
+		for url in [
+			"https://github.com/anthropics/skills/tree/main/skills/claude-api",
+			"https://github.com/anthropics/skills/tree/main/skills/skill-creator",
+			"https://github.com/anthropics/skills/tree/main/skills/xlsx",
+		] {
+			registry
+				.install_from_url(url, "test-suite")
+				.expect("install should succeed");
+		}
+		let catalog = build_resource_catalog(&registry, &tool_config);
+		let inventory_json = inventory_context_json(&catalog, &registry);
+		assert!(inventory_json.contains("\"claude-api\""));
+		assert!(inventory_json.contains("\"skill-creator\""));
+		assert!(inventory_json.contains("\"xlsx\""));
+		assert!(inventory_json.contains("\"inventory.describe\""));
+		assert!(inventory_json.contains("\"research.synthesize\""));
+		assert!(inventory_json.contains("\"data.execute\""));
+		assert!(inventory_json.contains("\"review.assess\""));
+		assert!(inventory_json.contains("\"inventory.read\""));
+		assert!(!inventory_json.contains("skill.ensure_installed"));
+	}
+
+	#[test]
+	fn inventory_tool_injects_inventory_json_for_followup_formatting() {
+		let tool_config = ToolCatalogConfig::default();
+		let registry = SkillRegistry::disabled();
+		let catalog = build_resource_catalog(&registry, &tool_config);
+		let captured_prompt = Arc::new(Mutex::new(None));
+		let mut router = LlmRouter::new(RoutingPolicy {
+			max_request_cost_usd: 1.0,
+			max_latency_ms: 5_000,
+		});
+		router.register_provider(CapturingProvider {
+			prompt: Arc::clone(&captured_prompt),
+		});
+		router.register_model(ModelProfile {
+			model_id: "capturing-model".to_string(),
+			provider: "capturing-provider".to_string(),
+			max_context_tokens: 16_000,
+			cost_per_1k_tokens_usd: 0.0,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		});
+		let inventory_tool = tool_config
+			.tool_for_role(BuiltinToolRole::Inventory)
+			.expect("inventory tool should exist");
+
+		let tool =
+			PromptedLlmTool::from_config(inventory_tool, registry, Arc::new(router), catalog);
+		tool.invoke(ToolInvocationRequest {
+			invocation_key: "invoke-1".to_string(),
+			input: json!({
+				"task_id": "task-1",
+				"node_id": "node-1",
+				"goal": "用无序列表列一下",
+				"summary": "Use selected tool `inventory.describe`",
+				"conversation_history": "user: 列出 skill、tool\nassistant: 已安装的 skills: xlsx。可用工具: data.execute。能力类别: data.read。",
+				"granted_capabilities": ["inventory.read"],
+				"budget_tokens": 2048_u64,
+				"time_budget_ms": 45_000_u64
+			}),
+			attempt: 1,
+			sandbox_profile: SandboxProfile::NoIsolation,
+		})
+		.expect("invoke should succeed");
+
+		let prompt = captured_prompt
+			.lock()
+			.expect("prompt lock should succeed")
+			.clone()
+			.expect("prompt should be captured");
+		assert!(prompt.contains("Authoritative local inventory JSON"));
+		assert!(prompt.contains("\"inventory.describe\""));
+		assert!(prompt.contains("\"inventory.read\""));
+	}
+
+	#[test]
+	fn prompted_tool_includes_execution_authority_for_skill_creation_requests() {
+		let tool_config = ToolCatalogConfig::default();
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let registry = SkillRegistry::file_backed(root.path().join("skills")).with_fetcher(
+			Arc::new(StaticArchiveFetcher {
+				archive: DownloadedArchive {
+					archive_url: "https://example.com/archive.zip".to_string(),
+					bytes: test_skill_archive_bytes_for(
+						"skill-creator",
+						"Build and evaluate new skills.",
+						"Use this skill to create and iterate on Codex skills.",
+					),
+					resolved_reference: Some("main".to_string()),
+				},
+			}),
+		);
+		registry
+			.install_from_url(
+				"https://github.com/anthropics/skills/tree/main/skills/skill-creator",
+				"test-suite",
+			)
+			.expect("install should succeed");
+		let captured_prompt = Arc::new(Mutex::new(None));
+		let mut router = LlmRouter::new(RoutingPolicy {
+			max_request_cost_usd: 1.0,
+			max_latency_ms: 5_000,
+		});
+		router.register_provider(CapturingProvider {
+			prompt: Arc::clone(&captured_prompt),
+		});
+		router.register_model(ModelProfile {
+			model_id: "capturing-model".to_string(),
+			provider: "capturing-provider".to_string(),
+			max_context_tokens: 16_000,
+			cost_per_1k_tokens_usd: 0.0,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		});
+		let general_tool = tool_config
+			.tool_for_role(BuiltinToolRole::General)
+			.expect("general tool should exist");
+		let catalog = build_resource_catalog(&registry, &tool_config);
+		let tool = PromptedLlmTool::from_config(general_tool, registry, Arc::new(router), catalog);
+
+		tool.invoke(ToolInvocationRequest {
+			invocation_key: "invoke-1".to_string(),
+			input: json!({
+				"task_id": "task-1",
+				"node_id": "node-1",
+				"goal": "你帮我创建一个写python的skill吧，创建完之后告诉我创建在了哪里。",
+				"summary": "Use selected skill `skill-creator` for this request",
+				"conversation_history": "",
+				"granted_capabilities": [],
+				"resource_selectors": ["skill:skill-creator"],
+				"budget_tokens": 2048_u64,
+				"time_budget_ms": 45_000_u64
+			}),
+			attempt: 1,
+			sandbox_profile: SandboxProfile::NoIsolation,
+		})
+		.expect("invoke should succeed");
+
+		let prompt = captured_prompt
+			.lock()
+			.expect("prompt lock should succeed")
+			.clone()
+			.expect("prompt should be captured");
+		assert!(prompt.contains("Execution authority"));
+		assert!(prompt.contains("selected_resources: skill:skill-creator"));
+		assert!(prompt.contains("side_effects_allowed: not allowed"));
+		assert!(prompt.contains("you must clearly say it has not been created yet"));
+	}
+
 	fn test_skill_archive_bytes() -> Vec<u8> {
+		test_skill_archive_bytes_for(
+			"claude-api",
+			"Build apps with the Claude API.",
+			"Use this skill when the user explicitly asks for Claude API integration help.",
+		)
+	}
+
+	fn test_skill_archive_bytes_for(skill_name: &str, description: &str, body: &str) -> Vec<u8> {
 		let mut cursor = Cursor::new(Vec::new());
 		{
 			let mut writer = zip::ZipWriter::new(&mut cursor);
 			let options = zip::write::SimpleFileOptions::default();
 			writer
-				.add_directory("skills-main/skills/claude-api/", options)
+				.add_directory(format!("skills-main/skills/{skill_name}/"), options)
 				.expect("dir should be added");
 			writer
-				.add_directory("skills-main/skills/claude-api/shared/", options)
+				.add_directory(format!("skills-main/skills/{skill_name}/shared/"), options)
 				.expect("shared dir should be added");
 			writer
-				.start_file("skills-main/skills/claude-api/SKILL.md", options)
+				.start_file(format!("skills-main/skills/{skill_name}/SKILL.md"), options)
 				.expect("skill file should start");
 			writer
 				.write_all(
-					br#"---
-name: claude-api
-description: Build apps with the Claude API.
----
-
-# Claude API Skill
-
-Use this skill when the user explicitly asks for Claude API integration help.
-"#,
+					format!(
+						"---\nname: {skill_name}\ndescription: {description}\n---\n\n# {skill_name}\n\n{body}\n"
+					)
+					.as_bytes(),
 				)
 				.expect("skill markdown should write");
 			writer
-				.start_file("skills-main/skills/claude-api/shared/models.md", options)
+				.start_file(
+					format!("skills-main/skills/{skill_name}/shared/models.md"),
+					options,
+				)
 				.expect("support file should start");
 			writer
 				.write_all(b"Use claude-opus-4-6 unless the user asks otherwise.")

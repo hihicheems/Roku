@@ -25,6 +25,7 @@ pub(crate) struct LocalStorageLayout {
 	pub experiment_root: PathBuf,
 	pub report_root: PathBuf,
 	pub skill_root: PathBuf,
+	pub tool_config_path: PathBuf,
 	pub prompt_archive_dir: PathBuf,
 	pub memory_summary_dir: PathBuf,
 	pub audit_export_dir: PathBuf,
@@ -46,6 +47,8 @@ impl LocalStorageLayout {
 		let report_root = env_path("ROKU_REPORT_ROOT").unwrap_or_else(|| home_dir.join("reports"));
 		let skill_root =
 			env_path("ROKU_SKILL_ROOT").unwrap_or_else(|| PathBuf::from(".roku").join("skills"));
+		let tool_config_path = env_path("ROKU_TOOL_CONFIG_PATH")
+			.unwrap_or_else(|| PathBuf::from("config").join("tools.json"));
 		let prompt_archive_dir =
 			env_path("ROKU_PROMPT_ARCHIVE_DIR").unwrap_or_else(|| home_dir.join("prompts"));
 		let memory_summary_dir =
@@ -64,6 +67,7 @@ impl LocalStorageLayout {
 			experiment_root,
 			report_root,
 			skill_root,
+			tool_config_path,
 			prompt_archive_dir,
 			memory_summary_dir,
 			audit_export_dir,
@@ -141,5 +145,6 @@ mod tests {
 		assert!(layout.sqlite_path.ends_with("state/control-plane.db"));
 		assert!(layout.artifact_root.ends_with("artifacts"));
 		assert!(layout.skill_root.ends_with(".roku/skills"));
+		assert!(layout.tool_config_path.ends_with("config/tools.json"));
 	}
 }

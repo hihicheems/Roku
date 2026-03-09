@@ -55,6 +55,11 @@ alias t := test
 @stop service="telegram-bot":
     ./scripts/dev-services.sh stop {{service}}
 
+# Restart one named dev service
+@restart service="telegram-bot":
+    ./scripts/dev-services.sh stop {{service}}
+    ./scripts/dev-services.sh start {{service}}
+
 # Show one named dev service status
 @status service="telegram-bot":
     ./scripts/dev-services.sh status {{service}}

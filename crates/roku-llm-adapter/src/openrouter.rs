@@ -547,7 +547,8 @@ fn extract_content_text(content: &Value) -> Option<String> {
 }
 
 fn truncate_for_log(value: &str, max_chars: usize) -> String {
-	let mut chars = value.chars();
+	let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+	let mut chars = normalized.chars();
 	let truncated = chars.by_ref().take(max_chars).collect::<String>();
 	if chars.next().is_some() {
 		format!("{truncated}...")
@@ -791,6 +792,14 @@ mod tests {
 		.expect_err("reasoning-only payloads must not be surfaced as assistant output");
 
 		assert!(error.contains("no readable assistant content"));
+	}
+
+	#[test]
+	fn truncate_for_log_compacts_blank_lines_and_whitespace() {
+		assert_eq!(
+			truncate_for_log("line one\n\n\n   line two\t\tline three", 80),
+			"line one line two line three"
+		);
 	}
 
 	#[test]

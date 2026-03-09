@@ -24,7 +24,7 @@ use roku_orchestrator::{
 	build_idempotency_key, recovery_eligibility_for_state, replay_consistency_status,
 	replay_consistency_status_from, replayed_state, replayed_state_from,
 };
-use roku_state_store::{DispatchEnvelope, DispatchLease};
+use roku_state_store::{DispatchClaim, DispatchEnvelope, DispatchLease, RetryClaim};
 use std::collections::{HashMap, HashSet};
 
 use crate::RuntimeService;
@@ -328,13 +328,48 @@ impl RuntimeService {
 	pub(super) fn claim_dispatched_node(
 		&self,
 		task_id: &TaskId,
-	) -> Result<Option<roku_state_store::DispatchClaim>, RuntimeError> {
+	) -> Result<Option<DispatchClaim>, RuntimeError> {
 		let mut state = self.lock_state()?;
 		let consumer_id = format!("runtime-{}", task_id.0);
-		state
-			.dispatch_queue
-			.claim(&consumer_id, 0)
-			.map_err(|error| RuntimeError::new(error.to_string()))
+		let queue_depth = state.dispatch_queue.backpressure();
+		let max_attempts = queue_depth.queued.saturating_add(queue_depth.leased).max(1);
+		let mut deferred_claims = Vec::new();
+		let mut matched_claim = None;
+
+		for _ in 0..max_attempts {
+			let Some(claim) = state
+				.dispatch_queue
+				.claim(&consumer_id, 0)
+				.map_err(|error| RuntimeError::new(error.to_string()))?
+			else {
+				break;
+			};
+
+			if claim.envelope.task_id == *task_id {
+				matched_claim = Some(claim);
+				break;
+			}
+
+			deferred_claims.push(claim);
+		}
+
+		for claim in deferred_claims {
+			state
+				.dispatch_queue
+				.nack(
+					&claim.lease,
+					RetryClaim {
+						next_attempt: claim.envelope.attempt,
+						reason: format!(
+							"claimed while processing a different task: requested={} claimed={}",
+							task_id.0, claim.envelope.task_id.0
+						),
+					},
+				)
+				.map_err(|error| RuntimeError::new(error.to_string()))?;
+		}
+
+		Ok(matched_claim)
 	}
 
 	pub(super) fn ack_dispatched_node(&self, lease: &DispatchLease) -> Result<(), RuntimeError> {
