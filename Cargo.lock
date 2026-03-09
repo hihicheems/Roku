@@ -1712,7 +1712,11 @@ dependencies = [
  "roku-common-types",
  "roku-llm-adapter",
  "roku-planning-engine",
+ "roku-skill-registry",
+ "serde",
  "serde_json",
+ "tempfile",
+ "zip",
 ]
 
 [[package]]

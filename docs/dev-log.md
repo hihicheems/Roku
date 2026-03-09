@@ -1,5 +1,44 @@
 # Roku Agent Dev Log
 
+## 2026-03-09 - Session Milestone (Phase 32)
+
+### Completed Modules
+
+- `roku-task-planner`
+  - Replaced the ad-hoc `looks_like_skill_install_request` shortcut with a layered `SkillShortcutResolver` that separates anchor extraction, structured intent classification, and policy merge.
+  - Added high-precision anchor extraction for valid skill source URLs, installed skill name matches from the local registry, and explicit `/skill`-style command inputs.
+  - Added a narrow structured intent classifier that asks the planner LLM router for strict JSON (`ensure_skill_installed | use_installed_skill | none`) plus `source_url`, `skill_name`, `if_missing`, and `confidence`.
+  - Kept URL-backed install requests deterministic and idempotent while letting installed-skill usage requests use the classifier only when the anchor layer is not already conclusive.
+- `roku-agent-runtime`
+  - Added the new `skill.ensure_installed` runtime tool while keeping a legacy `skill.install` alias for compatibility.
+  - Expanded installed-skill context lookup to include the planner step summary so classifier-selected skill names still activate local skill context even when the original user message is indirect.
+- `roku-skill-registry`
+  - Added canonical installed-skill lookup helpers for planner routing.
+  - Promoted install semantics to `ensure_installed_from_url`, keeping repeated installs idempotent and recognizing equivalent GitHub source forms.
+- `roku-agent-instance-factory` / `roku-execution-graph-builder`
+  - Switched skill shortcut steps to `skill.ensure_installed` and preserved the higher time/token budgets needed for skill install and installed-skill usage shortcuts.
+
+### Verification Status
+
+- `cargo test -p roku-task-planner -p roku-skill-registry`: passed
+- `cargo test -p roku-agent-runtime -p roku-agent-instance-factory -p roku-execution-graph-builder`: passed
+- `cargo test -p roku-runtime-service -p roku-cmd`: passed
+- `OPENROUTER_API_KEY=... TELOXIDE_TOKEN=... ROKU_HOME=.roku/live-shortcut-validate-2 ROKU_SKILL_ROOT=.roku/live-shortcut-validate-2/skills cargo run -p roku-cmd -- telegram-once --session-id skill-shortcut-tg-1 "帮我看下有没有这个 skill，如果没有，帮我装一下 https://github.com/anthropics/skills/tree/main/skills/skill-creator"`: passed
+- Repeating the same Telegram request against the same skill root now returns an `already installed` message: passed
+- `OPENROUTER_API_KEY=... TELOXIDE_TOKEN=... ROKU_HOME=.roku/live-shortcut-validate-2 ROKU_SKILL_ROOT=.roku/live-shortcut-validate-2/skills cargo run -p roku-cmd -- live-once --session-id skill-shortcut-live "Use the skill-creator skill. According to that skill, what exact field names must grading.json expectations use, and how do baseline runs differ when creating a new skill versus improving an existing skill?"`: passed
+
+### Remaining Work
+
+- The structured classifier currently relies on prompt-enforced JSON because the shared LLM adapter does not yet expose provider-native strict structured output controls.
+- Requests that both install a skill and immediately ask the agent to use it in the same turn still collapse to the install shortcut instead of a richer multi-step shortcut workflow.
+- Broader skill-routing quality beyond the validated install/use slice still depends on prompt engineering rather than a dedicated intent eval dataset.
+
+### Next Recommended Steps
+
+1. Expose provider-native structured output controls in the shared LLM adapter so shortcut classification can be schema-enforced instead of prompt-enforced.
+2. Add a compound shortcut intent for "ensure installed, then use skill" requests if operators need one-turn install-and-apply flows.
+3. Build an eval set for shortcut routing across multilingual Telegram / CLI phrasing variants before expanding to more shortcut intents.
+
 ## 2026-03-09 - Session Milestone (Phase 31)
 
 ### Completed Modules
@@ -7,8 +46,11 @@
 - `roku-skill-registry`
   - Stopped the disabled registry path from eagerly constructing the blocking HTTP fetch client, so async HTTP/API tests and default runtime bootstrap no longer panic while skills are disabled.
   - Refined query-focused excerpt behavior so exact factual questions still get compressed authoritative snippets, while broader summary questions keep the high-level skill workflow context.
+  - Made repeated installs from the same source idempotent so "check first, install if missing" requests can safely reuse the install path and return an "already installed" message.
 - `roku-agent-instance-factory`
   - Added a dedicated `skill` profile with a longer default time budget so runtime-driven skill installation has enough wall-clock headroom.
+- `roku-task-planner`
+  - Expanded the deterministic skill-install detector to catch mixed "check whether this skill exists, and install it if missing" requests in Telegram and CLI flows.
 - `roku-execution-graph-builder`
   - Extended `skill.install` execution deadlines and reserved a larger token budget for the `use-installed-skill` fast path so installed-skill usage no longer times out or exceed tiny node budgets.
 - `roku-api-gateway`
@@ -22,6 +64,8 @@
 - `OPENROUTER_API_KEY=... TELOXIDE_TOKEN=... ROKU_HOME=.roku/live-skill-validate-4 ROKU_SKILL_ROOT=.roku/live-skill-validate-4/skills cargo run -p roku-cmd -- live-once --session-id agent-skill-install "Install skill from https://github.com/anthropics/skills/tree/main/skills/skill-creator"`: passed
 - `OPENROUTER_API_KEY=... TELOXIDE_TOKEN=... ROKU_HOME=.roku/live-skill-validate-4 ROKU_SKILL_ROOT=.roku/live-skill-validate-4/skills cargo run -p roku-cmd -- telegram-once --session-id agent-skill-usage-tg "Use the skill-creator skill. According to that skill, what exact field names must grading.json expectations use, and how do baseline runs differ when creating a new skill versus improving an existing skill?"`: passed
 - `OPENROUTER_API_KEY=... TELOXIDE_TOKEN=... ROKU_HOME=.roku/live-skill-validate-4 ROKU_SKILL_ROOT=.roku/live-skill-validate-4/skills cargo run -p roku-cmd -- live-once --session-id agent-skill-usage-2b "Use the skill-creator skill. Summarize the core loop it recommends for creating and iterating on a skill."`: passed
+- `OPENROUTER_API_KEY=... TELOXIDE_TOKEN=... ROKU_HOME=.roku/live-skill-conditional-check ROKU_SKILL_ROOT=.roku/live-skill-conditional-check/skills cargo run -p roku-cmd -- telegram-once --session-id skill-check-install "帮我看下有没有这个 skill，如果没有，帮我装一下 https://github.com/anthropics/skills/tree/main/skills/skill-creator"`: passed
+- Repeating the same conditional request against the same skill root returns an "already installed" message instead of re-planning through research workers: passed
 - `just fmt`: passed
 - `just lint`: passed
 - `just t`: passed

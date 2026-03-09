@@ -15,20 +15,28 @@
 use roku_common_types::{PlanOutline, PlanStep, RequestEnvelope};
 use roku_llm_adapter::{GenerationRequest, LlmRouter, RiskTier};
 use roku_planning_engine::{PlanningDecision, PlanningMode};
+use roku_skill_registry::SkillRegistry;
 
 use crate::planner::{AdaptiveTaskPlanner, TaskPlanner};
+use crate::shortcut::{ShortcutIntent, SkillShortcutResolver};
 use crate::strategies::{build_explicit_skill_usage_steps, build_skill_install_steps};
 
 pub struct LlmTaskPlanner {
 	router: LlmRouter,
+	shortcut_resolver: SkillShortcutResolver,
 	fallback: AdaptiveTaskPlanner,
 }
 
 impl LlmTaskPlanner {
 	pub fn new(router: LlmRouter) -> Self {
+		Self::with_skill_registry(router, SkillRegistry::disabled())
+	}
+
+	pub fn with_skill_registry(router: LlmRouter, skill_registry: SkillRegistry) -> Self {
 		Self {
 			router,
-			fallback: AdaptiveTaskPlanner,
+			shortcut_resolver: SkillShortcutResolver::new(skill_registry.clone()),
+			fallback: AdaptiveTaskPlanner::with_skill_registry(skill_registry),
 		}
 	}
 
@@ -61,16 +69,13 @@ impl LlmTaskPlanner {
 
 impl TaskPlanner for LlmTaskPlanner {
 	fn build_outline(&self, request: &RequestEnvelope, decision: &PlanningDecision) -> PlanOutline {
-		if let Some(steps) = build_skill_install_steps(&request.goal) {
+		if let Some(shortcut) = self
+			.shortcut_resolver
+			.resolve_with_classifier(request, &self.router)
+		{
 			return PlanOutline {
 				goal: request.goal.clone(),
-				steps,
-			};
-		}
-		if let Some(steps) = build_explicit_skill_usage_steps(&request.goal) {
-			return PlanOutline {
-				goal: request.goal.clone(),
-				steps,
+				steps: shortcut_steps(&request.goal, shortcut),
 			};
 		}
 
@@ -80,6 +85,18 @@ impl TaskPlanner for LlmTaskPlanner {
 
 		self.generate_outline(request, decision)
 			.unwrap_or_else(|| self.fallback.build_outline(request, decision))
+	}
+}
+
+fn shortcut_steps(goal: &str, shortcut: ShortcutIntent) -> Vec<PlanStep> {
+	match shortcut {
+		ShortcutIntent::EnsureSkillInstalled {
+			source_url,
+			if_missing,
+		} => build_skill_install_steps(goal, &source_url, if_missing),
+		ShortcutIntent::UseInstalledSkill { skill_name } => {
+			build_explicit_skill_usage_steps(goal, &skill_name)
+		}
 	}
 }
 
@@ -266,11 +283,17 @@ mod tests {
 	use roku_llm_adapter::{
 		LlmProvider, ModelProfile, ProviderCallError, ProviderResponse, RoutingPolicy,
 	};
+	use roku_skill_registry::{
+		DownloadedArchive, SkillArchiveFetcher, SkillRegistry, SkillRegistryError, SkillSource,
+	};
+	use std::io::{Cursor, Write};
+	use std::sync::Arc;
 
 	use super::*;
 
 	struct PlanningProvider {
-		output: &'static str,
+		outline_output: &'static str,
+		shortcut_output: &'static str,
 	}
 
 	impl LlmProvider for PlanningProvider {
@@ -281,14 +304,34 @@ mod tests {
 		fn complete(
 			&self,
 			_model: &ModelProfile,
-			_request: &GenerationRequest,
+			request: &GenerationRequest,
 		) -> Result<ProviderResponse, ProviderCallError> {
+			let output = if request
+				.system_prompt
+				.as_deref()
+				.is_some_and(|prompt| prompt.contains("shortcut intent classifier"))
+			{
+				self.shortcut_output
+			} else {
+				self.outline_output
+			};
 			Ok(ProviderResponse {
-				output: self.output.to_string(),
+				output: output.to_string(),
 				prompt_tokens: 60,
 				output_tokens: 120,
 				latency_ms: 80,
 			})
+		}
+	}
+
+	#[derive(Clone)]
+	struct StaticArchiveFetcher {
+		archive: DownloadedArchive,
+	}
+
+	impl SkillArchiveFetcher for StaticArchiveFetcher {
+		fn fetch(&self, _source: &SkillSource) -> Result<DownloadedArchive, SkillRegistryError> {
+			Ok(self.archive.clone())
 		}
 	}
 
@@ -312,11 +355,29 @@ mod tests {
 	}
 
 	fn planner_with_output(output: &'static str) -> LlmTaskPlanner {
+		planner_with_output_and_registry(output, output, SkillRegistry::disabled())
+	}
+
+	fn planner_with_shortcut_output(
+		shortcut_output: &'static str,
+		registry: SkillRegistry,
+	) -> LlmTaskPlanner {
+		planner_with_output_and_registry("this should never be used", shortcut_output, registry)
+	}
+
+	fn planner_with_output_and_registry(
+		outline_output: &'static str,
+		shortcut_output: &'static str,
+		registry: SkillRegistry,
+	) -> LlmTaskPlanner {
 		let mut router = LlmRouter::new(RoutingPolicy {
 			max_request_cost_usd: 1.0,
 			max_latency_ms: 5_000,
 		});
-		router.register_provider(PlanningProvider { output });
+		router.register_provider(PlanningProvider {
+			outline_output,
+			shortcut_output,
+		});
 		router.register_model(ModelProfile {
 			model_id: "planner-model".to_string(),
 			provider: "planner-provider".to_string(),
@@ -325,7 +386,61 @@ mod tests {
 			max_risk_tier: RiskTier::Critical,
 			route_priority: 100,
 		});
-		LlmTaskPlanner::new(router)
+		LlmTaskPlanner::with_skill_registry(router, registry)
+	}
+
+	fn installed_skill_registry() -> SkillRegistry {
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let root_path = root.keep();
+		let registry = SkillRegistry::file_backed(root_path.join("skills")).with_fetcher(Arc::new(
+			StaticArchiveFetcher {
+				archive: DownloadedArchive {
+					archive_url: "https://example.com/archive.zip".to_string(),
+					bytes: skill_archive_bytes(),
+					resolved_reference: Some("main".to_string()),
+				},
+			},
+		));
+		registry
+			.install_from_url(
+				"https://github.com/anthropics/skills/tree/main/skills/skill-creator",
+				"test-suite",
+			)
+			.expect("install should succeed");
+		registry
+	}
+
+	fn skill_archive_bytes() -> Vec<u8> {
+		let mut cursor = Cursor::new(Vec::new());
+		{
+			let mut writer = zip::ZipWriter::new(&mut cursor);
+			let options = zip::write::SimpleFileOptions::default();
+			writer
+				.add_directory("skills-main/", options)
+				.expect("root dir should be added");
+			writer
+				.add_directory("skills-main/skills/", options)
+				.expect("skills dir should be added");
+			writer
+				.add_directory("skills-main/skills/skill-creator/", options)
+				.expect("skill dir should be added");
+			writer
+				.start_file("skills-main/skills/skill-creator/SKILL.md", options)
+				.expect("skill file should start");
+			writer
+				.write_all(
+					br#"---
+name: skill-creator
+description: Build and evaluate new skills.
+---
+
+# Skill Creator
+"#,
+				)
+				.expect("skill file should write");
+			writer.finish().expect("zip should finish");
+		}
+		cursor.into_inner()
 	}
 
 	#[test]
@@ -462,13 +577,31 @@ mod tests {
 		assert_eq!(outline.steps[0].step_id, "install-skill");
 		assert_eq!(
 			outline.steps[0].required_capabilities,
-			vec!["skill.install".to_string()]
+			vec!["skill.ensure_installed".to_string()]
+		);
+	}
+
+	#[test]
+	fn llm_planner_uses_conditional_skill_install_fast_path_before_llm_generation() {
+		let planner = planner_with_output("this should never be used");
+		let mut request = request();
+		request.goal = "帮我看下有没有这个 skill，如果没有，帮我装一下 https://github.com/anthropics/skills/tree/main/skills/skill-creator".to_string();
+		let outline = planner.build_outline(&request, &decision());
+
+		assert_eq!(outline.steps.len(), 1);
+		assert_eq!(outline.steps[0].step_id, "install-skill");
+		assert_eq!(
+			outline.steps[0].required_capabilities,
+			vec!["skill.ensure_installed".to_string()]
 		);
 	}
 
 	#[test]
 	fn llm_planner_uses_explicit_skill_usage_fast_path_before_llm_generation() {
-		let planner = planner_with_output("this should never be used");
+		let planner = planner_with_shortcut_output(
+			r#"{"intent":"use_installed_skill","source_url":null,"skill_name":"skill-creator","if_missing":false,"confidence":0.94}"#,
+			installed_skill_registry(),
+		);
 		let mut request = request();
 		request.goal = "Use the skill-creator skill to explain the eval workflow".to_string();
 		let outline = planner.build_outline(&request, &decision());

@@ -16,6 +16,7 @@
 
 pub mod llm;
 mod planner;
+mod shortcut;
 mod strategies;
 
 pub use llm::LlmTaskPlanner;

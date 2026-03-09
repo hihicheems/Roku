@@ -395,7 +395,7 @@ fn default_node_metadata(
 fn execution_deadline_ms(capabilities: &[String]) -> u64 {
 	if capabilities
 		.iter()
-		.any(|capability| capability == "skill.install")
+		.any(|capability| capability == "skill.install" || capability == "skill.ensure_installed")
 	{
 		120_000
 	} else {
@@ -523,7 +523,7 @@ mod tests {
 					steps: vec![PlanStep {
 						step_id: "install-skill".to_string(),
 						summary: "install skill".to_string(),
-						required_capabilities: vec!["skill.install".to_string()],
+						required_capabilities: vec!["skill.ensure_installed".to_string()],
 						requires_approval: false,
 						depends_on: Vec::new(),
 						branch: None,

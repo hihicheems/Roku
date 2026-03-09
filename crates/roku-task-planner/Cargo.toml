@@ -9,4 +9,10 @@ authors.workspace = true
 roku-common-types = { path = "../roku-common-types" }
 roku-llm-adapter = { path = "../roku-llm-adapter" }
 roku-planning-engine = { path = "../roku-planning-engine" }
+roku-skill-registry = { path = "../roku-skill-registry" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+zip = { version = "8", default-features = false, features = ["deflate"] }

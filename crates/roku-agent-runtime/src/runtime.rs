@@ -223,20 +223,21 @@ mod tests {
 			}),
 		);
 		let runtime = GenericAgentRuntime::with_skill_registry(registry);
-		let node = node_with_capability("skill.install");
-		let mut spec = spec_with_capabilities(vec!["skill.install"]);
+		let node = node_with_capability("skill.ensure_installed");
+		let mut spec = spec_with_capabilities(vec!["skill.ensure_installed"]);
 		spec.context.summary =
-			"Goal: install skill\nStep: Install requested skill from source URL".to_string();
+			"Goal: install skill\nStep: Ensure requested skill from source URL is installed"
+				.to_string();
 		spec.context.conversation_history = Vec::new();
 		let node = TaskNode {
-			description: "Goal: install the claude api skill from https://github.com/anthropics/skills/tree/main/skills/claude-api\nStep: Install requested skill from source URL".to_string(),
+			description: "Goal: install the claude api skill from https://github.com/anthropics/skills/tree/main/skills/claude-api\nStep: Ensure requested skill from source URL is installed".to_string(),
 			..node
 		};
 
 		let result = runtime.execute(&spec, &node);
 		assert_eq!(result.status, ResultStatus::Ok);
 		assert_eq!(result.evidence[0].value, "skill-worker");
-		assert_eq!(result.evidence[1].value, "skill.install");
+		assert_eq!(result.evidence[1].value, "skill.ensure_installed");
 		assert!(
 			payload_value(&result)["message"]
 				.as_str()
