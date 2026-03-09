@@ -1,5 +1,5 @@
 [package]
-name = "roku-execution-graph-builder"
+name = "roku-resource-catalog"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,5 +7,4 @@ authors.workspace = true
 
 [dependencies]
 roku-common-types = { path = "../roku-common-types" }
-roku-resource-catalog = { path = "../roku-resource-catalog" }
-thiserror = "2"
+serde = { version = "1", features = ["derive"] }

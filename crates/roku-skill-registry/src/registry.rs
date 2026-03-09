@@ -20,6 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::blocking::Client;
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
+use roku_resource_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
 use serde::Deserialize;
 use walkdir::WalkDir;
 
@@ -344,6 +345,17 @@ impl SkillRegistry {
 		}
 	}
 
+	pub fn catalog_descriptors(&self) -> Result<Vec<CatalogDescriptor>, SkillRegistryError> {
+		let Some(root) = self.optional_root_path() else {
+			return Ok(Vec::new());
+		};
+
+		self.list_skills()?
+			.into_iter()
+			.map(|record| build_skill_catalog_descriptor(root, &record))
+			.collect()
+	}
+
 	fn root_path(&self) -> Result<&Path, SkillRegistryError> {
 		match &self.backend {
 			SkillRegistryBackend::Disabled => Err(SkillRegistryError::RegistryDisabled),
@@ -637,6 +649,141 @@ fn infer_name_from_directory(source_dir: &Path) -> Option<String> {
 		.map(str::trim)
 		.filter(|value| !value.is_empty())
 		.map(str::to_string)
+}
+
+fn build_skill_catalog_descriptor(
+	root: &Path,
+	record: &InstalledSkillRecord,
+) -> Result<CatalogDescriptor, SkillRegistryError> {
+	let skill_dir = root.join(&record.install_dir);
+	let manifest_path = skill_dir.join(&record.descriptor.entrypoint);
+	let content = fs::read_to_string(manifest_path)?;
+	let (_, body) = split_front_matter(&content)?;
+	let summary = skill_summary(body);
+	let key_commands = extract_key_commands(body);
+	let use_cases = extract_use_cases(body);
+	let tags = extract_skill_tags(&record.descriptor, &summary, &use_cases, &key_commands);
+	let examples = key_commands.iter().take(3).cloned().collect::<Vec<_>>();
+
+	Ok(CatalogDescriptor {
+		selector: roku_common_types::ResourceSelector::skill(record.descriptor.name.clone()),
+		kind: ResourceKind::Skill,
+		name: record.descriptor.name.clone(),
+		description: record.descriptor.description.clone(),
+		tags,
+		examples,
+		input_schema: Vec::new(),
+		risk: ResourceRisk::Low,
+		cost: ResourceCost::default(),
+		required_capabilities: Vec::new(),
+		summary,
+		key_commands,
+		use_cases,
+	})
+}
+
+fn skill_summary(body: &str) -> String {
+	let mut lines = body
+		.lines()
+		.map(str::trim)
+		.filter(|line| !line.is_empty() && !line.starts_with('#'));
+	let first = lines.next().unwrap_or_default().to_string();
+	let second = lines.next().unwrap_or_default().to_string();
+
+	if second.is_empty() {
+		first
+	} else if first.is_empty() {
+		second
+	} else {
+		format!("{first} {second}")
+	}
+}
+
+fn extract_key_commands(body: &str) -> Vec<String> {
+	let mut commands = Vec::new();
+	for line in body.lines().map(str::trim).filter(|line| !line.is_empty()) {
+		if line.starts_with("```") {
+			continue;
+		}
+		if line.starts_with('-') && line.contains('`') {
+			commands.extend(extract_backtick_segments(line));
+		} else if line.starts_with('$') || line.starts_with("./") {
+			commands.push(line.to_string());
+		}
+		if commands.len() >= 6 {
+			break;
+		}
+	}
+	commands.sort();
+	commands.dedup();
+	commands
+}
+
+fn extract_use_cases(body: &str) -> Vec<String> {
+	body.lines()
+		.map(str::trim)
+		.filter(|line| line.starts_with("- ") || line.starts_with("* "))
+		.map(|line| line.trim_start_matches(['-', '*']).trim().to_string())
+		.filter(|line| !line.is_empty())
+		.take(6)
+		.collect()
+}
+
+fn extract_skill_tags(
+	descriptor: &SkillDescriptor,
+	summary: &str,
+	use_cases: &[String],
+	key_commands: &[String],
+) -> Vec<String> {
+	let mut tags = tokenize_catalog_text(&descriptor.name);
+	tags.extend(tokenize_catalog_text(&descriptor.description));
+	tags.extend(tokenize_catalog_text(summary));
+	for use_case in use_cases {
+		tags.extend(tokenize_catalog_text(use_case));
+	}
+	for command in key_commands {
+		tags.extend(tokenize_catalog_text(command));
+	}
+	tags.sort();
+	tags.dedup();
+	tags
+}
+
+fn tokenize_catalog_text(text: &str) -> Vec<String> {
+	let mut tokens = Vec::new();
+	let mut current = String::new();
+	for character in text.chars() {
+		if character.is_ascii_alphanumeric() {
+			current.push(character.to_ascii_lowercase());
+		} else if !current.is_empty() {
+			tokens.push(current.clone());
+			current.clear();
+		}
+	}
+	if !current.is_empty() {
+		tokens.push(current);
+	}
+	tokens
+}
+
+fn extract_backtick_segments(line: &str) -> Vec<String> {
+	let mut segments = Vec::new();
+	let mut in_segment = false;
+	let mut current = String::new();
+	for character in line.chars() {
+		if character == '`' {
+			if in_segment && !current.trim().is_empty() {
+				segments.push(current.trim().to_string());
+				current.clear();
+			}
+			in_segment = !in_segment;
+			continue;
+		}
+		if in_segment {
+			current.push(character);
+		}
+	}
+	segments
 }
 
 fn publish_skill_dir(

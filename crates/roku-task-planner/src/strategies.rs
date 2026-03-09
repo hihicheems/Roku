@@ -12,85 +12,309 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_common_types::{PlanBranch, PlanLoopControl, PlanStep};
+use roku_common_types::{PlanBranch, PlanLoopControl, PlanStep, ResourceSelector};
 use roku_planning_engine::PlanningDecision;
+
+const RESEARCH_TOOL_NAME: &str = "research.synthesize";
+const DATA_TOOL_NAME: &str = "data.execute";
+const REVIEW_TOOL_NAME: &str = "review.assess";
+const SKILL_TOOL_NAME: &str = "skill.ensure_installed";
+
+pub(crate) fn build_conversation_steps(goal: &str) -> Vec<PlanStep> {
+	vec![step(
+		"conversation",
+		goal,
+		"Answer directly without external resources",
+	)]
+}
 
 pub(crate) fn build_skill_install_steps(
 	goal: &str,
 	source_url: &str,
 	if_missing: bool,
 ) -> Vec<PlanStep> {
-	vec![PlanStep {
-		step_id: "install-skill".to_string(),
-		summary: step_summary(
-			goal,
-			&format!(
-				"Ensure requested skill from {source_url} is installed{}",
-				if if_missing { " if it is missing" } else { "" }
-			),
+	vec![resource_step(
+		"install-skill",
+		goal,
+		&format!(
+			"Ensure requested skill from {source_url} is installed{}",
+			if if_missing { " if it is missing" } else { "" }
 		),
-		required_capabilities: vec!["skill.ensure_installed".to_string()],
-		requires_approval: false,
-		depends_on: Vec::new(),
-		branch: None,
-		loop_control: None,
-	}]
+		vec![ResourceSelector::tool(SKILL_TOOL_NAME)],
+	)]
 }
 
-pub(crate) fn build_explicit_skill_usage_steps(goal: &str, skill_name: &str) -> Vec<PlanStep> {
-	vec![PlanStep {
-		step_id: "use-installed-skill".to_string(),
-		summary: step_summary(
-			goal,
-			&format!("Use installed skill `{skill_name}` for this request"),
-		),
-		required_capabilities: vec!["tool.invoke".to_string()],
-		requires_approval: false,
-		depends_on: Vec::new(),
-		branch: None,
-		loop_control: None,
-	}]
+pub(crate) fn build_selected_skill_steps(goal: &str, selector: ResourceSelector) -> Vec<PlanStep> {
+	vec![resource_step(
+		"use-installed-skill",
+		goal,
+		&format!("Use selected skill `{}` for this request", selector.name()),
+		vec![selector],
+	)]
+}
+
+pub(crate) fn build_selected_tool_steps(
+	goal: &str,
+	selectors: &[ResourceSelector],
+) -> Vec<PlanStep> {
+	selectors
+		.iter()
+		.enumerate()
+		.map(|(index, selector)| {
+			resource_step(
+				&format!("use-tool-{}", index + 1),
+				goal,
+				&format!("Use selected tool `{}`", selector.name()),
+				vec![selector.clone()],
+			)
+		})
+		.collect()
 }
 
 pub(crate) fn build_react_steps(goal: &str, decision: &PlanningDecision) -> Vec<PlanStep> {
 	if should_use_direct_react_action(goal) {
-		return vec![PlanStep {
-			step_id: "act-primary".to_string(),
-			summary: step_summary(goal, "Execute primary action"),
-			required_capabilities: vec!["tool.invoke".to_string()],
-			requires_approval: false,
-			depends_on: Vec::new(),
-			branch: None,
-			loop_control: None,
-		}];
+		return vec![step("act-primary", goal, "Execute primary action")];
 	}
 
 	vec![
-		PlanStep {
-			step_id: "observe-context".to_string(),
-			summary: step_summary(
-				goal,
-				&format!(
-					"Observe context with max {} iteration(s)",
-					decision.max_iterations
-				),
+		resource_step(
+			"observe-context",
+			goal,
+			&format!(
+				"Observe context with max {} iteration(s)",
+				decision.max_iterations
 			),
-			required_capabilities: vec!["information.read".to_string()],
-			requires_approval: false,
-			depends_on: Vec::new(),
-			branch: None,
-			loop_control: None,
-		},
-		PlanStep {
-			step_id: "act-primary".to_string(),
-			summary: step_summary(goal, "Execute primary action"),
-			required_capabilities: vec!["tool.invoke".to_string()],
-			requires_approval: false,
-			depends_on: vec!["observe-context".to_string()],
-			branch: None,
-			loop_control: None,
-		},
+			vec![ResourceSelector::tool(RESEARCH_TOOL_NAME)],
+		),
+		step_with_dep(
+			"act-primary",
+			goal,
+			"Execute primary action",
+			vec!["observe-context".to_string()],
+		),
 	]
+}
+
+pub(crate) fn build_decomposition_steps(goal: &str, decision: &PlanningDecision) -> Vec<PlanStep> {
+	let mut steps = vec![
+		resource_step(
+			"decompose-goal",
+			goal,
+			&format!(
+				"Decompose goal into branch tasks (max branches = {})",
+				decision.max_branches
+			),
+			vec![ResourceSelector::tool(RESEARCH_TOOL_NAME)],
+		),
+		branched_resource_step(
+			"branch-data",
+			goal,
+			"Run data branch",
+			vec![ResourceSelector::tool(DATA_TOOL_NAME)],
+			"task-decomposition",
+			"data",
+		),
+		branched_resource_step(
+			"branch-analysis",
+			goal,
+			"Run analysis branch",
+			vec![ResourceSelector::tool(RESEARCH_TOOL_NAME)],
+			"task-decomposition",
+			"analysis",
+		),
+	];
+	steps[1].depends_on = vec!["decompose-goal".to_string()];
+	steps[2].depends_on = vec!["decompose-goal".to_string()];
+
+	if decision.max_branches >= 3 {
+		let mut risk = branched_resource_step(
+			"branch-risk",
+			goal,
+			"Run risk review branch",
+			vec![ResourceSelector::tool(REVIEW_TOOL_NAME)],
+			"task-decomposition",
+			"risk",
+		);
+		risk.depends_on = vec!["decompose-goal".to_string()];
+		steps.push(risk);
+	}
+
+	let mut merge_dependencies = vec!["branch-data".to_string(), "branch-analysis".to_string()];
+	if decision.max_branches >= 3 {
+		merge_dependencies.push("branch-risk".to_string());
+	}
+	steps.push(step_with_dep(
+		"merge-branches",
+		goal,
+		"Merge decomposition branch results",
+		merge_dependencies,
+	));
+	steps
+}
+
+pub(crate) fn build_tree_search_steps(goal: &str, decision: &PlanningDecision) -> Vec<PlanStep> {
+	let mut steps = vec![resource_step(
+		"search-root",
+		goal,
+		"Generate tree-search seed hypotheses",
+		vec![ResourceSelector::tool(RESEARCH_TOOL_NAME)],
+	)];
+
+	let mut branch_ids = Vec::new();
+	for branch in 1..=decision.max_branches {
+		let branch_id = format!("search-branch-{branch}");
+		let mut step = branched_resource_step(
+			&branch_id,
+			goal,
+			&format!("Explore tree branch {branch}"),
+			vec![ResourceSelector::tool(RESEARCH_TOOL_NAME)],
+			"tree-search",
+			&format!("branch-{branch}"),
+		);
+		step.depends_on = vec!["search-root".to_string()];
+		steps.push(step);
+		branch_ids.push(branch_id);
+	}
+	steps.push(resource_step_with_dep(
+		"search-evaluate",
+		goal,
+		"Evaluate candidate branches",
+		vec![ResourceSelector::tool(REVIEW_TOOL_NAME)],
+		branch_ids,
+	));
+	steps
+}
+
+pub(crate) fn build_refinement_steps(goal: &str, decision: &PlanningDecision) -> Vec<PlanStep> {
+	let draft_id = "draft-v1".to_string();
+	let mut steps = vec![step(&draft_id, goal, "Generate initial draft")];
+	let mut previous_step_id = draft_id;
+	for iteration in 1..=decision.max_iterations {
+		let critique_id = format!("critique-{iteration}");
+		let improve_id = format!("improve-{iteration}");
+		steps.push(looped_resource_step(
+			&critique_id,
+			goal,
+			&format!("Critique iteration {iteration}"),
+			vec![ResourceSelector::tool(REVIEW_TOOL_NAME)],
+			vec![previous_step_id.clone()],
+			iteration,
+			decision.max_iterations,
+		));
+		steps.push(looped_step(
+			&improve_id,
+			goal,
+			&format!("Improve draft from critique {iteration}"),
+			vec![critique_id],
+			iteration,
+			decision.max_iterations,
+		));
+		previous_step_id = improve_id;
+	}
+
+	let mut final_step = resource_step_with_dep(
+		"final-review",
+		goal,
+		"Produce refinement final answer",
+		vec![ResourceSelector::tool(REVIEW_TOOL_NAME)],
+		vec![previous_step_id],
+	);
+	final_step.requires_approval = true;
+	steps.push(final_step);
+	steps
+}
+
+fn step(step_id: &str, goal: &str, action: &str) -> PlanStep {
+	PlanStep {
+		step_id: step_id.to_string(),
+		summary: step_summary(goal, action),
+		resource_selectors: Vec::new(),
+		required_capabilities: Vec::new(),
+		requires_approval: false,
+		depends_on: Vec::new(),
+		branch: None,
+		loop_control: None,
+	}
+}
+
+fn step_with_dep(step_id: &str, goal: &str, action: &str, depends_on: Vec<String>) -> PlanStep {
+	let mut step = step(step_id, goal, action);
+	step.depends_on = depends_on;
+	step
+}
+
+fn resource_step(
+	step_id: &str,
+	goal: &str,
+	action: &str,
+	resource_selectors: Vec<ResourceSelector>,
+) -> PlanStep {
+	let mut step = step(step_id, goal, action);
+	step.resource_selectors = resource_selectors;
+	step
+}
+
+fn resource_step_with_dep(
+	step_id: &str,
+	goal: &str,
+	action: &str,
+	resource_selectors: Vec<ResourceSelector>,
+	depends_on: Vec<String>,
+) -> PlanStep {
+	let mut step = resource_step(step_id, goal, action, resource_selectors);
+	step.depends_on = depends_on;
+	step
+}
+
+fn branched_resource_step(
+	step_id: &str,
+	goal: &str,
+	action: &str,
+	resource_selectors: Vec<ResourceSelector>,
+	branch_group: &str,
+	branch_label: &str,
+) -> PlanStep {
+	let mut step = resource_step(step_id, goal, action, resource_selectors);
+	step.branch = Some(PlanBranch {
+		branch_group: branch_group.to_string(),
+		branch_label: branch_label.to_string(),
+	});
+	step
+}
+
+fn looped_step(
+	step_id: &str,
+	goal: &str,
+	action: &str,
+	depends_on: Vec<String>,
+	iteration: u8,
+	max_iterations: u8,
+) -> PlanStep {
+	let mut step = step_with_dep(step_id, goal, action, depends_on);
+	step.loop_control = Some(PlanLoopControl {
+		loop_id: "iterative-refinement".to_string(),
+		iteration,
+		max_iterations,
+	});
+	step
+}
+
+fn looped_resource_step(
+	step_id: &str,
+	goal: &str,
+	action: &str,
+	resource_selectors: Vec<ResourceSelector>,
+	depends_on: Vec<String>,
+	iteration: u8,
+	max_iterations: u8,
+) -> PlanStep {
+	let mut step = resource_step_with_dep(step_id, goal, action, resource_selectors, depends_on);
+	step.loop_control = Some(PlanLoopControl {
+		loop_id: "iterative-refinement".to_string(),
+		iteration,
+		max_iterations,
+	});
+	step
 }
 
 fn should_use_direct_react_action(goal: &str) -> bool {
@@ -127,342 +351,6 @@ fn should_use_direct_react_action(goal: &str) -> bool {
 			.any(|marker| lower.contains(marker) || normalized.contains(marker))
 }
 
-pub(crate) fn build_decomposition_steps(goal: &str, decision: &PlanningDecision) -> Vec<PlanStep> {
-	let mut steps = vec![
-		PlanStep {
-			step_id: "decompose-goal".to_string(),
-			summary: step_summary(
-				goal,
-				&format!(
-					"Decompose goal into branch tasks (max branches = {})",
-					decision.max_branches
-				),
-			),
-			required_capabilities: vec!["information.read".to_string()],
-			requires_approval: false,
-			depends_on: Vec::new(),
-			branch: None,
-			loop_control: None,
-		},
-		PlanStep {
-			step_id: "branch-data".to_string(),
-			summary: step_summary(goal, "Run data branch"),
-			required_capabilities: vec!["data.read".to_string(), "tool.invoke".to_string()],
-			requires_approval: false,
-			depends_on: vec!["decompose-goal".to_string()],
-			branch: Some(PlanBranch {
-				branch_group: "task-decomposition".to_string(),
-				branch_label: "data".to_string(),
-			}),
-			loop_control: None,
-		},
-		PlanStep {
-			step_id: "branch-analysis".to_string(),
-			summary: step_summary(goal, "Run analysis branch"),
-			required_capabilities: vec!["research.analyze".to_string(), "tool.invoke".to_string()],
-			requires_approval: false,
-			depends_on: vec!["decompose-goal".to_string()],
-			branch: Some(PlanBranch {
-				branch_group: "task-decomposition".to_string(),
-				branch_label: "analysis".to_string(),
-			}),
-			loop_control: None,
-		},
-	];
-	if decision.max_branches >= 3 {
-		steps.push(PlanStep {
-			step_id: "branch-risk".to_string(),
-			summary: step_summary(goal, "Run risk review branch"),
-			required_capabilities: vec!["risk.review".to_string()],
-			requires_approval: false,
-			depends_on: vec!["decompose-goal".to_string()],
-			branch: Some(PlanBranch {
-				branch_group: "task-decomposition".to_string(),
-				branch_label: "risk".to_string(),
-			}),
-			loop_control: None,
-		});
-	}
-
-	let mut merge_dependencies = vec!["branch-data".to_string(), "branch-analysis".to_string()];
-	if decision.max_branches >= 3 {
-		merge_dependencies.push("branch-risk".to_string());
-	}
-	steps.push(PlanStep {
-		step_id: "merge-branches".to_string(),
-		summary: step_summary(goal, "Merge decomposition branch results"),
-		required_capabilities: vec!["result.merge".to_string()],
-		requires_approval: false,
-		depends_on: merge_dependencies,
-		branch: None,
-		loop_control: None,
-	});
-	steps
-}
-
-pub(crate) fn build_tree_search_steps(goal: &str, decision: &PlanningDecision) -> Vec<PlanStep> {
-	let mut steps = vec![PlanStep {
-		step_id: "search-root".to_string(),
-		summary: step_summary(goal, "Generate tree-search seed hypotheses"),
-		required_capabilities: vec!["information.read".to_string()],
-		requires_approval: false,
-		depends_on: Vec::new(),
-		branch: None,
-		loop_control: None,
-	}];
-
-	let mut branch_ids = Vec::new();
-	for branch in 1..=decision.max_branches {
-		let branch_id = format!("search-branch-{branch}");
-		steps.push(PlanStep {
-			step_id: branch_id.clone(),
-			summary: step_summary(goal, &format!("Explore tree branch {branch}")),
-			required_capabilities: vec!["research.search".to_string(), "tool.invoke".to_string()],
-			requires_approval: false,
-			depends_on: vec!["search-root".to_string()],
-			branch: Some(PlanBranch {
-				branch_group: "tree-search".to_string(),
-				branch_label: format!("branch-{branch}"),
-			}),
-			loop_control: None,
-		});
-		branch_ids.push(branch_id);
-	}
-	steps.push(PlanStep {
-		step_id: "search-evaluate".to_string(),
-		summary: step_summary(goal, "Evaluate candidate branches"),
-		required_capabilities: vec!["research.evaluate".to_string()],
-		requires_approval: false,
-		depends_on: branch_ids,
-		branch: None,
-		loop_control: None,
-	});
-	steps
-}
-
-pub(crate) fn build_refinement_steps(goal: &str, decision: &PlanningDecision) -> Vec<PlanStep> {
-	let draft_id = "draft-v1".to_string();
-	let mut steps = vec![PlanStep {
-		step_id: draft_id.clone(),
-		summary: step_summary(goal, "Generate initial draft"),
-		required_capabilities: vec!["research.draft".to_string()],
-		requires_approval: false,
-		depends_on: Vec::new(),
-		branch: None,
-		loop_control: None,
-	}];
-	let mut previous_step_id = draft_id;
-	for iteration in 1..=decision.max_iterations {
-		let critique_id = format!("critique-{iteration}");
-		let improve_id = format!("improve-{iteration}");
-		steps.push(PlanStep {
-			step_id: critique_id.clone(),
-			summary: step_summary(goal, &format!("Critique iteration {iteration}")),
-			required_capabilities: vec!["review.critique".to_string()],
-			requires_approval: false,
-			depends_on: vec![previous_step_id.clone()],
-			branch: None,
-			loop_control: Some(PlanLoopControl {
-				loop_id: "iterative-refinement".to_string(),
-				iteration,
-				max_iterations: decision.max_iterations,
-			}),
-		});
-		steps.push(PlanStep {
-			step_id: improve_id.clone(),
-			summary: step_summary(goal, &format!("Improve draft from critique {iteration}")),
-			required_capabilities: vec!["research.improve".to_string()],
-			requires_approval: false,
-			depends_on: vec![critique_id],
-			branch: None,
-			loop_control: Some(PlanLoopControl {
-				loop_id: "iterative-refinement".to_string(),
-				iteration,
-				max_iterations: decision.max_iterations,
-			}),
-		});
-		previous_step_id = improve_id;
-	}
-
-	steps.push(PlanStep {
-		step_id: "final-review".to_string(),
-		summary: step_summary(goal, "Produce refinement final answer"),
-		required_capabilities: vec!["review.finalize".to_string()],
-		requires_approval: true,
-		depends_on: vec![previous_step_id],
-		branch: None,
-		loop_control: None,
-	});
-	steps
-}
-
 fn step_summary(goal: &str, action: &str) -> String {
 	format!("Goal: {goal}\nStep: {action}")
-}
-
-#[cfg(test)]
-mod tests {
-	use roku_common_types::{RequestEnvelope, RequestId};
-	use roku_planning_engine::PlanningMode;
-
-	use super::*;
-	use crate::planner::{AdaptiveTaskPlanner, TaskPlanner};
-
-	fn decision(mode: PlanningMode, max_iterations: u8, max_branches: u8) -> PlanningDecision {
-		PlanningDecision {
-			mode,
-			max_iterations,
-			max_branches,
-			hooks: Vec::new(),
-		}
-	}
-
-	fn sample_request() -> RequestEnvelope {
-		RequestEnvelope {
-			request_id: RequestId("req-1".to_string()),
-			session_id: "s1".to_string(),
-			goal: "g".to_string(),
-			planning_mode_hint: None,
-			conversation_history: Vec::new(),
-		}
-	}
-
-	#[test]
-	fn task_decomposition_contains_branch_merge_dependencies() {
-		let planner = AdaptiveTaskPlanner::default();
-		let outline = planner.build_outline(
-			&sample_request(),
-			&decision(PlanningMode::TaskDecomposition, 4, 3),
-		);
-
-		let merge = outline
-			.steps
-			.iter()
-			.find(|step| step.step_id == "merge-branches")
-			.expect("merge step should exist");
-		assert_eq!(merge.depends_on.len(), 3);
-		assert_eq!(
-			outline
-				.steps
-				.iter()
-				.find(|step| step.step_id == "branch-data")
-				.and_then(|step| step.branch.as_ref())
-				.expect("branch metadata should exist")
-				.branch_group,
-			"task-decomposition"
-		);
-	}
-
-	#[test]
-	fn tree_search_contains_configured_branch_count() {
-		let planner = AdaptiveTaskPlanner::default();
-		let outline =
-			planner.build_outline(&sample_request(), &decision(PlanningMode::TreeSearch, 4, 2));
-
-		assert!(
-			outline
-				.steps
-				.iter()
-				.any(|step| step.step_id == "search-branch-1")
-		);
-		assert!(
-			outline
-				.steps
-				.iter()
-				.any(|step| step.step_id == "search-branch-2")
-		);
-		assert!(
-			!outline
-				.steps
-				.iter()
-				.any(|step| step.step_id == "search-branch-3")
-		);
-	}
-
-	#[test]
-	fn iterative_refinement_builds_critique_loop() {
-		let planner = AdaptiveTaskPlanner::default();
-		let outline = planner.build_outline(
-			&sample_request(),
-			&decision(PlanningMode::IterativeRefinement, 2, 1),
-		);
-
-		assert!(
-			outline
-				.steps
-				.iter()
-				.any(|step| step.step_id == "critique-1")
-		);
-		assert!(outline.steps.iter().any(|step| step.step_id == "improve-2"));
-		let final_review = outline
-			.steps
-			.iter()
-			.find(|step| step.step_id == "final-review")
-			.expect("final review should exist");
-		assert_eq!(final_review.depends_on, vec!["improve-2".to_string()]);
-		assert!(final_review.requires_approval);
-		assert_eq!(
-			outline
-				.steps
-				.iter()
-				.find(|step| step.step_id == "critique-1")
-				.and_then(|step| step.loop_control.as_ref())
-				.expect("loop metadata should exist")
-				.max_iterations,
-			2
-		);
-	}
-
-	#[test]
-	fn react_uses_single_direct_action_for_simple_chat_goal() {
-		let planner = AdaptiveTaskPlanner::default();
-		let mut request = sample_request();
-		request.goal = "今天周几？".to_string();
-		let outline = planner.build_outline(&request, &decision(PlanningMode::ReAct, 4, 1));
-
-		assert_eq!(outline.steps.len(), 1);
-		assert_eq!(outline.steps[0].step_id, "act-primary");
-	}
-
-	#[test]
-	fn react_keeps_observe_then_act_for_complex_goal() {
-		let planner = AdaptiveTaskPlanner::default();
-		let mut request = sample_request();
-		request.goal = "如何解决哥德巴赫猜想？".to_string();
-		let outline = planner.build_outline(&request, &decision(PlanningMode::ReAct, 4, 1));
-
-		assert_eq!(outline.steps.len(), 2);
-		assert_eq!(outline.steps[0].step_id, "observe-context");
-		assert_eq!(outline.steps[1].step_id, "act-primary");
-	}
-
-	#[test]
-	fn build_skill_install_steps_uses_ensure_capability() {
-		let steps = build_skill_install_steps(
-			"Install the skill",
-			"https://github.com/anthropics/skills/tree/main/skills/skill-creator",
-			true,
-		);
-
-		assert_eq!(steps.len(), 1);
-		assert_eq!(steps[0].step_id, "install-skill");
-		assert_eq!(
-			steps[0].required_capabilities,
-			vec!["skill.ensure_installed".to_string()]
-		);
-		assert!(steps[0].summary.contains("if it is missing"));
-	}
-
-	#[test]
-	fn build_explicit_skill_usage_steps_records_skill_name() {
-		let steps = build_explicit_skill_usage_steps("Explain the eval workflow", "skill-creator");
-
-		assert_eq!(steps.len(), 1);
-		assert_eq!(steps[0].step_id, "use-installed-skill");
-		assert_eq!(
-			steps[0].required_capabilities,
-			vec!["tool.invoke".to_string()]
-		);
-		assert!(steps[0].summary.contains("skill-creator"));
-	}
 }

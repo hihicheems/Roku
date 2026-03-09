@@ -16,6 +16,7 @@ roku-experiment-registry = { path = "../roku-experiment-registry" }
 roku-observability = { path = "../roku-observability" }
 roku-orchestrator = { path = "../roku-orchestrator" }
 roku-planning-engine = { path = "../roku-planning-engine" }
+roku-resource-catalog = { path = "../roku-resource-catalog" }
 roku-state-store = { path = "../roku-state-store" }
 roku-supervisor-agent = { path = "../roku-supervisor-agent" }
 roku-task-planner = { path = "../roku-task-planner" }

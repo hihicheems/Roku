@@ -60,6 +60,12 @@ impl ToolBackedWorker {
 				"node_id": node.node_id.0,
 				"goal": goal,
 				"summary": step_summary,
+				"resource_selectors": spec
+					.context
+					.resources
+					.iter()
+					.map(|resource| resource.display_key())
+					.collect::<Vec<_>>(),
 				"conversation_history": render_conversation_history(&spec.context.conversation_history),
 				"budget_tokens": spec.policy_bindings.budget_tokens,
 				"time_budget_ms": spec.policy_bindings.time_budget_ms,

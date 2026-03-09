@@ -14,12 +14,13 @@
 
 use roku_common_types::{PlanOutline, RequestEnvelope};
 use roku_planning_engine::{PlanningDecision, PlanningMode};
-use roku_skill_registry::SkillRegistry;
+use roku_resource_catalog::ResourceCatalog;
 
-use crate::shortcut::{ShortcutIntent, SkillShortcutResolver};
+use crate::selection::{ResourceSelectionEngine, SelectionRoute};
 use crate::strategies::{
-	build_decomposition_steps, build_explicit_skill_usage_steps, build_react_steps,
-	build_refinement_steps, build_skill_install_steps, build_tree_search_steps,
+	build_conversation_steps, build_decomposition_steps, build_react_steps, build_refinement_steps,
+	build_selected_skill_steps, build_selected_tool_steps, build_skill_install_steps,
+	build_tree_search_steps,
 };
 
 pub trait TaskPlanner {
@@ -28,54 +29,52 @@ pub trait TaskPlanner {
 
 #[derive(Clone)]
 pub struct AdaptiveTaskPlanner {
-	shortcut_resolver: SkillShortcutResolver,
+	selector: ResourceSelectionEngine,
 }
 
 impl AdaptiveTaskPlanner {
-	pub fn with_skill_registry(skill_registry: SkillRegistry) -> Self {
+	pub fn with_resource_catalog(catalog: ResourceCatalog) -> Self {
 		Self {
-			shortcut_resolver: SkillShortcutResolver::new(skill_registry),
+			selector: ResourceSelectionEngine::new(catalog),
 		}
 	}
 }
 
 impl Default for AdaptiveTaskPlanner {
 	fn default() -> Self {
-		Self::with_skill_registry(SkillRegistry::disabled())
+		Self::with_resource_catalog(ResourceCatalog::default())
 	}
 }
 
 impl TaskPlanner for AdaptiveTaskPlanner {
 	fn build_outline(&self, request: &RequestEnvelope, decision: &PlanningDecision) -> PlanOutline {
-		if let Some(shortcut) = self.shortcut_resolver.resolve_without_classifier(request) {
-			return PlanOutline {
-				goal: request.goal.clone(),
-				steps: shortcut_steps(&request.goal, shortcut),
-			};
-		}
-
-		let steps = match decision.mode {
-			PlanningMode::ReAct => build_react_steps(&request.goal, decision),
-			PlanningMode::TaskDecomposition => build_decomposition_steps(&request.goal, decision),
-			PlanningMode::TreeSearch => build_tree_search_steps(&request.goal, decision),
-			PlanningMode::IterativeRefinement => build_refinement_steps(&request.goal, decision),
+		let steps = match self.selector.select_without_llm(request) {
+			SelectionRoute::Conversation => build_conversation_steps(&request.goal),
+			SelectionRoute::InstallSkill {
+				source_url,
+				if_missing,
+			} => build_skill_install_steps(&request.goal, &source_url, if_missing),
+			SelectionRoute::UseSkill { selector } => {
+				build_selected_skill_steps(&request.goal, selector)
+			}
+			SelectionRoute::UseTools { selectors } => {
+				build_selected_tool_steps(&request.goal, &selectors)
+			}
+			SelectionRoute::PlannerDefault => match decision.mode {
+				PlanningMode::ReAct => build_react_steps(&request.goal, decision),
+				PlanningMode::TaskDecomposition => {
+					build_decomposition_steps(&request.goal, decision)
+				}
+				PlanningMode::TreeSearch => build_tree_search_steps(&request.goal, decision),
+				PlanningMode::IterativeRefinement => {
+					build_refinement_steps(&request.goal, decision)
+				}
+			},
 		};
 
 		PlanOutline {
 			goal: request.goal.clone(),
 			steps,
-		}
-	}
-}
-
-fn shortcut_steps(goal: &str, shortcut: ShortcutIntent) -> Vec<roku_common_types::PlanStep> {
-	match shortcut {
-		ShortcutIntent::EnsureSkillInstalled {
-			source_url,
-			if_missing,
-		} => build_skill_install_steps(goal, &source_url, if_missing),
-		ShortcutIntent::UseInstalledSkill { skill_name } => {
-			build_explicit_skill_usage_steps(goal, &skill_name)
 		}
 	}
 }

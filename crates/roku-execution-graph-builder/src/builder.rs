@@ -16,9 +16,10 @@ use std::collections::{HashMap, HashSet};
 
 use roku_common_types::{
 	AggregationMode, JoinPolicy, NodeBudgetSnapshot, NodeId, NodeRecoveryAnchor, PlanOutline,
-	RerunPolicy, RetryPolicy, TaskEdge, TaskEdgeCondition, TaskGraph, TaskId, TaskNode,
-	TaskNodeDispatchPolicy, TaskNodeKind,
+	RerunPolicy, ResourceSelector, RetryPolicy, TaskEdge, TaskEdgeCondition, TaskGraph, TaskId,
+	TaskNode, TaskNodeDispatchPolicy, TaskNodeKind,
 };
+use roku_resource_catalog::ResourceCatalog;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -27,6 +28,8 @@ pub enum GraphBuildError {
 	DuplicateStepId(String),
 	#[error("step {step_id} depends on unknown step {dependency}")]
 	MissingDependency { step_id: String, dependency: String },
+	#[error("step {step_id} references unknown resource {selector}")]
+	UnknownResource { step_id: String, selector: String },
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +57,7 @@ impl ExecutionGraphBuilder {
 		&self,
 		task_id: TaskId,
 		outline: &PlanOutline,
+		catalog: &ResourceCatalog,
 		cfg: &GraphBuildConfig,
 	) -> Result<TaskGraph, GraphBuildError> {
 		let mut nodes = Vec::new();
@@ -69,16 +73,24 @@ impl ExecutionGraphBuilder {
 			}
 
 			let execution_node_id = NodeId(step.step_id.clone());
+			let resolved_capabilities =
+				resolve_step_capabilities(step, catalog).map_err(|selector| {
+					GraphBuildError::UnknownResource {
+						step_id: step.step_id.clone(),
+						selector,
+					}
+				})?;
 			let execution_metadata = default_node_metadata(
 				&execution_node_id,
 				TaskNodeKind::Execution,
-				&step.required_capabilities,
+				&resolved_capabilities,
 			);
 			nodes.push(build_task_node(
 				execution_node_id.clone(),
 				TaskNodeKind::Execution,
 				step.summary.clone(),
-				step.required_capabilities.clone(),
+				step.resource_selectors.clone(),
+				resolved_capabilities.clone(),
 				TaskNodeDispatchPolicy::Automatic,
 				execution_metadata,
 			));
@@ -94,6 +106,7 @@ impl ExecutionGraphBuilder {
 				retry_node_id.clone(),
 				TaskNodeKind::Retry,
 				format!("Retry helper for {}", step.step_id),
+				Vec::new(),
 				vec!["control.retry".to_string()],
 				TaskNodeDispatchPolicy::ManualRecovery,
 				retry_metadata,
@@ -114,6 +127,7 @@ impl ExecutionGraphBuilder {
 				dead_letter_node_id.clone(),
 				TaskNodeKind::DeadLetter,
 				format!("Dead-letter helper for {}", step.step_id),
+				Vec::new(),
 				vec!["control.dead_letter".to_string()],
 				TaskNodeDispatchPolicy::ManualRecovery,
 				dead_letter_metadata,
@@ -135,6 +149,7 @@ impl ExecutionGraphBuilder {
 					approval_node_id.clone(),
 					TaskNodeKind::Approval,
 					"Approval gate".to_string(),
+					Vec::new(),
 					vec!["approve.action".to_string()],
 					TaskNodeDispatchPolicy::Automatic,
 					approval_metadata,
@@ -188,6 +203,7 @@ impl ExecutionGraphBuilder {
 				validation_id.clone(),
 				TaskNodeKind::Validation,
 				"Validation gate".to_string(),
+				Vec::new(),
 				vec!["validate.result".to_string()],
 				TaskNodeDispatchPolicy::Automatic,
 				validation_metadata,
@@ -220,6 +236,7 @@ impl ExecutionGraphBuilder {
 				aggregation_id.clone(),
 				TaskNodeKind::Aggregation,
 				"Aggregation gate".to_string(),
+				Vec::new(),
 				vec!["aggregate.result".to_string()],
 				TaskNodeDispatchPolicy::Automatic,
 				aggregation_metadata,
@@ -293,6 +310,7 @@ fn build_task_node(
 	node_id: NodeId,
 	kind: TaskNodeKind,
 	description: String,
+	resources: Vec<ResourceSelector>,
 	capabilities: Vec<String>,
 	dispatch_policy: TaskNodeDispatchPolicy,
 	metadata: NodeMetadata,
@@ -301,6 +319,7 @@ fn build_task_node(
 		node_id,
 		kind,
 		description,
+		resources,
 		capabilities,
 		dispatch_policy,
 		join_policy: JoinPolicy::AllParents,
@@ -312,6 +331,24 @@ fn build_task_node(
 		retry_policy: metadata.retry_policy,
 		rerun_policy: metadata.rerun_policy,
 	}
+}
+
+fn resolve_step_capabilities(
+	step: &roku_common_types::PlanStep,
+	catalog: &ResourceCatalog,
+) -> Result<Vec<String>, String> {
+	let mut capabilities = step.required_capabilities.clone();
+	for selector in &step.resource_selectors {
+		let Some(descriptor) = catalog.descriptor(selector) else {
+			return Err(selector.display_key());
+		};
+		for capability in &descriptor.required_capabilities {
+			if !capabilities.contains(capability) {
+				capabilities.push(capability.clone());
+			}
+		}
+	}
+	Ok(capabilities)
 }
 
 fn default_node_metadata(
@@ -435,6 +472,11 @@ mod tests {
 	use roku_common_types::{
 		PlanOutline, PlanStep, TaskEdgeCondition, TaskId, TaskNodeDispatchPolicy, TaskNodeKind,
 	};
+	use roku_resource_catalog::ResourceCatalog;
+
+	fn empty_catalog() -> ResourceCatalog {
+		ResourceCatalog::default()
+	}
 
 	#[test]
 	fn compile_outline_to_graph() {
@@ -447,6 +489,7 @@ mod tests {
 					steps: vec![PlanStep {
 						step_id: "s1".to_string(),
 						summary: "do".to_string(),
+						resource_selectors: Vec::new(),
 						required_capabilities: vec![],
 						requires_approval: true,
 						depends_on: Vec::new(),
@@ -454,6 +497,7 @@ mod tests {
 						loop_control: None,
 					}],
 				},
+				&empty_catalog(),
 				&GraphBuildConfig::default(),
 			)
 			.expect("graph compilation should succeed");
@@ -523,6 +567,7 @@ mod tests {
 					steps: vec![PlanStep {
 						step_id: "install-skill".to_string(),
 						summary: "install skill".to_string(),
+						resource_selectors: Vec::new(),
 						required_capabilities: vec!["skill.ensure_installed".to_string()],
 						requires_approval: false,
 						depends_on: Vec::new(),
@@ -530,6 +575,7 @@ mod tests {
 						loop_control: None,
 					}],
 				},
+				&empty_catalog(),
 				&GraphBuildConfig::default(),
 			)
 			.expect("graph compilation should succeed");
@@ -554,6 +600,7 @@ mod tests {
 					steps: vec![PlanStep {
 						step_id: "use-installed-skill".to_string(),
 						summary: "use installed skill".to_string(),
+						resource_selectors: Vec::new(),
 						required_capabilities: vec!["tool.invoke".to_string()],
 						requires_approval: false,
 						depends_on: Vec::new(),
@@ -561,6 +608,7 @@ mod tests {
 						loop_control: None,
 					}],
 				},
+				&empty_catalog(),
 				&GraphBuildConfig::default(),
 			)
 			.expect("graph compilation should succeed");
@@ -585,6 +633,7 @@ mod tests {
 						PlanStep {
 							step_id: "fetch".to_string(),
 							summary: "fetch".to_string(),
+							resource_selectors: Vec::new(),
 							required_capabilities: vec![],
 							requires_approval: false,
 							depends_on: Vec::new(),
@@ -594,6 +643,7 @@ mod tests {
 						PlanStep {
 							step_id: "analyze-a".to_string(),
 							summary: "analyze a".to_string(),
+							resource_selectors: Vec::new(),
 							required_capabilities: vec![],
 							requires_approval: false,
 							depends_on: vec!["fetch".to_string()],
@@ -603,6 +653,7 @@ mod tests {
 						PlanStep {
 							step_id: "analyze-b".to_string(),
 							summary: "analyze b".to_string(),
+							resource_selectors: Vec::new(),
 							required_capabilities: vec![],
 							requires_approval: false,
 							depends_on: vec!["fetch".to_string()],
@@ -611,6 +662,7 @@ mod tests {
 						},
 					],
 				},
+				&empty_catalog(),
 				&GraphBuildConfig::default(),
 			)
 			.expect("graph compilation should succeed");
@@ -642,6 +694,7 @@ mod tests {
 						PlanStep {
 							step_id: "extract".to_string(),
 							summary: "extract".to_string(),
+							resource_selectors: Vec::new(),
 							required_capabilities: vec![],
 							requires_approval: false,
 							depends_on: Vec::new(),
@@ -651,6 +704,7 @@ mod tests {
 						PlanStep {
 							step_id: "analyze".to_string(),
 							summary: "analyze".to_string(),
+							resource_selectors: Vec::new(),
 							required_capabilities: vec![],
 							requires_approval: false,
 							depends_on: vec!["extract".to_string()],
@@ -659,6 +713,7 @@ mod tests {
 						},
 					],
 				},
+				&empty_catalog(),
 				&GraphBuildConfig::default(),
 			)
 			.expect("graph compilation should succeed");
@@ -681,6 +736,7 @@ mod tests {
 					steps: vec![PlanStep {
 						step_id: "step-1".to_string(),
 						summary: "invalid".to_string(),
+						resource_selectors: Vec::new(),
 						required_capabilities: vec![],
 						requires_approval: false,
 						depends_on: vec!["unknown".to_string()],
@@ -688,6 +744,7 @@ mod tests {
 						loop_control: None,
 					}],
 				},
+				&empty_catalog(),
 				&GraphBuildConfig::default(),
 			)
 			.expect_err("missing dependency should fail graph compilation");

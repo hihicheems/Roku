@@ -322,6 +322,7 @@ mod tests {
 			node_id: NodeId(id.to_string()),
 			kind,
 			description: id.to_string(),
+			resources: Vec::new(),
 			capabilities: Vec::new(),
 			dispatch_policy: TaskNodeDispatchPolicy::Automatic,
 			join_policy: roku_common_types::JoinPolicy::AllParents,

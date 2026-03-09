@@ -101,6 +101,10 @@ impl RuntimeService {
 		result_repo: Box<dyn ResultRepository + Send>,
 		audit_sink: Arc<dyn AuditSink>,
 	) -> Self {
+		let runtime = GenericAgentRuntime::default();
+		let planner = Box::new(AdaptiveTaskPlanner::with_resource_catalog(
+			runtime.resource_catalog().clone(),
+		));
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
 				task_repo,
@@ -112,9 +116,9 @@ impl RuntimeService {
 				experiment_registry: ExperimentRegistry::default(),
 			},
 			audit_sink,
-			GenericAgentRuntime::default(),
+			runtime,
 			Arc::new(Metrics::default()),
-			Box::new(AdaptiveTaskPlanner::default()),
+			planner,
 		)
 	}
 
@@ -127,33 +131,10 @@ impl RuntimeService {
 		experiment_registry: ExperimentRegistry,
 		audit_sink: Arc<dyn AuditSink>,
 	) -> Self {
-		Self::new_with_runtime_data_plane_and_metrics(
-			RuntimeDataPlane {
-				task_repo,
-				event_repo,
-				approval_repo,
-				result_repo,
-				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
-				artifact_store,
-				experiment_registry,
-			},
-			audit_sink,
-			GenericAgentRuntime::default(),
-			Arc::new(Metrics::default()),
-			Box::new(AdaptiveTaskPlanner::default()),
-		)
-	}
-
-	pub fn new_with_data_plane_and_runtime(
-		task_repo: Box<dyn TaskRepository + Send>,
-		event_repo: Box<dyn EventRepository + Send>,
-		approval_repo: Box<dyn ApprovalRepository + Send>,
-		result_repo: Box<dyn ResultRepository + Send>,
-		artifact_store: ArtifactStore,
-		experiment_registry: ExperimentRegistry,
-		audit_sink: Arc<dyn AuditSink>,
-		runtime: GenericAgentRuntime,
-	) -> Self {
+		let runtime = GenericAgentRuntime::default();
+		let planner = Box::new(AdaptiveTaskPlanner::with_resource_catalog(
+			runtime.resource_catalog().clone(),
+		));
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
 				task_repo,
@@ -167,7 +148,37 @@ impl RuntimeService {
 			audit_sink,
 			runtime,
 			Arc::new(Metrics::default()),
-			Box::new(AdaptiveTaskPlanner::default()),
+			planner,
+		)
+	}
+
+	pub fn new_with_data_plane_and_runtime(
+		task_repo: Box<dyn TaskRepository + Send>,
+		event_repo: Box<dyn EventRepository + Send>,
+		approval_repo: Box<dyn ApprovalRepository + Send>,
+		result_repo: Box<dyn ResultRepository + Send>,
+		artifact_store: ArtifactStore,
+		experiment_registry: ExperimentRegistry,
+		audit_sink: Arc<dyn AuditSink>,
+		runtime: GenericAgentRuntime,
+	) -> Self {
+		let planner = Box::new(AdaptiveTaskPlanner::with_resource_catalog(
+			runtime.resource_catalog().clone(),
+		));
+		Self::new_with_runtime_data_plane_and_metrics(
+			RuntimeDataPlane {
+				task_repo,
+				event_repo,
+				approval_repo,
+				result_repo,
+				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				artifact_store,
+				experiment_registry,
+			},
+			audit_sink,
+			runtime,
+			Arc::new(Metrics::default()),
+			planner,
 		)
 	}
 
@@ -245,6 +256,9 @@ impl RuntimeService {
 	}
 
 	pub fn in_memory_with_agent_runtime(runtime: GenericAgentRuntime) -> Self {
+		let planner = Box::new(AdaptiveTaskPlanner::with_resource_catalog(
+			runtime.resource_catalog().clone(),
+		));
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
 				task_repo: Box::new(InMemoryTaskRepository::default()),
@@ -258,7 +272,7 @@ impl RuntimeService {
 			Arc::new(InMemoryAuditSink::default()),
 			runtime,
 			Arc::new(Metrics::default()),
-			Box::new(AdaptiveTaskPlanner::default()),
+			planner,
 		)
 	}
 
@@ -266,6 +280,9 @@ impl RuntimeService {
 		runtime: GenericAgentRuntime,
 		metrics: Arc<Metrics>,
 	) -> Self {
+		let planner = Box::new(AdaptiveTaskPlanner::with_resource_catalog(
+			runtime.resource_catalog().clone(),
+		));
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
 				task_repo: Box::new(InMemoryTaskRepository::default()),
@@ -279,7 +296,7 @@ impl RuntimeService {
 			Arc::new(InMemoryAuditSink::default()),
 			runtime,
 			metrics,
-			Box::new(AdaptiveTaskPlanner::default()),
+			planner,
 		)
 	}
 
@@ -372,25 +389,26 @@ impl RuntimeService {
 		}
 
 		self.record_transition(&mut task, TaskState::GraphBuilding, "build graph")?;
-		let graph =
-			match self
-				.builder
-				.compile(task.task_id.clone(), &outline, &GraphBuildConfig::default())
-			{
-				Ok(graph) => graph,
-				Err(error) => {
-					self.metrics.inc_failures();
-					let terminal_state =
-						self.fail_task(&mut task, "graph build failed", ErrorClass::Dependency)?;
-					self.save_task(task)?;
-					return Ok(ResponseEnvelope {
-						request_id: request.request_id,
-						status: ResponseStatus::Failed,
-						message: failure_message(&error.to_string(), terminal_state),
-						artifacts: Vec::new(),
-					});
-				}
-			};
+		let graph = match self.builder.compile(
+			task.task_id.clone(),
+			&outline,
+			self.runtime.resource_catalog(),
+			&GraphBuildConfig::default(),
+		) {
+			Ok(graph) => graph,
+			Err(error) => {
+				self.metrics.inc_failures();
+				let terminal_state =
+					self.fail_task(&mut task, "graph build failed", ErrorClass::Dependency)?;
+				self.save_task(task)?;
+				return Ok(ResponseEnvelope {
+					request_id: request.request_id,
+					status: ResponseStatus::Failed,
+					message: failure_message(&error.to_string(), terminal_state),
+					artifacts: Vec::new(),
+				});
+			}
+		};
 		task.graph = Some(graph);
 		task.completed_nodes = Vec::new();
 		task.next_node_index = 0;
