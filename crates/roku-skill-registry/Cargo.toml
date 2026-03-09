@@ -15,4 +15,4 @@ tempfile = "3"
 thiserror = "2"
 url = { version = "2", features = ["serde"] }
 walkdir = "2"
-zip = "2"
+zip = "8"
