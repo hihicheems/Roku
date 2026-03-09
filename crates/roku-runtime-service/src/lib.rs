@@ -114,7 +114,7 @@ impl RuntimeService {
 			audit_sink,
 			GenericAgentRuntime::default(),
 			Arc::new(Metrics::default()),
-			Box::new(AdaptiveTaskPlanner),
+			Box::new(AdaptiveTaskPlanner::default()),
 		)
 	}
 
@@ -140,7 +140,7 @@ impl RuntimeService {
 			audit_sink,
 			GenericAgentRuntime::default(),
 			Arc::new(Metrics::default()),
-			Box::new(AdaptiveTaskPlanner),
+			Box::new(AdaptiveTaskPlanner::default()),
 		)
 	}
 
@@ -167,7 +167,7 @@ impl RuntimeService {
 			audit_sink,
 			runtime,
 			Arc::new(Metrics::default()),
-			Box::new(AdaptiveTaskPlanner),
+			Box::new(AdaptiveTaskPlanner::default()),
 		)
 	}
 
@@ -258,7 +258,7 @@ impl RuntimeService {
 			Arc::new(InMemoryAuditSink::default()),
 			runtime,
 			Arc::new(Metrics::default()),
-			Box::new(AdaptiveTaskPlanner),
+			Box::new(AdaptiveTaskPlanner::default()),
 		)
 	}
 
@@ -279,7 +279,7 @@ impl RuntimeService {
 			Arc::new(InMemoryAuditSink::default()),
 			runtime,
 			metrics,
-			Box::new(AdaptiveTaskPlanner),
+			Box::new(AdaptiveTaskPlanner::default()),
 		)
 	}
 

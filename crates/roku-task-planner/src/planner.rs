@@ -14,7 +14,9 @@
 
 use roku_common_types::{PlanOutline, RequestEnvelope};
 use roku_planning_engine::{PlanningDecision, PlanningMode};
+use roku_skill_registry::SkillRegistry;
 
+use crate::shortcut::{ShortcutIntent, SkillShortcutResolver};
 use crate::strategies::{
 	build_decomposition_steps, build_explicit_skill_usage_steps, build_react_steps,
 	build_refinement_steps, build_skill_install_steps, build_tree_search_steps,
@@ -24,21 +26,31 @@ pub trait TaskPlanner {
 	fn build_outline(&self, request: &RequestEnvelope, decision: &PlanningDecision) -> PlanOutline;
 }
 
-#[derive(Debug, Default)]
-pub struct AdaptiveTaskPlanner;
+#[derive(Clone)]
+pub struct AdaptiveTaskPlanner {
+	shortcut_resolver: SkillShortcutResolver,
+}
+
+impl AdaptiveTaskPlanner {
+	pub fn with_skill_registry(skill_registry: SkillRegistry) -> Self {
+		Self {
+			shortcut_resolver: SkillShortcutResolver::new(skill_registry),
+		}
+	}
+}
+
+impl Default for AdaptiveTaskPlanner {
+	fn default() -> Self {
+		Self::with_skill_registry(SkillRegistry::disabled())
+	}
+}
 
 impl TaskPlanner for AdaptiveTaskPlanner {
 	fn build_outline(&self, request: &RequestEnvelope, decision: &PlanningDecision) -> PlanOutline {
-		if let Some(steps) = build_skill_install_steps(&request.goal) {
+		if let Some(shortcut) = self.shortcut_resolver.resolve_without_classifier(request) {
 			return PlanOutline {
 				goal: request.goal.clone(),
-				steps,
-			};
-		}
-		if let Some(steps) = build_explicit_skill_usage_steps(&request.goal) {
-			return PlanOutline {
-				goal: request.goal.clone(),
-				steps,
+				steps: shortcut_steps(&request.goal, shortcut),
 			};
 		}
 
@@ -52,6 +64,18 @@ impl TaskPlanner for AdaptiveTaskPlanner {
 		PlanOutline {
 			goal: request.goal.clone(),
 			steps,
+		}
+	}
+}
+
+fn shortcut_steps(goal: &str, shortcut: ShortcutIntent) -> Vec<roku_common_types::PlanStep> {
+	match shortcut {
+		ShortcutIntent::EnsureSkillInstalled {
+			source_url,
+			if_missing,
+		} => build_skill_install_steps(goal, &source_url, if_missing),
+		ShortcutIntent::UseInstalledSkill { skill_name } => {
+			build_explicit_skill_usage_steps(goal, &skill_name)
 		}
 	}
 }

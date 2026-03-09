@@ -199,7 +199,7 @@ fn service_surfaces_skill_install_success_message() {
 	let service = file_backed_service_with_planner(
 		&paths,
 		runtime,
-		Box::new(roku_task_planner::AdaptiveTaskPlanner),
+		Box::new(roku_task_planner::AdaptiveTaskPlanner::default()),
 	);
 	let response = service
 		.execute(RequestEnvelope {
@@ -851,7 +851,7 @@ fn service_recovers_after_replay_log_is_compacted_into_snapshot() {
 	let service = file_backed_service_with_planner(
 		&paths,
 		GenericAgentRuntime::default(),
-		Box::new(roku_task_planner::AdaptiveTaskPlanner),
+		Box::new(roku_task_planner::AdaptiveTaskPlanner::default()),
 	);
 	let pending = service
 		.execute_with_mode(sample_request(), RunMode::ApprovalRequired)
@@ -881,7 +881,7 @@ fn service_recovers_after_replay_log_is_compacted_into_snapshot() {
 	let restarted_service = file_backed_service_with_planner(
 		&paths,
 		GenericAgentRuntime::default(),
-		Box::new(roku_task_planner::AdaptiveTaskPlanner),
+		Box::new(roku_task_planner::AdaptiveTaskPlanner::default()),
 	);
 	let replay = restarted_service
 		.get_task_replay_report(&task_id)
@@ -1819,7 +1819,7 @@ fn service_routes_ready_nodes_through_dispatch_queue() {
 		Arc::new(roku_observability::InMemoryAuditSink::default()),
 		GenericAgentRuntime::default(),
 		Arc::new(roku_observability::Metrics::default()),
-		Box::new(roku_task_planner::AdaptiveTaskPlanner),
+		Box::new(roku_task_planner::AdaptiveTaskPlanner::default()),
 	);
 
 	let response = service

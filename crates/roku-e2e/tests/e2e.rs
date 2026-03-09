@@ -49,7 +49,7 @@ fn file_backed_runtime_service(paths: &FileBackedPaths) -> RuntimeService {
 	file_backed_runtime_service_with_runtime_and_planner(
 		paths,
 		roku_agent_runtime::GenericAgentRuntime::default(),
-		Box::new(roku_task_planner::AdaptiveTaskPlanner),
+		Box::new(roku_task_planner::AdaptiveTaskPlanner::default()),
 	)
 }
 

@@ -29,14 +29,18 @@ pub(crate) const RESEARCH_TOOL_NAME: &str = "research.synthesize";
 pub(crate) const DATA_TOOL_NAME: &str = "data.execute";
 pub(crate) const REVIEW_TOOL_NAME: &str = "review.assess";
 pub(crate) const GENERAL_TOOL_NAME: &str = "general.execute";
-pub(crate) const SKILL_TOOL_NAME: &str = "skill.install";
+pub(crate) const SKILL_TOOL_NAME: &str = "skill.ensure_installed";
+pub(crate) const LEGACY_SKILL_TOOL_NAME: &str = "skill.install";
 const LLM_TOOL_TIMEOUT_MS: u64 = 45_000;
 const MAX_SKILL_PROMPT_CONTEXT_CHARS: usize = 16_000;
 
 pub(crate) fn build_builtin_tool_runtime(skill_registry: SkillRegistry) -> ToolRuntime {
 	let mut runtime = ToolRuntime::default();
 	runtime
-		.register_tool(SkillInstallTool::new(skill_registry))
+		.register_tool(SkillInstallTool::new(skill_registry.clone()))
+		.expect("skill ensure tool must register successfully");
+	runtime
+		.register_tool(SkillInstallTool::legacy(skill_registry))
 		.expect("skill install tool must register successfully");
 	for tool in [
 		WorkerReportTool::new(
@@ -82,6 +86,9 @@ pub(crate) fn build_llm_tool_runtime(
 	let mut runtime = ToolRuntime::default();
 	runtime
 		.register_tool(SkillInstallTool::new(skill_registry.clone()))
+		.expect("skill ensure tool must register successfully");
+	runtime
+		.register_tool(SkillInstallTool::legacy(skill_registry.clone()))
 		.expect("skill install tool must register successfully");
 	for tool in [
 		PromptedLlmTool::new(
@@ -140,10 +147,18 @@ struct SkillInstallTool {
 
 impl SkillInstallTool {
 	fn new(registry: SkillRegistry) -> Self {
+		Self::with_name(SKILL_TOOL_NAME, "skill.ensure_installed", registry)
+	}
+
+	fn legacy(registry: SkillRegistry) -> Self {
+		Self::with_name(LEGACY_SKILL_TOOL_NAME, "skill.install", registry)
+	}
+
+	fn with_name(tool_name: &str, required_capability: &str, registry: SkillRegistry) -> Self {
 		Self {
 			descriptor: tool_descriptor(
-				SKILL_TOOL_NAME,
-				vec!["skill.install".to_string()],
+				tool_name,
+				vec![required_capability.to_string()],
 				SandboxProfile::ReadOnlyFs,
 				120_000,
 			),
@@ -169,7 +184,7 @@ impl Tool for SkillInstallTool {
 			})?;
 		let report = self
 			.registry
-			.install_from_url(source_url, "runtime")
+			.ensure_installed_from_url(source_url, "runtime")
 			.map_err(|error| ToolFailure::terminal(error.to_string()))?;
 
 		Ok(json!({
@@ -279,6 +294,7 @@ impl Tool for PromptedLlmTool {
 
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
 		let input = request_input(&request)?;
+		let skill_query = skill_context_query(&input);
 		if let Some(answer) = direct_runtime_answer(input.goal) {
 			log_runtime_output(
 				"used deterministic runtime answer",
@@ -306,9 +322,9 @@ impl Tool for PromptedLlmTool {
 		}
 		let skill_context = self
 			.skill_registry
-			.render_prompt_context_for_query(input.goal, skill_prompt_context_budget(&input))
+			.render_prompt_context_for_query(&skill_query, skill_prompt_context_budget(&input))
 			.map_err(|error| ToolFailure::terminal(error.to_string()))?;
-		if let Some(answer) = direct_skill_context_answer(input.goal, skill_context.as_deref()) {
+		if let Some(answer) = direct_skill_context_answer(&skill_query, skill_context.as_deref()) {
 			log_runtime_output(
 				"used deterministic installed skill answer",
 				[
@@ -436,6 +452,14 @@ fn skill_prompt_context_budget(input: &ToolInput<'_>) -> usize {
 	usize::try_from(available_tokens.saturating_mul(3))
 		.unwrap_or(MAX_SKILL_PROMPT_CONTEXT_CHARS)
 		.min(MAX_SKILL_PROMPT_CONTEXT_CHARS)
+}
+
+fn skill_context_query(input: &ToolInput<'_>) -> String {
+	if input.summary.is_empty() {
+		input.goal.to_string()
+	} else {
+		format!("{}\n{}", input.goal, input.summary)
+	}
 }
 
 fn direct_skill_context_answer(goal: &str, skill_context: Option<&str>) -> Option<String> {

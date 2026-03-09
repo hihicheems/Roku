@@ -97,6 +97,8 @@
 | TP-09 | 对简单对话型 `ReAct` 请求降级为单步 direct-action outline，减少不必要的观察步骤与 live LLM 波动 | §7.3 ReAct / §22 风险缓解 | DONE |
 | TP-10 | 对显式 `install skill from <url>` 请求走确定性单步 outline，避免被通用 planner 稀释 | §13.2 Skill 生命周期 / §22 风险缓解 | DONE |
 | TP-11 | 对显式已安装 skill 使用请求走确定性单步 outline，避免被通用 planner 拆散后丢失权威 skill 上下文 | §13.2 Skill 生命周期 / §22 风险缓解 | DONE |
+| TP-12 | 对“先检查是否已安装、若缺失再安装”的 skill 请求也走确定性 install fast path，避免 Telegram 多轮里回退到 research worker 并超预算 | §13.2 Skill 生命周期 / §22 风险缓解 | DONE |
+| TP-13 | 引入分层 skill shortcut resolver：高精度锚点抽取 + 结构化意图分类 + policy merge，替代脆弱的关键词硬编码路由 | §13.2 Skill 生命周期 / §22 风险缓解 | DONE |
 
 ## roku-execution-graph-builder
 
@@ -127,6 +129,7 @@
 | AF-08 | 支持带外部 coding provider 的组合 worker profile | §7.7 / §13.4 | TODO |
 | AF-09 | 增加组织级 profile 模板与租户级 policy override | §17 OrgPolicy | TODO |
 | AF-10 | 为 `skill.install` 提供专用 profile 默认预算，避免 skill 下载/安装被通用 worker 时间预算截断 | §13.2 Skill 生命周期 / §14 预算治理 | DONE |
+| AF-11 | 将 skill worker 默认 capability 升级为 `skill.ensure_installed`，同时保留 legacy alias 兼容已有节点 | §13.2 Skill 生命周期 / §14 预算治理 | DONE |
 
 ## roku-agent-runtime
 
@@ -218,6 +221,8 @@
 | SR-06 | 接入 `roku-agent-runtime` / live prompt 链路，让已安装 skill 可被执行与引用 | §13 Tool / Skill / MCP | DONE |
 | SR-07 | 对超大 `SKILL.md` / supporting docs 做 prompt-budget 截断与优先级裁剪，避免安装后无法激活 | §13.2 Skill 生命周期 / 运行稳健性 | DONE |
 | SR-08 | 禁止 disabled skill registry 预初始化阻塞式 HTTP client，并在精确问答与概览问答之间切换合适的 excerpt 策略 | §13.2 Skill 生命周期 / 运行稳健性 | DONE |
+| SR-09 | 让相同来源的重复安装请求返回“already installed”并复用既有 registry 记录，支持条件式安装对话 | §13.2 Skill 生命周期 / 运行稳健性 | DONE |
+| SR-10 | 为 planner 暴露 installed skill 名称匹配 / canonical lookup 能力，并把安装语义提升为 `ensure installed` | §13.2 Skill 生命周期 / 运行稳健性 | DONE |
 
 ## roku-mcp-bridge
 

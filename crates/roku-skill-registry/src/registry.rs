@@ -117,10 +117,51 @@ impl SkillRegistry {
 		source_url: &str,
 		activated_by: &str,
 	) -> Result<SkillInstallReport, SkillRegistryError> {
+		self.ensure_installed_from_url(source_url, activated_by)
+	}
+
+	pub fn ensure_installed_from_url(
+		&self,
+		source_url: &str,
+		activated_by: &str,
+	) -> Result<SkillInstallReport, SkillRegistryError> {
 		let root = self.root_path()?;
 		ensure_registry_layout(root)?;
 
 		let source = SkillSource::parse(source_url)?;
+		if let Some(existing) = self
+			.list_skills()?
+			.into_iter()
+			.find(|record| skill_source_matches(&record.source, &source))
+		{
+			let install_dir = root.join(existing.install_dir.trim_start_matches("./"));
+			let install_dir = display_path(&install_dir);
+			let message = format!(
+				"Skill `{}` is already installed from {} at {}. Reference `{}` in future requests to activate it.",
+				existing.descriptor.name,
+				source.original_url(),
+				install_dir,
+				existing.descriptor.name,
+			);
+			log_skill_event(
+				"skill already installed",
+				[
+					("skill_name", existing.descriptor.name.clone()),
+					("source_url", source.original_url().to_string()),
+					("install_dir", install_dir.clone()),
+				],
+			);
+
+			return Ok(SkillInstallReport {
+				skill_name: existing.descriptor.name,
+				version: existing.descriptor.version,
+				source_url: source.original_url().to_string(),
+				install_dir,
+				installed_files: existing.installed_files,
+				activated_by: activated_by.to_string(),
+				message,
+			});
+		}
 		log_skill_event(
 			"installing skill from source",
 			[
@@ -189,6 +230,29 @@ impl SkillRegistry {
 			activated_by: activated_by.to_string(),
 			message,
 		})
+	}
+
+	pub fn referenced_skill_names(&self, query: &str) -> Result<Vec<String>, SkillRegistryError> {
+		let mut names = self
+			.list_skills()?
+			.into_iter()
+			.filter(|record| query_mentions_skill(query, &record.descriptor.name))
+			.map(|record| record.descriptor.name)
+			.collect::<Vec<_>>();
+		names.sort();
+		names.dedup();
+		Ok(names)
+	}
+
+	pub fn resolve_installed_skill_name(
+		&self,
+		candidate: &str,
+	) -> Result<Option<String>, SkillRegistryError> {
+		Ok(self
+			.list_skills()?
+			.into_iter()
+			.find(|record| skill_name_matches(candidate, &record.descriptor.name))
+			.map(|record| record.descriptor.name))
 	}
 
 	pub fn list_skills(&self) -> Result<Vec<InstalledSkillRecord>, SkillRegistryError> {
@@ -1051,6 +1115,45 @@ fn skill_name_matches(candidate: &str, skill_name: &str) -> bool {
 	!normalized_name.is_empty() && normalized_candidate == normalized_name
 }
 
+fn skill_source_matches(left: &SkillSource, right: &SkillSource) -> bool {
+	match (left, right) {
+		(
+			SkillSource::GitHub {
+				owner: left_owner,
+				repo: left_repo,
+				reference: left_reference,
+				subpath: left_subpath,
+				..
+			},
+			SkillSource::GitHub {
+				owner: right_owner,
+				repo: right_repo,
+				reference: right_reference,
+				subpath: right_subpath,
+				..
+			},
+		) => {
+			left_owner == right_owner
+				&& left_repo == right_repo
+				&& left_reference == right_reference
+				&& left_subpath == right_subpath
+		}
+		(
+			SkillSource::ArchiveZip {
+				archive_url: left_archive_url,
+				subpath: left_subpath,
+				..
+			},
+			SkillSource::ArchiveZip {
+				archive_url: right_archive_url,
+				subpath: right_subpath,
+				..
+			},
+		) => left_archive_url == right_archive_url && left_subpath == right_subpath,
+		_ => false,
+	}
+}
+
 fn query_keywords(query: &str) -> Vec<String> {
 	normalize_skill_text(query)
 		.split_whitespace()
@@ -1230,6 +1333,76 @@ mod tests {
 		let records = registry.list_skills().expect("list should succeed");
 		assert_eq!(records.len(), 1);
 		assert_eq!(records[0].descriptor.name, "claude-api");
+	}
+
+	#[test]
+	fn returns_existing_install_report_when_source_is_already_installed() {
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let registry = SkillRegistry::file_backed(root.path().join("skills")).with_fetcher(
+			Arc::new(StaticArchiveFetcher {
+				archive: DownloadedArchive {
+					archive_url: "https://github.com/anthropics/skills/archive/refs/heads/main.zip"
+						.to_string(),
+					bytes: test_skill_archive_bytes(),
+					resolved_reference: Some("main".to_string()),
+				},
+			}),
+		);
+
+		let first = registry
+			.install_from_url(
+				"https://github.com/anthropics/skills/tree/main/skills/claude-api",
+				"test-suite",
+			)
+			.expect("first install should succeed");
+		let second = registry
+			.install_from_url(
+				"https://github.com/anthropics/skills/tree/main/skills/claude-api",
+				"test-suite",
+			)
+			.expect("second install should succeed");
+
+		assert_eq!(first.skill_name, second.skill_name);
+		assert_eq!(first.install_dir, second.install_dir);
+		assert!(second.message.contains("already installed"));
+		assert_eq!(
+			registry.list_skills().expect("list should succeed").len(),
+			1
+		);
+	}
+
+	#[test]
+	fn returns_existing_install_report_for_equivalent_github_source_forms() {
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let registry = SkillRegistry::file_backed(root.path().join("skills")).with_fetcher(
+			Arc::new(StaticArchiveFetcher {
+				archive: DownloadedArchive {
+					archive_url: "https://github.com/anthropics/skills/archive/refs/heads/main.zip"
+						.to_string(),
+					bytes: test_skill_archive_bytes(),
+					resolved_reference: Some("main".to_string()),
+				},
+			}),
+		);
+
+		registry
+			.install_from_url(
+				"https://github.com/anthropics/skills/tree/main/skills/claude-api",
+				"test-suite",
+			)
+			.expect("tree install should succeed");
+		let second = registry
+			.install_from_url(
+				"https://github.com/anthropics/skills/blob/main/skills/claude-api/SKILL.md",
+				"test-suite",
+			)
+			.expect("blob install should resolve as existing");
+
+		assert!(second.message.contains("already installed"));
+		assert_eq!(
+			registry.list_skills().expect("list should succeed").len(),
+			1
+		);
 	}
 
 	#[test]

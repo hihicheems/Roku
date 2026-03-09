@@ -222,7 +222,10 @@ fn default_profiles() -> Vec<CapabilityProfile> {
 		CapabilityProfile::new(
 			PROFILE_SKILL,
 			vec!["skill.".to_string()],
-			vec!["skill.install".to_string()],
+			vec![
+				"skill.ensure_installed".to_string(),
+				"skill.install".to_string(),
+			],
 			10_000,
 			120_000,
 		),
@@ -365,12 +368,15 @@ mod tests {
 	fn select_skill_profile_for_skill_capabilities() {
 		let factory = AgentInstanceFactory::default();
 		let task_id = TaskId("task-skill".to_string());
-		let node = execution_node("node-s1", vec!["skill.install"]);
+		let node = execution_node("node-s1", vec!["skill.ensure_installed"]);
 
 		let spec = factory.build_for_node(&task_id, &node);
 
 		assert!(spec.instance_id.starts_with("agent-skill-"));
-		assert!(spec.capabilities.contains(&"skill.install".to_string()));
+		assert!(
+			spec.capabilities
+				.contains(&"skill.ensure_installed".to_string())
+		);
 		assert!(spec.policy_bindings.time_budget_ms >= 45_000);
 	}
 
