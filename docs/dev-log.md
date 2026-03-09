@@ -1,5 +1,43 @@
 # Roku Agent Dev Log
 
+## 2026-03-09 - Session Milestone (Phase 31)
+
+### Completed Modules
+
+- `roku-skill-registry`
+  - Stopped the disabled registry path from eagerly constructing the blocking HTTP fetch client, so async HTTP/API tests and default runtime bootstrap no longer panic while skills are disabled.
+  - Refined query-focused excerpt behavior so exact factual questions still get compressed authoritative snippets, while broader summary questions keep the high-level skill workflow context.
+- `roku-agent-instance-factory`
+  - Added a dedicated `skill` profile with a longer default time budget so runtime-driven skill installation has enough wall-clock headroom.
+- `roku-execution-graph-builder`
+  - Extended `skill.install` execution deadlines and reserved a larger token budget for the `use-installed-skill` fast path so installed-skill usage no longer times out or exceed tiny node budgets.
+- `roku-api-gateway`
+  - Made the replay route regression test safe to run under the synchronous test harness while still exercising the runtime-backed replay report path.
+
+### Verification Status
+
+- `ROKU_HOME=.roku/cmd-skill-validate-4 ROKU_SKILL_ROOT=.roku/cmd-skill-validate-4/skills cargo run -p roku-cmd -- skill install https://github.com/anthropics/skills/tree/main/skills/skill-creator`: passed
+- `ROKU_HOME=.roku/cmd-skill-validate-4 ROKU_SKILL_ROOT=.roku/cmd-skill-validate-4/skills cargo run -p roku-cmd -- skill list`: passed
+- `ROKU_HOME=.roku/cmd-skill-validate-4 ROKU_SKILL_ROOT=.roku/cmd-skill-validate-4/skills cargo run -p roku-cmd -- skill show skill-creator`: passed
+- `OPENROUTER_API_KEY=... TELOXIDE_TOKEN=... ROKU_HOME=.roku/live-skill-validate-4 ROKU_SKILL_ROOT=.roku/live-skill-validate-4/skills cargo run -p roku-cmd -- live-once --session-id agent-skill-install "Install skill from https://github.com/anthropics/skills/tree/main/skills/skill-creator"`: passed
+- `OPENROUTER_API_KEY=... TELOXIDE_TOKEN=... ROKU_HOME=.roku/live-skill-validate-4 ROKU_SKILL_ROOT=.roku/live-skill-validate-4/skills cargo run -p roku-cmd -- telegram-once --session-id agent-skill-usage-tg "Use the skill-creator skill. According to that skill, what exact field names must grading.json expectations use, and how do baseline runs differ when creating a new skill versus improving an existing skill?"`: passed
+- `OPENROUTER_API_KEY=... TELOXIDE_TOKEN=... ROKU_HOME=.roku/live-skill-validate-4 ROKU_SKILL_ROOT=.roku/live-skill-validate-4/skills cargo run -p roku-cmd -- live-once --session-id agent-skill-usage-2b "Use the skill-creator skill. Summarize the core loop it recommends for creating and iterating on a skill."`: passed
+- `just fmt`: passed
+- `just lint`: passed
+- `just t`: passed
+
+### Remaining Work
+
+- Installed skills now work for the validated `skill-creator` slice, but broader skill quality still depends on prompt/context shaping rather than a richer local retrieval or semantic indexing layer.
+- Skill installation still lacks package validation / smoke tests before activation.
+- Tool / MCP governance under `TR-10` is still not complete.
+
+### Next Recommended Steps
+
+1. Add install-time validation hooks so malformed skill packages fail before activation.
+2. Consider a richer local retrieval path for non-exact skill usage questions if more skills show quality cliffs.
+3. Continue `TR-10` toward governed skill and MCP catalog management.
+
 ## 2026-03-09 - Session Milestone (Phase 30)
 
 ### Completed Modules

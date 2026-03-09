@@ -111,6 +111,7 @@
 | GB-07 | 自动注入 approval / aggregation / retry / dead-letter 辅助节点 | §8.2 / §15.3 人审闸门 | DONE |
 | GB-08 | 增加条件边、条件分支和受控回环 DAG 编译能力 | §8.2 条件分支 / 回环有限图 | DONE |
 | GB-09 | 为每个节点写入预算、deadline、capability requirement snapshot | §8.4 / §14 | DONE |
+| GB-10 | 对 `skill.install` 与 `use-installed-skill` 这类 skill 关键节点调高 deadline / token budget，避免被默认执行预算误杀 | §13.2 Skill 生命周期 / §14 预算治理 | DONE |
 
 ## roku-agent-instance-factory
 
@@ -125,6 +126,7 @@
 | AF-07 | 让 profile 装配显式绑定审批策略、模型路由策略和验证策略 | §7.6 PolicyBindings | TODO |
 | AF-08 | 支持带外部 coding provider 的组合 worker profile | §7.7 / §13.4 | TODO |
 | AF-09 | 增加组织级 profile 模板与租户级 policy override | §17 OrgPolicy | TODO |
+| AF-10 | 为 `skill.install` 提供专用 profile 默认预算，避免 skill 下载/安装被通用 worker 时间预算截断 | §13.2 Skill 生命周期 / §14 预算治理 | DONE |
 
 ## roku-agent-runtime
 
@@ -215,6 +217,7 @@
 | SR-05 | 增加 success rate / failure rate / permission deny rate 统计与熔断 | §13.2 观测 / 回滚 | TODO |
 | SR-06 | 接入 `roku-agent-runtime` / live prompt 链路，让已安装 skill 可被执行与引用 | §13 Tool / Skill / MCP | DONE |
 | SR-07 | 对超大 `SKILL.md` / supporting docs 做 prompt-budget 截断与优先级裁剪，避免安装后无法激活 | §13.2 Skill 生命周期 / 运行稳健性 | DONE |
+| SR-08 | 禁止 disabled skill registry 预初始化阻塞式 HTTP client，并在精确问答与概览问答之间切换合适的 excerpt 策略 | §13.2 Skill 生命周期 / 运行稳健性 | DONE |
 
 ## roku-mcp-bridge
 

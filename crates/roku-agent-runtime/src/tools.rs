@@ -145,7 +145,7 @@ impl SkillInstallTool {
 				SKILL_TOOL_NAME,
 				vec!["skill.install".to_string()],
 				SandboxProfile::ReadOnlyFs,
-				30_000,
+				120_000,
 			),
 			registry,
 		}

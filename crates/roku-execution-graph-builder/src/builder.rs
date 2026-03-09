@@ -322,7 +322,7 @@ fn default_node_metadata(
 	let (deadline_ms, retry_policy, rerun_policy, requires_manual_resume, allows_partial_rerun) =
 		match kind {
 			TaskNodeKind::Execution => (
-				45_000,
+				execution_deadline_ms(capabilities),
 				RetryPolicy {
 					max_attempts: 2,
 					retry_on_timeout: true,
@@ -382,13 +382,32 @@ fn default_node_metadata(
 			allows_partial_rerun,
 		},
 		budget_snapshot: NodeBudgetSnapshot {
-			token_budget: 1_000u64.saturating_add(capability_count.saturating_mul(250)),
+			token_budget: execution_token_budget(node_id, capability_count),
 			time_budget_ms: deadline_ms,
 		},
 		deadline_ms,
 		capability_requirements_snapshot: capabilities.to_vec(),
 		retry_policy,
 		rerun_policy,
+	}
+}
+
+fn execution_deadline_ms(capabilities: &[String]) -> u64 {
+	if capabilities
+		.iter()
+		.any(|capability| capability == "skill.install")
+	{
+		120_000
+	} else {
+		45_000
+	}
+}
+
+fn execution_token_budget(node_id: &NodeId, capability_count: u64) -> u64 {
+	if node_id.0 == "use-installed-skill" {
+		4_000
+	} else {
+		1_000u64.saturating_add(capability_count.saturating_mul(250))
 	}
 }
 
@@ -491,6 +510,67 @@ mod tests {
 				&& edge.to == NodeId("validation-gate".to_string())
 				&& edge.condition == TaskEdgeCondition::OnApproved
 		}));
+	}
+
+	#[test]
+	fn skill_install_steps_get_extended_execution_deadline() {
+		let builder = ExecutionGraphBuilder;
+		let graph = builder
+			.compile(
+				TaskId("t-skill".to_string()),
+				&PlanOutline {
+					goal: "install a skill".to_string(),
+					steps: vec![PlanStep {
+						step_id: "install-skill".to_string(),
+						summary: "install skill".to_string(),
+						required_capabilities: vec!["skill.install".to_string()],
+						requires_approval: false,
+						depends_on: Vec::new(),
+						branch: None,
+						loop_control: None,
+					}],
+				},
+				&GraphBuildConfig::default(),
+			)
+			.expect("graph compilation should succeed");
+
+		let node = graph
+			.nodes
+			.iter()
+			.find(|node| node.node_id == NodeId("install-skill".to_string()))
+			.expect("skill install node should exist");
+		assert_eq!(node.deadline_ms, 120_000);
+		assert_eq!(node.budget_snapshot.time_budget_ms, 120_000);
+	}
+
+	#[test]
+	fn explicit_skill_usage_steps_get_expanded_token_budget() {
+		let builder = ExecutionGraphBuilder;
+		let graph = builder
+			.compile(
+				TaskId("t-skill-usage".to_string()),
+				&PlanOutline {
+					goal: "use an installed skill".to_string(),
+					steps: vec![PlanStep {
+						step_id: "use-installed-skill".to_string(),
+						summary: "use installed skill".to_string(),
+						required_capabilities: vec!["tool.invoke".to_string()],
+						requires_approval: false,
+						depends_on: Vec::new(),
+						branch: None,
+						loop_control: None,
+					}],
+				},
+				&GraphBuildConfig::default(),
+			)
+			.expect("graph compilation should succeed");
+
+		let node = graph
+			.nodes
+			.iter()
+			.find(|node| node.node_id == NodeId("use-installed-skill".to_string()))
+			.expect("skill usage node should exist");
+		assert_eq!(node.budget_snapshot.token_budget, 4_000);
 	}
 
 	#[test]
