@@ -14,8 +14,12 @@
 
 use std::sync::Arc;
 
+use roku_common_types::ResourceSelector;
 use roku_llm_adapter::{GenerationRequest, LlmAdapterError, LlmRouter, RiskTier};
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
+use roku_resource_catalog::{
+	CatalogDescriptor, ResourceCatalog, ResourceCost, ResourceKind, ResourceRisk,
+};
 use roku_skill_registry::SkillRegistry;
 use roku_tool_runtime::{
 	RuntimeConstraints, SandboxProfile, Tool, ToolDescriptor, ToolFailure, ToolInvocationRequest,
@@ -33,6 +37,84 @@ pub(crate) const SKILL_TOOL_NAME: &str = "skill.ensure_installed";
 pub(crate) const LEGACY_SKILL_TOOL_NAME: &str = "skill.install";
 const LLM_TOOL_TIMEOUT_MS: u64 = 45_000;
 const MAX_SKILL_PROMPT_CONTEXT_CHARS: usize = 16_000;
+
+pub(crate) fn build_resource_catalog(skill_registry: &SkillRegistry) -> ResourceCatalog {
+	let mut entries = vec![
+		tool_catalog_descriptor(
+			SKILL_TOOL_NAME,
+			"Install a skill package from a supported source URL.",
+			vec![
+				"install".to_string(),
+				"skills".to_string(),
+				"registry".to_string(),
+			],
+			vec!["Install the claude-api skill from a GitHub URL.".to_string()],
+			vec!["source_url".to_string()],
+			ResourceRisk::Medium,
+			ResourceCost {
+				estimated_tokens: 0,
+				estimated_latency_ms: 120_000,
+			},
+			vec!["skill.ensure_installed".to_string()],
+		),
+		tool_catalog_descriptor(
+			RESEARCH_TOOL_NAME,
+			"Research a topic, read context, and synthesize grounded findings.",
+			vec![
+				"research".to_string(),
+				"analysis".to_string(),
+				"information".to_string(),
+			],
+			vec!["Summarize the latest requirements from the project docs.".to_string()],
+			vec!["goal".to_string(), "summary".to_string()],
+			ResourceRisk::Low,
+			ResourceCost {
+				estimated_tokens: 600,
+				estimated_latency_ms: 30_000,
+			},
+			vec!["information.read".to_string()],
+		),
+		tool_catalog_descriptor(
+			DATA_TOOL_NAME,
+			"Transform datasets, aggregate metrics, or run structured data processing.",
+			vec![
+				"data".to_string(),
+				"metrics".to_string(),
+				"pipeline".to_string(),
+			],
+			vec!["Aggregate the experiment results into a compact table.".to_string()],
+			vec!["goal".to_string(), "summary".to_string()],
+			ResourceRisk::Low,
+			ResourceCost {
+				estimated_tokens: 700,
+				estimated_latency_ms: 35_000,
+			},
+			vec!["data.read".to_string()],
+		),
+		tool_catalog_descriptor(
+			REVIEW_TOOL_NAME,
+			"Review a draft, assess correctness, and call out residual risks.",
+			vec![
+				"review".to_string(),
+				"validation".to_string(),
+				"risk".to_string(),
+			],
+			vec!["Review the proposed plan and list the main risks.".to_string()],
+			vec!["goal".to_string(), "summary".to_string()],
+			ResourceRisk::Medium,
+			ResourceCost {
+				estimated_tokens: 500,
+				estimated_latency_ms: 20_000,
+			},
+			vec!["review.check".to_string()],
+		),
+	];
+	if let Ok(skill_entries) = skill_registry.catalog_descriptors() {
+		entries.extend(skill_entries);
+	}
+
+	ResourceCatalog::new(entries)
+}
 
 pub(crate) fn build_builtin_tool_runtime(skill_registry: SkillRegistry) -> ToolRuntime {
 	let mut runtime = ToolRuntime::default();
@@ -455,10 +537,20 @@ fn skill_prompt_context_budget(input: &ToolInput<'_>) -> usize {
 }
 
 fn skill_context_query(input: &ToolInput<'_>) -> String {
-	if input.summary.is_empty() {
+	let selected_skills = input
+		.resource_selectors
+		.iter()
+		.filter_map(|selector| selector.strip_prefix("skill:"))
+		.collect::<Vec<_>>();
+	let request_text = if input.summary.is_empty() {
 		input.goal.to_string()
 	} else {
 		format!("{}\n{}", input.goal, input.summary)
+	};
+	if selected_skills.is_empty() {
+		request_text
+	} else {
+		format!("{}\n{}", selected_skills.join("\n"), request_text)
 	}
 }
 
@@ -770,6 +862,7 @@ struct ToolInput<'a> {
 	goal: &'a str,
 	summary: &'a str,
 	conversation_history: &'a str,
+	resource_selectors: Vec<String>,
 	budget_tokens: u64,
 	time_budget_ms: u64,
 }
@@ -799,6 +892,17 @@ fn request_input(request: &ToolInvocationRequest) -> Result<ToolInput<'_>, ToolF
 		conversation_history: input
 			.get("conversation_history")
 			.and_then(Value::as_str)
+			.unwrap_or_default(),
+		resource_selectors: input
+			.get("resource_selectors")
+			.and_then(Value::as_array)
+			.map(|values| {
+				values
+					.iter()
+					.filter_map(Value::as_str)
+					.map(str::to_string)
+					.collect::<Vec<_>>()
+			})
 			.unwrap_or_default(),
 		budget_tokens: input
 			.get("budget_tokens")
@@ -840,6 +944,33 @@ fn tool_descriptor(
 			sandbox_profile,
 			deterministic_hooks: true,
 		},
+	}
+}
+
+fn tool_catalog_descriptor(
+	name: &str,
+	description: &str,
+	tags: Vec<String>,
+	examples: Vec<String>,
+	input_schema: Vec<String>,
+	risk: ResourceRisk,
+	cost: ResourceCost,
+	required_capabilities: Vec<String>,
+) -> CatalogDescriptor {
+	CatalogDescriptor {
+		selector: ResourceSelector::tool(name),
+		kind: ResourceKind::Tool,
+		name: name.to_string(),
+		description: description.to_string(),
+		tags,
+		examples,
+		input_schema,
+		risk,
+		cost,
+		required_capabilities,
+		summary: description.to_string(),
+		key_commands: Vec::new(),
+		use_cases: Vec::new(),
 	}
 }
 

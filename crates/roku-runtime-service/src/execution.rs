@@ -16,9 +16,10 @@ use roku_agent_runtime::AgentWorker;
 use std::collections::HashMap;
 
 use roku_common_types::{
-	ApprovalStatus, CompensationAction, CompensationRecord, CompensationStatus, ErrorClass,
-	EvidenceItem, RecoveryEligibility, ResponseEnvelope, ResponseStatus, ResultEnvelope,
-	ResultStatus, RuntimeError, Task, TaskEventKind, TaskId, TaskNode, TaskNodeKind, TaskState,
+	ApprovalStatus, CapabilityToken, CompensationAction, CompensationRecord, CompensationStatus,
+	ErrorClass, EvidenceItem, RecoveryEligibility, ResponseEnvelope, ResponseStatus,
+	ResultEnvelope, ResultStatus, RuntimeError, Task, TaskEventKind, TaskId, TaskNode,
+	TaskNodeKind, TaskState,
 };
 use roku_execution_graph_builder::TaskGraphScheduler;
 use roku_observability::{AuditCorrelation, AuditRecord};
@@ -268,26 +269,24 @@ impl RuntimeService {
 		node: &TaskNode,
 		mode: RunMode,
 	) -> Result<Option<ResponseEnvelope>, RuntimeError> {
-		let spec = self.factory.build_for_node_with_history(
+		let mut spec = self.factory.build_for_node_with_history(
 			&task.task_id,
 			node,
 			&task.conversation_history,
 		);
 		let capability_allowed = {
 			let mut state = self.lock_state()?;
-			let token = state
-				.capability_auth
-				.issue(roku_capability_auth::CapabilityRequest {
-					subject: spec.instance_id.clone(),
-					resource: "tool.runtime".to_string(),
-					actions: if matches!(mode, RunMode::CapabilityDenied) {
-						vec!["read".to_string()]
-					} else {
-						vec!["invoke".to_string()]
-					},
-					expires_at_unix: 999_999,
-				});
-			let is_allowed = state.capability_auth.verify(&token, "invoke", 100);
+			let capability_tokens = issue_node_capability_tokens(
+				&mut state.capability_auth,
+				&spec.instance_id,
+				node,
+				self.runtime.resource_catalog(),
+				!matches!(mode, RunMode::CapabilityDenied),
+			);
+			let is_allowed =
+				verify_node_capabilities(&mut state.capability_auth, node, &capability_tokens);
+			spec.capabilities = flatten_granted_capabilities(&capability_tokens);
+			spec.capability_tokens = capability_tokens.clone();
 
 			if !is_allowed {
 				self.audit_sink
@@ -295,7 +294,7 @@ impl RuntimeService {
 						AuditRecord::new(
 							spec.instance_id.clone(),
 							"invoke",
-							token.resource,
+							node_resource_label(node),
 							"denied",
 						)
 						.with_correlation(AuditCorrelation {
@@ -692,6 +691,100 @@ fn classify_resume_state(ready_nodes: &[TaskNode]) -> TaskState {
 		TaskState::Validating
 	} else {
 		TaskState::Executing
+	}
+}
+
+fn issue_node_capability_tokens(
+	capability_auth: &mut roku_capability_auth::CapabilityAuthority,
+	subject: &str,
+	node: &TaskNode,
+	catalog: &roku_resource_catalog::ResourceCatalog,
+	allow_invoke: bool,
+) -> Vec<CapabilityToken> {
+	let mut tokens = Vec::new();
+	if node.resources.is_empty() && node.capabilities.is_empty() {
+		return tokens;
+	}
+
+	let actions = if allow_invoke {
+		vec!["invoke".to_string()]
+	} else {
+		vec!["read".to_string()]
+	};
+
+	if node.resources.is_empty() {
+		tokens.push(
+			capability_auth.issue(roku_capability_auth::CapabilityRequest {
+				subject: subject.to_string(),
+				resource: roku_common_types::ResourceSelector::tool("internal.execution"),
+				actions,
+				granted_capabilities: if allow_invoke {
+					node.capabilities.clone()
+				} else {
+					Vec::new()
+				},
+				expires_at_unix: 999_999,
+			}),
+		);
+		return tokens;
+	}
+
+	for resource in &node.resources {
+		let granted_capabilities = catalog
+			.descriptor(resource)
+			.map(|descriptor| descriptor.required_capabilities.clone())
+			.unwrap_or_default();
+		tokens.push(
+			capability_auth.issue(roku_capability_auth::CapabilityRequest {
+				subject: subject.to_string(),
+				resource: resource.clone(),
+				actions: actions.clone(),
+				granted_capabilities: if allow_invoke {
+					granted_capabilities
+				} else {
+					Vec::new()
+				},
+				expires_at_unix: 999_999,
+			}),
+		);
+	}
+
+	tokens
+}
+
+fn verify_node_capabilities(
+	capability_auth: &mut roku_capability_auth::CapabilityAuthority,
+	node: &TaskNode,
+	tokens: &[CapabilityToken],
+) -> bool {
+	node.capabilities.iter().all(|capability| {
+		tokens
+			.iter()
+			.any(|token| capability_auth.verify(token, "invoke", Some(capability), 100))
+	})
+}
+
+fn flatten_granted_capabilities(tokens: &[CapabilityToken]) -> Vec<String> {
+	let mut capabilities = Vec::new();
+	for token in tokens {
+		for capability in &token.granted_capabilities {
+			if !capabilities.contains(capability) {
+				capabilities.push(capability.clone());
+			}
+		}
+	}
+	capabilities
+}
+
+fn node_resource_label(node: &TaskNode) -> String {
+	if node.resources.is_empty() {
+		"internal.execution".to_string()
+	} else {
+		node.resources
+			.iter()
+			.map(|resource| resource.display_key())
+			.collect::<Vec<_>>()
+			.join(",")
 	}
 }
 

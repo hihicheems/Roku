@@ -14,13 +14,14 @@
 
 //! Capability issuance and verification.
 
-use roku_common_types::CapabilityToken;
+use roku_common_types::{CapabilityToken, ResourceSelector};
 
 #[derive(Debug, Clone)]
 pub struct CapabilityRequest {
 	pub subject: String,
-	pub resource: String,
+	pub resource: ResourceSelector,
 	pub actions: Vec<String>,
+	pub granted_capabilities: Vec<String>,
 	pub expires_at_unix: u64,
 }
 
@@ -43,6 +44,7 @@ impl CapabilityAuthority {
 			subject: request.subject,
 			resource: request.resource,
 			actions: request.actions,
+			granted_capabilities: request.granted_capabilities,
 			expires_at_unix: request.expires_at_unix,
 		};
 		self.audit_log.push(AuditEvent {
@@ -70,6 +72,7 @@ impl CapabilityAuthority {
 			subject: parent.subject.clone(),
 			resource: parent.resource.clone(),
 			actions,
+			granted_capabilities: parent.granted_capabilities.clone(),
 			expires_at_unix: parent.expires_at_unix,
 		};
 
@@ -86,10 +89,17 @@ impl CapabilityAuthority {
 		&mut self,
 		token: &CapabilityToken,
 		required_action: &str,
+		required_capability: Option<&str>,
 		now_unix: u64,
 	) -> bool {
 		let accepted = token.expires_at_unix >= now_unix
-			&& token.actions.iter().any(|action| action == required_action);
+			&& token.actions.iter().any(|action| action == required_action)
+			&& required_capability.is_none_or(|capability| {
+				token
+					.granted_capabilities
+					.iter()
+					.any(|granted| granted == capability)
+			});
 
 		self.audit_log.push(AuditEvent {
 			token_id: token.token_id.clone(),
@@ -118,12 +128,13 @@ mod tests {
 		let mut auth = CapabilityAuthority::default();
 		let token = auth.issue(CapabilityRequest {
 			subject: "agent-a".to_string(),
-			resource: "tool.echo".to_string(),
+			resource: ResourceSelector::tool("tool.echo"),
 			actions: vec!["read".to_string()],
+			granted_capabilities: vec!["tool.echo".to_string()],
 			expires_at_unix: 999,
 		});
 
-		assert!(!auth.verify(&token, "invoke", 100));
+		assert!(!auth.verify(&token, "invoke", Some("tool.echo"), 100));
 	}
 
 	#[test]
@@ -131,14 +142,15 @@ mod tests {
 		let mut auth = CapabilityAuthority::default();
 		let parent = auth.issue(CapabilityRequest {
 			subject: "agent-a".to_string(),
-			resource: "tool.echo".to_string(),
+			resource: ResourceSelector::tool("tool.echo"),
 			actions: vec!["invoke".to_string(), "read".to_string()],
+			granted_capabilities: vec!["tool.echo".to_string()],
 			expires_at_unix: 999,
 		});
 		let child = auth.attenuate(&parent, &[String::from("invoke")]);
 
-		assert!(auth.verify(&child, "invoke", 100));
-		assert!(!auth.verify(&child, "read", 100));
+		assert!(auth.verify(&child, "invoke", Some("tool.echo"), 100));
+		assert!(!auth.verify(&child, "read", Some("tool.echo"), 100));
 	}
 
 	#[test]
@@ -146,11 +158,12 @@ mod tests {
 		let mut auth = CapabilityAuthority::default();
 		let token = auth.issue(CapabilityRequest {
 			subject: "agent-a".to_string(),
-			resource: "tool.echo".to_string(),
+			resource: ResourceSelector::tool("tool.echo"),
 			actions: vec!["invoke".to_string()],
+			granted_capabilities: vec!["tool.echo".to_string()],
 			expires_at_unix: 10,
 		});
 
-		assert!(!auth.verify(&token, "invoke", 11));
+		assert!(!auth.verify(&token, "invoke", Some("tool.echo"), 11));
 	}
 }

@@ -1479,6 +1479,7 @@ dependencies = [
  "roku-common-types",
  "roku-llm-adapter",
  "roku-observability",
+ "roku-resource-catalog",
  "roku-skill-registry",
  "roku-tool-runtime",
  "serde_json",
@@ -1594,6 +1595,7 @@ name = "roku-execution-graph-builder"
 version = "0.1.0"
 dependencies = [
  "roku-common-types",
+ "roku-resource-catalog",
  "thiserror",
 ]
 
@@ -1646,6 +1648,14 @@ name = "roku-planning-engine"
 version = "0.1.0"
 
 [[package]]
+name = "roku-resource-catalog"
+version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+ "serde",
+]
+
+[[package]]
 name = "roku-runtime-service"
 version = "0.1.0"
 dependencies = [
@@ -1659,6 +1669,7 @@ dependencies = [
  "roku-observability",
  "roku-orchestrator",
  "roku-planning-engine",
+ "roku-resource-catalog",
  "roku-skill-registry",
  "roku-state-store",
  "roku-supervisor-agent",
@@ -1674,7 +1685,9 @@ name = "roku-skill-registry"
 version = "0.1.0"
 dependencies = [
  "reqwest",
+ "roku-common-types",
  "roku-observability",
+ "roku-resource-catalog",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1712,6 +1725,7 @@ dependencies = [
  "roku-common-types",
  "roku-llm-adapter",
  "roku-planning-engine",
+ "roku-resource-catalog",
  "roku-skill-registry",
  "serde",
  "serde_json",

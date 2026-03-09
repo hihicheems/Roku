@@ -287,6 +287,9 @@ pub struct PlanOutline {
 pub struct PlanStep {
 	pub step_id: String,
 	pub summary: String,
+	#[serde(default)]
+	pub resource_selectors: Vec<ResourceSelector>,
+	#[serde(default)]
 	pub required_capabilities: Vec<String>,
 	pub requires_approval: bool,
 	#[serde(default)]
@@ -393,6 +396,9 @@ pub struct TaskNode {
 	pub node_id: NodeId,
 	pub kind: TaskNodeKind,
 	pub description: String,
+	#[serde(default)]
+	pub resources: Vec<ResourceSelector>,
+	#[serde(default)]
 	pub capabilities: Vec<String>,
 	#[serde(default)]
 	pub dispatch_policy: TaskNodeDispatchPolicy,
@@ -438,6 +444,8 @@ pub struct AgentContext {
 	pub node_id: NodeId,
 	pub summary: String,
 	#[serde(default)]
+	pub resources: Vec<ResourceSelector>,
+	#[serde(default)]
 	pub conversation_history: Vec<ConversationTurn>,
 }
 
@@ -452,15 +460,48 @@ pub struct AgentInstanceSpec {
 	pub instance_id: String,
 	pub context: AgentContext,
 	pub capabilities: Vec<String>,
+	#[serde(default)]
+	pub capability_tokens: Vec<CapabilityToken>,
 	pub policy_bindings: PolicyBindings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ResourceSelector {
+	Tool { name: String },
+	Skill { name: String },
+}
+
+impl ResourceSelector {
+	pub fn tool(name: impl Into<String>) -> Self {
+		Self::Tool { name: name.into() }
+	}
+
+	pub fn skill(name: impl Into<String>) -> Self {
+		Self::Skill { name: name.into() }
+	}
+
+	pub fn name(&self) -> &str {
+		match self {
+			Self::Tool { name } | Self::Skill { name } => name,
+		}
+	}
+
+	pub fn display_key(&self) -> String {
+		match self {
+			Self::Tool { name } => format!("tool:{name}"),
+			Self::Skill { name } => format!("skill:{name}"),
+		}
+	}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityToken {
 	pub token_id: String,
 	pub subject: String,
-	pub resource: String,
+	pub resource: ResourceSelector,
 	pub actions: Vec<String>,
+	#[serde(default)]
+	pub granted_capabilities: Vec<String>,
 	pub expires_at_unix: u64,
 }
 

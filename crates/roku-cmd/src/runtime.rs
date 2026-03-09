@@ -108,9 +108,9 @@ pub(crate) fn build_live_runtime_service_from_env() -> Result<RuntimeService, Co
 		runtime_router,
 		skill_registry.clone(),
 	);
-	let planner = Box::new(LlmTaskPlanner::with_skill_registry(
+	let planner = Box::new(LlmTaskPlanner::with_resource_catalog(
 		planner_router,
-		skill_registry,
+		runtime.resource_catalog().clone(),
 	));
 	let store_config = sqlite_store_config(&layout);
 	let (artifact_store, experiment_registry) = build_runtime_data_plane(&layout);
@@ -295,6 +295,12 @@ fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandEr
 	let layout = LocalStorageLayout::from_env();
 	layout.ensure_dirs().map_err(CommandError::Io)?;
 	let skill_registry = build_skill_registry(&layout);
+	let runtime = GenericAgentRuntime::with_skill_registry(skill_registry);
+	let planner = Box::new(
+		roku_task_planner::AdaptiveTaskPlanner::with_resource_catalog(
+			runtime.resource_catalog().clone(),
+		),
+	);
 	let store_config = sqlite_store_config(&layout);
 	let (artifact_store, experiment_registry) = build_runtime_data_plane(&layout);
 
@@ -309,9 +315,9 @@ fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandEr
 			experiment_registry,
 		},
 		Arc::new(InMemoryAuditSink::default()),
-		GenericAgentRuntime::with_skill_registry(skill_registry),
+		runtime,
 		Arc::new(Metrics::default()),
-		Box::new(roku_task_planner::AdaptiveTaskPlanner::default()),
+		planner,
 	))
 }
 

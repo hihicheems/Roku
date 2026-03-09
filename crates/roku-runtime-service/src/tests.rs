@@ -744,6 +744,7 @@ fn service_reconstructs_execution_progress_from_persisted_results_after_restart(
 				steps: vec![roku_common_types::PlanStep {
 					step_id: "single-step".to_string(),
 					summary: "single-step".to_string(),
+					resource_selectors: Vec::new(),
 					required_capabilities: Vec::new(),
 					requires_approval: true,
 					depends_on: Vec::new(),

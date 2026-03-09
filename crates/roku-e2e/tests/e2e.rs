@@ -130,6 +130,7 @@ impl roku_task_planner::TaskPlanner for SingleStepPlanner {
 			steps: vec![PlanStep {
 				step_id: "single-step".to_string(),
 				summary: "single-step".to_string(),
+				resource_selectors: Vec::new(),
 				required_capabilities: Vec::new(),
 				requires_approval: false,
 				depends_on: Vec::new(),
@@ -153,6 +154,7 @@ impl roku_task_planner::TaskPlanner for FixedApprovalPlanner {
 			steps: vec![PlanStep {
 				step_id: "single-step".to_string(),
 				summary: "single-step".to_string(),
+				resource_selectors: Vec::new(),
 				required_capabilities: Vec::new(),
 				requires_approval: true,
 				depends_on: Vec::new(),

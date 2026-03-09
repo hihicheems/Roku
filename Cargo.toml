@@ -9,6 +9,7 @@ resolver = "3"
 members = [
     "crates/roku-cmd",
     "crates/roku-common-types",
+    "crates/roku-resource-catalog",
     "crates/roku-orchestrator",
     "crates/roku-supervisor-agent",
     "crates/roku-planning-engine",

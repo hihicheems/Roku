@@ -15,10 +15,11 @@
 use std::sync::Arc;
 
 use crate::result::policy_rejection_result;
-use crate::tools::{build_builtin_tool_runtime, build_llm_tool_runtime};
+use crate::tools::{build_builtin_tool_runtime, build_llm_tool_runtime, build_resource_catalog};
 use crate::workers::{data_worker, generic_worker, research_worker, review_worker, skill_worker};
 use roku_common_types::{AgentInstanceSpec, ResultEnvelope, TaskNode};
 use roku_llm_adapter::LlmRouter;
+use roku_resource_catalog::ResourceCatalog;
 use roku_skill_registry::SkillRegistry;
 use roku_tool_runtime::ToolRuntime;
 
@@ -40,14 +41,16 @@ struct WorkerRegistryEntry {
 pub struct GenericAgentRuntime {
 	workers: Vec<WorkerRegistryEntry>,
 	tool_runtime: Arc<ToolRuntime>,
+	resource_catalog: ResourceCatalog,
 }
 
 impl GenericAgentRuntime {
-	pub fn with_tool_runtime(tool_runtime: ToolRuntime) -> Self {
+	pub fn with_tool_runtime(tool_runtime: ToolRuntime, resource_catalog: ResourceCatalog) -> Self {
 		let shared_tool_runtime = Arc::new(tool_runtime);
 		let mut runtime = Self {
 			workers: Vec::new(),
 			tool_runtime: Arc::clone(&shared_tool_runtime),
+			resource_catalog,
 		};
 		runtime.register_worker(95, skill_worker(Arc::clone(&shared_tool_runtime)));
 		runtime.register_worker(90, research_worker(Arc::clone(&shared_tool_runtime)));
@@ -58,7 +61,8 @@ impl GenericAgentRuntime {
 	}
 
 	pub fn with_skill_registry(skill_registry: SkillRegistry) -> Self {
-		Self::with_tool_runtime(build_builtin_tool_runtime(skill_registry))
+		let resource_catalog = build_resource_catalog(&skill_registry);
+		Self::with_tool_runtime(build_builtin_tool_runtime(skill_registry), resource_catalog)
 	}
 
 	pub fn with_llm_router(router: LlmRouter) -> Self {
@@ -69,7 +73,15 @@ impl GenericAgentRuntime {
 		router: LlmRouter,
 		skill_registry: SkillRegistry,
 	) -> Self {
-		Self::with_tool_runtime(build_llm_tool_runtime(Arc::new(router), skill_registry))
+		let resource_catalog = build_resource_catalog(&skill_registry);
+		Self::with_tool_runtime(
+			build_llm_tool_runtime(Arc::new(router), skill_registry),
+			resource_catalog,
+		)
+	}
+
+	pub fn resource_catalog(&self) -> &ResourceCatalog {
+		&self.resource_catalog
 	}
 
 	pub fn register_worker<W>(&mut self, priority: u8, worker: W)
@@ -153,12 +165,14 @@ mod tests {
 				task_id: TaskId("task-1".to_string()),
 				node_id: NodeId("node-1".to_string()),
 				summary: "summary".to_string(),
+				resources: Vec::new(),
 				conversation_history: Vec::new(),
 			},
 			capabilities: capabilities
 				.into_iter()
 				.map(std::string::ToString::to_string)
 				.collect(),
+			capability_tokens: Vec::new(),
 			policy_bindings: PolicyBindings {
 				budget_tokens: 10_000,
 				time_budget_ms: 30_000,
