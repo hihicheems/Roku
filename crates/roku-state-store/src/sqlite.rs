@@ -68,7 +68,11 @@ impl TaskRepository for SqliteTaskRepository {
 		connection.execute(
 			"INSERT INTO tasks (task_id, task_json, updated_at_unix_ms) VALUES (?1, ?2, ?3)
 			 ON CONFLICT(task_id) DO UPDATE SET task_json = excluded.task_json, updated_at_unix_ms = excluded.updated_at_unix_ms",
-			params![task.task_id.0, serde_json::to_string(&task)?, now_unix_ms()],
+			params![
+				task.task_id.0,
+				serde_json::to_string(&task)?,
+				sql_i64_from_u64(now_unix_ms(), "tasks.updated_at_unix_ms")?,
+			],
 		)?;
 		Ok(())
 	}
@@ -163,7 +167,11 @@ impl EventRepository for SqliteEventRepository {
 		let current_event_count = transaction.query_row(
 			"SELECT COUNT(*) FROM task_events WHERE task_id = ?1",
 			params![snapshot.task_id.0],
-			|row| row.get::<_, usize>(0),
+			|row| {
+				let count = row.get::<_, i64>(0)?;
+				sql_usize_from_i64(count, "task_events.count")
+					.map_err(rusqlite::Error::ToSqlConversionFailure)
+			},
 		)?;
 		let total_event_count =
 			previous_snapshot
@@ -209,7 +217,7 @@ impl EventRepository for SqliteEventRepository {
 			params![
 				snapshot.task_id.0,
 				serde_json::to_string(&snapshot)?,
-				now_unix_ms(),
+				sql_i64_from_u64(now_unix_ms(), "task_replay_snapshots.updated_at_unix_ms")?,
 			],
 		)?;
 		transaction.commit()?;
@@ -243,7 +251,7 @@ impl ApprovalRepository for SqliteApprovalRepository {
 				ticket.approval_id.0,
 				ticket.task_id.0,
 				serde_json::to_string(&ticket)?,
-				now_unix_ms(),
+				sql_i64_from_u64(now_unix_ms(), "approval_tickets.updated_at_unix_ms")?,
 			],
 		)?;
 		Ok(())
@@ -304,7 +312,7 @@ impl ResultRepository for SqliteResultRepository {
 				result.task_id.0,
 				result.node_id.0,
 				serde_json::to_string(&result)?,
-				now_unix_ms(),
+				sql_i64_from_u64(now_unix_ms(), "node_results.updated_at_unix_ms")?,
 			],
 		)?;
 		Ok(())
@@ -369,7 +377,11 @@ impl SessionPreferenceRepository for SqliteSessionPreferenceRepository {
 		connection.execute(
 			"INSERT INTO session_preferences (session_id, preferences_json, updated_at_unix_ms) VALUES (?1, ?2, ?3)
 			 ON CONFLICT(session_id) DO UPDATE SET preferences_json = excluded.preferences_json, updated_at_unix_ms = excluded.updated_at_unix_ms",
-			params![session_id, serde_json::to_string(&preferences)?, now_unix_ms()],
+			params![
+				session_id,
+				serde_json::to_string(&preferences)?,
+				sql_i64_from_u64(now_unix_ms(), "session_preferences.updated_at_unix_ms")?,
+			],
 		)?;
 		Ok(())
 	}
@@ -480,7 +492,7 @@ impl SqliteDispatchQueue {
 					Ok((
 						row.get::<_, Option<String>>(0)?,
 						row.get::<_, Option<String>>(1)?,
-						row.get::<_, Option<u64>>(2)?,
+						sql_opt_u64_from_row(row, 2, "dispatch_entries.expires_at_unix_ms")?,
 					))
 				},
 			)
@@ -527,7 +539,7 @@ impl DispatchQueue for SqliteDispatchQueue {
 				envelope.node_id.0,
 				envelope.attempt,
 				envelope.payload,
-				now_unix_ms(),
+				sql_i64_from_u64(now_unix_ms(), "dispatch_entries.updated_at_unix_ms")?,
 			],
 		)?;
 		Ok(())
@@ -544,7 +556,11 @@ impl DispatchQueue for SqliteDispatchQueue {
 		let leased_count: usize = transaction.query_row(
 			"SELECT COUNT(*) FROM dispatch_entries WHERE state = 'leased'",
 			[],
-			|row| row.get(0),
+			|row| {
+				let count = row.get::<_, i64>(0)?;
+				sql_usize_from_i64(count, "dispatch_entries.leased_count")
+					.map_err(rusqlite::Error::ToSqlConversionFailure)
+			},
 		)?;
 		if leased_count >= self.max_in_flight {
 			transaction.commit()?;
@@ -588,8 +604,8 @@ impl DispatchQueue for SqliteDispatchQueue {
 			params![
 				lease.consumer_id,
 				lease.lease_token,
-				lease.expires_at_unix_ms,
-				now_unix_ms,
+				sql_i64_from_u64(lease.expires_at_unix_ms, "dispatch_entries.expires_at_unix_ms")?,
+				sql_i64_from_u64(now_unix_ms, "dispatch_entries.updated_at_unix_ms")?,
 				lease.entry_id,
 			],
 		)?;
@@ -626,7 +642,11 @@ impl DispatchQueue for SqliteDispatchQueue {
 				 expires_at_unix_ms = NULL,
 				 updated_at_unix_ms = ?2
 			 WHERE entry_id = ?3 AND state = 'leased'",
-			params![retry.next_attempt, now_unix_ms(), lease.entry_id],
+			params![
+				retry.next_attempt,
+				sql_i64_from_u64(now_unix_ms(), "dispatch_entries.updated_at_unix_ms")?,
+				lease.entry_id,
+			],
 		)?;
 		transaction.commit()?;
 		Ok(())
@@ -653,8 +673,11 @@ impl DispatchQueue for SqliteDispatchQueue {
 			 WHERE entry_id = ?4 AND state = 'leased'",
 			params![
 				renewed.lease_token,
-				renewed.expires_at_unix_ms,
-				now_unix_ms,
+				sql_i64_from_u64(
+					renewed.expires_at_unix_ms,
+					"dispatch_entries.expires_at_unix_ms"
+				)?,
+				sql_i64_from_u64(now_unix_ms, "dispatch_entries.updated_at_unix_ms")?,
 				renewed.entry_id,
 			],
 		)?;
@@ -675,14 +698,22 @@ impl DispatchQueue for SqliteDispatchQueue {
 			.query_row(
 				"SELECT COUNT(*) FROM dispatch_entries WHERE state = 'queued'",
 				[],
-				|row| row.get::<_, usize>(0),
+				|row| {
+					let count = row.get::<_, i64>(0)?;
+					sql_usize_from_i64(count, "dispatch_entries.queued_count")
+						.map_err(rusqlite::Error::ToSqlConversionFailure)
+				},
 			)
 			.unwrap_or(0);
 		let leased = connection
 			.query_row(
 				"SELECT COUNT(*) FROM dispatch_entries WHERE state = 'leased'",
 				[],
-				|row| row.get::<_, usize>(0),
+				|row| {
+					let count = row.get::<_, i64>(0)?;
+					sql_usize_from_i64(count, "dispatch_entries.leased_count")
+						.map_err(rusqlite::Error::ToSqlConversionFailure)
+				},
 			)
 			.unwrap_or(0);
 		BackpressureSnapshot {
@@ -793,9 +824,57 @@ fn requeue_expired_entries(
 			 expires_at_unix_ms = NULL,
 			 updated_at_unix_ms = ?1
 		 WHERE state = 'leased' AND expires_at_unix_ms IS NOT NULL AND expires_at_unix_ms <= ?2",
-		params![now_unix_ms, now_unix_ms],
+		params![
+			sql_i64_from_u64(now_unix_ms, "dispatch_entries.updated_at_unix_ms")?,
+			sql_i64_from_u64(now_unix_ms, "dispatch_entries.expires_at_unix_ms")?,
+		],
 	)?;
 	Ok(())
+}
+
+fn sql_i64_from_u64(value: u64, field: &str) -> Result<i64, StoreError> {
+	i64::try_from(value).map_err(|_| {
+		StoreError::Storage(format!(
+			"{field} value {value} exceeds SQLite INTEGER range"
+		))
+	})
+}
+
+fn sql_usize_from_i64(
+	value: i64,
+	field: &str,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+	if value < 0 {
+		return Err(format!("{field} returned negative SQLite INTEGER {value}").into());
+	}
+	usize::try_from(value).map_err(|_| format!("{field} value {value} exceeds usize range").into())
+}
+
+fn sql_u64_from_i64(value: i64, field: &str) -> Result<u64, rusqlite::Error> {
+	if value < 0 {
+		return Err(rusqlite::Error::FromSqlConversionFailure(
+			0,
+			rusqlite::types::Type::Integer,
+			format!("{field} returned negative SQLite INTEGER {value}").into(),
+		));
+	}
+	u64::try_from(value).map_err(|_| {
+		rusqlite::Error::FromSqlConversionFailure(
+			0,
+			rusqlite::types::Type::Integer,
+			format!("{field} value {value} exceeds u64 range").into(),
+		)
+	})
+}
+
+fn sql_opt_u64_from_row(
+	row: &rusqlite::Row<'_>,
+	index: usize,
+	field: &str,
+) -> Result<Option<u64>, rusqlite::Error> {
+	row.get::<_, Option<i64>>(index)?
+		.map(|value| sql_u64_from_i64(value, field))
+		.transpose()
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<(), StoreError> {
