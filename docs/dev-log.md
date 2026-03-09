@@ -396,17 +396,6 @@
   - Added a session-level Telegram regression harness that exercises planning-mode persistence, multi-turn memory retention, and post-time-query knowledge-answer continuity in one flow.
   - Verified that session history persists user/assistant turns and that the stored planning mode remains active across turns.
 
-### Verification Status
-
-- `cargo fmt --all`: passed before repository-level formatting normalization
-- `cargo test -p roku-llm-adapter -p roku-task-planner -p roku-cmd`: passed
-- `source .env && cargo run -p roku-cmd -- live-once --planning-mode ReAct '今天几月几号' && printf '\n---\n' && cargo run -p roku-cmd -- live-once --planning-mode ReAct '叫爸爸'`: passed outside sandbox after the StepFun reasoning fix
-  - `今天几月几号` -> `2026年3月8日`
-  - `叫爸爸` -> `这个称呼不合适。`
-- Log analysis of `logs/dev-services/telegram-bot-20260308T013143Z.stdout.log` confirmed the original failure mode:
-  - OpenRouter/StepFun intermittently returned `finish_reason=length` with `message.content=null`
-  - the prior implementation treated that as a terminal unreadable response instead of escalating to a fallback model
-
 ### Remaining Work
 
 - Finish PostgreSQL task/event/result repositories so orchestration recovery is not limited to session memory.

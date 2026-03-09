@@ -23,6 +23,7 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use roku_agent_runtime::ToolCatalogConfigError;
 use roku_common_types::{ApprovalDecision, PlanningModeHint};
 use roku_observability::{
 	AsyncRotatingFileLogSink, FanoutLogSink, FileLogConfig, LogSink, StderrLogSink,
@@ -54,6 +55,8 @@ pub enum CommandError {
 	ApiGatewayBootstrap(String),
 	#[error("failed to bootstrap state store: {0}")]
 	StateStoreBootstrap(String),
+	#[error("failed to load tool catalog config: {0}")]
+	ToolCatalogBootstrap(String),
 	#[error("failed to encode command output: {0}")]
 	OutputEncoding(String),
 	#[error("io error: {0}")]
@@ -64,6 +67,8 @@ pub enum CommandError {
 	SkillRegistry(#[from] SkillRegistryError),
 	#[error(transparent)]
 	OpenRouterBootstrap(#[from] roku_llm_adapter::OpenRouterBootstrapError),
+	#[error(transparent)]
+	ToolCatalogConfig(#[from] ToolCatalogConfigError),
 	#[error(transparent)]
 	TelegramTransport(#[from] roku_connectors_telegram::TelegramTransportError),
 }

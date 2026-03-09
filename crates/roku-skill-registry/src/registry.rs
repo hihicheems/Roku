@@ -669,6 +669,8 @@ fn build_skill_catalog_descriptor(
 		selector: roku_common_types::ResourceSelector::skill(record.descriptor.name.clone()),
 		kind: ResourceKind::Skill,
 		name: record.descriptor.name.clone(),
+		role: None,
+		discoverable: true,
 		description: record.descriptor.description.clone(),
 		tags,
 		examples,

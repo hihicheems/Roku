@@ -15,8 +15,12 @@
 use std::sync::Arc;
 
 use crate::result::policy_rejection_result;
+use crate::tool_config::ToolCatalogConfig;
 use crate::tools::{build_builtin_tool_runtime, build_llm_tool_runtime, build_resource_catalog};
-use crate::workers::{data_worker, generic_worker, research_worker, review_worker, skill_worker};
+use crate::workers::{
+	data_worker_with_config, generic_worker_with_config, inventory_worker_with_config,
+	research_worker_with_config, review_worker_with_config, skill_worker_with_config,
+};
 use roku_common_types::{AgentInstanceSpec, ResultEnvelope, TaskNode};
 use roku_llm_adapter::LlmRouter;
 use roku_resource_catalog::ResourceCatalog;
@@ -42,27 +46,63 @@ pub struct GenericAgentRuntime {
 	workers: Vec<WorkerRegistryEntry>,
 	tool_runtime: Arc<ToolRuntime>,
 	resource_catalog: ResourceCatalog,
+	tool_config: ToolCatalogConfig,
 }
 
 impl GenericAgentRuntime {
-	pub fn with_tool_runtime(tool_runtime: ToolRuntime, resource_catalog: ResourceCatalog) -> Self {
+	pub fn with_tool_runtime(
+		tool_runtime: ToolRuntime,
+		resource_catalog: ResourceCatalog,
+		tool_config: ToolCatalogConfig,
+	) -> Self {
 		let shared_tool_runtime = Arc::new(tool_runtime);
 		let mut runtime = Self {
 			workers: Vec::new(),
 			tool_runtime: Arc::clone(&shared_tool_runtime),
 			resource_catalog,
+			tool_config: tool_config.clone(),
 		};
-		runtime.register_worker(95, skill_worker(Arc::clone(&shared_tool_runtime)));
-		runtime.register_worker(90, research_worker(Arc::clone(&shared_tool_runtime)));
-		runtime.register_worker(80, data_worker(Arc::clone(&shared_tool_runtime)));
-		runtime.register_worker(70, review_worker(Arc::clone(&shared_tool_runtime)));
-		runtime.register_worker(10, generic_worker(shared_tool_runtime));
+		runtime.register_worker(
+			95,
+			skill_worker_with_config(Arc::clone(&shared_tool_runtime), &tool_config),
+		);
+		runtime.register_worker(
+			90,
+			research_worker_with_config(Arc::clone(&shared_tool_runtime), &tool_config),
+		);
+		runtime.register_worker(
+			85,
+			inventory_worker_with_config(Arc::clone(&shared_tool_runtime), &tool_config),
+		);
+		runtime.register_worker(
+			80,
+			data_worker_with_config(Arc::clone(&shared_tool_runtime), &tool_config),
+		);
+		runtime.register_worker(
+			70,
+			review_worker_with_config(Arc::clone(&shared_tool_runtime), &tool_config),
+		);
+		runtime.register_worker(
+			10,
+			generic_worker_with_config(shared_tool_runtime, &tool_config),
+		);
 		runtime
 	}
 
 	pub fn with_skill_registry(skill_registry: SkillRegistry) -> Self {
-		let resource_catalog = build_resource_catalog(&skill_registry);
-		Self::with_tool_runtime(build_builtin_tool_runtime(skill_registry), resource_catalog)
+		Self::with_skill_registry_and_tool_config(skill_registry, ToolCatalogConfig::default())
+	}
+
+	pub fn with_skill_registry_and_tool_config(
+		skill_registry: SkillRegistry,
+		tool_config: ToolCatalogConfig,
+	) -> Self {
+		let resource_catalog = build_resource_catalog(&skill_registry, &tool_config);
+		Self::with_tool_runtime(
+			build_builtin_tool_runtime(skill_registry, &tool_config),
+			resource_catalog,
+			tool_config,
+		)
 	}
 
 	pub fn with_llm_router(router: LlmRouter) -> Self {
@@ -73,15 +113,37 @@ impl GenericAgentRuntime {
 		router: LlmRouter,
 		skill_registry: SkillRegistry,
 	) -> Self {
-		let resource_catalog = build_resource_catalog(&skill_registry);
+		Self::with_llm_router_skill_registry_and_tool_config(
+			router,
+			skill_registry,
+			ToolCatalogConfig::default(),
+		)
+	}
+
+	pub fn with_llm_router_skill_registry_and_tool_config(
+		router: LlmRouter,
+		skill_registry: SkillRegistry,
+		tool_config: ToolCatalogConfig,
+	) -> Self {
+		let resource_catalog = build_resource_catalog(&skill_registry, &tool_config);
 		Self::with_tool_runtime(
-			build_llm_tool_runtime(Arc::new(router), skill_registry),
+			build_llm_tool_runtime(
+				Arc::new(router),
+				skill_registry,
+				&tool_config,
+				&resource_catalog,
+			),
 			resource_catalog,
+			tool_config,
 		)
 	}
 
 	pub fn resource_catalog(&self) -> &ResourceCatalog {
 		&self.resource_catalog
+	}
+
+	pub fn tool_config(&self) -> &ToolCatalogConfig {
+		&self.tool_config
 	}
 
 	pub fn register_worker<W>(&mut self, priority: u8, worker: W)
@@ -118,7 +180,8 @@ impl AgentWorker for GenericAgentRuntime {
 			return result;
 		}
 
-		generic_worker(Arc::clone(&self.tool_runtime)).execute(spec, node)
+		generic_worker_with_config(Arc::clone(&self.tool_runtime), &self.tool_config)
+			.execute(spec, node)
 	}
 }
 

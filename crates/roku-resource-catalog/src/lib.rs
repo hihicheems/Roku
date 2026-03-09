@@ -49,7 +49,11 @@ pub struct CatalogDescriptor {
 	pub selector: ResourceSelector,
 	pub kind: ResourceKind,
 	pub name: String,
+	#[serde(default)]
+	pub role: Option<String>,
 	pub description: String,
+	#[serde(default = "default_discoverable")]
+	pub discoverable: bool,
 	#[serde(default)]
 	pub tags: Vec<String>,
 	#[serde(default)]
@@ -74,6 +78,7 @@ impl CatalogDescriptor {
 	pub fn searchable_text(&self) -> String {
 		[
 			self.name.as_str(),
+			self.role.as_deref().unwrap_or_default(),
 			self.description.as_str(),
 			self.summary.as_str(),
 			&self.tags.join(" "),
@@ -84,6 +89,10 @@ impl CatalogDescriptor {
 		]
 		.join(" ")
 	}
+}
+
+fn default_discoverable() -> bool {
+	true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -361,7 +370,9 @@ mod tests {
 			selector: ResourceSelector::tool(name),
 			kind: ResourceKind::Tool,
 			name: name.to_string(),
+			role: None,
 			description: description.to_string(),
+			discoverable: true,
 			tags: Vec::new(),
 			examples: Vec::new(),
 			input_schema: Vec::new(),
@@ -392,7 +403,9 @@ mod tests {
 				selector: ResourceSelector::skill("postgres-backup"),
 				kind: ResourceKind::Skill,
 				name: "postgres-backup".to_string(),
+				role: None,
 				description: "Back up postgres databases".to_string(),
+				discoverable: true,
 				..tool_descriptor("ignored", "ignored")
 			},
 			tool_descriptor("data.execute", "Analyze datasets"),

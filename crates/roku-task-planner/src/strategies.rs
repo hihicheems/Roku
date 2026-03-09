@@ -14,11 +14,30 @@
 
 use roku_common_types::{PlanBranch, PlanLoopControl, PlanStep, ResourceSelector};
 use roku_planning_engine::PlanningDecision;
+use roku_resource_catalog::{ResourceCatalog, ResourceKind};
 
-const RESEARCH_TOOL_NAME: &str = "research.synthesize";
-const DATA_TOOL_NAME: &str = "data.execute";
-const REVIEW_TOOL_NAME: &str = "review.assess";
-const SKILL_TOOL_NAME: &str = "skill.ensure_installed";
+#[derive(Debug, Clone)]
+pub(crate) struct PlannerToolbox {
+	research_tool: String,
+	data_tool: String,
+	review_tool: String,
+	skill_install_tool: String,
+}
+
+impl PlannerToolbox {
+	pub(crate) fn from_catalog(catalog: &ResourceCatalog) -> Self {
+		Self {
+			research_tool: catalog_tool_name(catalog, "research", "research.synthesize"),
+			data_tool: catalog_tool_name(catalog, "data", "data.execute"),
+			review_tool: catalog_tool_name(catalog, "review", "review.assess"),
+			skill_install_tool: catalog_tool_name(
+				catalog,
+				"skill_install",
+				"skill.ensure_installed",
+			),
+		}
+	}
+}
 
 pub(crate) fn build_conversation_steps(goal: &str) -> Vec<PlanStep> {
 	vec![step(
@@ -32,6 +51,7 @@ pub(crate) fn build_skill_install_steps(
 	goal: &str,
 	source_url: &str,
 	if_missing: bool,
+	toolbox: &PlannerToolbox,
 ) -> Vec<PlanStep> {
 	vec![resource_step(
 		"install-skill",
@@ -40,7 +60,7 @@ pub(crate) fn build_skill_install_steps(
 			"Ensure requested skill from {source_url} is installed{}",
 			if if_missing { " if it is missing" } else { "" }
 		),
-		vec![ResourceSelector::tool(SKILL_TOOL_NAME)],
+		vec![ResourceSelector::tool(&toolbox.skill_install_tool)],
 	)]
 }
 
@@ -71,7 +91,11 @@ pub(crate) fn build_selected_tool_steps(
 		.collect()
 }
 
-pub(crate) fn build_react_steps(goal: &str, decision: &PlanningDecision) -> Vec<PlanStep> {
+pub(crate) fn build_react_steps(
+	goal: &str,
+	decision: &PlanningDecision,
+	toolbox: &PlannerToolbox,
+) -> Vec<PlanStep> {
 	if should_use_direct_react_action(goal) {
 		return vec![step("act-primary", goal, "Execute primary action")];
 	}
@@ -84,7 +108,7 @@ pub(crate) fn build_react_steps(goal: &str, decision: &PlanningDecision) -> Vec<
 				"Observe context with max {} iteration(s)",
 				decision.max_iterations
 			),
-			vec![ResourceSelector::tool(RESEARCH_TOOL_NAME)],
+			vec![ResourceSelector::tool(&toolbox.research_tool)],
 		),
 		step_with_dep(
 			"act-primary",
@@ -95,7 +119,11 @@ pub(crate) fn build_react_steps(goal: &str, decision: &PlanningDecision) -> Vec<
 	]
 }
 
-pub(crate) fn build_decomposition_steps(goal: &str, decision: &PlanningDecision) -> Vec<PlanStep> {
+pub(crate) fn build_decomposition_steps(
+	goal: &str,
+	decision: &PlanningDecision,
+	toolbox: &PlannerToolbox,
+) -> Vec<PlanStep> {
 	let mut steps = vec![
 		resource_step(
 			"decompose-goal",
@@ -104,13 +132,13 @@ pub(crate) fn build_decomposition_steps(goal: &str, decision: &PlanningDecision)
 				"Decompose goal into branch tasks (max branches = {})",
 				decision.max_branches
 			),
-			vec![ResourceSelector::tool(RESEARCH_TOOL_NAME)],
+			vec![ResourceSelector::tool(&toolbox.research_tool)],
 		),
 		branched_resource_step(
 			"branch-data",
 			goal,
 			"Run data branch",
-			vec![ResourceSelector::tool(DATA_TOOL_NAME)],
+			vec![ResourceSelector::tool(&toolbox.data_tool)],
 			"task-decomposition",
 			"data",
 		),
@@ -118,7 +146,7 @@ pub(crate) fn build_decomposition_steps(goal: &str, decision: &PlanningDecision)
 			"branch-analysis",
 			goal,
 			"Run analysis branch",
-			vec![ResourceSelector::tool(RESEARCH_TOOL_NAME)],
+			vec![ResourceSelector::tool(&toolbox.research_tool)],
 			"task-decomposition",
 			"analysis",
 		),
@@ -131,7 +159,7 @@ pub(crate) fn build_decomposition_steps(goal: &str, decision: &PlanningDecision)
 			"branch-risk",
 			goal,
 			"Run risk review branch",
-			vec![ResourceSelector::tool(REVIEW_TOOL_NAME)],
+			vec![ResourceSelector::tool(&toolbox.review_tool)],
 			"task-decomposition",
 			"risk",
 		);
@@ -152,12 +180,16 @@ pub(crate) fn build_decomposition_steps(goal: &str, decision: &PlanningDecision)
 	steps
 }
 
-pub(crate) fn build_tree_search_steps(goal: &str, decision: &PlanningDecision) -> Vec<PlanStep> {
+pub(crate) fn build_tree_search_steps(
+	goal: &str,
+	decision: &PlanningDecision,
+	toolbox: &PlannerToolbox,
+) -> Vec<PlanStep> {
 	let mut steps = vec![resource_step(
 		"search-root",
 		goal,
 		"Generate tree-search seed hypotheses",
-		vec![ResourceSelector::tool(RESEARCH_TOOL_NAME)],
+		vec![ResourceSelector::tool(&toolbox.research_tool)],
 	)];
 
 	let mut branch_ids = Vec::new();
@@ -167,7 +199,7 @@ pub(crate) fn build_tree_search_steps(goal: &str, decision: &PlanningDecision) -
 			&branch_id,
 			goal,
 			&format!("Explore tree branch {branch}"),
-			vec![ResourceSelector::tool(RESEARCH_TOOL_NAME)],
+			vec![ResourceSelector::tool(&toolbox.research_tool)],
 			"tree-search",
 			&format!("branch-{branch}"),
 		);
@@ -179,13 +211,17 @@ pub(crate) fn build_tree_search_steps(goal: &str, decision: &PlanningDecision) -
 		"search-evaluate",
 		goal,
 		"Evaluate candidate branches",
-		vec![ResourceSelector::tool(REVIEW_TOOL_NAME)],
+		vec![ResourceSelector::tool(&toolbox.review_tool)],
 		branch_ids,
 	));
 	steps
 }
 
-pub(crate) fn build_refinement_steps(goal: &str, decision: &PlanningDecision) -> Vec<PlanStep> {
+pub(crate) fn build_refinement_steps(
+	goal: &str,
+	decision: &PlanningDecision,
+	toolbox: &PlannerToolbox,
+) -> Vec<PlanStep> {
 	let draft_id = "draft-v1".to_string();
 	let mut steps = vec![step(&draft_id, goal, "Generate initial draft")];
 	let mut previous_step_id = draft_id;
@@ -196,7 +232,7 @@ pub(crate) fn build_refinement_steps(goal: &str, decision: &PlanningDecision) ->
 			&critique_id,
 			goal,
 			&format!("Critique iteration {iteration}"),
-			vec![ResourceSelector::tool(REVIEW_TOOL_NAME)],
+			vec![ResourceSelector::tool(&toolbox.review_tool)],
 			vec![previous_step_id.clone()],
 			iteration,
 			decision.max_iterations,
@@ -216,7 +252,7 @@ pub(crate) fn build_refinement_steps(goal: &str, decision: &PlanningDecision) ->
 		"final-review",
 		goal,
 		"Produce refinement final answer",
-		vec![ResourceSelector::tool(REVIEW_TOOL_NAME)],
+		vec![ResourceSelector::tool(&toolbox.review_tool)],
 		vec![previous_step_id],
 	);
 	final_step.requires_approval = true;
@@ -241,6 +277,15 @@ fn step_with_dep(step_id: &str, goal: &str, action: &str, depends_on: Vec<String
 	let mut step = step(step_id, goal, action);
 	step.depends_on = depends_on;
 	step
+}
+
+fn catalog_tool_name(catalog: &ResourceCatalog, role: &str, fallback: &str) -> String {
+	catalog
+		.entries()
+		.iter()
+		.find(|entry| entry.kind == ResourceKind::Tool && entry.role.as_deref() == Some(role))
+		.map(|entry| entry.name.clone())
+		.unwrap_or_else(|| fallback.to_string())
 }
 
 fn resource_step(

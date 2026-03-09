@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use crate::tool_config::{BuiltinToolRole, ToolCatalogConfig};
 use roku_common_types::{
 	AgentInstanceSpec, ConversationRole, ConversationTurn, ResultEnvelope, TaskNode,
 };
@@ -22,13 +23,10 @@ use serde_json::json;
 
 use crate::result::{tool_failure_result, tool_success_result};
 use crate::runtime::RuntimeWorker;
-use crate::tools::{
-	DATA_TOOL_NAME, GENERAL_TOOL_NAME, RESEARCH_TOOL_NAME, REVIEW_TOOL_NAME, SKILL_TOOL_NAME,
-};
 
 pub(crate) struct ToolBackedWorker {
 	worker_id: &'static str,
-	tool_name: &'static str,
+	tool_name: String,
 	capability_prefixes: &'static [&'static str],
 	tool_runtime: Arc<ToolRuntime>,
 	confidence: f32,
@@ -37,14 +35,14 @@ pub(crate) struct ToolBackedWorker {
 impl ToolBackedWorker {
 	fn new(
 		worker_id: &'static str,
-		tool_name: &'static str,
+		tool_name: impl Into<String>,
 		capability_prefixes: &'static [&'static str],
 		tool_runtime: Arc<ToolRuntime>,
 		confidence: f32,
 	) -> Self {
 		Self {
 			worker_id,
-			tool_name,
+			tool_name: tool_name.into(),
 			capability_prefixes,
 			tool_runtime,
 			confidence,
@@ -54,12 +52,13 @@ impl ToolBackedWorker {
 	fn invocation(&self, spec: &AgentInstanceSpec, node: &TaskNode) -> ToolInvocation {
 		let (goal, step_summary) = goal_and_step(&node.description);
 		ToolInvocation {
-			tool_name: self.tool_name.to_string(),
+			tool_name: self.tool_name.clone(),
 			input: json!({
 				"task_id": spec.context.task_id.0,
 				"node_id": node.node_id.0,
 				"goal": goal,
 				"summary": step_summary,
+				"granted_capabilities": spec.capabilities.clone(),
 				"resource_selectors": spec
 					.context
 					.resources
@@ -103,57 +102,91 @@ impl RuntimeWorker for ToolBackedWorker {
 				spec,
 				node,
 				self.worker_id,
-				self.tool_name,
+				&self.tool_name,
 				execution,
 				self.confidence,
 			),
-			Err(error) => tool_failure_result(spec, node, self.worker_id, self.tool_name, error),
+			Err(error) => tool_failure_result(spec, node, self.worker_id, &self.tool_name, error),
 		}
 	}
 }
 
-pub(crate) fn research_worker(tool_runtime: Arc<ToolRuntime>) -> ToolBackedWorker {
+pub(crate) fn research_worker_with_config(
+	tool_runtime: Arc<ToolRuntime>,
+	tool_config: &ToolCatalogConfig,
+) -> ToolBackedWorker {
 	ToolBackedWorker::new(
 		"research-worker",
-		RESEARCH_TOOL_NAME,
+		tool_name_for_role(tool_config, BuiltinToolRole::Research),
 		&["information.", "research."],
 		tool_runtime,
 		0.86,
 	)
 }
 
-pub(crate) fn data_worker(tool_runtime: Arc<ToolRuntime>) -> ToolBackedWorker {
+pub(crate) fn inventory_worker_with_config(
+	tool_runtime: Arc<ToolRuntime>,
+	tool_config: &ToolCatalogConfig,
+) -> ToolBackedWorker {
+	ToolBackedWorker::new(
+		"inventory-worker",
+		tool_name_for_role(tool_config, BuiltinToolRole::Inventory),
+		&["inventory."],
+		tool_runtime,
+		0.84,
+	)
+}
+
+pub(crate) fn data_worker_with_config(
+	tool_runtime: Arc<ToolRuntime>,
+	tool_config: &ToolCatalogConfig,
+) -> ToolBackedWorker {
 	ToolBackedWorker::new(
 		"data-worker",
-		DATA_TOOL_NAME,
+		tool_name_for_role(tool_config, BuiltinToolRole::Data),
 		&["data."],
 		tool_runtime,
 		0.88,
 	)
 }
 
-pub(crate) fn review_worker(tool_runtime: Arc<ToolRuntime>) -> ToolBackedWorker {
+pub(crate) fn review_worker_with_config(
+	tool_runtime: Arc<ToolRuntime>,
+	tool_config: &ToolCatalogConfig,
+) -> ToolBackedWorker {
 	ToolBackedWorker::new(
 		"review-worker",
-		REVIEW_TOOL_NAME,
+		tool_name_for_role(tool_config, BuiltinToolRole::Review),
 		&["review.", "validation."],
 		tool_runtime,
 		0.92,
 	)
 }
 
-pub(crate) fn skill_worker(tool_runtime: Arc<ToolRuntime>) -> ToolBackedWorker {
+pub(crate) fn skill_worker_with_config(
+	tool_runtime: Arc<ToolRuntime>,
+	tool_config: &ToolCatalogConfig,
+) -> ToolBackedWorker {
 	ToolBackedWorker::new(
 		"skill-worker",
-		SKILL_TOOL_NAME,
+		tool_name_for_role(tool_config, BuiltinToolRole::SkillInstall),
 		&["skill."],
 		tool_runtime,
 		0.94,
 	)
 }
 
-pub(crate) fn generic_worker(tool_runtime: Arc<ToolRuntime>) -> ToolBackedWorker {
-	ToolBackedWorker::new("generic-worker", GENERAL_TOOL_NAME, &[], tool_runtime, 0.75)
+pub(crate) fn generic_worker_with_config(
+	tool_runtime: Arc<ToolRuntime>,
+	tool_config: &ToolCatalogConfig,
+) -> ToolBackedWorker {
+	ToolBackedWorker::new(
+		"generic-worker",
+		tool_name_for_role(tool_config, BuiltinToolRole::General),
+		&[],
+		tool_runtime,
+		0.75,
+	)
 }
 
 fn goal_and_step(description: &str) -> (String, String) {
@@ -180,4 +213,11 @@ fn role_label(role: ConversationRole) -> &'static str {
 		ConversationRole::Assistant => "assistant",
 		ConversationRole::System => "system",
 	}
+}
+
+fn tool_name_for_role(tool_config: &ToolCatalogConfig, role: BuiltinToolRole) -> String {
+	tool_config
+		.tool_for_role(role)
+		.map(|tool| tool.name.clone())
+		.unwrap_or_else(|| role.as_str().to_string())
 }

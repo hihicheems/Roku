@@ -15,9 +15,10 @@
 use roku_agent_runtime::{GenericAgentRuntime, RuntimeWorker};
 use roku_common_types::{
 	AggregationMode, ApprovalDecision, ApprovalId, ApprovalStatus, CompensationAction,
-	CompensationStatus, ErrorClass, EvidenceItem, JoinPolicy, NodeId, PlanningModeHint,
-	RecoveryEligibility, RequestEnvelope, RequestId, ResponseStatus, ResultEnvelope, ResultStatus,
-	Task, TaskEdge, TaskEventKind, TaskGraph, TaskId, TaskNode, TaskNodeKind, TaskState,
+	CompensationStatus, ConversationRole, ConversationTurn, ErrorClass, EvidenceItem, JoinPolicy,
+	NodeId, PlanningModeHint, RecoveryEligibility, RequestEnvelope, RequestId, ResponseStatus,
+	ResultEnvelope, ResultStatus, Task, TaskEdge, TaskEventKind, TaskGraph, TaskId, TaskNode,
+	TaskNodeKind, TaskState,
 };
 use roku_skill_registry::{
 	DownloadedArchive, SkillArchiveFetcher, SkillRegistry, SkillRegistryError, SkillSource,
@@ -1709,6 +1710,7 @@ struct RecordingDispatchState {
 	published: Vec<String>,
 	claimed: Vec<String>,
 	acked: Vec<String>,
+	nacked: Vec<String>,
 	queued: VecDeque<DispatchEnvelope>,
 	lease_sequence: u64,
 }
@@ -1719,7 +1721,7 @@ struct RecordingDispatchQueue {
 }
 
 impl RecordingDispatchQueue {
-	fn snapshot(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
+	fn snapshot(&self) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
 		let state = self
 			.state
 			.lock()
@@ -1728,7 +1730,16 @@ impl RecordingDispatchQueue {
 			state.published.clone(),
 			state.claimed.clone(),
 			state.acked.clone(),
+			state.nacked.clone(),
 		)
+	}
+
+	fn seed(&self, envelope: DispatchEnvelope) {
+		let mut state = self
+			.state
+			.lock()
+			.expect("dispatch state lock should succeed");
+		state.queued.push_back(envelope);
 	}
 }
 
@@ -1777,7 +1788,12 @@ impl DispatchQueue for RecordingDispatchQueue {
 		Ok(())
 	}
 
-	fn nack(&mut self, _lease: &DispatchLease, _retry: RetryClaim) -> Result<(), StoreError> {
+	fn nack(&mut self, lease: &DispatchLease, _retry: RetryClaim) -> Result<(), StoreError> {
+		let mut state = self
+			.state
+			.lock()
+			.expect("dispatch state lock should succeed");
+		state.nacked.push(lease.entry_id.clone());
 		Ok(())
 	}
 
@@ -1828,8 +1844,97 @@ fn service_routes_ready_nodes_through_dispatch_queue() {
 		.expect("runtime service should succeed");
 	assert_eq!(response.status, ResponseStatus::Succeeded);
 
-	let (published, claimed, acked) = snapshot.snapshot();
+	let (published, claimed, acked, _) = snapshot.snapshot();
 	assert_eq!(published.len(), claimed.len());
 	assert_eq!(claimed.len(), acked.len());
 	assert!(published.len() >= 2);
+}
+
+#[test]
+fn service_ignores_foreign_dispatch_entries_for_other_tasks() {
+	let dispatch = RecordingDispatchQueue::default();
+	dispatch.seed(DispatchEnvelope {
+		entry_id: "foreign-entry".to_string(),
+		task_id: TaskId("task-foreign".to_string()),
+		node_id: NodeId("use-tool-1".to_string()),
+		attempt: 1,
+		payload: "foreign payload".to_string(),
+	});
+	let snapshot = dispatch.clone();
+	let service = RuntimeService::new_with_runtime_data_plane_and_metrics(
+		RuntimeDataPlane {
+			task_repo: Box::new(roku_state_store::InMemoryTaskRepository::default()),
+			event_repo: Box::new(roku_state_store::InMemoryEventRepository::default()),
+			approval_repo: Box::new(roku_state_store::InMemoryApprovalRepository::default()),
+			result_repo: Box::new(roku_state_store::InMemoryResultRepository::default()),
+			dispatch_queue: Box::new(dispatch),
+			artifact_store: roku_artifact_store::ArtifactStore::default(),
+			experiment_registry: roku_experiment_registry::ExperimentRegistry::default(),
+		},
+		Arc::new(roku_observability::InMemoryAuditSink::default()),
+		GenericAgentRuntime::default(),
+		Arc::new(roku_observability::Metrics::default()),
+		Box::new(roku_task_planner::AdaptiveTaskPlanner::default()),
+	);
+
+	let response = service
+		.execute(sample_request())
+		.expect("runtime service should succeed");
+	assert_eq!(response.status, ResponseStatus::Succeeded);
+
+	let (_, claimed, acked, nacked) = snapshot.snapshot();
+	assert!(claimed.contains(&"use-tool-1".to_string()));
+	assert!(nacked.contains(&"foreign-entry".to_string()));
+	assert!(!acked.contains(&"foreign-entry".to_string()));
+}
+
+#[test]
+fn service_handles_bare_roku_ping_without_tool_failure() {
+	let service = RuntimeService::in_memory();
+	let mut request = sample_request();
+	request.goal = "roku".to_string();
+
+	let response = service
+		.execute(request)
+		.expect("runtime service should handle direct roku ping");
+
+	assert_eq!(response.status, ResponseStatus::Succeeded);
+}
+
+#[test]
+fn service_handles_greeting_with_roku_without_tool_failure() {
+	let service = RuntimeService::in_memory();
+	let mut request = sample_request();
+	request.goal = "你好 roku".to_string();
+
+	let response = service
+		.execute(request)
+		.expect("runtime service should handle greeting");
+
+	assert_eq!(response.status, ResponseStatus::Succeeded);
+}
+
+#[test]
+fn service_handles_inventory_format_followup_without_tool_failure() {
+	let service = RuntimeService::in_memory();
+	let mut request = sample_request();
+	request.goal = "用无序列表列一下".to_string();
+	request.conversation_history = vec![
+		ConversationTurn {
+			role: ConversationRole::User,
+			content: "列出 skill、tool".to_string(),
+			created_at_unix_ms: 0,
+		},
+		ConversationTurn {
+			role: ConversationRole::Assistant,
+			content: "已安装的 skills: xlsx（处理 Excel 文件）、skill-creator（创建和测试技能）、claude-api。可用工具: data.execute（数据处理）、research.synthesize（研究总结）、review.assess（评审）. 此外还有能力类别: data.read、information.read、review.check.".to_string(),
+			created_at_unix_ms: 0,
+		},
+	];
+
+	let response = service
+		.execute(request)
+		.expect("runtime service should handle inventory format follow-up");
+
+	assert_eq!(response.status, ResponseStatus::Succeeded);
 }
