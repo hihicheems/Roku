@@ -14,11 +14,11 @@
 
 //! Multi-provider model routing with budget and risk-aware controls.
 
-mod openrouter;
+mod providers;
 mod router;
 mod types;
 
-pub use openrouter::{
+pub use providers::openrouter::{
 	OpenRouterBootstrapError, OpenRouterConfig, OpenRouterProvider, build_openrouter_router,
 	build_openrouter_router_with_metrics,
 };

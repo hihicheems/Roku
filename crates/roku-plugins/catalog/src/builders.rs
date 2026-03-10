@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Unified resource catalog with retrieval and catalog-building helpers.
+use crate::{CatalogDescriptor, ResourceCatalog};
 
-mod builders;
-mod retrieval;
-
-pub use builders::build_resource_catalog;
-pub use retrieval::{
-	CatalogDescriptor, CatalogMatch, ResourceCatalog, ResourceCost, ResourceKind, ResourceRisk,
-};
+pub fn build_resource_catalog(
+	mut base_entries: Vec<CatalogDescriptor>,
+	extra_entries: Vec<CatalogDescriptor>,
+) -> ResourceCatalog {
+	base_entries.extend(extra_entries);
+	ResourceCatalog::new(base_entries)
+}

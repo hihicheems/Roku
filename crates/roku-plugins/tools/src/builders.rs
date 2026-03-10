@@ -37,7 +37,7 @@ use serde_json::{Value, json};
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 
-pub const LEGACY_SKILL_TOOL_NAME: &str = "skill.install";
+pub(crate) const LEGACY_SKILL_TOOL_NAME: &str = "skill.install";
 const LLM_TOOL_TIMEOUT_MS: u64 = 45_000;
 const MAX_SKILL_PROMPT_CONTEXT_CHARS: usize = 16_000;
 const MAX_SKILL_EXECUTION_OUTPUT_CHARS: usize = 4_000;
@@ -46,16 +46,13 @@ pub fn build_resource_catalog(
 	skill_registry: &SkillRegistry,
 	tool_config: &ToolCatalogConfig,
 ) -> ResourceCatalog {
-	let mut entries = tool_config
+	let entries = tool_config
 		.tools
 		.iter()
 		.map(tool_catalog_descriptor)
 		.collect::<Vec<_>>();
-	if let Ok(skill_entries) = skill_registry.catalog_descriptors() {
-		entries.extend(skill_entries);
-	}
-
-	ResourceCatalog::new(entries)
+	let skill_entries = skill_registry.catalog_descriptors().unwrap_or_default();
+	roku_resource_catalog::build_resource_catalog(entries, skill_entries)
 }
 
 pub fn build_builtin_tool_runtime(
@@ -130,7 +127,7 @@ pub fn build_llm_tool_runtime(
 }
 
 #[derive(Clone)]
-struct SkillInstallTool {
+pub(crate) struct SkillInstallTool {
 	descriptor: ToolDescriptor,
 	registry: SkillRegistry,
 }
@@ -201,7 +198,7 @@ impl Tool for SkillInstallTool {
 }
 
 #[derive(Clone)]
-struct SkillExecuteTool {
+pub(crate) struct SkillExecuteTool {
 	descriptor: ToolDescriptor,
 	registry: SkillRegistry,
 	router: Option<Arc<LlmRouter>>,
@@ -320,7 +317,7 @@ impl Tool for SkillExecuteTool {
 }
 
 #[derive(Clone)]
-struct WorkerReportTool {
+pub(crate) struct WorkerReportTool {
 	descriptor: ToolDescriptor,
 	worker_id: &'static str,
 	message: &'static str,
@@ -364,7 +361,7 @@ impl Tool for WorkerReportTool {
 }
 
 #[derive(Clone)]
-struct PromptedLlmTool {
+pub(crate) struct PromptedLlmTool {
 	descriptor: ToolDescriptor,
 	worker_id: &'static str,
 	system_prompt: &'static str,
@@ -1293,7 +1290,7 @@ fn io_tool_failure(error: std::io::Error) -> ToolFailure {
 	ToolFailure::terminal(error.to_string())
 }
 
-fn inventory_context_json(
+pub(crate) fn inventory_context_json(
 	resource_catalog: &ResourceCatalog,
 	skill_registry: &SkillRegistry,
 ) -> String {
