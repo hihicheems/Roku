@@ -12,13 +12,13 @@ roku-agent-runtime = { path = "../roku-agent-runtime" }
 roku-artifact-store = { path = "../roku-artifact-store" }
 roku-api-gateway = { path = "../roku-api-gateway" }
 roku-common-types = { path = "../roku-common-types" }
-roku-connectors-telegram = { path = "../roku-connectors-telegram" }
 roku-experiment-registry = { path = "../roku-experiment-registry" }
-roku-llm-adapter = { path = "../roku-llm-adapter" }
 roku-observability = { path = "../roku-observability" }
 roku-orchestrator = { path = "../roku-orchestrator" }
+roku-plugin-llm = { path = "../roku-plugins/llm" }
+roku-plugin-skills = { path = "../roku-plugins/skills" }
+roku-plugin-telegram = { path = "../roku-plugins/telegram" }
 roku-runtime-service = { path = "../roku-runtime-service" }
-roku-skill-registry = { path = "../roku-skill-registry" }
 roku-state-store = { path = "../roku-state-store" }
 roku-task-planner = { path = "../roku-task-planner" }
 serde_json = "1"

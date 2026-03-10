@@ -24,11 +24,11 @@ use roku_common_types::{
 	TaskId,
 };
 use roku_experiment_registry::ExperimentRegistry;
-use roku_llm_adapter::{OpenRouterConfig, build_openrouter_router_with_metrics};
 use roku_observability::{InMemoryAuditSink, LogLevel, LogRecord, Metrics, emit_global_log};
+use roku_plugin_llm::{OpenRouterConfig, build_openrouter_router_with_metrics};
+use roku_plugin_skills::SkillRegistry;
 pub use roku_runtime_service::RunMode;
 use roku_runtime_service::RuntimeService;
-use roku_skill_registry::SkillRegistry;
 use roku_state_store::{
 	SqliteApprovalRepository, SqliteDispatchQueue, SqliteEventRepository, SqliteResultRepository,
 	SqliteStoreConfig, SqliteTaskRepository,
@@ -450,7 +450,7 @@ mod tests {
 	use std::io::{Cursor, Write};
 	use std::sync::Arc;
 
-	use roku_skill_registry::{
+	use roku_plugin_skills::{
 		DownloadedArchive, SkillArchiveFetcher, SkillRegistryError, SkillSource,
 	};
 	use serde_json::Value;

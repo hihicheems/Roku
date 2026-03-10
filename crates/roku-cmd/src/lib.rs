@@ -29,7 +29,7 @@ use roku_observability::{
 	AsyncRotatingFileLogSink, FanoutLogSink, FileLogConfig, LogSink, StderrLogSink,
 	install_global_log_sink,
 };
-use roku_skill_registry::SkillRegistryError;
+use roku_plugin_skills::SkillRegistryError;
 use thiserror::Error;
 
 pub use runtime::{RunMode, run_live_once_from_env, run_once, run_with_mode};
@@ -66,11 +66,11 @@ pub enum CommandError {
 	#[error(transparent)]
 	SkillRegistry(#[from] SkillRegistryError),
 	#[error(transparent)]
-	OpenRouterBootstrap(#[from] roku_llm_adapter::OpenRouterBootstrapError),
+	OpenRouterBootstrap(#[from] roku_plugin_llm::OpenRouterBootstrapError),
 	#[error(transparent)]
 	ToolCatalogConfig(#[from] ToolCatalogConfigError),
 	#[error(transparent)]
-	TelegramTransport(#[from] roku_connectors_telegram::TelegramTransportError),
+	TelegramTransport(#[from] roku_plugin_telegram::TelegramTransportError),
 }
 
 pub fn execute_cli<I, S>(args: I) -> Result<Option<String>, CommandError>
