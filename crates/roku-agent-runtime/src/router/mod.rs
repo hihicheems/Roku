@@ -12,19 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Capability-aware dynamic agent runtime.
+mod classifier;
+mod decision;
+mod direct_route;
+mod escalation;
+mod scratchpad;
 
-mod result;
-mod router;
-mod runtime;
-mod tool_config;
-mod tools;
-mod workers;
-
-pub use roku_plugin_core::PluginRegistrySnapshot;
-pub use router::{
-	DirectRouteExecutionResult, DirectRoutePlan, EscalationAction, EscalationReason, IntentFamily,
-	RouteDecision, RouteDecisionResult, RouteEscalationPlan, RouteRisk, RouteScratchpad,
+pub(crate) use classifier::{RouteClassifierContext, classify_request};
+pub use decision::{IntentFamily, RouteDecision, RouteRisk};
+pub use direct_route::{DirectRouteExecutionResult, DirectRouteKind, DirectRoutePlan};
+pub use escalation::{
+	EscalationAction, EscalationReason, RouteDecisionResult, RouteEscalationPlan,
 };
-pub use runtime::{AgentWorker, GenericAgentRuntime, RuntimeWorker};
-pub use tool_config::{BuiltinToolRole, ConfiguredTool, ToolCatalogConfig, ToolCatalogConfigError};
+pub use scratchpad::RouteScratchpad;
