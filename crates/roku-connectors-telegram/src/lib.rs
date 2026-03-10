@@ -12,20 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Telegram connector adapter.
+//! Backward-compatible shim for the plugin Telegram connector.
 
-mod client;
-mod inbound;
-mod outbound;
-mod runner;
-
-pub use client::{TelegramBotClient, TelegramBotConfig, TelegramTransportError};
-pub use inbound::{
-	TelegramApprovalAction, TelegramCallbackQuery, TelegramChat, TelegramConnector,
-	TelegramConnectorError, TelegramInteraction, TelegramMessage, TelegramSessionCommand,
-	TelegramSessionCommandRequest, TelegramUpdate, TelegramUser,
-};
-pub use outbound::{
-	TelegramInlineKeyboardButton, TelegramOutboundMessage, TelegramParseMode, TelegramReplyMarkup,
-};
-pub use runner::{TelegramInteractionHandler, TelegramPollingRunner};
+pub use roku_plugin_telegram::*;
