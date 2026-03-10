@@ -12,4 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Phase 0 placeholder crate for Roku plugin skills.
+mod error;
+mod registry;
+mod source;
+mod types;
+
+pub use error::SkillRegistryError;
+pub use registry::{
+	DownloadedArchive, HttpSkillArchiveFetcher, SkillArchiveFetcher, SkillRegistry,
+};
+pub use source::SkillSource;
+pub use types::{InstalledSkillRecord, SkillDescriptor, SkillInstallReport};
