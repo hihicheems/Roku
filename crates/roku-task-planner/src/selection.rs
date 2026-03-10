@@ -821,6 +821,7 @@ mod tests {
 				.expect("capturing provider prompt lock must not be poisoned") = Some(request.prompt.clone());
 			Ok(ProviderResponse {
 				output: self.output.to_string(),
+				finish_reason: None,
 				prompt_tokens: 64,
 				output_tokens: 32,
 				latency_ms: 25,

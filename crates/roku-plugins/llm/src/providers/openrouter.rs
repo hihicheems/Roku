@@ -291,6 +291,7 @@ impl OpenRouterProvider {
 		);
 		Ok(ProviderResponse {
 			output: parsed.output,
+			finish_reason: parsed.finish_reason,
 			prompt_tokens: parsed.prompt_tokens,
 			output_tokens: parsed.output_tokens,
 			latency_ms,
@@ -322,6 +323,9 @@ fn should_try_explicit_fallback(error: &ProviderCallError) -> bool {
 	match error {
 		ProviderCallError::Retryable { message } => {
 			message.contains("unreadable provider response")
+				|| message.contains("provider_unreadable_content:")
+				|| message.contains("provider_content_null:")
+				|| message.contains("provider_finish_reason_length:")
 				|| message.contains("no readable assistant content")
 		}
 		ProviderCallError::NonRetryable { .. } => false,
@@ -389,6 +393,7 @@ fn build_request_body<'a>(
 #[derive(Debug)]
 struct ParsedOpenRouterResponse {
 	output: String,
+	finish_reason: Option<String>,
 	prompt_tokens: u64,
 	output_tokens: u64,
 	served_model_id: Option<String>,
@@ -402,6 +407,24 @@ fn parse_response(response_body: &str) -> Result<ParsedOpenRouterResponse, Strin
 		.and_then(Value::as_array)
 		.and_then(|choices| choices.first())
 		.ok_or_else(|| "openrouter response contained no choice payload".to_string())?;
+	let finish_reason = choice
+		.get("finish_reason")
+		.and_then(Value::as_str)
+		.map(str::to_string);
+	if finish_reason.as_deref() == Some("length") {
+		return Err(
+			"provider_finish_reason_length: openrouter response was truncated by finish_reason=length"
+				.to_string(),
+		);
+	}
+	if choice
+		.get("message")
+		.and_then(Value::as_object)
+		.and_then(|message| message.get("content"))
+		.is_some_and(Value::is_null)
+	{
+		return Err("provider_content_null: openrouter response content is null".to_string());
+	}
 	let output = choice
 		.get("message")
 		.and_then(extract_message_text)
@@ -413,7 +436,7 @@ fn parse_response(response_body: &str) -> Result<ParsedOpenRouterResponse, Strin
 		})
 		.ok_or_else(|| {
 			format!(
-				"openrouter response contained no readable assistant content: {}",
+				"provider_unreadable_content: openrouter response contained no readable assistant content: {}",
 				truncate_for_log(&choice.to_string(), 400)
 			)
 		})?;
@@ -435,6 +458,7 @@ fn parse_response(response_body: &str) -> Result<ParsedOpenRouterResponse, Strin
 
 	Ok(ParsedOpenRouterResponse {
 		output,
+		finish_reason,
 		prompt_tokens,
 		output_tokens,
 		served_model_id,
@@ -791,7 +815,7 @@ mod tests {
 		)
 		.expect_err("reasoning-only payloads must not be surfaced as assistant output");
 
-		assert!(error.contains("no readable assistant content"));
+		assert!(error.contains("provider_content_null"));
 	}
 
 	#[test]

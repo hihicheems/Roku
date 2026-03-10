@@ -19,10 +19,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use roku_observability::{LlmInvocationOutcome, Metrics};
+use serde_json::Value;
 
 use crate::types::{
 	GenerationRequest, LlmAdapterError, LlmResponse, ModelProfile, ProviderCallError,
-	ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy, estimate_cost_usd,
+	ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy, StructuredGenerationError,
+	StructuredJsonResponse, StructuredOutputError, estimate_cost_usd,
 };
 
 pub trait LlmProvider: Send + Sync {
@@ -182,12 +184,30 @@ impl LlmRouter {
 			provider: selected_model.provider.clone(),
 			model_id: selected_model.model_id.clone(),
 			output: provider_response.output,
+			finish_reason: provider_response.finish_reason,
 			prompt_tokens: provider_response.prompt_tokens,
 			output_tokens: provider_response.output_tokens,
 			total_tokens,
 			estimated_cost_usd,
 			latency_ms: provider_response.latency_ms,
 		})
+	}
+
+	pub fn generate_json_value(
+		&self,
+		request: &GenerationRequest,
+	) -> Result<StructuredJsonResponse, StructuredGenerationError> {
+		let response = match self.generate(request) {
+			Ok(response) => response,
+			Err(error) => return Err(map_structured_generation_error(error)),
+		};
+		if response.finish_reason.as_deref() == Some("length") {
+			return Err(StructuredOutputError::FinishReasonLength.into());
+		}
+		let payload = extract_json_payload(&response.output);
+		let value = serde_json::from_str::<Value>(payload)
+			.map_err(|error| StructuredOutputError::InvalidJson(error.to_string()))?;
+		Ok(StructuredJsonResponse { response, value })
 	}
 
 	fn complete_with_resilience(
@@ -326,6 +346,38 @@ impl LlmRouter {
 			.next()
 			.ok_or(LlmAdapterError::NoEligibleModel)
 	}
+}
+
+fn map_structured_generation_error(error: LlmAdapterError) -> StructuredGenerationError {
+	match &error {
+		LlmAdapterError::ProviderCallFailed { message, .. } => {
+			if message.contains("provider_unreadable_content:") {
+				return StructuredOutputError::UnreadableProviderContent.into();
+			}
+			if message.contains("provider_content_null:") {
+				return StructuredOutputError::NullContent.into();
+			}
+			if message.contains("provider_finish_reason_length:") {
+				return StructuredOutputError::FinishReasonLength.into();
+			}
+			StructuredGenerationError::Llm(error)
+		}
+		_ => StructuredGenerationError::Llm(error),
+	}
+}
+
+fn extract_json_payload(output: &str) -> &str {
+	let trimmed = output.trim();
+	if let Some(stripped) = trimmed.strip_prefix("```") {
+		return stripped
+			.strip_prefix("json")
+			.map(str::trim_start)
+			.unwrap_or(stripped)
+			.strip_suffix("```")
+			.map(str::trim)
+			.unwrap_or(stripped);
+	}
+	trimmed
 }
 
 struct RegisteredProvider {
@@ -476,6 +528,7 @@ mod tests {
 		) -> Result<ProviderResponse, ProviderCallError> {
 			Ok(ProviderResponse {
 				output: self.output.to_string(),
+				finish_reason: None,
 				prompt_tokens: self.prompt_tokens,
 				output_tokens: self.output_tokens,
 				latency_ms: self.latency_ms,
@@ -722,6 +775,7 @@ mod tests {
 				Err(ProviderCallError::retryable("transient upstream failure")),
 				Ok(ProviderResponse {
 					output: "recovered".to_string(),
+					finish_reason: None,
 					prompt_tokens: 40,
 					output_tokens: 12,
 					latency_ms: 80,
@@ -824,6 +878,7 @@ mod tests {
 				Err(ProviderCallError::retryable("temporary overload")),
 				Ok(ProviderResponse {
 					output: "healthy-again".to_string(),
+					finish_reason: None,
 					prompt_tokens: 30,
 					output_tokens: 10,
 					latency_ms: 60,
@@ -850,5 +905,74 @@ mod tests {
 			.expect("second request should probe and close the circuit");
 		assert_eq!(response.output, "healthy-again");
 		assert_eq!(provider.invocations(), 2);
+	}
+
+	#[test]
+	fn generate_json_value_parses_structured_output() {
+		let mut router = LlmRouter::new(RoutingPolicy::default());
+		router.register_provider(StaticProvider {
+			name: "json-provider",
+			output: r#"{"intent_family":"chat","confidence":0.9}"#,
+			prompt_tokens: 12,
+			output_tokens: 8,
+			latency_ms: 25,
+		});
+		router.register_model(ModelProfile {
+			model_id: "json-model".to_string(),
+			provider: "json-provider".to_string(),
+			max_context_tokens: 8_000,
+			cost_per_1k_tokens_usd: 0.0,
+			max_risk_tier: RiskTier::Low,
+			route_priority: 100,
+		});
+
+		let response = router
+			.generate_json_value(&sample_request(RiskTier::Low))
+			.expect("structured json should parse");
+		assert_eq!(response.value["intent_family"], "chat");
+	}
+
+	#[test]
+	fn generate_json_value_rejects_truncated_finish_reason() {
+		struct TruncatedProvider;
+
+		impl LlmProvider for TruncatedProvider {
+			fn provider_name(&self) -> &'static str {
+				"truncated-provider"
+			}
+
+			fn complete(
+				&self,
+				_model: &ModelProfile,
+				_request: &GenerationRequest,
+			) -> Result<ProviderResponse, ProviderCallError> {
+				Ok(ProviderResponse {
+					output: r#"{"intent_family":"chat"}"#.to_string(),
+					finish_reason: Some("length".to_string()),
+					prompt_tokens: 10,
+					output_tokens: 5,
+					latency_ms: 20,
+				})
+			}
+		}
+
+		let mut router = LlmRouter::new(RoutingPolicy::default());
+		router.register_provider(TruncatedProvider);
+		router.register_model(ModelProfile {
+			model_id: "truncated-model".to_string(),
+			provider: "truncated-provider".to_string(),
+			max_context_tokens: 8_000,
+			cost_per_1k_tokens_usd: 0.0,
+			max_risk_tier: RiskTier::Low,
+			route_priority: 100,
+		});
+
+		let error = router
+			.generate_json_value(&sample_request(RiskTier::Low))
+			.expect_err("finish_reason=length must be rejected");
+		assert!(matches!(
+			error,
+			StructuredGenerationError::ParseGuard(StructuredOutputError::FinishReasonLength)
+		));
 	}
 }
