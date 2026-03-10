@@ -31,7 +31,15 @@ members = [
     "crates/roku-experiment-registry",
     "crates/roku-observability",
     "crates/roku-runtime-service",
-    "crates/roku-e2e",
+    "crates/roku-plugins/core",
+    "crates/roku-plugins/host",
+    "crates/roku-plugins/tools",
+    "crates/roku-plugins/catalog",
+    "crates/roku-plugins/skills",
+    "crates/roku-plugins/llm",
+    "crates/roku-plugins/coding",
+    "crates/roku-plugins/mcp",
+    "crates/roku-plugins/telegram",
 ]
 
 [workspace.dependencies]
