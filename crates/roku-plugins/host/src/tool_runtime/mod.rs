@@ -12,10 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Backward-compatible shim for the plugin host tool runtime.
+mod descriptor;
+mod error;
+mod event;
+mod runtime;
+#[cfg(test)]
+mod tests;
 
-pub use roku_plugin_host::tool_runtime::{
-	ExecutionEvent, ExecutionEventKind, ExecutionHook, RuntimeConstraints, SandboxProfile, Tool,
-	ToolDescriptor, ToolExecutionResult, ToolFailure, ToolInvocation, ToolInvocationRequest,
-	ToolRuntime, ToolRuntimeError, ToolSchema,
-};
+pub use descriptor::{RuntimeConstraints, SandboxProfile, ToolDescriptor, ToolSchema};
+pub use error::{ToolFailure, ToolRuntimeError};
+pub use event::{ExecutionEvent, ExecutionEventKind, ExecutionHook};
+pub use runtime::{Tool, ToolExecutionResult, ToolInvocation, ToolInvocationRequest, ToolRuntime};

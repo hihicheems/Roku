@@ -1477,11 +1477,12 @@ name = "roku-agent-runtime"
 version = "0.1.0"
 dependencies = [
  "roku-common-types",
- "roku-llm-adapter",
  "roku-observability",
- "roku-resource-catalog",
- "roku-skill-registry",
- "roku-tool-runtime",
+ "roku-plugin-catalog",
+ "roku-plugin-host",
+ "roku-plugin-llm",
+ "roku-plugin-skills",
+ "roku-plugin-tools",
  "serde",
  "serde_json",
  "tempfile",
@@ -1528,13 +1529,13 @@ dependencies = [
  "roku-api-gateway",
  "roku-artifact-store",
  "roku-common-types",
- "roku-connectors-telegram",
  "roku-experiment-registry",
- "roku-llm-adapter",
  "roku-observability",
  "roku-orchestrator",
+ "roku-plugin-llm",
+ "roku-plugin-skills",
+ "roku-plugin-telegram",
  "roku-runtime-service",
- "roku-skill-registry",
  "roku-state-store",
  "roku-task-planner",
  "serde_json",
@@ -1549,6 +1550,7 @@ version = "0.1.0"
 dependencies = [
  "roku-common-types",
  "roku-mcp-bridge",
+ "roku-plugin-coding",
  "serde",
  "serde_json",
  "thiserror",
@@ -1568,6 +1570,7 @@ dependencies = [
  "reqwest",
  "roku-common-types",
  "roku-observability",
+ "roku-plugin-telegram",
  "serde",
  "serde_json",
  "thiserror",
@@ -1597,6 +1600,7 @@ version = "0.1.0"
 dependencies = [
  "reqwest",
  "roku-observability",
+ "roku-plugin-llm",
  "serde",
  "serde_json",
  "thiserror",
@@ -1606,6 +1610,7 @@ dependencies = [
 name = "roku-mcp-bridge"
 version = "0.1.0"
 dependencies = [
+ "roku-plugin-mcp",
  "serde",
  "thiserror",
 ]
@@ -1633,10 +1638,21 @@ version = "0.1.0"
 [[package]]
 name = "roku-plugin-catalog"
 version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+ "serde",
+]
 
 [[package]]
 name = "roku-plugin-coding"
 version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+ "roku-plugin-mcp",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "roku-plugin-core"
@@ -1645,32 +1661,86 @@ version = "0.1.0"
 [[package]]
 name = "roku-plugin-host"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "roku-plugin-llm"
 version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "roku-observability",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "roku-plugin-mcp"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
+]
 
 [[package]]
 name = "roku-plugin-skills"
 version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "roku-common-types",
+ "roku-observability",
+ "roku-plugin-catalog",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror",
+ "url",
+ "walkdir",
+ "zip",
+]
 
 [[package]]
 name = "roku-plugin-telegram"
 version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "roku-common-types",
+ "roku-observability",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "roku-plugin-tools"
 version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+ "roku-observability",
+ "roku-plugin-catalog",
+ "roku-plugin-host",
+ "roku-plugin-llm",
+ "roku-plugin-skills",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "time",
+ "url",
+ "zip",
+]
 
 [[package]]
 name = "roku-resource-catalog"
 version = "0.1.0"
 dependencies = [
  "roku-common-types",
+ "roku-plugin-catalog",
  "serde",
 ]
 
@@ -1688,8 +1758,8 @@ dependencies = [
  "roku-observability",
  "roku-orchestrator",
  "roku-planning-engine",
- "roku-resource-catalog",
- "roku-skill-registry",
+ "roku-plugin-catalog",
+ "roku-plugin-skills",
  "roku-state-store",
  "roku-supervisor-agent",
  "roku-task-planner",
@@ -1706,6 +1776,7 @@ dependencies = [
  "reqwest",
  "roku-common-types",
  "roku-observability",
+ "roku-plugin-skills",
  "roku-resource-catalog",
  "serde",
  "serde_json",
@@ -1756,6 +1827,7 @@ dependencies = [
 name = "roku-tool-runtime"
 version = "0.1.0"
 dependencies = [
+ "roku-plugin-host",
  "serde",
  "serde_json",
  "thiserror",
