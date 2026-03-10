@@ -16,7 +16,10 @@ use std::sync::Arc;
 
 use crate::result::policy_rejection_result;
 use crate::tool_config::ToolCatalogConfig;
-use crate::tools::{build_builtin_tool_runtime, build_llm_tool_runtime, build_resource_catalog};
+use crate::tools::{
+	build_builtin_tool_runtime_with_plugin_snapshot, build_llm_tool_runtime_with_plugin_snapshot,
+	build_resource_catalog_with_plugin_snapshot,
+};
 use crate::workers::{
 	data_worker_with_config, generic_worker_with_config, inventory_worker_with_config,
 	research_worker_with_config, review_worker_with_config, skill_execute_worker_with_config,
@@ -24,6 +27,7 @@ use crate::workers::{
 };
 use roku_common_types::{AgentInstanceSpec, ResultEnvelope, TaskNode};
 use roku_plugin_catalog::ResourceCatalog;
+use roku_plugin_core::PluginRegistrySnapshot;
 use roku_plugin_host::ToolRuntime;
 use roku_plugin_llm::LlmRouter;
 use roku_plugin_skills::SkillRegistry;
@@ -48,6 +52,7 @@ pub struct GenericAgentRuntime {
 	tool_runtime: Arc<ToolRuntime>,
 	resource_catalog: ResourceCatalog,
 	tool_config: ToolCatalogConfig,
+	plugin_snapshot: PluginRegistrySnapshot,
 }
 
 impl GenericAgentRuntime {
@@ -56,12 +61,27 @@ impl GenericAgentRuntime {
 		resource_catalog: ResourceCatalog,
 		tool_config: ToolCatalogConfig,
 	) -> Self {
+		Self::with_tool_runtime_and_plugin_snapshot(
+			tool_runtime,
+			resource_catalog,
+			tool_config,
+			PluginRegistrySnapshot::permissive(),
+		)
+	}
+
+	pub fn with_tool_runtime_and_plugin_snapshot(
+		tool_runtime: ToolRuntime,
+		resource_catalog: ResourceCatalog,
+		tool_config: ToolCatalogConfig,
+		plugin_snapshot: PluginRegistrySnapshot,
+	) -> Self {
 		let shared_tool_runtime = Arc::new(tool_runtime);
 		let mut runtime = Self {
 			workers: Vec::new(),
 			tool_runtime: Arc::clone(&shared_tool_runtime),
 			resource_catalog,
 			tool_config: tool_config.clone(),
+			plugin_snapshot,
 		};
 		runtime.register_worker(
 			96,
@@ -102,11 +122,32 @@ impl GenericAgentRuntime {
 		skill_registry: SkillRegistry,
 		tool_config: ToolCatalogConfig,
 	) -> Self {
-		let resource_catalog = build_resource_catalog(&skill_registry, &tool_config);
-		Self::with_tool_runtime(
-			build_builtin_tool_runtime(skill_registry, &tool_config),
+		Self::with_skill_registry_tool_config_and_plugin_snapshot(
+			skill_registry,
+			tool_config,
+			PluginRegistrySnapshot::permissive(),
+		)
+	}
+
+	pub fn with_skill_registry_tool_config_and_plugin_snapshot(
+		skill_registry: SkillRegistry,
+		tool_config: ToolCatalogConfig,
+		plugin_snapshot: PluginRegistrySnapshot,
+	) -> Self {
+		let resource_catalog = build_resource_catalog_with_plugin_snapshot(
+			&skill_registry,
+			&tool_config,
+			&plugin_snapshot,
+		);
+		Self::with_tool_runtime_and_plugin_snapshot(
+			build_builtin_tool_runtime_with_plugin_snapshot(
+				skill_registry,
+				&tool_config,
+				&plugin_snapshot,
+			),
 			resource_catalog,
 			tool_config,
+			plugin_snapshot,
 		)
 	}
 
@@ -130,16 +171,36 @@ impl GenericAgentRuntime {
 		skill_registry: SkillRegistry,
 		tool_config: ToolCatalogConfig,
 	) -> Self {
-		let resource_catalog = build_resource_catalog(&skill_registry, &tool_config);
-		Self::with_tool_runtime(
-			build_llm_tool_runtime(
+		Self::with_llm_router_skill_registry_tool_config_and_plugin_snapshot(
+			router,
+			skill_registry,
+			tool_config,
+			PluginRegistrySnapshot::permissive(),
+		)
+	}
+
+	pub fn with_llm_router_skill_registry_tool_config_and_plugin_snapshot(
+		router: LlmRouter,
+		skill_registry: SkillRegistry,
+		tool_config: ToolCatalogConfig,
+		plugin_snapshot: PluginRegistrySnapshot,
+	) -> Self {
+		let resource_catalog = build_resource_catalog_with_plugin_snapshot(
+			&skill_registry,
+			&tool_config,
+			&plugin_snapshot,
+		);
+		Self::with_tool_runtime_and_plugin_snapshot(
+			build_llm_tool_runtime_with_plugin_snapshot(
 				Arc::new(router),
 				skill_registry,
 				&tool_config,
 				&resource_catalog,
+				&plugin_snapshot,
 			),
 			resource_catalog,
 			tool_config,
+			plugin_snapshot,
 		)
 	}
 
@@ -149,6 +210,10 @@ impl GenericAgentRuntime {
 
 	pub fn tool_config(&self) -> &ToolCatalogConfig {
 		&self.tool_config
+	}
+
+	pub fn plugin_snapshot(&self) -> &PluginRegistrySnapshot {
+		&self.plugin_snapshot
 	}
 
 	pub fn register_worker<W>(&mut self, priority: u8, worker: W)

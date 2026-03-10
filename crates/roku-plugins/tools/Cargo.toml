@@ -7,11 +7,12 @@ authors.workspace = true
 
 [dependencies]
 roku-common-types = { path = "../../roku-common-types" }
-roku-llm-adapter = { package = "roku-plugin-llm", path = "../llm" }
 roku-observability = { path = "../../roku-observability" }
-roku-resource-catalog = { package = "roku-plugin-catalog", path = "../catalog" }
-roku-skill-registry = { package = "roku-plugin-skills", path = "../skills" }
-roku-tool-runtime = { package = "roku-plugin-host", path = "../host" }
+roku-plugin-catalog = { path = "../catalog" }
+roku-plugin-core = { path = "../core" }
+roku-plugin-host = { path = "../host" }
+roku-plugin-llm = { path = "../llm" }
+roku-plugin-skills = { path = "../skills" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

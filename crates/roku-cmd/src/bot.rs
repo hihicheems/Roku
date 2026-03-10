@@ -32,7 +32,10 @@ use serde_json::json;
 
 use crate::CommandError;
 use crate::runtime::ExecutionRequestOptions;
-use crate::runtime::{apply_request_env_overrides, build_live_runtime_service_from_env};
+use crate::runtime::{
+	apply_request_env_overrides, build_live_runtime_service_from_layout_and_bootstrap,
+	build_plugin_bootstrap_from_env, ensure_plugin_enabled_for_command,
+};
 use crate::storage::LocalStorageLayout;
 
 pub fn run_telegram_bot_from_env() -> Result<(), CommandError> {
@@ -64,8 +67,16 @@ pub(crate) fn run_telegram_once_with_options_from_env(
 }
 
 fn build_live_telegram_handler_from_env() -> Result<RuntimeServiceTelegramHandler, CommandError> {
+	let (layout, bootstrap) = build_plugin_bootstrap_from_env()?;
+	ensure_plugin_enabled_for_command(
+		&bootstrap.plugin_snapshot,
+		"telegram",
+		"telegram-once/telegram-bot",
+	)?;
 	Ok(RuntimeServiceTelegramHandler {
-		service: Arc::new(build_live_runtime_service_from_env()?),
+		service: Arc::new(build_live_runtime_service_from_layout_and_bootstrap(
+			&layout, bootstrap,
+		)?),
 		session_state: Arc::new(TelegramSessionState::from_env()?),
 	})
 }

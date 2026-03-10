@@ -14,8 +14,16 @@
 
 //! Plugin host building blocks for Roku.
 
+mod admission;
+mod discovery;
+mod registry_loader;
+mod startup;
 pub mod tool_runtime;
 
+pub use startup::{
+	BundledPluginDescriptor, PluginDiscoveryConfig, PluginHostError, PluginStartupConfig,
+	build_plugin_registry_snapshot, default_bundled_plugin_descriptors,
+};
 pub use tool_runtime::{
 	ExecutionEvent, ExecutionEventKind, ExecutionHook, RuntimeConstraints, SandboxProfile, Tool,
 	ToolDescriptor, ToolExecutionResult, ToolFailure, ToolInvocation, ToolInvocationRequest,

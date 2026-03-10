@@ -21,7 +21,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::blocking::Client;
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
-use roku_resource_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
+use roku_plugin_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
 use serde::Deserialize;
 use walkdir::WalkDir;
 

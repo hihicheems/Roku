@@ -20,5 +20,6 @@ mod tool_config;
 mod tools;
 mod workers;
 
+pub use roku_plugin_core::PluginRegistrySnapshot;
 pub use runtime::{AgentWorker, GenericAgentRuntime, RuntimeWorker};
 pub use tool_config::{BuiltinToolRole, ConfiguredTool, ToolCatalogConfig, ToolCatalogConfigError};

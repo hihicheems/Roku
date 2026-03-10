@@ -23,14 +23,15 @@ use roku_common_types::{
 	ResourceSelector, SkillExecutionMode, SkillExecutionPlan, SkillExecutionRequest,
 	SkillExecutionResult,
 };
-use roku_llm_adapter::{GenerationRequest, LlmAdapterError, LlmRouter, RiskTier};
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
-use roku_resource_catalog::{CatalogDescriptor, ResourceCatalog, ResourceKind};
-use roku_skill_registry::{InstalledSkillRecord, SkillRegistry};
-use roku_tool_runtime::{
+use roku_plugin_catalog::{CatalogDescriptor, ResourceCatalog, ResourceKind};
+use roku_plugin_core::PluginRegistrySnapshot;
+use roku_plugin_host::{
 	RuntimeConstraints, SandboxProfile, Tool, ToolDescriptor, ToolFailure, ToolInvocationRequest,
 	ToolRuntime, ToolSchema,
 };
+use roku_plugin_llm::{GenerationRequest, LlmAdapterError, LlmRouter, RiskTier};
+use roku_plugin_skills::{InstalledSkillRecord, SkillRegistry};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -46,20 +47,52 @@ pub fn build_resource_catalog(
 	skill_registry: &SkillRegistry,
 	tool_config: &ToolCatalogConfig,
 ) -> ResourceCatalog {
+	build_resource_catalog_with_plugin_snapshot(
+		skill_registry,
+		tool_config,
+		&PluginRegistrySnapshot::permissive(),
+	)
+}
+
+pub fn build_resource_catalog_with_plugin_snapshot(
+	skill_registry: &SkillRegistry,
+	tool_config: &ToolCatalogConfig,
+	plugin_snapshot: &PluginRegistrySnapshot,
+) -> ResourceCatalog {
 	let entries = tool_config
 		.tools
 		.iter()
+		.filter(|_| plugin_snapshot.is_plugin_enabled("builtin-tools"))
 		.map(tool_catalog_descriptor)
 		.collect::<Vec<_>>();
-	let skill_entries = skill_registry.catalog_descriptors().unwrap_or_default();
-	roku_resource_catalog::build_resource_catalog(entries, skill_entries)
+	let skill_entries = if plugin_snapshot.is_plugin_enabled("skill-source-local") {
+		skill_registry.catalog_descriptors().unwrap_or_default()
+	} else {
+		Vec::new()
+	};
+	roku_plugin_catalog::build_resource_catalog(entries, skill_entries)
 }
 
 pub fn build_builtin_tool_runtime(
 	skill_registry: SkillRegistry,
 	tool_config: &ToolCatalogConfig,
 ) -> ToolRuntime {
+	build_builtin_tool_runtime_with_plugin_snapshot(
+		skill_registry,
+		tool_config,
+		&PluginRegistrySnapshot::permissive(),
+	)
+}
+
+pub fn build_builtin_tool_runtime_with_plugin_snapshot(
+	skill_registry: SkillRegistry,
+	tool_config: &ToolCatalogConfig,
+	plugin_snapshot: &PluginRegistrySnapshot,
+) -> ToolRuntime {
 	let mut runtime = ToolRuntime::default();
+	if !plugin_snapshot.is_plugin_enabled("builtin-tools") {
+		return runtime;
+	}
 	runtime
 		.register_tool(SkillInstallTool::legacy(skill_registry.clone()))
 		.expect("skill install tool must register successfully");
@@ -93,7 +126,26 @@ pub fn build_llm_tool_runtime(
 	tool_config: &ToolCatalogConfig,
 	resource_catalog: &ResourceCatalog,
 ) -> ToolRuntime {
+	build_llm_tool_runtime_with_plugin_snapshot(
+		router,
+		skill_registry,
+		tool_config,
+		resource_catalog,
+		&PluginRegistrySnapshot::permissive(),
+	)
+}
+
+pub fn build_llm_tool_runtime_with_plugin_snapshot(
+	router: Arc<LlmRouter>,
+	skill_registry: SkillRegistry,
+	tool_config: &ToolCatalogConfig,
+	resource_catalog: &ResourceCatalog,
+	plugin_snapshot: &PluginRegistrySnapshot,
+) -> ToolRuntime {
 	let mut runtime = ToolRuntime::default();
+	if !plugin_snapshot.is_plugin_enabled("builtin-tools") {
+		return runtime;
+	}
 	runtime
 		.register_tool(SkillInstallTool::legacy(skill_registry.clone()))
 		.expect("skill install tool must register successfully");
@@ -1777,14 +1829,14 @@ mod tests {
 		runtime_context_block, sanitize_final_reply, user_visible_prompt,
 	};
 	use crate::config::{BuiltinToolRole, ToolCatalogConfig};
-	use roku_llm_adapter::{
+	use roku_plugin_host::{SandboxProfile, Tool, ToolInvocationRequest};
+	use roku_plugin_llm::{
 		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderCallError,
 		ProviderResponse, RiskTier, RoutingPolicy,
 	};
-	use roku_skill_registry::{
+	use roku_plugin_skills::{
 		DownloadedArchive, SkillArchiveFetcher, SkillRegistry, SkillRegistryError, SkillSource,
 	};
-	use roku_tool_runtime::{SandboxProfile, Tool, ToolInvocationRequest};
 
 	#[test]
 	fn runtime_context_block_contains_date_and_weekday() {
