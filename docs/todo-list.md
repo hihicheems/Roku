@@ -426,17 +426,11 @@
 | QD-05 | 为 task planner 增加 quant workflow template（data -> factor -> strategy -> backtest -> analysis） | §18.1 / §7.3 | TODO |
 | QD-06 | 增加量化基准样例和 e2e acceptance scenario | §18 量化研究 Agent | TODO |
 
-## roku-e2e
+## roku-e2e (deleted)
 
-| ID | Subtask | Design Anchor | Status |
-| --- | --- | --- | --- |
-| E2E-01 | 覆盖 CLI happy path | §20 端到端测试 | DONE |
-| E2E-02 | 覆盖 validation failure path | §11 失败处理策略 | DONE |
-| E2E-03 | 覆盖 capability denied path | §10 Capability 最小权限 | DONE |
-| E2E-04 | 覆盖 approval pending -> approve -> succeed roundtrip | §15.3 人审闸门 | DONE |
-| E2E-05 | 覆盖 dead-letter failure path | §8.3 / §8.4 | DONE |
-| E2E-06 | 覆盖 HTTP artifact / experiment / artifact-content / download 路由 | §12 / §19.1 | DONE |
-| E2E-07 | 增加 property-based 状态迁移 / graph compilation / capability attenuation 测试 | §20 测试策略 | TODO |
-| E2E-08 | 增加 chaos 测试：timeout、进程重启、重复投递、provider 失联 | §20 混沌测试 | DONE |
-| E2E-09 | 增加 replay 测试：基于持久化 task/event/result/artifact 恢复执行 | §20 回归测试 / replay | DONE |
-| E2E-10 | 增加 tool / MCP / coding provider / approval gate / backpressure 组合矩阵 | §20 集成测试 / 验收重点 | TODO |
+`crates/roku-e2e` 已在 runtime refactor Phase 0 中删除。
+
+后续仍需要保留的 acceptance / smoke coverage，应在后续 phase 中迁移到：
+
+- `roku-cmd/tests/`
+- `roku-runtime-service/tests/`
