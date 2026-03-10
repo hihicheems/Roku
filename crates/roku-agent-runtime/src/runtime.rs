@@ -23,10 +23,10 @@ use crate::workers::{
 	skill_worker_with_config,
 };
 use roku_common_types::{AgentInstanceSpec, ResultEnvelope, TaskNode};
-use roku_llm_adapter::LlmRouter;
-use roku_resource_catalog::ResourceCatalog;
-use roku_skill_registry::SkillRegistry;
-use roku_tool_runtime::ToolRuntime;
+use roku_plugin_catalog::ResourceCatalog;
+use roku_plugin_host::ToolRuntime;
+use roku_plugin_llm::LlmRouter;
+use roku_plugin_skills::SkillRegistry;
 
 pub trait AgentWorker {
 	fn execute(&self, spec: &AgentInstanceSpec, node: &TaskNode) -> ResultEnvelope;
@@ -202,11 +202,11 @@ mod tests {
 		AgentContext, AggregationMode, EvidenceItem, JoinPolicy, NodeId, PolicyBindings,
 		ResultStatus, TaskId, TaskNode, TaskNodeKind,
 	};
-	use roku_llm_adapter::{
+	use roku_plugin_llm::{
 		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderCallError,
 		ProviderResponse, RiskTier, RoutingPolicy,
 	};
-	use roku_skill_registry::{
+	use roku_plugin_skills::{
 		DownloadedArchive, SkillArchiveFetcher, SkillRegistry, SkillRegistryError, SkillSource,
 	};
 	use std::io::{Cursor, Write};

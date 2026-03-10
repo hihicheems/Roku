@@ -18,7 +18,7 @@ use crate::tool_config::{BuiltinToolRole, ToolCatalogConfig};
 use roku_common_types::{
 	AgentInstanceSpec, ConversationRole, ConversationTurn, ResultEnvelope, TaskNode,
 };
-use roku_tool_runtime::{ToolInvocation, ToolRuntime};
+use roku_plugin_host::{ToolInvocation, ToolRuntime};
 use serde_json::json;
 
 use crate::result::{tool_failure_result, tool_success_result};

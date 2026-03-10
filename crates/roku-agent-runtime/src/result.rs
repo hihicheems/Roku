@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use roku_common_types::{AgentInstanceSpec, EvidenceItem, ResultEnvelope, ResultStatus, TaskNode};
-use roku_tool_runtime::{SandboxProfile, ToolExecutionResult, ToolRuntimeError};
+use roku_plugin_host::{SandboxProfile, ToolExecutionResult, ToolRuntimeError};
 use serde_json::{Value, json};
 
 pub(crate) fn policy_rejection_result(spec: &AgentInstanceSpec, node: &TaskNode) -> ResultEnvelope {
