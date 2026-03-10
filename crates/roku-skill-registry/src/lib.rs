@@ -12,14 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod error;
-mod registry;
-mod source;
-mod types;
+//! Backward-compatible shim for the plugin skill registry.
 
-pub use error::SkillRegistryError;
-pub use registry::{
-	DownloadedArchive, HttpSkillArchiveFetcher, SkillArchiveFetcher, SkillRegistry,
+pub use roku_plugin_skills::{
+	DownloadedArchive, HttpSkillArchiveFetcher, InstalledSkillRecord, SkillArchiveFetcher,
+	SkillDescriptor, SkillInstallReport, SkillRegistry, SkillRegistryError, SkillSource,
 };
-pub use source::SkillSource;
-pub use types::{InstalledSkillRecord, SkillDescriptor, SkillInstallReport};
