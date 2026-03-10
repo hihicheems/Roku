@@ -12,12 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Unified resource catalog with retrieval and catalog-building helpers.
-
-mod builders;
-mod retrieval;
-
-pub use builders::build_resource_catalog;
-pub use retrieval::{
-	CatalogDescriptor, CatalogMatch, ResourceCatalog, ResourceCost, ResourceKind, ResourceRisk,
-};
+#[allow(unused_imports)]
+pub(crate) use crate::builders::SkillExecuteTool;

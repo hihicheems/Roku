@@ -15,6 +15,7 @@
 //! Builtin tool catalog and runtime builders for Roku plugins.
 
 mod builders;
+mod builtin;
 mod config;
 
 pub use builders::{build_builtin_tool_runtime, build_llm_tool_runtime, build_resource_catalog};
