@@ -51,6 +51,7 @@ pub(crate) fn tool_success_result(
 		.get("message")
 		.and_then(Value::as_str)
 		.unwrap_or(&node.description);
+	let derived_evidence = derived_execution_evidence(&execution.output);
 	let payload = json!({
 		"worker_id": worker_id,
 		"tool_name": tool_name,
@@ -69,35 +70,39 @@ pub(crate) fn tool_success_result(
 		schema_version: "result.v1".to_string(),
 		status: ResultStatus::Ok,
 		payload: serialize_payload(&payload),
-		evidence: vec![
-			EvidenceItem {
-				kind: "runtime".to_string(),
-				value: worker_id.to_string(),
-			},
-			EvidenceItem {
-				kind: "tool".to_string(),
-				value: tool_name.to_string(),
-			},
-			EvidenceItem {
-				kind: "output_fingerprint".to_string(),
-				value: execution.output_fingerprint,
-			},
-			EvidenceItem {
-				kind: "sandbox_profile".to_string(),
-				value: sandbox_profile_label(&execution.sandbox_profile).to_string(),
-			},
-			EvidenceItem {
-				kind: "tool_attempts".to_string(),
-				value: execution.attempts.to_string(),
-			},
-			EvidenceItem {
-				kind: "policy".to_string(),
-				value: format!(
-					"budget_tokens={},time_budget_ms={}",
-					spec.policy_bindings.budget_tokens, spec.policy_bindings.time_budget_ms
-				),
-			},
-		],
+		evidence: {
+			let mut evidence = vec![
+				EvidenceItem {
+					kind: "runtime".to_string(),
+					value: worker_id.to_string(),
+				},
+				EvidenceItem {
+					kind: "tool".to_string(),
+					value: tool_name.to_string(),
+				},
+				EvidenceItem {
+					kind: "output_fingerprint".to_string(),
+					value: execution.output_fingerprint,
+				},
+				EvidenceItem {
+					kind: "sandbox_profile".to_string(),
+					value: sandbox_profile_label(&execution.sandbox_profile).to_string(),
+				},
+				EvidenceItem {
+					kind: "tool_attempts".to_string(),
+					value: execution.attempts.to_string(),
+				},
+				EvidenceItem {
+					kind: "policy".to_string(),
+					value: format!(
+						"budget_tokens={},time_budget_ms={}",
+						spec.policy_bindings.budget_tokens, spec.policy_bindings.time_budget_ms
+					),
+				},
+			];
+			evidence.extend(derived_evidence);
+			evidence
+		},
 		confidence,
 	}
 }
@@ -175,4 +180,43 @@ fn serialize_payload(payload: &Value) -> String {
 		Ok(serialized) => serialized,
 		Err(error) => format!(r#"{{"error_code":"serialization_failure","message":"{error}"}}"#),
 	}
+}
+
+fn derived_execution_evidence(output: &Value) -> Vec<EvidenceItem> {
+	let mut evidence = Vec::new();
+	if let Some(selected_skill) = output.get("selected_skill").and_then(Value::as_str) {
+		evidence.push(EvidenceItem {
+			kind: "selected_skill".to_string(),
+			value: selected_skill.to_string(),
+		});
+	}
+	if let Some(status) = output.get("validation_status").and_then(Value::as_str) {
+		evidence.push(EvidenceItem {
+			kind: "validation_status".to_string(),
+			value: status.to_string(),
+		});
+	}
+	if let Some(paths) = output.get("created_paths").and_then(Value::as_array) {
+		evidence.extend(
+			paths
+				.iter()
+				.filter_map(Value::as_str)
+				.map(|path| EvidenceItem {
+					kind: "created_path".to_string(),
+					value: path.to_string(),
+				}),
+		);
+	}
+	if let Some(scripts) = output.get("executed_scripts").and_then(Value::as_array) {
+		evidence.extend(
+			scripts
+				.iter()
+				.filter_map(Value::as_str)
+				.map(|path| EvidenceItem {
+					kind: "executed_script".to_string(),
+					value: path.to_string(),
+				}),
+		);
+	}
+	evidence
 }

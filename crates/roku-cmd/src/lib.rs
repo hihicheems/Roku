@@ -122,7 +122,7 @@ where
 }
 
 pub fn help_text() -> &'static str {
-	"Usage:\n  roku-cmd once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd live-once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd telegram-once [--session-id <id>] [--planning-mode <mode>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n  roku-cmd task show <task-id>\n  roku-cmd task replay <task-id>\n  roku-cmd task resume <task-id>\n  roku-cmd approval show <approval-id>\n  roku-cmd approval approve <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd approval reject <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd artifact list <task-id>\n  roku-cmd artifact content <task-id> <artifact-id>\n  roku-cmd artifact download <task-id> <artifact-id> --output <path>\n  roku-cmd experiment show <task-id>\n  roku-cmd skill install <source-url>\n  roku-cmd skill list\n  roku-cmd skill show <skill-name>\n\nCommands:\n  once              Run the deterministic in-process pipeline.\n  live-once         Run the OpenRouter-backed live pipeline from environment.\n  telegram-once     Run one live Telegram handler turn and print the outbound bot message.\n  telegram-bot      Start the Telegram polling bot using environment configuration.\n  api-gateway       Start the Actix HTTP gateway using environment configuration.\n  task show         Render a persisted task snapshot with its event timeline.\n  task replay       Rebuild a state-transition report from persisted task events.\n  task resume       Continue a resumable persisted task using the live runtime path.\n  approval          Show or decide an approval ticket from persisted state.\n  artifact          List artifacts, print artifact content, or download an artifact payload.\n  experiment show   Render the persisted experiment run for a task.\n  skill install     Install a skill package into the local file-backed registry.\n  skill list        List installed skills from the local registry.\n  skill show        Render installed skill metadata and prompt context.\n\nPlanning Modes:\n  react | taskdecomposition | treesearch | iterativerefinement"
+	"Usage:\n  roku-cmd once [--session-id <id>] [--planning-mode <mode>] [--generated-skill-root <path>] <goal>\n  roku-cmd live-once [--session-id <id>] [--planning-mode <mode>] [--generated-skill-root <path>] <goal>\n  roku-cmd telegram-once [--session-id <id>] [--planning-mode <mode>] [--generated-skill-root <path>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n  roku-cmd task show <task-id>\n  roku-cmd task replay <task-id>\n  roku-cmd task resume <task-id>\n  roku-cmd approval show <approval-id>\n  roku-cmd approval approve <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd approval reject <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd artifact list <task-id>\n  roku-cmd artifact content <task-id> <artifact-id>\n  roku-cmd artifact download <task-id> <artifact-id> --output <path>\n  roku-cmd experiment show <task-id>\n  roku-cmd skill install <source-url>\n  roku-cmd skill list\n  roku-cmd skill show <skill-name>\n\nCommands:\n  once              Run the deterministic in-process pipeline.\n  live-once         Run the OpenRouter-backed live pipeline from environment.\n  telegram-once     Run one live Telegram handler turn and print the outbound bot message.\n  telegram-bot      Start the Telegram polling bot using environment configuration.\n  api-gateway       Start the Actix HTTP gateway using environment configuration.\n  task show         Render a persisted task snapshot with its event timeline.\n  task replay       Rebuild a state-transition report from persisted task events.\n  task resume       Continue a resumable persisted task using the live runtime path.\n  approval          Show or decide an approval ticket from persisted state.\n  artifact          List artifacts, print artifact content, or download an artifact payload.\n  experiment show   Render the persisted experiment run for a task.\n  skill install     Install a skill package into the local file-backed registry.\n  skill list        List installed skills from the local registry.\n  skill show        Render installed skill metadata and prompt context.\n\nPlanning Modes:\n  react | taskdecomposition | treesearch | iterativerefinement"
 }
 
 fn join_goal(parts: &[String]) -> Result<String, CommandError> {
@@ -138,6 +138,7 @@ fn join_goal(parts: &[String]) -> Result<String, CommandError> {
 fn parse_request_options(parts: &[String]) -> Result<ExecutionRequestOptions, CommandError> {
 	let mut session_id = "session-1".to_string();
 	let mut planning_mode_hint = None;
+	let mut generated_skill_root = None;
 	let mut goal_parts = Vec::new();
 	let mut index = 0usize;
 
@@ -169,6 +170,25 @@ fn parse_request_options(parts: &[String]) -> Result<ExecutionRequestOptions, Co
 			index += 2;
 			continue;
 		}
+		if let Some(value) = current.strip_prefix("--generated-skill-root=") {
+			generated_skill_root = Some(PathBuf::from(parse_non_empty_flag(
+				"--generated-skill-root",
+				value,
+			)?));
+			index += 1;
+			continue;
+		}
+		if current == "--generated-skill-root" {
+			let value = parts.get(index + 1).ok_or_else(|| {
+				CommandError::Usage("missing value for --generated-skill-root".to_string())
+			})?;
+			generated_skill_root = Some(PathBuf::from(parse_non_empty_flag(
+				"--generated-skill-root",
+				value,
+			)?));
+			index += 2;
+			continue;
+		}
 		goal_parts.push(current.clone());
 		index += 1;
 	}
@@ -177,6 +197,7 @@ fn parse_request_options(parts: &[String]) -> Result<ExecutionRequestOptions, Co
 		session_id,
 		goal: join_goal(&goal_parts)?,
 		planning_mode_hint,
+		generated_skill_root,
 	})
 }
 
@@ -564,6 +585,8 @@ mod tests {
 			"chat-42".to_string(),
 			"--planning-mode".to_string(),
 			"TreeSearch".to_string(),
+			"--generated-skill-root".to_string(),
+			"/tmp/generated-skills".to_string(),
 			"investigate".to_string(),
 			"memory".to_string(),
 		])
@@ -573,6 +596,10 @@ mod tests {
 		assert_eq!(
 			options.planning_mode_hint,
 			Some(PlanningModeHint::TreeSearch)
+		);
+		assert_eq!(
+			options.generated_skill_root,
+			Some(PathBuf::from("/tmp/generated-skills"))
 		);
 		assert_eq!(options.goal, "investigate memory");
 	}

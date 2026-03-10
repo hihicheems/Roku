@@ -19,8 +19,9 @@ use roku_resource_catalog::ResourceCatalog;
 use crate::selection::{ResourceSelectionEngine, SelectionRoute};
 use crate::strategies::{
 	PlannerToolbox, build_conversation_steps, build_decomposition_steps, build_react_steps,
-	build_refinement_steps, build_selected_skill_steps, build_selected_tool_steps,
-	build_skill_install_steps, build_tree_search_steps,
+	build_refinement_steps, build_selected_skill_advisory_steps,
+	build_selected_skill_executable_steps, build_selected_tool_steps, build_skill_install_steps,
+	build_tree_search_steps,
 };
 
 pub trait TaskPlanner {
@@ -57,8 +58,11 @@ impl TaskPlanner for AdaptiveTaskPlanner {
 				source_url,
 				if_missing,
 			} => build_skill_install_steps(&request.goal, &source_url, if_missing, &self.toolbox),
-			SelectionRoute::UseSkill { selector } => {
-				build_selected_skill_steps(&request.goal, selector)
+			SelectionRoute::UseSkillAdvisory { selector } => {
+				build_selected_skill_advisory_steps(&request.goal, selector)
+			}
+			SelectionRoute::UseSkillExecutable { selector } => {
+				build_selected_skill_executable_steps(&request.goal, selector, &self.toolbox)
 			}
 			SelectionRoute::UseTools { selectors } => {
 				build_selected_tool_steps(&request.goal, &selectors)

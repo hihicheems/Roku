@@ -19,7 +19,8 @@ use crate::tool_config::ToolCatalogConfig;
 use crate::tools::{build_builtin_tool_runtime, build_llm_tool_runtime, build_resource_catalog};
 use crate::workers::{
 	data_worker_with_config, generic_worker_with_config, inventory_worker_with_config,
-	research_worker_with_config, review_worker_with_config, skill_worker_with_config,
+	research_worker_with_config, review_worker_with_config, skill_execute_worker_with_config,
+	skill_worker_with_config,
 };
 use roku_common_types::{AgentInstanceSpec, ResultEnvelope, TaskNode};
 use roku_llm_adapter::LlmRouter;
@@ -62,6 +63,10 @@ impl GenericAgentRuntime {
 			resource_catalog,
 			tool_config: tool_config.clone(),
 		};
+		runtime.register_worker(
+			96,
+			skill_execute_worker_with_config(Arc::clone(&shared_tool_runtime), &tool_config),
+		);
 		runtime.register_worker(
 			95,
 			skill_worker_with_config(Arc::clone(&shared_tool_runtime), &tool_config),

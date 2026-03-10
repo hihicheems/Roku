@@ -34,6 +34,17 @@ pub struct InstalledSkillRecord {
 	pub installed_files: Vec<String>,
 }
 
+impl InstalledSkillRecord {
+	pub fn has_scripts(&self) -> bool {
+		self.installed_files.iter().any(|path| {
+			path == "scripts"
+				|| path.starts_with("scripts/")
+				|| path == "./scripts"
+				|| path.starts_with("./scripts/")
+		})
+	}
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillInstallReport {
 	pub skill_name: String,

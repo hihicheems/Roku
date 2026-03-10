@@ -6,6 +6,7 @@
 
 - `tmp/agent-design-doc.md` 是架构白皮书，定义系统设计方向、分层和模块边界。
 - `docs/todo-list.md` 是实施路线图，按 crate 粒度拆解为可执行子任务。
+- `tmp/phase-2-security-validation-sandbox.md` 是 Phase 2 施工图，聚焦 capability、validation、sandbox 与 gateway 治理。
 - 本文档优先按设计文档的分层顺序组织：基础工程 -> 控制面 / 认知层 -> 执行面 -> 数据面 -> 接入层 -> 组织层 -> 领域扩展 -> 测试矩阵。
 - 表格中的状态只使用 `DONE` / `TODO`。
 - `DONE` 表示当前仓库里已有相应实现，并且已纳入现有开发主线；`TODO` 表示尚未完成或仅有很薄的骨架。
@@ -44,6 +45,7 @@
 | CT-14 | 增加 A2A 所需的 `AgentIdentity` / `CapabilityCard` / `WorkContract` / `DelegationTicket` DTO | §17 组织层抽象 | TODO |
 | CT-15 | 增加组织级策略、审批规则、预算快照、模型路由等跨 crate 通用契约 | §14 / §15 / §17 | TODO |
 | CT-16 | 增加 `PlanningModeHint` / `SessionPreferences` / `ConversationTurn` 等会话级策略与记忆契约 | §7 Planning Architecture / §12 Memory | DONE |
+| CT-17 | 增加 `CapabilityVerifyResult` / `CapabilityDenyReason` / `ValidationFailureCode` / `ValidationFailureDetail` / `ValidationDecision` 等结构化治理 DTO | §10 Capability 模型 / §11.2 Schema Validation / §11.4 失败处理策略 | TODO |
 
 ## roku-orchestrator
 
@@ -58,7 +60,7 @@
 | OR-07 | 增加 node-level deadline / budget snapshot enforcement | §8.4 / §14 预算治理 | DONE |
 | OR-08 | 接入本地 SQLite dispatch plane 的 lease / ack / retry / renewal 协议 | §14.3 背压与资源隔离 | DONE |
 
-## roku-supervisor-agent (planned)
+## roku-supervisor-agent
 
 | ID | Subtask | Design Anchor | Status |
 | --- | --- | --- | --- |
@@ -113,7 +115,7 @@
 | GB-07 | 自动注入 approval / aggregation / retry / dead-letter 辅助节点 | §8.2 / §15.3 人审闸门 | DONE |
 | GB-08 | 增加条件边、条件分支和受控回环 DAG 编译能力 | §8.2 条件分支 / 回环有限图 | DONE |
 | GB-09 | 为每个节点写入预算、deadline、capability requirement snapshot | §8.4 / §14 | DONE |
-| GB-10 | 对 `skill.install` 与 `use-installed-skill` 这类 skill 关键节点调高 deadline / token budget，避免被默认执行预算误杀 | §13.2 Skill 生命周期 / §14 预算治理 | DONE |
+| GB-10 | 对 `skill.ensure_installed` 与 `use-installed-skill` 这类 skill 关键节点调高 deadline / token budget，避免被默认执行预算误杀 | §13.2 Skill 生命周期 / §14 预算治理 | DONE |
 
 ## roku-agent-instance-factory
 
@@ -128,7 +130,7 @@
 | AF-07 | 让 profile 装配显式绑定审批策略、模型路由策略和验证策略 | §7.6 PolicyBindings | TODO |
 | AF-08 | 支持带外部 coding provider 的组合 worker profile | §7.7 / §13.4 | TODO |
 | AF-09 | 增加组织级 profile 模板与租户级 policy override | §17 OrgPolicy | TODO |
-| AF-10 | 为 `skill.install` 提供专用 profile 默认预算，避免 skill 下载/安装被通用 worker 时间预算截断 | §13.2 Skill 生命周期 / §14 预算治理 | DONE |
+| AF-10 | 为 `skill.ensure_installed` 提供专用 profile 默认预算，避免 skill 下载/安装被通用 worker 时间预算截断 | §13.2 Skill 生命周期 / §14 预算治理 | DONE |
 | AF-11 | 将 skill worker 默认 capability 升级为 `skill.ensure_installed`，同时保留 legacy alias 兼容已有节点 | §13.2 Skill 生命周期 / §14 预算治理 | DONE |
 
 ## roku-agent-runtime
@@ -144,7 +146,7 @@
 | AR-07 | 按 profile / task type 选择输出 schema 和 evidence 模板 | §11 结果合同 | TODO |
 | AR-08 | 将 timeout / retry / budget 消耗下放到 worker 执行层 | §14 预算与超时 | TODO |
 | AR-09 | 在 live worker prompt 中注入可信 runtime date/time context，并显式抑制 meta-reasoning 泄漏 | §7 Agent Instance / §16 可观测与运行治理 | DONE |
-| AR-10 | 增加 `skill-worker` / `skill.install`，并在显式引用已安装 skill 时向 live prompt 注入 skill context | §13 Tool / Skill / MCP | DONE |
+| AR-10 | 增加 `skill-worker` / `skill.ensure_installed`（保留 `skill.install` 兼容别名），并在显式引用已安装 skill 时向 live prompt 注入 skill context | §13 Tool / Skill / MCP | DONE |
 
 ## roku-llm-adapter
 
@@ -258,7 +260,7 @@
 | AG-04 | 提供 task artifacts / experiment 查询路由 | §12 Artifact / Experiment | DONE |
 | AG-05 | 提供 artifact content / download 路由 | §12 Artifact / §19.1 | DONE |
 | AG-06 | 为 approval / artifact 路由增加更细粒度错误映射 | §19.2 错误模型 | DONE |
-| AG-07 | 增加 auth / rate limit / idempotency middleware | §4.1 Gateway / §14.3 | TODO |
+| AG-07 | 增加组合式 auth / rate limit / idempotency middleware | §4.1 Gateway / §14.3 | TODO |
 | AG-08 | 增加 request-id / trace-id 透传与全链路 correlation | §16 Trace 与日志 | TODO |
 | AG-09 | 增加异步任务观察、流式响应或 callback 机制 | §9 请求生命周期 / 长任务治理 | TODO |
 | AG-10 | 增加 OpenAPI / schema 文档与 API versioning 策略 | §19.1 / §20 验收 | TODO |
@@ -373,6 +375,7 @@
 | RS-17 | 暴露 `task snapshot` 与 `task event timeline` 查询接口，为后续 replay / CLI 运维命令提供 recovery 基线 | §8 ResumePoint / §20 replay | DONE |
 | RS-18 | 增加 `resume_task` 入口，基于 persisted task snapshot + graph + completed nodes 恢复可继续执行的任务，并对等待审批态返回明确挂起响应 | §8 ResumePoint / §15.3 人审闸门 | DONE |
 | RS-19 | 暴露统一 `task replay report` 查询接口，收敛事件链一致性与 recoverable 判定，避免 CLI / Gateway 重复实现编排规则 | §8 ResumePoint / §19 运维接口 | DONE |
+| RS-20 | 在 validation / aggregation 主链路中显式隔离 `untrusted result`，并暴露 escalation / quarantine 处理分支 | §11.4 / §11.5 验证失败处理 | TODO |
 
 ## roku-cmd
 

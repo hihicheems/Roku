@@ -23,6 +23,7 @@ use thiserror::Error;
 #[serde(rename_all = "snake_case")]
 pub enum BuiltinToolRole {
 	SkillInstall,
+	SkillExecute,
 	Inventory,
 	Research,
 	Data,
@@ -34,6 +35,7 @@ impl BuiltinToolRole {
 	pub fn as_str(self) -> &'static str {
 		match self {
 			Self::SkillInstall => "skill_install",
+			Self::SkillExecute => "skill_execute",
 			Self::Inventory => "inventory",
 			Self::Research => "research",
 			Self::Data => "data",
@@ -123,6 +125,11 @@ mod tests {
 		assert!(
 			config
 				.tool_for_role(BuiltinToolRole::SkillInstall)
+				.is_some()
+		);
+		assert!(
+			config
+				.tool_for_role(BuiltinToolRole::SkillExecute)
 				.is_some()
 		);
 	}

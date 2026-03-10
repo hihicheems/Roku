@@ -12,19 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
 use crate::tool_config::{BuiltinToolRole, ConfiguredTool, ToolCatalogConfig};
-use roku_common_types::ResourceSelector;
+use roku_common_types::{
+	ResourceSelector, SkillExecutionMode, SkillExecutionPlan, SkillExecutionRequest,
+	SkillExecutionResult,
+};
 use roku_llm_adapter::{GenerationRequest, LlmAdapterError, LlmRouter, RiskTier};
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_resource_catalog::{CatalogDescriptor, ResourceCatalog, ResourceKind};
-use roku_skill_registry::SkillRegistry;
+use roku_skill_registry::{InstalledSkillRecord, SkillRegistry};
 use roku_tool_runtime::{
 	RuntimeConstraints, SandboxProfile, Tool, ToolDescriptor, ToolFailure, ToolInvocationRequest,
 	ToolRuntime, ToolSchema,
 };
-use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
@@ -32,6 +40,7 @@ use time::{OffsetDateTime, UtcOffset};
 pub(crate) const LEGACY_SKILL_TOOL_NAME: &str = "skill.install";
 const LLM_TOOL_TIMEOUT_MS: u64 = 45_000;
 const MAX_SKILL_PROMPT_CONTEXT_CHARS: usize = 16_000;
+const MAX_SKILL_EXECUTION_OUTPUT_CHARS: usize = 4_000;
 
 pub(crate) fn build_resource_catalog(
 	skill_registry: &SkillRegistry,
@@ -62,6 +71,13 @@ pub(crate) fn build_builtin_tool_runtime(
 			BuiltinToolRole::SkillInstall => runtime
 				.register_tool(SkillInstallTool::new(tool, skill_registry.clone()))
 				.expect("default runtime tools must register successfully"),
+			BuiltinToolRole::SkillExecute => runtime
+				.register_tool(SkillExecuteTool::from_config(
+					tool,
+					skill_registry.clone(),
+					None,
+				))
+				.expect("default runtime tools must register successfully"),
 			BuiltinToolRole::Inventory
 			| BuiltinToolRole::Research
 			| BuiltinToolRole::Data
@@ -88,6 +104,13 @@ pub(crate) fn build_llm_tool_runtime(
 		match tool.role {
 			BuiltinToolRole::SkillInstall => runtime
 				.register_tool(SkillInstallTool::new(tool, skill_registry.clone()))
+				.expect("llm runtime tools must register successfully"),
+			BuiltinToolRole::SkillExecute => runtime
+				.register_tool(SkillExecuteTool::from_config(
+					tool,
+					skill_registry.clone(),
+					Some(Arc::clone(&router)),
+				))
 				.expect("llm runtime tools must register successfully"),
 			BuiltinToolRole::Inventory
 			| BuiltinToolRole::Research
@@ -171,6 +194,125 @@ impl Tool for SkillInstallTool {
 			"source_url": report.source_url,
 			"install_dir": report.install_dir,
 			"installed_files": report.installed_files,
+			"attempt": request.attempt,
+			"invocation_key": request.invocation_key,
+		}))
+	}
+}
+
+#[derive(Clone)]
+struct SkillExecuteTool {
+	descriptor: ToolDescriptor,
+	registry: SkillRegistry,
+	router: Option<Arc<LlmRouter>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SkillCreatorExecutionPlan {
+	skill_name: String,
+	description: String,
+	overview: String,
+	#[serde(default)]
+	short_description: Option<String>,
+	#[serde(default)]
+	default_prompt: Option<String>,
+	#[serde(default)]
+	resources: Vec<String>,
+}
+
+impl SkillExecuteTool {
+	fn from_config(
+		tool: &ConfiguredTool,
+		registry: SkillRegistry,
+		router: Option<Arc<LlmRouter>>,
+	) -> Self {
+		Self {
+			descriptor: tool_descriptor(
+				&tool.name,
+				tool.required_capabilities.clone(),
+				SandboxProfile::ContainerRestricted,
+				120_000,
+			),
+			registry,
+			router,
+		}
+	}
+}
+
+impl Tool for SkillExecuteTool {
+	fn descriptor(&self) -> ToolDescriptor {
+		self.descriptor.clone()
+	}
+
+	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
+		let input = request_input(&request)?;
+		let selected_skill = selected_skill_from_input(&input)
+			.ok_or_else(|| ToolFailure::terminal("skill execute request must select a skill"))?;
+		let record = self
+			.registry
+			.get_skill(&selected_skill)
+			.map_err(|error| ToolFailure::terminal(error.to_string()))?;
+		let skill_dir = self
+			.registry
+			.skill_dir(&record.descriptor.name)
+			.map_err(|error| ToolFailure::terminal(error.to_string()))?;
+		let output_root = generated_skill_root()?;
+		let execution_request = SkillExecutionRequest {
+			selected_skill: record.descriptor.name.clone(),
+			goal: input.goal.to_string(),
+			execution_mode: Some(SkillExecutionMode::Executable),
+			allowed_script_paths: allowed_script_paths(&record),
+			allowed_output_root: Some(display_path(&output_root)),
+			expected_artifacts: Vec::new(),
+		};
+		let result = if !request_wants_skill_execution(input.goal) {
+			SkillExecutionResult {
+				selected_skill: record.descriptor.name.clone(),
+				execution_mode: Some(SkillExecutionMode::Advisory),
+				success: false,
+				message: format!(
+					"Referenced skill `{}` for guidance only. No scripts were run and no files were created.",
+					record.descriptor.name
+				),
+				created_paths: Vec::new(),
+				executed_scripts: Vec::new(),
+				validation_status: Some("not_executed".to_string()),
+				generated_skill_name: None,
+			}
+		} else if skill_name_is(&record.descriptor.name, "skill-creator") {
+			execute_skill_creator(
+				&self.registry,
+				self.router.as_deref(),
+				&record,
+				&input,
+				&output_root,
+				&execution_request,
+			)?
+		} else {
+			execute_script_backed_skill(
+				self.router.as_deref(),
+				&record,
+				&skill_dir,
+				&input,
+				&output_root,
+				&execution_request,
+			)?
+		};
+
+		Ok(json!({
+			"worker_id": "skill-execute-worker",
+			"message": result.message,
+			"task_id": input.task_id,
+			"node_id": input.node_id,
+			"goal": input.goal,
+			"summary": input.summary,
+			"selected_skill": result.selected_skill,
+			"execution_mode": result.execution_mode,
+			"success": result.success,
+			"created_paths": result.created_paths,
+			"executed_scripts": result.executed_scripts,
+			"validation_status": result.validation_status,
+			"generated_skill_name": result.generated_skill_name,
 			"attempt": request.attempt,
 			"invocation_key": request.invocation_key,
 		}))
@@ -539,6 +681,616 @@ fn direct_runtime_answer(goal: &str) -> Option<String> {
 		(false, false, true) => Some(format!("现在是{time_label}。")),
 		(false, false, false) => None,
 	}
+}
+
+fn selected_skill_from_input(input: &ToolInput<'_>) -> Option<String> {
+	input
+		.resource_selectors
+		.iter()
+		.find_map(|selector| selector.strip_prefix("skill:"))
+		.map(str::to_string)
+}
+
+fn request_wants_skill_execution(goal: &str) -> bool {
+	let normalized = goal.to_ascii_lowercase();
+	let advisory_intent = [
+		"summarize",
+		"summary",
+		"explain",
+		"describe",
+		"what is",
+		"how does",
+		"overview",
+		"list",
+		"show me",
+		"总结",
+		"概括",
+		"解释",
+		"说明",
+		"介绍",
+		"是什么",
+		"怎么用",
+		"有哪些",
+		"列出",
+	]
+	.iter()
+	.any(|pattern| normalized.contains(pattern) || goal.contains(pattern));
+	let execution_intent = [
+		"create",
+		"build",
+		"generate",
+		"make",
+		"write",
+		"run",
+		"execute",
+		"install",
+		"modify",
+		"update",
+		"fix",
+		"帮我",
+		"请帮",
+		"创建",
+		"新建",
+		"生成",
+		"制作",
+		"写一个",
+		"运行",
+		"执行",
+		"安装",
+		"修改",
+		"更新",
+		"修复",
+	]
+	.iter()
+	.any(|pattern| normalized.contains(pattern) || goal.contains(pattern));
+
+	execution_intent || (!advisory_intent && has_goal_work_intent(goal))
+}
+
+fn has_goal_work_intent(goal: &str) -> bool {
+	let normalized = goal.to_ascii_lowercase();
+	[
+		"install",
+		"setup",
+		"use ",
+		"create",
+		"build",
+		"generate",
+		"analyze",
+		"analyse",
+		"review",
+		"search",
+		"find",
+		"summarize",
+		"debug",
+		"fix",
+		"帮我",
+		"请帮",
+		"安装",
+		"装一个",
+		"使用",
+		"创建",
+		"新建",
+		"生成",
+		"分析",
+		"总结",
+		"检索",
+		"搜索",
+		"修复",
+		"排查",
+	]
+	.iter()
+	.any(|pattern| normalized.contains(pattern) || goal.contains(pattern))
+}
+
+fn skill_name_is(left: &str, right: &str) -> bool {
+	normalize_skill_name(left) == normalize_skill_name(right)
+}
+
+fn normalize_skill_name(value: &str) -> String {
+	let mut normalized = String::new();
+	let mut last_hyphen = false;
+	for character in value.chars() {
+		if character.is_ascii_alphanumeric() {
+			normalized.push(character.to_ascii_lowercase());
+			last_hyphen = false;
+		} else if !last_hyphen && !normalized.is_empty() {
+			normalized.push('-');
+			last_hyphen = true;
+		}
+	}
+	normalized.trim_matches('-').to_string()
+}
+
+fn allowed_script_paths(record: &InstalledSkillRecord) -> Vec<String> {
+	let mut scripts = record
+		.installed_files
+		.iter()
+		.filter(|path| path.starts_with("scripts/"))
+		.cloned()
+		.collect::<Vec<_>>();
+	scripts.sort();
+	scripts
+}
+
+fn generated_skill_root() -> Result<PathBuf, ToolFailure> {
+	let configured = env::var("ROKU_SKILL_ROOT")
+		.ok()
+		.map(|value| value.trim().to_string())
+		.filter(|value| !value.is_empty())
+		.map(PathBuf::from)
+		.unwrap_or_else(|| {
+			env::current_dir()
+				.map(|cwd| cwd.join(".roku").join("skills"))
+				.unwrap_or_else(|_| PathBuf::from(".roku").join("skills"))
+		});
+	fs::create_dir_all(&configured).map_err(|error| {
+		ToolFailure::terminal(format!("failed to create generated skill root: {error}"))
+	})?;
+	Ok(normalize_runtime_path(configured))
+}
+
+fn execute_skill_creator(
+	registry: &SkillRegistry,
+	router: Option<&LlmRouter>,
+	record: &InstalledSkillRecord,
+	input: &ToolInput<'_>,
+	output_root: &Path,
+	execution_request: &SkillExecutionRequest,
+) -> Result<SkillExecutionResult, ToolFailure> {
+	let plan = plan_skill_creator(router, record, input, execution_request)?;
+	let skill_name = normalize_skill_name(&plan.skill_name);
+	if skill_name.is_empty() {
+		return Err(ToolFailure::terminal(
+			"skill-creator execution plan did not produce a valid skill name",
+		));
+	}
+	let skill_dir = output_root.join(&skill_name);
+	if skill_dir.exists() {
+		return Err(ToolFailure::terminal(format!(
+			"generated skill target already exists: {}",
+			display_path(&skill_dir)
+		)));
+	}
+
+	fs::create_dir_all(&skill_dir).map_err(io_tool_failure)?;
+	let mut created_paths = vec![display_path(&skill_dir)];
+	for resource in normalized_resources(&plan.resources) {
+		let resource_dir = skill_dir.join(resource);
+		fs::create_dir_all(&resource_dir).map_err(io_tool_failure)?;
+		created_paths.push(display_path(&resource_dir));
+	}
+
+	let skill_md_path = skill_dir.join("SKILL.md");
+	fs::write(&skill_md_path, skill_markdown(&skill_name, &plan)).map_err(io_tool_failure)?;
+	created_paths.push(display_path(&skill_md_path));
+
+	let openai_yaml_path = skill_dir.join("agents").join("openai.yaml");
+	if let Some(parent) = openai_yaml_path.parent() {
+		fs::create_dir_all(parent).map_err(io_tool_failure)?;
+	}
+	fs::write(&openai_yaml_path, openai_yaml(&skill_name, &plan)).map_err(io_tool_failure)?;
+	created_paths.push(display_path(&openai_yaml_path));
+
+	let validation = run_skill_creator_validation(registry, &record.descriptor.name, &skill_dir)?;
+	registry
+		.register_local_skill(&skill_dir, "runtime")
+		.map_err(|error| ToolFailure::terminal(error.to_string()))?;
+
+	Ok(SkillExecutionResult {
+		selected_skill: record.descriptor.name.clone(),
+		execution_mode: Some(SkillExecutionMode::Executable),
+		success: true,
+		message: format!(
+			"Created skill `{}` at {} and registered it locally.",
+			skill_name,
+			display_path(&skill_dir)
+		),
+		created_paths,
+		executed_scripts: validation.executed_scripts,
+		validation_status: Some(validation.validation_status),
+		generated_skill_name: Some(skill_name),
+	})
+}
+
+fn execute_script_backed_skill(
+	router: Option<&LlmRouter>,
+	record: &InstalledSkillRecord,
+	skill_dir: &Path,
+	input: &ToolInput<'_>,
+	output_root: &Path,
+	execution_request: &SkillExecutionRequest,
+) -> Result<SkillExecutionResult, ToolFailure> {
+	if !record.has_scripts() {
+		return Err(ToolFailure::terminal(format!(
+			"skill `{}` does not provide executable scripts",
+			record.descriptor.name
+		)));
+	}
+	let router = router.ok_or_else(|| {
+		ToolFailure::terminal("script-backed skill execution requires a live llm router")
+	})?;
+	let plan = plan_script_execution(router, record, input, execution_request)?;
+	let script_relpath = plan.script_relpath.as_deref().ok_or_else(|| {
+		ToolFailure::terminal("skill execution plan did not choose a script path")
+	})?;
+	if !execution_request
+		.allowed_script_paths
+		.iter()
+		.any(|path| path == script_relpath)
+	{
+		return Err(ToolFailure::terminal(format!(
+			"skill execution plan selected disallowed script: {script_relpath}"
+		)));
+	}
+	let script_path = skill_dir.join(script_relpath);
+	let command_output = run_script_command(
+		&script_path,
+		&plan.script_args,
+		skill_dir,
+		[
+			("ROKU_SKILL_ROOT", display_path(output_root)),
+			("ROKU_GENERATED_SKILL_ROOT", display_path(output_root)),
+		],
+	)?;
+	let created_paths = collect_existing_expected_paths(output_root, &plan.expected_artifacts);
+	Ok(SkillExecutionResult {
+		selected_skill: record.descriptor.name.clone(),
+		execution_mode: Some(SkillExecutionMode::Executable),
+		success: true,
+		message: format!(
+			"Executed skill `{}` via `{}` successfully.\n{}",
+			record.descriptor.name, script_relpath, command_output
+		),
+		created_paths,
+		executed_scripts: vec![display_path(&script_path)],
+		validation_status: Some("not_requested".to_string()),
+		generated_skill_name: plan.generated_skill_name,
+	})
+}
+
+fn plan_skill_creator(
+	router: Option<&LlmRouter>,
+	record: &InstalledSkillRecord,
+	input: &ToolInput<'_>,
+	execution_request: &SkillExecutionRequest,
+) -> Result<SkillCreatorExecutionPlan, ToolFailure> {
+	if let Some(router) = router {
+		let prompt = format!(
+			"Return JSON only.\nYou are planning a local skill scaffold.\nCurrent installed skill: {}\nUser goal: {}\nAllowed output root: {}\nKnown resources in the installed skill: {}\nProduce a compact JSON object with keys skill_name, description, overview, short_description, default_prompt, resources.\nRules:\n- skill_name must be lowercase hyphen-case.\n- description must say when to use the skill.\n- overview must be 1 short paragraph.\n- resources must be zero or more of scripts,references,assets.\n- Do not claim any files already exist.",
+			record.descriptor.name,
+			input.goal,
+			execution_request
+				.allowed_output_root
+				.as_deref()
+				.unwrap_or("(unknown)"),
+			execution_request.allowed_script_paths.join(", "),
+		);
+		let response = router
+			.generate(&GenerationRequest {
+				system_prompt: Some(
+					"You generate structured plans for local skill creation. Return JSON only."
+						.to_string(),
+				),
+				prompt,
+				expected_output_tokens: 300,
+				risk_tier: RiskTier::Medium,
+				preferred_provider: None,
+				budget_tokens_remaining: input.budget_tokens,
+				budget_cost_remaining_usd: 1.0,
+			})
+			.map_err(llm_failure)?;
+		if let Some(plan) = parse_json_reply::<SkillCreatorExecutionPlan>(&response.output) {
+			return Ok(plan);
+		}
+	}
+
+	Ok(infer_skill_creator_plan(input.goal))
+}
+
+fn plan_script_execution(
+	router: &LlmRouter,
+	record: &InstalledSkillRecord,
+	input: &ToolInput<'_>,
+	execution_request: &SkillExecutionRequest,
+) -> Result<SkillExecutionPlan, ToolFailure> {
+	let prompt = format!(
+		"Return JSON only.\nYou are selecting a local skill script to execute.\nSkill: {}\nUser goal: {}\nAllowed scripts: {}\nAllowed output root: {}\nReturn keys selected_skill, execution_mode, script_relpath, script_args, expected_artifacts.\nRules:\n- execution_mode must be executable.\n- script_relpath must be one of the allowed scripts exactly.\n- script_args must be an array of strings.\n- expected_artifacts should list files or directories relative to the output root when the goal is expected to create output.\n- Do not claim the script already ran.",
+		record.descriptor.name,
+		input.goal,
+		execution_request.allowed_script_paths.join(", "),
+		execution_request
+			.allowed_output_root
+			.as_deref()
+			.unwrap_or("(unknown)"),
+	);
+	let response = router
+		.generate(&GenerationRequest {
+			system_prompt: Some(
+				"You plan safe local script execution for installed skills. Return JSON only."
+					.to_string(),
+			),
+			prompt,
+			expected_output_tokens: 240,
+			risk_tier: RiskTier::Medium,
+			preferred_provider: None,
+			budget_tokens_remaining: input.budget_tokens,
+			budget_cost_remaining_usd: 1.0,
+		})
+		.map_err(llm_failure)?;
+	parse_json_reply::<SkillExecutionPlan>(&response.output)
+		.ok_or_else(|| ToolFailure::terminal("skill execution planner did not return valid json"))
+}
+
+fn infer_skill_creator_plan(goal: &str) -> SkillCreatorExecutionPlan {
+	let inferred_name = infer_skill_name_from_goal(goal).unwrap_or_else(|| "new-skill".to_string());
+	let description = format!(
+		"Use this skill when the user needs help with {}.",
+		inferred_name.replace('-', " ")
+	);
+	SkillCreatorExecutionPlan {
+		skill_name: inferred_name.clone(),
+		description,
+		overview: format!(
+			"This skill provides concise guidance and reusable workflow context for {} tasks.",
+			inferred_name.replace('-', " ")
+		),
+		short_description: Some(format!(
+			"Help with {} workflows",
+			display_name(&inferred_name)
+		)),
+		default_prompt: Some(format!("Use the {} skill for this task.", inferred_name)),
+		resources: Vec::new(),
+	}
+}
+
+fn infer_skill_name_from_goal(goal: &str) -> Option<String> {
+	let normalized = goal
+		.split_whitespace()
+		.collect::<Vec<_>>()
+		.join(" ")
+		.to_ascii_lowercase();
+	for marker in ["叫", "named", "called", "name it", "名称"] {
+		if let Some((_, suffix)) = normalized.split_once(marker) {
+			let candidate = normalize_skill_name(suffix);
+			if !candidate.is_empty() {
+				return Some(candidate);
+			}
+		}
+	}
+	if normalized.contains("python") {
+		return Some("python-skill".to_string());
+	}
+	None
+}
+
+fn skill_markdown(skill_name: &str, plan: &SkillCreatorExecutionPlan) -> String {
+	let title = display_name(skill_name);
+	format!(
+		"---\nname: {skill_name}\ndescription: {description}\n---\n\n# {title}\n\n## Overview\n\n{overview}\n\n## Usage\n\n- Activate this skill when the request matches {title} workflows.\n- Extend this file with concrete procedures, examples, and references as the skill evolves.\n",
+		description = yaml_string(plan.description.trim()),
+		overview = plan.overview.trim(),
+	)
+}
+
+fn openai_yaml(skill_name: &str, plan: &SkillCreatorExecutionPlan) -> String {
+	let display_name = display_name(skill_name);
+	let short_description = plan.short_description.clone().unwrap_or_else(|| {
+		truncate_short_description(&format!("Help with {display_name} workflows"))
+	});
+	let default_prompt = plan
+		.default_prompt
+		.clone()
+		.unwrap_or_else(|| format!("Use the {skill_name} skill for this task."));
+	format!(
+		"interface:\n  display_name: {display_name}\n  short_description: {short_description}\n  default_prompt: {default_prompt}\n",
+		display_name = yaml_string(&display_name),
+		short_description = yaml_string(&short_description),
+		default_prompt = yaml_string(&default_prompt),
+	)
+}
+
+fn truncate_short_description(value: &str) -> String {
+	let mut output = value.trim().to_string();
+	if output.len() > 64 {
+		output.truncate(64);
+		output = output.trim().to_string();
+	}
+	if output.len() < 25 {
+		output = format!("{output} helper");
+	}
+	output
+}
+
+fn display_name(skill_name: &str) -> String {
+	skill_name
+		.split('-')
+		.filter(|segment| !segment.is_empty())
+		.map(|segment| {
+			let mut chars = segment.chars();
+			match chars.next() {
+				Some(first) => {
+					format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
+				}
+				None => String::new(),
+			}
+		})
+		.collect::<Vec<_>>()
+		.join(" ")
+}
+
+fn yaml_string(value: &str) -> String {
+	format!(
+		"\"{}\"",
+		value
+			.replace('\\', "\\\\")
+			.replace('"', "\\\"")
+			.replace('\n', "\\n")
+	)
+}
+
+fn normalized_resources(resources: &[String]) -> Vec<&'static str> {
+	let mut normalized = Vec::new();
+	for resource in resources {
+		match resource.trim().to_ascii_lowercase().as_str() {
+			"scripts" if !normalized.contains(&"scripts") => normalized.push("scripts"),
+			"references" if !normalized.contains(&"references") => normalized.push("references"),
+			"assets" if !normalized.contains(&"assets") => normalized.push("assets"),
+			_ => {}
+		}
+	}
+	normalized
+}
+
+struct ValidationOutcome {
+	executed_scripts: Vec<String>,
+	validation_status: String,
+}
+
+fn run_skill_creator_validation(
+	registry: &SkillRegistry,
+	skill_name: &str,
+	skill_dir: &Path,
+) -> Result<ValidationOutcome, ToolFailure> {
+	let creator_dir = registry
+		.skill_dir(skill_name)
+		.map_err(|error| ToolFailure::terminal(error.to_string()))?;
+	let validation_script = creator_dir.join("scripts").join("quick_validate.py");
+	if !validation_script.exists() {
+		return Ok(ValidationOutcome {
+			executed_scripts: Vec::new(),
+			validation_status: "skipped_missing_script".to_string(),
+		});
+	}
+	run_script_command(
+		&validation_script,
+		&[display_path(skill_dir)],
+		&creator_dir,
+		std::iter::empty::<(&str, String)>(),
+	)?;
+	Ok(ValidationOutcome {
+		executed_scripts: vec![display_path(&validation_script)],
+		validation_status: "passed".to_string(),
+	})
+}
+
+fn run_script_command(
+	script_path: &Path,
+	args: &[String],
+	current_dir: &Path,
+	envs: impl IntoIterator<Item = (&'static str, String)>,
+) -> Result<String, ToolFailure> {
+	let script_path = normalize_runtime_path(script_path.to_path_buf());
+	let current_dir = normalize_runtime_path(current_dir.to_path_buf());
+	let mut command = command_for_script(&script_path)?;
+	command.current_dir(&current_dir);
+	command.args(args);
+	for (key, value) in envs {
+		command.env(key, value);
+	}
+	let output = command.output().map_err(io_tool_failure)?;
+	let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+	let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+	if !output.status.success() {
+		let details = if stderr.is_empty() { stdout } else { stderr };
+		return Err(ToolFailure::terminal(format!(
+			"script execution failed for {}: {}",
+			display_path(&script_path),
+			truncate_execution_text(&details)
+		)));
+	}
+	let combined = if stdout.is_empty() { stderr } else { stdout };
+	Ok(truncate_execution_text(&combined))
+}
+
+fn normalize_runtime_path(path: PathBuf) -> PathBuf {
+	if path.is_absolute() {
+		path.canonicalize().unwrap_or(path)
+	} else {
+		let absolute = env::current_dir()
+			.map(|cwd| cwd.join(&path))
+			.unwrap_or_else(|_| PathBuf::from(".").join(path));
+		absolute.canonicalize().unwrap_or(absolute)
+	}
+}
+
+fn command_for_script(script_path: &Path) -> Result<Command, ToolFailure> {
+	let extension = script_path
+		.extension()
+		.and_then(|value| value.to_str())
+		.unwrap_or_default();
+	let mut command = match extension {
+		"py" => python_command()?,
+		"sh" => Command::new("bash"),
+		_ => Command::new(script_path),
+	};
+	if extension == "py" || extension == "sh" {
+		command.arg(script_path);
+	}
+	Ok(command)
+}
+
+fn python_command() -> Result<Command, ToolFailure> {
+	for candidate in ["python3", "python"] {
+		let status = Command::new(candidate).arg("--version").status();
+		if status.is_ok_and(|status| status.success()) {
+			return Ok(Command::new(candidate));
+		}
+	}
+	Err(ToolFailure::terminal(
+		"python interpreter is required for skill execution but was not found",
+	))
+}
+
+fn collect_existing_expected_paths(
+	output_root: &Path,
+	expected_artifacts: &[String],
+) -> Vec<String> {
+	let mut paths = expected_artifacts
+		.iter()
+		.map(|relative| output_root.join(relative))
+		.filter(|path| path.exists())
+		.map(|path| display_path(&path))
+		.collect::<Vec<_>>();
+	paths.sort();
+	paths.dedup();
+	paths
+}
+
+fn parse_json_reply<T>(value: &str) -> Option<T>
+where
+	T: DeserializeOwned,
+{
+	let trimmed = value.trim();
+	serde_json::from_str::<T>(trimmed).ok().or_else(|| {
+		let stripped = trimmed
+			.strip_prefix("```json")
+			.or_else(|| trimmed.strip_prefix("```"))
+			.unwrap_or(trimmed)
+			.trim();
+		let stripped = stripped.strip_suffix("```").unwrap_or(stripped).trim();
+		serde_json::from_str::<T>(stripped).ok()
+	})
+}
+
+fn truncate_execution_text(value: &str) -> String {
+	let trimmed = value.trim();
+	if trimmed.chars().count() <= MAX_SKILL_EXECUTION_OUTPUT_CHARS {
+		return trimmed.to_string();
+	}
+	let shortened = trimmed
+		.chars()
+		.take(MAX_SKILL_EXECUTION_OUTPUT_CHARS)
+		.collect::<String>();
+	format!("{shortened}\n[truncated]")
+}
+
+fn display_path(path: &Path) -> String {
+	path.display().to_string()
+}
+
+fn io_tool_failure(error: std::io::Error) -> ToolFailure {
+	ToolFailure::terminal(error.to_string())
 }
 
 fn inventory_context_json(
@@ -913,6 +1665,7 @@ fn tool_catalog_descriptor(tool: &ConfiguredTool) -> CatalogDescriptor {
 fn worker_id_for_role(role: BuiltinToolRole) -> &'static str {
 	match role {
 		BuiltinToolRole::SkillInstall => "skill-worker",
+		BuiltinToolRole::SkillExecute => "skill-execute-worker",
 		BuiltinToolRole::Inventory => "inventory-worker",
 		BuiltinToolRole::Research => "research-worker",
 		BuiltinToolRole::Data => "data-worker",
@@ -924,6 +1677,7 @@ fn worker_id_for_role(role: BuiltinToolRole) -> &'static str {
 fn sandbox_profile_for_role(role: BuiltinToolRole) -> SandboxProfile {
 	match role {
 		BuiltinToolRole::SkillInstall => SandboxProfile::ReadOnlyFs,
+		BuiltinToolRole::SkillExecute => SandboxProfile::ContainerRestricted,
 		BuiltinToolRole::Inventory => SandboxProfile::NoIsolation,
 		BuiltinToolRole::Research => SandboxProfile::PythonResearch,
 		BuiltinToolRole::Data => SandboxProfile::ContainerRestricted,
@@ -935,6 +1689,7 @@ fn sandbox_profile_for_role(role: BuiltinToolRole) -> SandboxProfile {
 fn completion_message_for_role(role: BuiltinToolRole) -> &'static str {
 	match role {
 		BuiltinToolRole::SkillInstall => "skill installation completed",
+		BuiltinToolRole::SkillExecute => "skill execution completed",
 		BuiltinToolRole::Inventory => "inventory summary generated",
 		BuiltinToolRole::Research => "research synthesis generated",
 		BuiltinToolRole::Data => "data pipeline step executed",
@@ -947,6 +1702,9 @@ fn system_prompt_for_role(role: BuiltinToolRole) -> &'static str {
 	match role {
 		BuiltinToolRole::SkillInstall => {
 			"You install skills from explicit source URLs and report the result."
+		}
+		BuiltinToolRole::SkillExecute => {
+			"You execute installed script-backed skills through structured runtime plans. Never claim side effects happened unless the runtime returns execution evidence."
 		}
 		BuiltinToolRole::Inventory => {
 			"You are Roku's inventory worker. Use only the authoritative local inventory JSON in the prompt to describe installed skills, discoverable tools, and capability families. Adapt the formatting to the user's request and conversation history, including list or bullet formatting when asked. Do not invent tools, skills, or capabilities that are not present in the inventory JSON."
@@ -969,6 +1727,7 @@ fn system_prompt_for_role(role: BuiltinToolRole) -> &'static str {
 fn risk_tier_for_role(role: BuiltinToolRole) -> RiskTier {
 	match role {
 		BuiltinToolRole::Review => RiskTier::High,
+		BuiltinToolRole::SkillExecute => RiskTier::High,
 		BuiltinToolRole::Inventory
 		| BuiltinToolRole::Research
 		| BuiltinToolRole::Data
@@ -1011,13 +1770,14 @@ fn llm_failure(error: LlmAdapterError) -> ToolFailure {
 #[cfg(test)]
 mod tests {
 	use serde_json::json;
+	use std::fs;
 	use std::io::{Cursor, Write};
 	use std::sync::{Arc, Mutex};
 
 	use super::{
-		PromptedLlmTool, build_resource_catalog, direct_runtime_answer, first_url_in_text,
-		inventory_context_json, request_input, runtime_context_block, sanitize_final_reply,
-		user_visible_prompt,
+		PromptedLlmTool, allowed_script_paths, build_resource_catalog, direct_runtime_answer,
+		execute_skill_creator, first_url_in_text, inventory_context_json, request_input,
+		runtime_context_block, sanitize_final_reply, user_visible_prompt,
 	};
 	use crate::tool_config::{BuiltinToolRole, ToolCatalogConfig};
 	use roku_llm_adapter::{
@@ -1435,6 +2195,85 @@ So, I'll output: "星期日""#;
 		assert!(prompt.contains("selected_resources: skill:skill-creator"));
 		assert!(prompt.contains("side_effects_allowed: not allowed"));
 		assert!(prompt.contains("you must clearly say it has not been created yet"));
+	}
+
+	#[test]
+	fn skill_execute_tool_creates_and_registers_generated_skill() {
+		let registry_root = tempfile::tempdir().expect("registry root should exist");
+		let skill_root = registry_root.path().join("skills");
+		let registry = SkillRegistry::file_backed(skill_root);
+		let creator_dir = registry_root.path().join("skill-creator");
+		fs::create_dir_all(creator_dir.join("scripts")).expect("creator scripts dir should exist");
+		fs::write(
+			creator_dir.join("SKILL.md"),
+			"---\nname: skill-creator\ndescription: Create local skills.\n---\n\n# Skill Creator\n",
+		)
+		.expect("creator manifest should write");
+		fs::write(
+			creator_dir.join("scripts").join("quick_validate.py"),
+			r#"import sys
+from pathlib import Path
+target = Path(sys.argv[1])
+assert (target / "SKILL.md").exists()
+print("ok")
+"#,
+		)
+		.expect("validation script should write");
+		registry
+			.register_local_skill(&creator_dir, "test-suite")
+			.expect("creator skill should register");
+
+		let generated_root = registry_root.path().join("generated");
+		let record = registry
+			.get_skill("skill-creator")
+			.expect("creator record should exist");
+		let input = super::ToolInput {
+			task_id: "task-1",
+			node_id: "node-1",
+			goal: "Use skill-creator to create a Python skill and tell me where it was created.",
+			summary: "Execute installed skill `skill-creator` using its local scripts",
+			conversation_history: "",
+			granted_capabilities: vec!["skill.execute".to_string()],
+			resource_selectors: vec![
+				"tool:skill.execute".to_string(),
+				"skill:skill-creator".to_string(),
+			],
+			budget_tokens: 4096,
+			time_budget_ms: 120_000,
+		};
+		let execution_request = roku_common_types::SkillExecutionRequest {
+			selected_skill: "skill-creator".to_string(),
+			goal: input.goal.to_string(),
+			execution_mode: Some(roku_common_types::SkillExecutionMode::Executable),
+			allowed_script_paths: allowed_script_paths(&record),
+			allowed_output_root: Some(generated_root.display().to_string()),
+			expected_artifacts: Vec::new(),
+		};
+
+		let result = execute_skill_creator(
+			&registry,
+			None,
+			&record,
+			&input,
+			&generated_root,
+			&execution_request,
+		)
+		.expect("skill creator execution should succeed");
+
+		let created_skill_dir = generated_root.join("python-skill");
+		assert!(created_skill_dir.join("SKILL.md").exists());
+		assert!(
+			created_skill_dir
+				.join("agents")
+				.join("openai.yaml")
+				.exists()
+		);
+		assert_eq!(result.generated_skill_name.as_deref(), Some("python-skill"));
+		assert_eq!(result.validation_status.as_deref(), Some("passed"));
+		assert!(
+			registry.get_skill("python-skill").is_ok(),
+			"generated skill should be registered immediately"
+		);
 	}
 
 	fn test_skill_archive_bytes() -> Vec<u8> {

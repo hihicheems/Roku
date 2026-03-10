@@ -16,6 +16,21 @@
       "required_capabilities": ["skill.ensure_installed"]
     },
     {
+      "name": "skill.execute",
+      "role": "skill_execute",
+      "discoverable": false,
+      "description": "Execute an installed script-backed skill in a controlled workspace and return grounded execution evidence.",
+      "tags": ["skills", "execution", "scripts", "generation"],
+      "examples": ["Use the skill-creator skill to generate a new Python skill in the project."],
+      "input_schema": ["goal", "summary", "conversation_history"],
+      "risk": "Medium",
+      "cost": {
+        "estimated_tokens": 12000,
+        "estimated_latency_ms": 120000
+      },
+      "required_capabilities": ["skill.execute"]
+    },
+    {
       "name": "inventory.describe",
       "role": "inventory",
       "discoverable": true,
