@@ -506,6 +506,59 @@ pub struct CapabilityToken {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillExecutionMode {
+	Advisory,
+	Executable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SkillExecutionRequest {
+	pub selected_skill: String,
+	pub goal: String,
+	#[serde(default)]
+	pub execution_mode: Option<SkillExecutionMode>,
+	#[serde(default)]
+	pub allowed_script_paths: Vec<String>,
+	#[serde(default)]
+	pub allowed_output_root: Option<String>,
+	#[serde(default)]
+	pub expected_artifacts: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SkillExecutionPlan {
+	pub selected_skill: String,
+	#[serde(default)]
+	pub execution_mode: Option<SkillExecutionMode>,
+	#[serde(default)]
+	pub script_relpath: Option<String>,
+	#[serde(default)]
+	pub script_args: Vec<String>,
+	#[serde(default)]
+	pub generated_skill_name: Option<String>,
+	#[serde(default)]
+	pub expected_artifacts: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SkillExecutionResult {
+	pub selected_skill: String,
+	#[serde(default)]
+	pub execution_mode: Option<SkillExecutionMode>,
+	pub success: bool,
+	pub message: String,
+	#[serde(default)]
+	pub created_paths: Vec<String>,
+	#[serde(default)]
+	pub executed_scripts: Vec<String>,
+	#[serde(default)]
+	pub validation_status: Option<String>,
+	#[serde(default)]
+	pub generated_skill_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResultStatus {
 	Ok,
 	Error,

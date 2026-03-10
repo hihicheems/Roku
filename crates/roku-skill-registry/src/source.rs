@@ -19,6 +19,10 @@ use crate::SkillRegistryError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SkillSource {
+	LocalPath {
+		path: String,
+		original_url: String,
+	},
 	GitHub {
 		owner: String,
 		repo: String,
@@ -34,6 +38,14 @@ pub enum SkillSource {
 }
 
 impl SkillSource {
+	pub fn local_path(path: impl Into<String>) -> Self {
+		let path = path.into();
+		Self::LocalPath {
+			original_url: path.clone(),
+			path,
+		}
+	}
+
 	pub fn parse(source_url: &str) -> Result<Self, SkillRegistryError> {
 		let parsed = Url::parse(source_url)
 			.map_err(|error| SkillRegistryError::InvalidSourceUrl(error.to_string()))?;
@@ -52,20 +64,22 @@ impl SkillSource {
 
 	pub fn original_url(&self) -> &str {
 		match self {
-			Self::GitHub { original_url, .. } | Self::ArchiveZip { original_url, .. } => {
-				original_url.as_str()
-			}
+			Self::LocalPath { original_url, .. }
+			| Self::GitHub { original_url, .. }
+			| Self::ArchiveZip { original_url, .. } => original_url.as_str(),
 		}
 	}
 
 	pub fn subpath(&self) -> Option<&str> {
 		match self {
+			Self::LocalPath { .. } => None,
 			Self::GitHub { subpath, .. } | Self::ArchiveZip { subpath, .. } => subpath.as_deref(),
 		}
 	}
 
 	pub fn version_hint(&self) -> Option<&str> {
 		match self {
+			Self::LocalPath { .. } => None,
 			Self::GitHub { reference, .. } => reference.as_deref(),
 			Self::ArchiveZip { .. } => None,
 		}

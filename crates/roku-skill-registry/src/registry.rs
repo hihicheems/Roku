@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::env;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -39,6 +40,19 @@ struct ParsedSkillFrontMatter {
 	name: Option<String>,
 	description: Option<String>,
 	license: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ParsedOpenAiAgentMetadata {
+	#[serde(default)]
+	interface: ParsedOpenAiInterface,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ParsedOpenAiInterface {
+	display_name: Option<String>,
+	short_description: Option<String>,
+	default_prompt: Option<String>,
 }
 
 #[derive(Clone)]
@@ -135,7 +149,7 @@ impl SkillRegistry {
 			.into_iter()
 			.find(|record| skill_source_matches(&record.source, &source))
 		{
-			let install_dir = root.join(existing.install_dir.trim_start_matches("./"));
+			let install_dir = resolve_record_install_dir(root, &existing);
 			let install_dir = display_path(&install_dir);
 			let message = format!(
 				"Skill `{}` is already installed from {} at {}. Reference `{}` in future requests to activate it.",
@@ -233,6 +247,79 @@ impl SkillRegistry {
 		})
 	}
 
+	pub fn register_local_skill(
+		&self,
+		skill_dir: impl AsRef<Path>,
+		activated_by: &str,
+	) -> Result<SkillInstallReport, SkillRegistryError> {
+		let root = self.root_path()?;
+		ensure_registry_layout(root)?;
+
+		let skill_dir = skill_dir.as_ref();
+		if !skill_dir.exists() || !skill_dir.is_dir() {
+			return Err(SkillRegistryError::InvalidSkillRoot(
+				skill_dir.to_path_buf(),
+			));
+		}
+		let skill_dir = skill_dir.canonicalize()?;
+		let descriptor = load_descriptor(&skill_dir, Some("local"))?;
+		let source = SkillSource::local_path(display_path(&skill_dir));
+		if let Some(existing) = self
+			.read_registry_records(root)?
+			.into_iter()
+			.find(|record| skill_source_matches(&record.source, &source))
+		{
+			let install_dir = resolve_record_install_dir(root, &existing);
+			let install_dir = display_path(&install_dir);
+			let message = format!(
+				"Skill `{}` is already registered from local path {}. Reference `{}` in future requests to activate it.",
+				existing.descriptor.name, install_dir, existing.descriptor.name,
+			);
+			return Ok(SkillInstallReport {
+				skill_name: existing.descriptor.name,
+				version: existing.descriptor.version,
+				source_url: source.original_url().to_string(),
+				install_dir,
+				installed_files: existing.installed_files,
+				activated_by: activated_by.to_string(),
+				message,
+			});
+		}
+
+		let installed_files = list_relative_files(&skill_dir)?;
+		let record = InstalledSkillRecord {
+			descriptor: descriptor.clone(),
+			source: source.clone(),
+			installed_at_unix_ms: now_unix_ms(),
+			install_dir: display_path(&skill_dir),
+			installed_files: installed_files.clone(),
+		};
+		write_record(root, &record)?;
+		let install_dir = display_path(&skill_dir);
+		let message = format!(
+			"Registered local skill `{}` at {}. Reference `{}` in future requests to activate it.",
+			descriptor.name, install_dir, descriptor.name,
+		);
+		log_skill_event(
+			"registered local skill",
+			[
+				("skill_name", descriptor.name.clone()),
+				("source_url", source.original_url().to_string()),
+				("install_dir", install_dir.clone()),
+			],
+		);
+
+		Ok(SkillInstallReport {
+			skill_name: descriptor.name,
+			version: descriptor.version,
+			source_url: source.original_url().to_string(),
+			install_dir,
+			installed_files,
+			activated_by: activated_by.to_string(),
+			message,
+		})
+	}
+
 	pub fn referenced_skill_names(&self, query: &str) -> Result<Vec<String>, SkillRegistryError> {
 		let mut names = self
 			.list_skills()?
@@ -260,22 +347,15 @@ impl SkillRegistry {
 		let Some(root) = self.optional_root_path() else {
 			return Ok(Vec::new());
 		};
-		let registry_dir = root.join("registry");
-		if !registry_dir.exists() {
-			return Ok(Vec::new());
+		let mut merged = std::collections::BTreeMap::<String, InstalledSkillRecord>::new();
+		for record in self.discover_skill_records(root)? {
+			merged.insert(normalize_skill_text(&record.descriptor.name), record);
+		}
+		for record in self.read_registry_records(root)? {
+			merged.insert(normalize_skill_text(&record.descriptor.name), record);
 		}
 
-		let mut records = fs::read_dir(registry_dir)?
-			.filter_map(Result::ok)
-			.filter(|entry| {
-				entry.path().extension().and_then(|value| value.to_str()) == Some("json")
-			})
-			.map(|entry| {
-				let content = fs::read_to_string(entry.path())?;
-				serde_json::from_str::<InstalledSkillRecord>(&content)
-					.map_err(SkillRegistryError::from)
-			})
-			.collect::<Result<Vec<_>, _>>()?;
+		let mut records = merged.into_values().collect::<Vec<_>>();
 		records.sort_by(|left, right| left.descriptor.name.cmp(&right.descriptor.name));
 		Ok(records)
 	}
@@ -285,6 +365,12 @@ impl SkillRegistry {
 			.into_iter()
 			.find(|record| skill_name_matches(skill_name, &record.descriptor.name))
 			.ok_or_else(|| SkillRegistryError::SkillNotFound(skill_name.to_string()))
+	}
+
+	pub fn skill_dir(&self, skill_name: &str) -> Result<PathBuf, SkillRegistryError> {
+		let root = self.root_path()?;
+		let record = self.get_skill(skill_name)?;
+		Ok(resolve_record_install_dir(root, &record))
 	}
 
 	pub fn render_prompt_context_for_skill(
@@ -369,11 +455,48 @@ impl SkillRegistry {
 			SkillRegistryBackend::FileBacked { root } => Some(root.as_path()),
 		}
 	}
+
+	fn read_registry_records(
+		&self,
+		root: &Path,
+	) -> Result<Vec<InstalledSkillRecord>, SkillRegistryError> {
+		let registry_dir = root.join("registry");
+		if !registry_dir.exists() {
+			return Ok(Vec::new());
+		}
+
+		let mut records = fs::read_dir(registry_dir)?
+			.filter_map(Result::ok)
+			.filter(|entry| {
+				entry.path().extension().and_then(|value| value.to_str()) == Some("json")
+			})
+			.map(|entry| {
+				let content = fs::read_to_string(entry.path())?;
+				serde_json::from_str::<InstalledSkillRecord>(&content)
+					.map_err(SkillRegistryError::from)
+			})
+			.collect::<Result<Vec<_>, _>>()?;
+		records.sort_by(|left, right| left.descriptor.name.cmp(&right.descriptor.name));
+		Ok(records)
+	}
+
+	fn discover_skill_records(
+		&self,
+		root: &Path,
+	) -> Result<Vec<InstalledSkillRecord>, SkillRegistryError> {
+		let mut discovered = scan_skill_dirs(root, root, true)?;
+		discovered.extend(scan_skill_dirs(root, &root.join("installed"), false)?);
+		discovered.sort_by(|left, right| left.descriptor.name.cmp(&right.descriptor.name));
+		Ok(discovered)
+	}
 }
 
 impl SkillArchiveFetcher for HttpSkillArchiveFetcher {
 	fn fetch(&self, source: &SkillSource) -> Result<DownloadedArchive, SkillRegistryError> {
 		match source {
+			SkillSource::LocalPath { path, .. } => Err(SkillRegistryError::InvalidSourceUrl(
+				format!("local skill path cannot be fetched as an archive: {path}"),
+			)),
 			SkillSource::GitHub {
 				owner,
 				repo,
@@ -526,6 +649,56 @@ fn ensure_registry_layout(root: &Path) -> Result<(), SkillRegistryError> {
 	Ok(())
 }
 
+fn scan_skill_dirs(
+	root: &Path,
+	scan_root: &Path,
+	skip_reserved_names: bool,
+) -> Result<Vec<InstalledSkillRecord>, SkillRegistryError> {
+	if !scan_root.exists() || !scan_root.is_dir() {
+		return Ok(Vec::new());
+	}
+
+	let mut records = Vec::new();
+	for entry in fs::read_dir(scan_root)? {
+		let entry = entry?;
+		if !entry.file_type()?.is_dir() {
+			continue;
+		}
+		let skill_dir = entry.path();
+		let Some(directory_name) = skill_dir.file_name().and_then(|value| value.to_str()) else {
+			continue;
+		};
+		if skip_reserved_names && is_reserved_skill_storage_dir(directory_name) {
+			continue;
+		}
+		if !skill_dir.join("SKILL.md").exists() {
+			continue;
+		}
+		records.push(discovered_skill_record(root, &skill_dir)?);
+	}
+
+	Ok(records)
+}
+
+fn discovered_skill_record(
+	root: &Path,
+	skill_dir: &Path,
+) -> Result<InstalledSkillRecord, SkillRegistryError> {
+	let descriptor = load_descriptor(skill_dir, Some("local"))?;
+	let installed_files = list_relative_files(skill_dir)?;
+	Ok(InstalledSkillRecord {
+		descriptor,
+		source: SkillSource::local_path(display_path(skill_dir)),
+		installed_at_unix_ms: path_modified_unix_ms(skill_dir),
+		install_dir: relative_display_path(root, skill_dir),
+		installed_files,
+	})
+}
+
+fn is_reserved_skill_storage_dir(name: &str) -> bool {
+	matches!(name, "installed" | "registry" | "cache" | "backups")
+}
+
 fn extract_archive(bytes: &[u8], target_dir: &Path) -> Result<(), SkillRegistryError> {
 	let reader = Cursor::new(bytes.to_vec());
 	let mut archive = zip::ZipArchive::new(reader)?;
@@ -655,15 +828,62 @@ fn build_skill_catalog_descriptor(
 	root: &Path,
 	record: &InstalledSkillRecord,
 ) -> Result<CatalogDescriptor, SkillRegistryError> {
-	let skill_dir = root.join(&record.install_dir);
+	let skill_dir = resolve_record_install_dir(root, record);
 	let manifest_path = skill_dir.join(&record.descriptor.entrypoint);
 	let content = fs::read_to_string(manifest_path)?;
 	let (_, body) = split_front_matter(&content)?;
-	let summary = skill_summary(body);
+	let ParsedOpenAiInterface {
+		display_name,
+		short_description,
+		default_prompt,
+	} = load_openai_agent_metadata(&skill_dir)?;
+	let mut summary_parts = vec![skill_summary(body)];
+	if let Some(short_description) = short_description.as_deref()
+		&& !short_description.trim().is_empty()
+	{
+		summary_parts.push(short_description.trim().to_string());
+	}
+	let summary = summary_parts
+		.into_iter()
+		.filter(|value| !value.trim().is_empty())
+		.collect::<Vec<_>>()
+		.join(" ");
 	let key_commands = extract_key_commands(body);
-	let use_cases = extract_use_cases(body);
+	let mut use_cases = extract_use_cases(body);
+	if let Some(default_prompt) = default_prompt.as_deref()
+		&& !default_prompt.trim().is_empty()
+	{
+		use_cases.push(default_prompt.trim().to_string());
+	}
 	let tags = extract_skill_tags(&record.descriptor, &summary, &use_cases, &key_commands);
-	let examples = key_commands.iter().take(3).cloned().collect::<Vec<_>>();
+	let mut tags = tags;
+	if let Some(display_name) = display_name.as_deref() {
+		tags.extend(tokenize_catalog_text(display_name));
+	}
+	if let Some(short_description) = short_description.as_deref() {
+		tags.extend(tokenize_catalog_text(short_description));
+	}
+	if let Some(default_prompt) = default_prompt.as_deref() {
+		tags.extend(tokenize_catalog_text(default_prompt));
+	}
+	if record.has_scripts() {
+		tags.push("executable-skill".to_string());
+		tags.push("has-scripts".to_string());
+	}
+	tags.sort();
+	tags.dedup();
+	let mut examples = key_commands.iter().take(3).cloned().collect::<Vec<_>>();
+	if let Some(display_name) = display_name
+		&& !display_name.trim().is_empty()
+	{
+		examples.push(display_name.trim().to_string());
+	}
+	if let Some(short_description) = short_description
+		&& !short_description.trim().is_empty()
+	{
+		examples.push(short_description.trim().to_string());
+	}
+	examples.truncate(3);
 
 	Ok(CatalogDescriptor {
 		selector: roku_common_types::ResourceSelector::skill(record.descriptor.name.clone()),
@@ -682,6 +902,19 @@ fn build_skill_catalog_descriptor(
 		key_commands,
 		use_cases,
 	})
+}
+
+fn load_openai_agent_metadata(
+	skill_dir: &Path,
+) -> Result<ParsedOpenAiInterface, SkillRegistryError> {
+	let metadata_path = skill_dir.join("agents").join("openai.yaml");
+	if !metadata_path.exists() {
+		return Ok(ParsedOpenAiInterface::default());
+	}
+
+	let metadata = fs::read_to_string(metadata_path)?;
+	let parsed = serde_yaml::from_str::<ParsedOpenAiAgentMetadata>(&metadata)?;
+	Ok(parsed.interface)
 }
 
 fn skill_summary(body: &str) -> String {
@@ -855,6 +1088,20 @@ fn write_record(root: &Path, record: &InstalledSkillRecord) -> Result<(), SkillR
 	write_text_atomically(&record_path, &serde_json::to_string_pretty(record)?)
 }
 
+fn resolve_record_install_dir(root: &Path, record: &InstalledSkillRecord) -> PathBuf {
+	let install_dir = PathBuf::from(&record.install_dir);
+	let resolved = if install_dir.is_absolute() {
+		install_dir
+	} else {
+		root.join(
+			install_dir
+				.strip_prefix("./")
+				.unwrap_or(install_dir.as_path()),
+		)
+	};
+	normalize_existing_path(resolved)
+}
+
 fn render_skill_context(
 	root: &Path,
 	record: &InstalledSkillRecord,
@@ -883,7 +1130,7 @@ fn render_skill_context_with_keywords(
 	max_chars: usize,
 	keywords: &[String],
 ) -> Result<String, SkillRegistryError> {
-	let skill_dir = root.join(&record.install_dir);
+	let skill_dir = resolve_record_install_dir(root, record);
 	if !skill_dir.exists() {
 		return Err(SkillRegistryError::SkillNotFound(
 			record.descriptor.name.clone(),
@@ -1267,6 +1514,14 @@ fn skill_name_matches(candidate: &str, skill_name: &str) -> bool {
 fn skill_source_matches(left: &SkillSource, right: &SkillSource) -> bool {
 	match (left, right) {
 		(
+			SkillSource::LocalPath {
+				path: left_path, ..
+			},
+			SkillSource::LocalPath {
+				path: right_path, ..
+			},
+		) => left_path == right_path,
+		(
 			SkillSource::GitHub {
 				owner: left_owner,
 				repo: left_repo,
@@ -1390,11 +1645,31 @@ fn relative_display_path(root: &Path, path: &Path) -> String {
 		.unwrap_or_else(|_| display_path(path))
 }
 
+fn normalize_existing_path(path: PathBuf) -> PathBuf {
+	let absolute = if path.is_absolute() {
+		path
+	} else {
+		env::current_dir()
+			.map(|cwd| cwd.join(&path))
+			.unwrap_or_else(|_| PathBuf::from(".").join(path))
+	};
+	absolute.canonicalize().unwrap_or(absolute)
+}
+
 fn display_path(path: &Path) -> String {
 	path.canonicalize()
 		.unwrap_or_else(|_| path.to_path_buf())
 		.display()
 		.to_string()
+}
+
+fn path_modified_unix_ms(path: &Path) -> u64 {
+	fs::metadata(path)
+		.and_then(|metadata| metadata.modified())
+		.ok()
+		.and_then(|timestamp| timestamp.duration_since(UNIX_EPOCH).ok())
+		.and_then(|duration| u64::try_from(duration.as_millis()).ok())
+		.unwrap_or_else(now_unix_ms)
 }
 
 fn path_to_forward_slashes(path: &Path) -> String {
@@ -1439,6 +1714,7 @@ fn log_skill_event(message: &str, fields: impl IntoIterator<Item = (&'static str
 #[cfg(test)]
 mod tests {
 	use std::collections::HashSet;
+	use std::fs;
 	use std::io::{Cursor, Write};
 	use std::sync::Arc;
 
@@ -1880,5 +2156,40 @@ Baseline run notes:
 			writer.finish().expect("zip should finish");
 		}
 		cursor.into_inner()
+	}
+
+	#[test]
+	fn register_local_skill_uses_absolute_install_dir_and_marks_scripts() {
+		let registry_root = tempfile::tempdir().expect("registry root should exist");
+		let local_skill_root = tempfile::tempdir().expect("local skill root should exist");
+		let skill_dir = local_skill_root.path().join("python-helper");
+		fs::create_dir_all(skill_dir.join("scripts")).expect("scripts dir should exist");
+		fs::write(
+			skill_dir.join("SKILL.md"),
+			"---\nname: python-helper\ndescription: Help with Python helper tasks.\n---\n\n# Python Helper\n",
+		)
+		.expect("skill manifest should write");
+		fs::write(skill_dir.join("scripts").join("run.py"), "print('ok')\n")
+			.expect("script should write");
+
+		let registry = SkillRegistry::file_backed(registry_root.path().join("skills"));
+		let report = registry
+			.register_local_skill(&skill_dir, "test-suite")
+			.expect("local skill should register");
+		let record = registry
+			.get_skill("python-helper")
+			.expect("local skill record should exist");
+
+		assert!(Path::new(&record.install_dir).is_absolute());
+		assert!(record.has_scripts());
+		assert_eq!(report.skill_name, "python-helper");
+		assert_eq!(
+			registry
+				.skill_dir("python-helper")
+				.expect("skill dir should resolve"),
+			skill_dir
+				.canonicalize()
+				.expect("skill dir should canonicalize")
+		);
 	}
 }

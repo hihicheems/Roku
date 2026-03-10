@@ -176,6 +176,19 @@ pub(crate) fn skill_worker_with_config(
 	)
 }
 
+pub(crate) fn skill_execute_worker_with_config(
+	tool_runtime: Arc<ToolRuntime>,
+	tool_config: &ToolCatalogConfig,
+) -> ToolBackedWorker {
+	ToolBackedWorker::new(
+		"skill-execute-worker",
+		tool_name_for_role(tool_config, BuiltinToolRole::SkillExecute),
+		&["skill.execute"],
+		tool_runtime,
+		0.97,
+	)
+}
+
 pub(crate) fn generic_worker_with_config(
 	tool_runtime: Arc<ToolRuntime>,
 	tool_config: &ToolCatalogConfig,

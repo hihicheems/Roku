@@ -22,6 +22,7 @@ pub(crate) struct PlannerToolbox {
 	data_tool: String,
 	review_tool: String,
 	skill_install_tool: String,
+	skill_execute_tool: String,
 }
 
 impl PlannerToolbox {
@@ -35,6 +36,7 @@ impl PlannerToolbox {
 				"skill_install",
 				"skill.ensure_installed",
 			),
+			skill_execute_tool: catalog_tool_name(catalog, "skill_execute", "skill.execute"),
 		}
 	}
 }
@@ -64,12 +66,37 @@ pub(crate) fn build_skill_install_steps(
 	)]
 }
 
-pub(crate) fn build_selected_skill_steps(goal: &str, selector: ResourceSelector) -> Vec<PlanStep> {
+pub(crate) fn build_selected_skill_advisory_steps(
+	goal: &str,
+	selector: ResourceSelector,
+) -> Vec<PlanStep> {
 	vec![resource_step(
-		"use-installed-skill",
+		"use-installed-skill-advisory",
 		goal,
-		&format!("Use selected skill `{}` for this request", selector.name()),
+		&format!(
+			"Use advisory skill `{}` as authoritative local guidance",
+			selector.name()
+		),
 		vec![selector],
+	)]
+}
+
+pub(crate) fn build_selected_skill_executable_steps(
+	goal: &str,
+	selector: ResourceSelector,
+	toolbox: &PlannerToolbox,
+) -> Vec<PlanStep> {
+	vec![resource_step(
+		"use-installed-skill-executable",
+		goal,
+		&format!(
+			"Execute installed skill `{}` using its local scripts",
+			selector.name()
+		),
+		vec![
+			ResourceSelector::tool(&toolbox.skill_execute_tool),
+			selector,
+		],
 	)]
 }
 

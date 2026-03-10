@@ -32,7 +32,7 @@ use serde_json::json;
 
 use crate::CommandError;
 use crate::runtime::ExecutionRequestOptions;
-use crate::runtime::build_live_runtime_service_from_env;
+use crate::runtime::{apply_request_env_overrides, build_live_runtime_service_from_env};
 use crate::storage::LocalStorageLayout;
 
 pub fn run_telegram_bot_from_env() -> Result<(), CommandError> {
@@ -49,6 +49,7 @@ pub fn run_telegram_bot_from_env() -> Result<(), CommandError> {
 pub(crate) fn run_telegram_once_with_options_from_env(
 	options: ExecutionRequestOptions,
 ) -> Result<String, CommandError> {
+	apply_request_env_overrides(&options);
 	let handler = build_live_telegram_handler_from_env()?;
 	render_telegram_preview(
 		1,

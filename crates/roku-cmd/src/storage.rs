@@ -25,6 +25,7 @@ pub(crate) struct LocalStorageLayout {
 	pub experiment_root: PathBuf,
 	pub report_root: PathBuf,
 	pub skill_root: PathBuf,
+	pub generated_skill_root: PathBuf,
 	pub tool_config_path: PathBuf,
 	pub prompt_archive_dir: PathBuf,
 	pub memory_summary_dir: PathBuf,
@@ -46,7 +47,8 @@ impl LocalStorageLayout {
 			env_path("ROKU_EXPERIMENT_ROOT").unwrap_or_else(|| home_dir.join("experiments"));
 		let report_root = env_path("ROKU_REPORT_ROOT").unwrap_or_else(|| home_dir.join("reports"));
 		let skill_root =
-			env_path("ROKU_SKILL_ROOT").unwrap_or_else(|| PathBuf::from(".roku").join("skills"));
+			normalize_path(env_path("ROKU_SKILL_ROOT").unwrap_or_else(default_project_skill_root));
+		let generated_skill_root = skill_root.clone();
 		let tool_config_path = env_path("ROKU_TOOL_CONFIG_PATH")
 			.unwrap_or_else(|| PathBuf::from("config").join("tools.json"));
 		let prompt_archive_dir =
@@ -67,6 +69,7 @@ impl LocalStorageLayout {
 			experiment_root,
 			report_root,
 			skill_root,
+			generated_skill_root,
 			tool_config_path,
 			prompt_archive_dir,
 			memory_summary_dir,
@@ -85,6 +88,7 @@ impl LocalStorageLayout {
 			&self.experiment_root,
 			&self.report_root,
 			&self.skill_root,
+			&self.generated_skill_root,
 			&self.prompt_archive_dir,
 			&self.memory_summary_dir,
 			&self.audit_export_dir,
@@ -109,6 +113,22 @@ fn default_roku_home() -> PathBuf {
 	home_dir()
 		.map(|home| home.join(".roku"))
 		.unwrap_or_else(|| PathBuf::from(".roku"))
+}
+
+fn default_project_skill_root() -> PathBuf {
+	env::current_dir()
+		.map(|cwd| cwd.join(".roku").join("skills"))
+		.unwrap_or_else(|_| PathBuf::from(".roku").join("skills"))
+}
+
+fn normalize_path(path: PathBuf) -> PathBuf {
+	if path.is_absolute() {
+		path
+	} else {
+		env::current_dir()
+			.map(|cwd| cwd.join(&path))
+			.unwrap_or_else(|_| PathBuf::from(".").join(path))
+	}
 }
 
 fn expand_home(value: &str) -> PathBuf {
@@ -145,6 +165,7 @@ mod tests {
 		assert!(layout.sqlite_path.ends_with("state/control-plane.db"));
 		assert!(layout.artifact_root.ends_with("artifacts"));
 		assert!(layout.skill_root.ends_with(".roku/skills"));
+		assert_eq!(layout.generated_skill_root, layout.skill_root);
 		assert!(layout.tool_config_path.ends_with("config/tools.json"));
 	}
 }

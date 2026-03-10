@@ -44,6 +44,7 @@ pub(crate) struct ExecutionRequestOptions {
 	pub session_id: String,
 	pub goal: String,
 	pub planning_mode_hint: Option<PlanningModeHint>,
+	pub generated_skill_root: Option<std::path::PathBuf>,
 }
 
 pub fn run_once(goal: &str) -> Result<ResponseEnvelope, RuntimeError> {
@@ -52,6 +53,7 @@ pub fn run_once(goal: &str) -> Result<ResponseEnvelope, RuntimeError> {
 			session_id: "session-1".to_string(),
 			goal: goal.to_string(),
 			planning_mode_hint: None,
+			generated_skill_root: None,
 		},
 		RunMode::Normal,
 	)
@@ -63,6 +65,7 @@ pub fn run_with_mode(goal: &str, mode: RunMode) -> Result<ResponseEnvelope, Runt
 			session_id: "session-1".to_string(),
 			goal: goal.to_string(),
 			planning_mode_hint: None,
+			generated_skill_root: None,
 		},
 		mode,
 	)
@@ -84,12 +87,14 @@ pub fn run_live_once_from_env(goal: &str) -> Result<ResponseEnvelope, CommandErr
 		session_id: "session-1".to_string(),
 		goal: goal.to_string(),
 		planning_mode_hint: None,
+		generated_skill_root: None,
 	})
 }
 
 pub(crate) fn run_live_once_with_options_from_env(
 	options: ExecutionRequestOptions,
 ) -> Result<ResponseEnvelope, CommandError> {
+	apply_request_env_overrides(&options);
 	let gateway = Gateway;
 	let service = build_live_runtime_service_from_env()?;
 	let request = build_request(&gateway, options, 1);
@@ -429,6 +434,15 @@ fn build_request(
 	);
 	request.planning_mode_hint = options.planning_mode_hint;
 	request
+}
+
+pub(crate) fn apply_request_env_overrides(options: &ExecutionRequestOptions) {
+	if let Some(path) = &options.generated_skill_root {
+		unsafe {
+			std::env::set_var("ROKU_SKILL_ROOT", path);
+			std::env::set_var("ROKU_GENERATED_SKILL_ROOT", path);
+		}
+	}
 }
 
 #[cfg(test)]

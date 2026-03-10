@@ -23,6 +23,7 @@ use std::collections::HashMap;
 const MIN_TOOL_SCORE: f32 = 0.60;
 const MIN_SKILL_SCORE: f32 = 0.72;
 const HIGH_CONFIDENCE: f32 = 0.78;
+const FALLBACK_SKILL_CANDIDATE_SCORE: f32 = 0.25;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SelectionRoute {
@@ -31,7 +32,10 @@ pub(crate) enum SelectionRoute {
 		source_url: String,
 		if_missing: bool,
 	},
-	UseSkill {
+	UseSkillAdvisory {
+		selector: ResourceSelector,
+	},
+	UseSkillExecutable {
 		selector: ResourceSelector,
 	},
 	UseTools {
@@ -57,6 +61,13 @@ impl ResourceSelectionEngine {
 				if_missing: true,
 			};
 		}
+		if wants_inventory_overview(&request.goal)
+			&& let Some(selector) = inventory_tool_selector(&self.catalog)
+		{
+			return SelectionRoute::UseTools {
+				selectors: vec![selector],
+			};
+		}
 
 		let query = request.goal.trim();
 		let tool_matches =
@@ -65,11 +76,14 @@ impl ResourceSelectionEngine {
 		if is_conversation(request, &tool_matches, &skill_matches) {
 			return SelectionRoute::Conversation;
 		}
-		if let Some(selector) = explicit_skill_selector(&request.goal, &skill_matches) {
-			return SelectionRoute::UseSkill { selector };
+		if let Some(selector) = explicit_skill_selector(&self.catalog, &request.goal) {
+			return selection_route_for_skill_selector(&self.catalog, selector, &request.goal);
+		}
+		if let Some(selector) = best_skill_authoring_selector(&self.catalog, &request.goal) {
+			return selection_route_for_skill_selector(&self.catalog, selector, &request.goal);
 		}
 		if let Some(selector) = best_skill_selector(&skill_matches, &tool_matches) {
-			return SelectionRoute::UseSkill { selector };
+			return selection_route_for_skill_selector(&self.catalog, selector, &request.goal);
 		}
 		let selected_tools = best_tool_selectors(&tool_matches);
 		if !selected_tools.is_empty() {
@@ -125,7 +139,9 @@ impl ResourceSelectionEngine {
 				.selectors
 				.into_iter()
 				.find_map(|selector| parse_selector(&selector))
-				.map(|selector| SelectionRoute::UseSkill { selector })
+				.map(|selector| {
+					selection_route_for_skill_selector(&self.catalog, selector, &request.goal)
+				})
 				.unwrap_or(SelectionRoute::PlannerDefault),
 			"tools" => {
 				let selectors = choice
@@ -164,6 +180,7 @@ struct SelectionCandidate {
 enum CandidateSource {
 	CurrentGoal,
 	RecentUserHistory,
+	InstalledSkillCatalog,
 }
 
 impl CandidateSource {
@@ -171,6 +188,7 @@ impl CandidateSource {
 		match self {
 			Self::CurrentGoal => "current_goal",
 			Self::RecentUserHistory => "recent_user_history",
+			Self::InstalledSkillCatalog => "installed_skill_catalog",
 		}
 	}
 }
@@ -179,10 +197,13 @@ fn selection_candidates(
 	catalog: &ResourceCatalog,
 	request: &RequestEnvelope,
 ) -> Vec<SelectionCandidate> {
+	let current_goal_tool_matches =
+		discoverable_tool_matches(catalog.retrieve(&request.goal, Some(ResourceKind::Tool), 4));
+	let current_goal_skill_matches = catalog.retrieve(&request.goal, Some(ResourceKind::Skill), 4);
 	let mut merged = merge_candidates(
-		discoverable_tool_matches(catalog.retrieve(&request.goal, Some(ResourceKind::Tool), 4))
+		current_goal_tool_matches
 			.into_iter()
-			.chain(catalog.retrieve(&request.goal, Some(ResourceKind::Skill), 4))
+			.chain(current_goal_skill_matches.clone())
 			.collect(),
 		CandidateSource::CurrentGoal,
 		HashMap::new(),
@@ -199,6 +220,13 @@ fn selection_candidates(
 			.chain(catalog.retrieve(&history_query, Some(ResourceKind::Skill), 4))
 			.collect(),
 			CandidateSource::RecentUserHistory,
+			merged,
+		);
+	}
+	if should_include_skill_catalog_fallback(request, &current_goal_skill_matches) {
+		merged = merge_candidates(
+			fallback_skill_candidates(catalog),
+			CandidateSource::InstalledSkillCatalog,
 			merged,
 		);
 	}
@@ -248,12 +276,18 @@ fn recent_user_history_query(request: &RequestEnvelope) -> Option<String> {
 	Some(format!("{}\n{}", request.goal.trim(), history))
 }
 
-fn explicit_skill_selector(goal: &str, matches: &[CatalogMatch]) -> Option<ResourceSelector> {
+fn explicit_skill_selector(catalog: &ResourceCatalog, goal: &str) -> Option<ResourceSelector> {
 	let normalized_goal = normalize(goal);
-	matches.iter().find_map(|entry| {
-		let normalized_name = normalize(&entry.descriptor.name);
+	let mut entries = catalog
+		.entries()
+		.iter()
+		.filter(|entry| entry.kind == ResourceKind::Skill)
+		.collect::<Vec<_>>();
+	entries.sort_by(|left, right| right.name.len().cmp(&left.name.len()));
+	entries.into_iter().find_map(|entry| {
+		let normalized_name = normalize(&entry.name);
 		(normalized_name.len() > 2 && normalized_goal.contains(&normalized_name))
-			.then(|| entry.descriptor.selector.clone())
+			.then(|| entry.selector.clone())
 	})
 }
 
@@ -279,6 +313,101 @@ fn best_tool_selectors(matches: &[CatalogMatch]) -> Vec<ResourceSelector> {
 		.collect::<Vec<_>>();
 	selectors.dedup();
 	selectors
+}
+
+fn best_skill_authoring_selector(
+	catalog: &ResourceCatalog,
+	goal: &str,
+) -> Option<ResourceSelector> {
+	if !request_targets_skill_authoring(goal) {
+		return None;
+	}
+
+	catalog
+		.descriptors_for_kind(ResourceKind::Skill)
+		.into_iter()
+		.filter_map(|descriptor| {
+			let score = skill_authoring_match_score(&descriptor);
+			(score > 0).then_some((score, descriptor.name.clone(), descriptor.selector))
+		})
+		.max_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)))
+		.map(|(_, _, selector)| selector)
+}
+
+fn inventory_tool_selector(catalog: &ResourceCatalog) -> Option<ResourceSelector> {
+	catalog
+		.entries()
+		.iter()
+		.find(|entry| {
+			entry.kind == ResourceKind::Tool
+				&& entry.discoverable
+				&& (entry.name.to_ascii_lowercase().contains("inventory")
+					|| entry
+						.description
+						.to_ascii_lowercase()
+						.contains("local inventory"))
+		})
+		.map(|entry| entry.selector.clone())
+}
+
+fn should_include_skill_catalog_fallback(
+	request: &RequestEnvelope,
+	skill_matches: &[CatalogMatch],
+) -> bool {
+	if wants_inventory_overview(&request.goal) || !has_task_intent(&request.goal) {
+		return false;
+	}
+
+	skill_matches
+		.first()
+		.map(|entry| entry.score < HIGH_CONFIDENCE)
+		.unwrap_or(true)
+}
+
+fn fallback_skill_candidates(catalog: &ResourceCatalog) -> Vec<CatalogMatch> {
+	catalog
+		.descriptors_for_kind(ResourceKind::Skill)
+		.into_iter()
+		.map(|descriptor| CatalogMatch {
+			descriptor,
+			bm25_score: 0.0,
+			embedding_score: 0.0,
+			score: FALLBACK_SKILL_CANDIDATE_SCORE,
+		})
+		.collect()
+}
+
+fn selection_route_for_skill_selector(
+	catalog: &ResourceCatalog,
+	selector: ResourceSelector,
+	goal: &str,
+) -> SelectionRoute {
+	let executable = catalog
+		.descriptor(&selector)
+		.map(skill_descriptor_is_executable)
+		.unwrap_or(false);
+	if executable && request_wants_skill_execution(goal) {
+		SelectionRoute::UseSkillExecutable { selector }
+	} else {
+		SelectionRoute::UseSkillAdvisory { selector }
+	}
+}
+
+fn skill_descriptor_is_executable(descriptor: &roku_resource_catalog::CatalogDescriptor) -> bool {
+	descriptor
+		.tags
+		.iter()
+		.any(|tag| tag == "executable-skill" || tag == "has-scripts")
+		|| descriptor
+			.key_commands
+			.iter()
+			.chain(descriptor.examples.iter())
+			.any(|value| looks_like_script_reference(value))
+}
+
+fn looks_like_script_reference(value: &str) -> bool {
+	let normalized = value.trim().to_ascii_lowercase();
+	normalized.contains("scripts/") || normalized.starts_with("./scripts/")
 }
 
 fn is_conversation(
@@ -497,6 +626,151 @@ fn has_task_intent(goal: &str) -> bool {
 	.any(|pattern| normalized.contains(pattern) || goal.contains(pattern))
 }
 
+fn wants_inventory_overview(goal: &str) -> bool {
+	let normalized = goal.to_ascii_lowercase();
+	[
+		"what skills",
+		"which skills",
+		"list skills",
+		"available skills",
+		"inventory",
+		"你现在有啥skill",
+		"你有哪些skill",
+		"有什么skill",
+		"列出skill",
+		"有哪些技能",
+		"技能列表",
+		"库存",
+	]
+	.iter()
+	.any(|pattern| normalized.contains(pattern) || goal.contains(pattern))
+}
+
+fn request_targets_skill_authoring(goal: &str) -> bool {
+	let normalized = goal.to_ascii_lowercase();
+	let mentions_skill =
+		normalized.contains("skill") || goal.contains("技能") || goal.contains("技能力");
+	let authoring_intent = [
+		"create",
+		"build",
+		"generate",
+		"modify",
+		"update",
+		"improve",
+		"optimize",
+		"benchmark",
+		"eval",
+		"创建",
+		"新建",
+		"生成",
+		"制作",
+		"修改",
+		"更新",
+		"改进",
+		"优化",
+		"评估",
+	]
+	.iter()
+	.any(|pattern| normalized.contains(pattern) || goal.contains(pattern));
+
+	mentions_skill && authoring_intent
+}
+
+fn skill_authoring_match_score(descriptor: &roku_resource_catalog::CatalogDescriptor) -> usize {
+	let text = descriptor.searchable_text().to_ascii_lowercase();
+	let mut score = 0usize;
+	if text.contains("skill") {
+		score += 1;
+	}
+	for pattern in [
+		"skill creator",
+		"create new skills",
+		"create a skill",
+		"creating new skills",
+		"new skill",
+		"existing skill",
+		"modify and improve existing skills",
+		"edit a skill",
+		"optimize a skill",
+		"benchmark skill",
+		"evals",
+		"run evals",
+	] {
+		if text.contains(pattern) {
+			score += 3;
+		}
+	}
+	for pattern in [
+		"create",
+		"modify",
+		"improve",
+		"optimize",
+		"benchmark",
+		"eval",
+	] {
+		if text.contains(pattern) {
+			score += 1;
+		}
+	}
+	score
+}
+
+fn request_wants_skill_execution(goal: &str) -> bool {
+	let normalized = goal.to_ascii_lowercase();
+	let advisory_intent = [
+		"summarize",
+		"summary",
+		"explain",
+		"describe",
+		"what is",
+		"how does",
+		"overview",
+		"list",
+		"show me",
+		"总结",
+		"概括",
+		"解释",
+		"说明",
+		"介绍",
+		"是什么",
+		"怎么用",
+		"有哪些",
+		"列出",
+	]
+	.iter()
+	.any(|pattern| normalized.contains(pattern) || goal.contains(pattern));
+	let execution_intent = [
+		"create",
+		"build",
+		"generate",
+		"make",
+		"write",
+		"run",
+		"execute",
+		"install",
+		"modify",
+		"update",
+		"fix",
+		"帮我",
+		"请帮",
+		"创建",
+		"新建",
+		"生成",
+		"制作",
+		"写一个",
+		"运行",
+		"执行",
+		"安装",
+		"修改",
+		"更新",
+		"修复",
+	]
+	.iter()
+	.any(|pattern| normalized.contains(pattern) || goal.contains(pattern));
+
+	execution_intent || (!advisory_intent && has_task_intent(goal))
+}
+
 fn role_label(role: ConversationRole) -> &'static str {
 	match role {
 		ConversationRole::User => "user",
@@ -596,6 +870,30 @@ mod tests {
 		}
 	}
 
+	fn skill_descriptor(name: &str, description: &str, executable: bool) -> CatalogDescriptor {
+		CatalogDescriptor {
+			selector: ResourceSelector::skill(name),
+			kind: ResourceKind::Skill,
+			name: name.to_string(),
+			role: None,
+			discoverable: true,
+			description: description.to_string(),
+			tags: if executable {
+				vec!["has-scripts".to_string()]
+			} else {
+				Vec::new()
+			},
+			examples: Vec::new(),
+			input_schema: Vec::new(),
+			risk: ResourceRisk::Low,
+			cost: ResourceCost::default(),
+			required_capabilities: Vec::new(),
+			summary: description.to_string(),
+			key_commands: Vec::new(),
+			use_cases: Vec::new(),
+		}
+	}
+
 	fn selection_engine() -> ResourceSelectionEngine {
 		ResourceSelectionEngine::new(ResourceCatalog::new(vec![
 			tool_descriptor(
@@ -634,6 +932,25 @@ mod tests {
 			selection,
 			SelectionRoute::UseTools {
 				selectors: vec![ResourceSelector::tool("inventory.describe")],
+			}
+		);
+	}
+
+	#[test]
+	fn explicit_script_backed_skill_routes_to_executable_skill() {
+		let engine = ResourceSelectionEngine::new(ResourceCatalog::new(vec![skill_descriptor(
+			"skill-creator",
+			"Create and iterate on local skills",
+			true,
+		)]));
+
+		let selection =
+			engine.select_without_llm(&request("Use skill-creator to create a Python skill"));
+
+		assert_eq!(
+			selection,
+			SelectionRoute::UseSkillExecutable {
+				selector: ResourceSelector::skill("skill-creator"),
 			}
 		);
 	}

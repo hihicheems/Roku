@@ -450,10 +450,11 @@ fn default_node_metadata(
 }
 
 fn execution_deadline_ms(capabilities: &[String], resource_time_budget_hint: u64) -> u64 {
-	let base = if capabilities
-		.iter()
-		.any(|capability| capability == "skill.install" || capability == "skill.ensure_installed")
-	{
+	let base = if capabilities.iter().any(|capability| {
+		capability == "skill.install"
+			|| capability == "skill.ensure_installed"
+			|| capability == "skill.execute"
+	}) {
 		120_000
 	} else {
 		45_000
@@ -466,7 +467,11 @@ fn execution_token_budget(
 	capability_count: u64,
 	resource_token_budget_hint: u64,
 ) -> u64 {
-	let base = if node_id.0 == "use-installed-skill" || capability_count == 0 {
+	let base = if matches!(
+		node_id.0.as_str(),
+		"use-installed-skill" | "use-installed-skill-advisory" | "use-installed-skill-executable"
+	) || capability_count == 0
+	{
 		10_000
 	} else {
 		1_000u64.saturating_add(capability_count.saturating_mul(250))
