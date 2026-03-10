@@ -359,6 +359,7 @@ mod tests {
 
 			Ok(ProviderResponse {
 				output,
+				finish_reason: None,
 				prompt_tokens: 64,
 				output_tokens: 24,
 				latency_ms: 10,

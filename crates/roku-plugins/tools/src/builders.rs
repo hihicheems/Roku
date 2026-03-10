@@ -1975,6 +1975,7 @@ So, I'll output: "星期日""#;
 			*self.prompt.lock().expect("prompt lock should succeed") = Some(request.prompt.clone());
 			Ok(ProviderResponse {
 				output: "done".to_string(),
+				finish_reason: None,
 				prompt_tokens: 12,
 				output_tokens: 4,
 				latency_ms: 10,

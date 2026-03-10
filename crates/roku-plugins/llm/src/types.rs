@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -111,6 +112,8 @@ pub struct LlmResponse {
 	pub provider: String,
 	pub model_id: String,
 	pub output: String,
+	#[serde(default)]
+	pub finish_reason: Option<String>,
 	pub prompt_tokens: u64,
 	pub output_tokens: u64,
 	pub total_tokens: u64,
@@ -121,9 +124,17 @@ pub struct LlmResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderResponse {
 	pub output: String,
+	#[serde(default)]
+	pub finish_reason: Option<String>,
 	pub prompt_tokens: u64,
 	pub output_tokens: u64,
 	pub latency_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructuredJsonResponse {
+	pub response: LlmResponse,
+	pub value: Value,
 }
 
 #[derive(Debug, Error, Clone, PartialEq)]
@@ -176,6 +187,26 @@ pub enum LlmAdapterError {
 		model_id: String,
 		message: String,
 	},
+}
+
+#[derive(Debug, Error, Clone, PartialEq)]
+pub enum StructuredOutputError {
+	#[error("provider returned unreadable content")]
+	UnreadableProviderContent,
+	#[error("provider returned content = null")]
+	NullContent,
+	#[error("provider returned finish_reason = length")]
+	FinishReasonLength,
+	#[error("invalid json: {0}")]
+	InvalidJson(String),
+}
+
+#[derive(Debug, Error, Clone, PartialEq)]
+pub enum StructuredGenerationError {
+	#[error(transparent)]
+	Llm(#[from] LlmAdapterError),
+	#[error(transparent)]
+	ParseGuard(#[from] StructuredOutputError),
 }
 
 pub(crate) fn estimate_prompt_tokens(prompt: &str) -> u64 {
