@@ -12,18 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Multi-provider model routing with budget and risk-aware controls.
+use thiserror::Error;
 
-mod openrouter;
-mod router;
-mod types;
+use roku_mcp_bridge::McpError;
 
-pub use openrouter::{
-	OpenRouterBootstrapError, OpenRouterConfig, OpenRouterProvider, build_openrouter_router,
-	build_openrouter_router_with_metrics,
-};
-pub use router::{LlmProvider, LlmRouter};
-pub use types::{
-	GenerationRequest, LlmAdapterError, LlmResponse, ModelProfile, ProviderCallError,
-	ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy,
-};
+#[derive(Debug, Error)]
+pub enum CodingProviderError {
+	#[error("invalid coding work contract: {0}")]
+	InvalidContract(String),
+	#[error("mcp bridge error: {0}")]
+	Bridge(#[from] McpError),
+	#[error("coding provider rejected work contract: {0}")]
+	ProviderRejected(String),
+	#[error("invalid coding provider response: {0}")]
+	InvalidResponse(String),
+}

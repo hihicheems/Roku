@@ -12,4 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Phase 0 placeholder crate for Roku plugin coding integrations.
+//! External coding provider adapter.
+
+mod contract;
+mod error;
+mod provider;
+
+pub use contract::ProviderExecutionPayload;
+pub use error::CodingProviderError;
+pub use provider::{CodingProvider, McpCodingProvider};

@@ -12,12 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! External coding provider adapter.
+//! Backward-compatible shim for the plugin coding adapter.
 
-mod contract;
-mod error;
-mod provider;
-
-pub use contract::ProviderExecutionPayload;
-pub use error::CodingProviderError;
-pub use provider::{CodingProvider, McpCodingProvider};
+pub use roku_plugin_coding::*;

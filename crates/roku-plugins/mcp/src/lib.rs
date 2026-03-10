@@ -12,4 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Phase 0 placeholder crate for Roku plugin MCP integrations.
+//! MCP protocol bridge boundary.
+
+mod bridge;
+mod catalog;
+mod error;
+mod types;
+
+pub use bridge::{InMemoryMcpBridge, McpClient};
+pub use catalog::McpToolCatalog;
+pub use error::McpError;
+pub use types::{McpRequest, McpResponse, McpToolDescriptor};

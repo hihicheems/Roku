@@ -12,18 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Multi-provider model routing with budget and risk-aware controls.
+use thiserror::Error;
 
-mod openrouter;
-mod router;
-mod types;
-
-pub use openrouter::{
-	OpenRouterBootstrapError, OpenRouterConfig, OpenRouterProvider, build_openrouter_router,
-	build_openrouter_router_with_metrics,
-};
-pub use router::{LlmProvider, LlmRouter};
-pub use types::{
-	GenerationRequest, LlmAdapterError, LlmResponse, ModelProfile, ProviderCallError,
-	ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy,
-};
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum McpError {
+	#[error("mcp server not found: {0}")]
+	ServerNotFound(String),
+	#[error("mcp tool not found: {server_id}/{tool_name}")]
+	ToolNotFound {
+		server_id: String,
+		tool_name: String,
+	},
+	#[error("invalid mcp request: {0}")]
+	InvalidRequest(String),
+	#[error("mcp transport error: {0}")]
+	Transport(String),
+}

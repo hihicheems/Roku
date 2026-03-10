@@ -12,18 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Multi-provider model routing with budget and risk-aware controls.
+//! Backward-compatible shim for the plugin LLM adapter.
 
-mod openrouter;
-mod router;
-mod types;
-
-pub use openrouter::{
-	OpenRouterBootstrapError, OpenRouterConfig, OpenRouterProvider, build_openrouter_router,
-	build_openrouter_router_with_metrics,
-};
-pub use router::{LlmProvider, LlmRouter};
-pub use types::{
-	GenerationRequest, LlmAdapterError, LlmResponse, ModelProfile, ProviderCallError,
-	ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy,
-};
+pub use roku_plugin_llm::*;
