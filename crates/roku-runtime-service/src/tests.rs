@@ -20,7 +20,7 @@ use roku_common_types::{
 	ResultEnvelope, ResultStatus, Task, TaskEdge, TaskEventKind, TaskGraph, TaskId, TaskNode,
 	TaskNodeKind, TaskState,
 };
-use roku_skill_registry::{
+use roku_plugin_skills::{
 	DownloadedArchive, SkillArchiveFetcher, SkillRegistry, SkillRegistryError, SkillSource,
 };
 use roku_state_store::{

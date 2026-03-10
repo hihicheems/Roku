@@ -698,7 +698,7 @@ fn issue_node_capability_tokens(
 	capability_auth: &mut roku_capability_auth::CapabilityAuthority,
 	subject: &str,
 	node: &TaskNode,
-	catalog: &roku_resource_catalog::ResourceCatalog,
+	catalog: &roku_plugin_catalog::ResourceCatalog,
 	allow_invoke: bool,
 ) -> Vec<CapabilityToken> {
 	let mut tokens = Vec::new();

@@ -19,10 +19,10 @@ use roku_common_types::{
 	ApprovalDecision, ApprovalId, ConversationRole, ConversationTurn, PlanningModeHint,
 	RequestEnvelope, RequestId, ResponseEnvelope, RuntimeError, SessionPreferences,
 };
-use roku_connectors_telegram::{
+use roku_observability::{LogLevel, LogRecord, emit_global_log};
+use roku_plugin_telegram::{
 	TelegramInteractionHandler, TelegramOutboundMessage, TelegramParseMode,
 };
-use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_state_store::{
 	ConversationRepository, InMemoryConversationRepository, InMemorySessionPreferenceRepository,
 	SessionPreferenceRepository, SqliteConversationRepository, SqliteSessionPreferenceRepository,
@@ -37,7 +37,7 @@ use crate::storage::LocalStorageLayout;
 
 pub fn run_telegram_bot_from_env() -> Result<(), CommandError> {
 	let handler = build_live_telegram_handler_from_env()?;
-	let runner = roku_connectors_telegram::TelegramPollingRunner::from_env()?;
+	let runner = roku_plugin_telegram::TelegramPollingRunner::from_env()?;
 	let _ = emit_global_log(LogRecord::new(
 		"roku-cmd",
 		LogLevel::Info,
@@ -75,7 +75,7 @@ struct RuntimeServiceTelegramHandler {
 	session_state: Arc<TelegramSessionState>,
 }
 
-impl roku_connectors_telegram::TelegramInteractionHandler for RuntimeServiceTelegramHandler {
+impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegramHandler {
 	fn handle_request(
 		&self,
 		mut request: RequestEnvelope,
@@ -300,15 +300,15 @@ mod tests {
 
 	use roku_agent_runtime::GenericAgentRuntime;
 	use roku_common_types::{PlanningModeHint, RequestEnvelope, RequestId, ResponseStatus};
-	use roku_connectors_telegram::TelegramInteractionHandler;
-	use roku_llm_adapter::{
+	use roku_plugin_llm::{
 		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderCallError,
 		ProviderResponse, RiskTier, RoutingPolicy,
 	};
-	use roku_runtime_service::RuntimeService;
-	use roku_skill_registry::{
+	use roku_plugin_skills::{
 		DownloadedArchive, SkillArchiveFetcher, SkillRegistry, SkillRegistryError, SkillSource,
 	};
+	use roku_plugin_telegram::TelegramInteractionHandler;
+	use roku_runtime_service::RuntimeService;
 	use serde_json::Value;
 
 	use super::*;
