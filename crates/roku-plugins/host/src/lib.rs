@@ -12,4 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Phase 0 placeholder crate for Roku plugin host.
+//! Plugin host building blocks for Roku.
+
+pub mod tool_runtime;
+
+pub use tool_runtime::{
+	ExecutionEvent, ExecutionEventKind, ExecutionHook, RuntimeConstraints, SandboxProfile, Tool,
+	ToolDescriptor, ToolExecutionResult, ToolFailure, ToolInvocation, ToolInvocationRequest,
+	ToolRuntime, ToolRuntimeError, ToolSchema,
+};
