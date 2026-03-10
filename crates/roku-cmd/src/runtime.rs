@@ -16,7 +16,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use roku_agent_runtime::{GenericAgentRuntime, ToolCatalogConfig};
+use roku_agent_runtime::{GenericAgentRuntime, PluginRegistrySnapshot, ToolCatalogConfig};
 use roku_api_gateway::{Gateway, RawRequest};
 use roku_artifact_store::ArtifactStore;
 use roku_common_types::{
@@ -25,6 +25,11 @@ use roku_common_types::{
 };
 use roku_experiment_registry::ExperimentRegistry;
 use roku_observability::{InMemoryAuditSink, LogLevel, LogRecord, Metrics, emit_global_log};
+use roku_plugin_core::{PluginDisableReason, PluginPolicyConfig};
+use roku_plugin_host::{
+	PluginDiscoveryConfig, PluginStartupConfig, build_plugin_registry_snapshot,
+	default_bundled_plugin_descriptors,
+};
 use roku_plugin_llm::{OpenRouterConfig, build_openrouter_router_with_metrics};
 use roku_plugin_skills::SkillRegistry;
 pub use roku_runtime_service::RunMode;
@@ -75,8 +80,10 @@ pub(crate) fn run_with_mode_and_options(
 	options: ExecutionRequestOptions,
 	mode: RunMode,
 ) -> Result<ResponseEnvelope, RuntimeError> {
+	apply_request_env_overrides(&options);
 	let gateway = Gateway;
-	let service = RuntimeService::default();
+	let service = build_deterministic_runtime_service_from_env()
+		.map_err(|error| RuntimeError::new(error.to_string()))?;
 	let request = build_request(&gateway, options, 1);
 
 	service.execute_with_mode(request, mode)
@@ -102,41 +109,8 @@ pub(crate) fn run_live_once_with_options_from_env(
 }
 
 pub(crate) fn build_live_runtime_service_from_env() -> Result<RuntimeService, CommandError> {
-	let config = OpenRouterConfig::from_env()?;
-	let metrics = Arc::new(Metrics::default());
-	let runtime_router = build_openrouter_router_with_metrics(config.clone(), metrics.clone())?;
-	let planner_router = build_openrouter_router_with_metrics(config, metrics.clone())?;
-	let layout = LocalStorageLayout::from_env();
-	layout.ensure_dirs().map_err(CommandError::Io)?;
-	let tool_config = load_tool_catalog_config(&layout)?;
-	let skill_registry = build_skill_registry(&layout);
-	let runtime = GenericAgentRuntime::with_llm_router_skill_registry_and_tool_config(
-		runtime_router,
-		skill_registry.clone(),
-		tool_config,
-	);
-	let planner = Box::new(LlmTaskPlanner::with_resource_catalog(
-		planner_router,
-		runtime.resource_catalog().clone(),
-	));
-	let store_config = sqlite_store_config(&layout);
-	let (artifact_store, experiment_registry) = build_runtime_data_plane(&layout);
-
-	Ok(RuntimeService::new_with_runtime_data_plane_and_metrics(
-		roku_runtime_service::RuntimeDataPlane {
-			task_repo: Box::new(connect_sqlite_task_repository(&store_config)?),
-			event_repo: Box::new(connect_sqlite_event_repository(&store_config)?),
-			approval_repo: Box::new(connect_sqlite_approval_repository(&store_config)?),
-			result_repo: Box::new(connect_sqlite_result_repository(&store_config)?),
-			dispatch_queue: Box::new(connect_sqlite_dispatch_queue(&store_config)?),
-			artifact_store,
-			experiment_registry,
-		},
-		Arc::new(InMemoryAuditSink::default()),
-		runtime,
-		metrics,
-		planner,
-	))
+	let (layout, bootstrap) = build_plugin_bootstrap_from_env()?;
+	build_live_runtime_service_from_layout_and_bootstrap(&layout, bootstrap)
 }
 
 pub(crate) fn show_task_from_env(task_id: &str) -> Result<String, CommandError> {
@@ -299,12 +273,12 @@ pub(crate) fn decide_approval_from_env(
 }
 
 fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandError> {
-	let layout = LocalStorageLayout::from_env();
-	layout.ensure_dirs().map_err(CommandError::Io)?;
-	let tool_config = load_tool_catalog_config(&layout)?;
-	let skill_registry = build_skill_registry(&layout);
-	let runtime =
-		GenericAgentRuntime::with_skill_registry_and_tool_config(skill_registry, tool_config);
+	let (layout, bootstrap) = build_plugin_bootstrap_from_env()?;
+	let runtime = GenericAgentRuntime::with_skill_registry_tool_config_and_plugin_snapshot(
+		bootstrap.skill_registry,
+		bootstrap.tool_config,
+		bootstrap.plugin_snapshot,
+	);
 	let planner = Box::new(
 		roku_task_planner::AdaptiveTaskPlanner::with_resource_catalog(
 			runtime.resource_catalog().clone(),
@@ -331,9 +305,7 @@ fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandEr
 }
 
 fn build_skill_registry_from_env() -> Result<SkillRegistry, CommandError> {
-	let layout = LocalStorageLayout::from_env();
-	layout.ensure_dirs().map_err(CommandError::Io)?;
-	Ok(build_skill_registry(&layout))
+	Ok(build_plugin_bootstrap_from_env()?.1.skill_registry)
 }
 
 fn load_tool_catalog_config(
@@ -343,6 +315,18 @@ fn load_tool_catalog_config(
 		return Ok(ToolCatalogConfig::default());
 	}
 	ToolCatalogConfig::from_path(&layout.tool_config_path).map_err(CommandError::from)
+}
+
+fn load_plugin_policy_config(
+	layout: &LocalStorageLayout,
+) -> Result<PluginPolicyConfig, CommandError> {
+	if !layout.plugin_config_path.exists() {
+		return Ok(PluginPolicyConfig::default());
+	}
+	let content = fs::read_to_string(&layout.plugin_config_path).map_err(CommandError::Io)?;
+	PluginPolicyConfig::from_toml(&content)
+		.map_err(roku_plugin_host::PluginHostError::from)
+		.map_err(CommandError::from)
 }
 
 fn connect_sqlite_task_repository(
@@ -411,9 +395,241 @@ fn log_data_plane_backend(component: &str, path: &Path) {
 	);
 }
 
-fn build_skill_registry(layout: &LocalStorageLayout) -> SkillRegistry {
-	log_data_plane_backend("skill-registry", &layout.skill_root);
-	SkillRegistry::file_backed(layout.skill_root.clone())
+#[derive(Clone)]
+pub(crate) struct PluginBootstrap {
+	pub(crate) plugin_snapshot: PluginRegistrySnapshot,
+	pub(crate) tool_config: ToolCatalogConfig,
+	pub(crate) skill_registry: SkillRegistry,
+}
+
+pub(crate) fn build_plugin_bootstrap_from_env()
+-> Result<(LocalStorageLayout, PluginBootstrap), CommandError> {
+	let layout = LocalStorageLayout::from_env();
+	layout.ensure_dirs().map_err(CommandError::Io)?;
+	let bootstrap = build_plugin_bootstrap(&layout)?;
+	Ok((layout, bootstrap))
+}
+
+fn build_plugin_bootstrap(layout: &LocalStorageLayout) -> Result<PluginBootstrap, CommandError> {
+	let tool_config = load_tool_catalog_config(layout)?;
+	let policy = load_plugin_policy_config(layout)?;
+	let discovery = PluginDiscoveryConfig {
+		explicit_paths: policy.paths.clone(),
+		env_root: plugin_root_override_from_env(),
+		workspace_root: layout.workspace_plugin_root.clone(),
+		user_root: layout.user_plugin_root.clone(),
+	};
+	let bundled_descriptors = default_bundled_plugin_descriptors(
+		&tool_config
+			.tools
+			.iter()
+			.map(|tool| tool.name.clone())
+			.collect::<Vec<_>>(),
+	);
+	let startup = PluginStartupConfig {
+		discovery,
+		policy,
+		bundled_descriptors,
+	};
+	let plugin_snapshot = build_plugin_registry_snapshot(&startup)?;
+	let skill_registry = build_skill_registry(layout, &plugin_snapshot);
+
+	Ok(PluginBootstrap {
+		plugin_snapshot,
+		tool_config,
+		skill_registry,
+	})
+}
+
+pub(crate) fn ensure_plugin_enabled_for_command(
+	plugin_snapshot: &PluginRegistrySnapshot,
+	plugin_id: &str,
+	command_name: &str,
+) -> Result<(), CommandError> {
+	if plugin_snapshot.is_plugin_enabled(plugin_id) {
+		return Ok(());
+	}
+
+	let detail = plugin_snapshot
+		.entry(plugin_id)
+		.and_then(|entry| entry.disable_reason.as_ref())
+		.map(|reason| format!("{reason:?}"))
+		.unwrap_or_else(|| "not registered in startup inventory".to_string());
+	Err(CommandError::Usage(format!(
+		"{command_name} requires the `{plugin_id}` plugin, but it is unavailable ({detail})"
+	)))
+}
+
+fn build_skill_registry(
+	layout: &LocalStorageLayout,
+	plugin_snapshot: &PluginRegistrySnapshot,
+) -> SkillRegistry {
+	if plugin_snapshot.is_plugin_enabled("skill-source-local") {
+		log_data_plane_backend("skill-registry", &layout.skill_root);
+		SkillRegistry::file_backed(layout.skill_root.clone())
+	} else {
+		let _ = emit_global_log(LogRecord::new(
+			"roku-cmd",
+			LogLevel::Warn,
+			"local skill source plugin is disabled; skill registry will remain disabled",
+		));
+		SkillRegistry::disabled()
+	}
+}
+
+fn build_deterministic_runtime_service_from_env() -> Result<RuntimeService, CommandError> {
+	let (_, bootstrap) = build_plugin_bootstrap_from_env()?;
+	let runtime = GenericAgentRuntime::with_skill_registry_tool_config_and_plugin_snapshot(
+		bootstrap.skill_registry,
+		bootstrap.tool_config,
+		bootstrap.plugin_snapshot,
+	);
+	Ok(RuntimeService::in_memory_with_agent_runtime(runtime))
+}
+
+pub(crate) fn build_live_runtime_service_from_layout_and_bootstrap(
+	layout: &LocalStorageLayout,
+	bootstrap: PluginBootstrap,
+) -> Result<RuntimeService, CommandError> {
+	let metrics = Arc::new(Metrics::default());
+	let runtime = build_live_runtime(bootstrap.clone(), metrics.clone())?;
+	let planner = build_live_planner(&runtime, metrics.clone(), &bootstrap.plugin_snapshot)?;
+	let store_config = sqlite_store_config(layout);
+	let (artifact_store, experiment_registry) = build_runtime_data_plane(layout);
+
+	Ok(RuntimeService::new_with_runtime_data_plane_and_metrics(
+		roku_runtime_service::RuntimeDataPlane {
+			task_repo: Box::new(connect_sqlite_task_repository(&store_config)?),
+			event_repo: Box::new(connect_sqlite_event_repository(&store_config)?),
+			approval_repo: Box::new(connect_sqlite_approval_repository(&store_config)?),
+			result_repo: Box::new(connect_sqlite_result_repository(&store_config)?),
+			dispatch_queue: Box::new(connect_sqlite_dispatch_queue(&store_config)?),
+			artifact_store,
+			experiment_registry,
+		},
+		Arc::new(InMemoryAuditSink::default()),
+		runtime,
+		metrics,
+		planner,
+	))
+}
+
+fn build_live_runtime(
+	mut bootstrap: PluginBootstrap,
+	metrics: Arc<Metrics>,
+) -> Result<GenericAgentRuntime, CommandError> {
+	if !bootstrap.plugin_snapshot.is_plugin_enabled("openrouter") {
+		log_optional_plugin_fallback("openrouter", "plugin disabled by startup policy");
+		return Ok(
+			GenericAgentRuntime::with_skill_registry_tool_config_and_plugin_snapshot(
+				bootstrap.skill_registry,
+				bootstrap.tool_config,
+				bootstrap.plugin_snapshot,
+			),
+		);
+	}
+
+	let config = match OpenRouterConfig::from_env() {
+		Ok(config) => config,
+		Err(error) => {
+			log_optional_plugin_fallback("openrouter", &error.to_string());
+			bootstrap.plugin_snapshot = bootstrap.plugin_snapshot.with_runtime_disable(
+				"openrouter",
+				PluginDisableReason::AdmissionRejected {
+					detail: format!("provider bootstrap failed: {error}"),
+				},
+			);
+			return Ok(
+				GenericAgentRuntime::with_skill_registry_tool_config_and_plugin_snapshot(
+					bootstrap.skill_registry,
+					bootstrap.tool_config,
+					bootstrap.plugin_snapshot,
+				),
+			);
+		}
+	};
+	let runtime_router = build_openrouter_router_with_metrics(config, metrics)?;
+	Ok(
+		GenericAgentRuntime::with_llm_router_skill_registry_tool_config_and_plugin_snapshot(
+			runtime_router,
+			bootstrap.skill_registry,
+			bootstrap.tool_config,
+			bootstrap.plugin_snapshot,
+		),
+	)
+}
+
+fn build_live_planner(
+	runtime: &GenericAgentRuntime,
+	metrics: Arc<Metrics>,
+	plugin_snapshot: &PluginRegistrySnapshot,
+) -> Result<Box<dyn roku_task_planner::TaskPlanner + Send + Sync>, CommandError> {
+	if !plugin_snapshot.is_plugin_enabled("openrouter") {
+		return Ok(Box::new(
+			roku_task_planner::AdaptiveTaskPlanner::with_resource_catalog(
+				runtime.resource_catalog().clone(),
+			),
+		));
+	}
+
+	let config = match OpenRouterConfig::from_env() {
+		Ok(config) => config,
+		Err(error) => {
+			log_optional_plugin_fallback("openrouter", &error.to_string());
+			return Ok(Box::new(
+				roku_task_planner::AdaptiveTaskPlanner::with_resource_catalog(
+					runtime.resource_catalog().clone(),
+				),
+			));
+		}
+	};
+	let planner_router = build_openrouter_router_with_metrics(config, metrics)?;
+	Ok(Box::new(LlmTaskPlanner::with_resource_catalog(
+		planner_router,
+		runtime.resource_catalog().clone(),
+	)))
+}
+
+fn log_optional_plugin_fallback(plugin_id: &str, reason: &str) {
+	let _ = emit_global_log(
+		LogRecord::new(
+			"roku-cmd",
+			LogLevel::Warn,
+			"optional plugin is unavailable; falling back to deterministic runtime path",
+		)
+		.with_field("plugin_id", plugin_id.to_string())
+		.with_field("reason", reason.to_string()),
+	);
+}
+
+fn plugin_root_override_from_env() -> Option<std::path::PathBuf> {
+	std::env::var("ROKU_PLUGIN_ROOT")
+		.ok()
+		.filter(|value| !value.trim().is_empty())
+		.map(|value| {
+			let path = expand_home_path(value.trim());
+			if path.is_absolute() {
+				path
+			} else {
+				std::env::current_dir()
+					.map(|cwd| cwd.join(path))
+					.unwrap_or_else(|_| std::path::PathBuf::from("."))
+			}
+		})
+}
+
+fn expand_home_path(value: &str) -> std::path::PathBuf {
+	if value == "~" {
+		return std::env::var_os("HOME")
+			.map(std::path::PathBuf::from)
+			.unwrap_or_else(|| std::path::PathBuf::from(value));
+	}
+	if let Some(suffix) = value.strip_prefix("~/")
+		&& let Some(home) = std::env::var_os("HOME")
+	{
+		return std::path::PathBuf::from(home).join(suffix);
+	}
+	std::path::PathBuf::from(value)
 }
 
 fn sqlite_store_config(layout: &LocalStorageLayout) -> SqliteStoreConfig {

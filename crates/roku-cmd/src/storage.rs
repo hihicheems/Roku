@@ -27,6 +27,9 @@ pub(crate) struct LocalStorageLayout {
 	pub skill_root: PathBuf,
 	pub generated_skill_root: PathBuf,
 	pub tool_config_path: PathBuf,
+	pub plugin_config_path: PathBuf,
+	pub workspace_plugin_root: PathBuf,
+	pub user_plugin_root: PathBuf,
 	pub prompt_archive_dir: PathBuf,
 	pub memory_summary_dir: PathBuf,
 	pub audit_export_dir: PathBuf,
@@ -37,32 +40,38 @@ pub(crate) struct LocalStorageLayout {
 
 impl LocalStorageLayout {
 	pub fn from_env() -> Self {
-		let home_dir = env_path("ROKU_HOME").unwrap_or_else(default_roku_home);
-		let state_dir = env_path("ROKU_STATE_DIR").unwrap_or_else(|| home_dir.join("state"));
+		let roku_home = env_path("ROKU_HOME").unwrap_or_else(default_roku_home);
+		let state_dir = env_path("ROKU_STATE_DIR").unwrap_or_else(|| roku_home.join("state"));
 		let sqlite_path =
 			env_path("ROKU_SQLITE_PATH").unwrap_or_else(|| state_dir.join("control-plane.db"));
 		let artifact_root =
-			env_path("ROKU_ARTIFACT_ROOT").unwrap_or_else(|| home_dir.join("artifacts"));
+			env_path("ROKU_ARTIFACT_ROOT").unwrap_or_else(|| roku_home.join("artifacts"));
 		let experiment_root =
-			env_path("ROKU_EXPERIMENT_ROOT").unwrap_or_else(|| home_dir.join("experiments"));
-		let report_root = env_path("ROKU_REPORT_ROOT").unwrap_or_else(|| home_dir.join("reports"));
+			env_path("ROKU_EXPERIMENT_ROOT").unwrap_or_else(|| roku_home.join("experiments"));
+		let report_root = env_path("ROKU_REPORT_ROOT").unwrap_or_else(|| roku_home.join("reports"));
 		let skill_root =
 			normalize_path(env_path("ROKU_SKILL_ROOT").unwrap_or_else(default_project_skill_root));
 		let generated_skill_root = skill_root.clone();
 		let tool_config_path = env_path("ROKU_TOOL_CONFIG_PATH")
 			.unwrap_or_else(|| PathBuf::from("config").join("tools.json"));
+		let plugin_config_path = env_path("ROKU_PLUGIN_CONFIG_PATH")
+			.unwrap_or_else(|| PathBuf::from("config").join("plugins.toml"));
+		let workspace_plugin_root = normalize_path(PathBuf::from(".roku").join("plugins"));
+		let user_plugin_root = home_dir()
+			.map(|home| home.join(".roku").join("plugins"))
+			.unwrap_or_else(|| PathBuf::from(".roku").join("plugins"));
 		let prompt_archive_dir =
-			env_path("ROKU_PROMPT_ARCHIVE_DIR").unwrap_or_else(|| home_dir.join("prompts"));
+			env_path("ROKU_PROMPT_ARCHIVE_DIR").unwrap_or_else(|| roku_home.join("prompts"));
 		let memory_summary_dir =
-			env_path("ROKU_MEMORY_SUMMARY_DIR").unwrap_or_else(|| home_dir.join("memory"));
+			env_path("ROKU_MEMORY_SUMMARY_DIR").unwrap_or_else(|| roku_home.join("memory"));
 		let audit_export_dir = env_path("ROKU_AUDIT_EXPORT_DIR")
-			.unwrap_or_else(|| home_dir.join("exports").join("audit"));
-		let log_dir = env_path("ROKU_LOG_DIR").unwrap_or_else(|| home_dir.join("logs"));
-		let run_dir = env_path("ROKU_RUN_DIR").unwrap_or_else(|| home_dir.join("run"));
-		let cache_dir = env_path("ROKU_CACHE_DIR").unwrap_or_else(|| home_dir.join("cache"));
+			.unwrap_or_else(|| roku_home.join("exports").join("audit"));
+		let log_dir = env_path("ROKU_LOG_DIR").unwrap_or_else(|| roku_home.join("logs"));
+		let run_dir = env_path("ROKU_RUN_DIR").unwrap_or_else(|| roku_home.join("run"));
+		let cache_dir = env_path("ROKU_CACHE_DIR").unwrap_or_else(|| roku_home.join("cache"));
 
 		Self {
-			home_dir,
+			home_dir: roku_home,
 			state_dir,
 			sqlite_path,
 			artifact_root,
@@ -71,6 +80,9 @@ impl LocalStorageLayout {
 			skill_root,
 			generated_skill_root,
 			tool_config_path,
+			plugin_config_path,
+			workspace_plugin_root,
+			user_plugin_root,
 			prompt_archive_dir,
 			memory_summary_dir,
 			audit_export_dir,
@@ -89,6 +101,7 @@ impl LocalStorageLayout {
 			&self.report_root,
 			&self.skill_root,
 			&self.generated_skill_root,
+			&self.workspace_plugin_root,
 			&self.prompt_archive_dir,
 			&self.memory_summary_dir,
 			&self.audit_export_dir,
@@ -167,5 +180,8 @@ mod tests {
 		assert!(layout.skill_root.ends_with(".roku/skills"));
 		assert_eq!(layout.generated_skill_root, layout.skill_root);
 		assert!(layout.tool_config_path.ends_with("config/tools.json"));
+		assert!(layout.plugin_config_path.ends_with("config/plugins.toml"));
+		assert!(layout.workspace_plugin_root.ends_with(".roku/plugins"));
+		assert!(layout.user_plugin_root.ends_with(".roku/plugins"));
 	}
 }

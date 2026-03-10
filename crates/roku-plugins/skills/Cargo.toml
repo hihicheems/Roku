@@ -9,7 +9,7 @@ authors.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 roku-common-types = { path = "../../roku-common-types" }
 roku-observability = { path = "../../roku-observability" }
-roku-resource-catalog = { package = "roku-plugin-catalog", path = "../catalog" }
+roku-plugin-catalog = { path = "../catalog" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"

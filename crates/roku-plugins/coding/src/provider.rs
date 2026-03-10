@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use roku_common_types::{CodeChangeReport, CodingWorkContract};
-use roku_mcp_bridge::{McpClient, McpRequest};
+use roku_plugin_mcp::{McpClient, McpRequest};
 
 use crate::contract::{ProviderExecutionPayload, normalize_payload, validate_contract};
 use crate::error::CodingProviderError;
@@ -84,7 +84,7 @@ impl<C: McpClient> CodingProvider for McpCodingProvider<C> {
 
 #[cfg(test)]
 mod tests {
-	use roku_mcp_bridge::{InMemoryMcpBridge, McpResponse, McpToolDescriptor};
+	use roku_plugin_mcp::{InMemoryMcpBridge, McpResponse, McpToolDescriptor};
 
 	use super::*;
 

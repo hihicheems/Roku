@@ -12,4 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Phase 0 placeholder crate for Roku plugin core.
+mod error;
+mod id;
+mod kind;
+mod manifest;
+mod policy;
+mod registry;
+mod source;
+
+pub use error::{PluginCoreError, PluginIdError};
+pub use id::PluginId;
+pub use kind::PluginKind;
+pub use manifest::{PluginCapabilities, PluginManifest, PluginRequirements};
+pub use policy::{PluginEntryPolicy, PluginPolicyConfig, PluginProfile};
+pub use registry::{
+	PluginDisableReason, PluginRegistryEntry, PluginRegistrySnapshot, PluginStatus,
+};
+pub use source::{PluginSource, PluginSourceKind};

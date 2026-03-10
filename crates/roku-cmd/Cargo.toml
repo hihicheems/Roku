@@ -15,6 +15,8 @@ roku-common-types = { path = "../roku-common-types" }
 roku-experiment-registry = { path = "../roku-experiment-registry" }
 roku-observability = { path = "../roku-observability" }
 roku-orchestrator = { path = "../roku-orchestrator" }
+roku-plugin-core = { path = "../roku-plugins/core" }
+roku-plugin-host = { path = "../roku-plugins/host" }
 roku-plugin-llm = { path = "../roku-plugins/llm" }
 roku-plugin-skills = { path = "../roku-plugins/skills" }
 roku-plugin-telegram = { path = "../roku-plugins/telegram" }

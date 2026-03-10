@@ -13,5 +13,6 @@
 // limitations under the License.
 
 pub(crate) use roku_plugin_tools::{
-	build_builtin_tool_runtime, build_llm_tool_runtime, build_resource_catalog,
+	build_builtin_tool_runtime_with_plugin_snapshot, build_llm_tool_runtime_with_plugin_snapshot,
+	build_resource_catalog_with_plugin_snapshot,
 };

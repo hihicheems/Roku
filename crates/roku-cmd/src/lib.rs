@@ -29,6 +29,7 @@ use roku_observability::{
 	AsyncRotatingFileLogSink, FanoutLogSink, FileLogConfig, LogSink, StderrLogSink,
 	install_global_log_sink,
 };
+use roku_plugin_host::PluginHostError;
 use roku_plugin_skills::SkillRegistryError;
 use thiserror::Error;
 
@@ -69,6 +70,8 @@ pub enum CommandError {
 	OpenRouterBootstrap(#[from] roku_plugin_llm::OpenRouterBootstrapError),
 	#[error(transparent)]
 	ToolCatalogConfig(#[from] ToolCatalogConfigError),
+	#[error(transparent)]
+	PluginHost(#[from] PluginHostError),
 	#[error(transparent)]
 	TelegramTransport(#[from] roku_plugin_telegram::TelegramTransportError),
 }

@@ -18,5 +18,9 @@ mod builders;
 mod builtin;
 mod config;
 
-pub use builders::{build_builtin_tool_runtime, build_llm_tool_runtime, build_resource_catalog};
+pub use builders::{
+	build_builtin_tool_runtime, build_builtin_tool_runtime_with_plugin_snapshot,
+	build_llm_tool_runtime, build_llm_tool_runtime_with_plugin_snapshot, build_resource_catalog,
+	build_resource_catalog_with_plugin_snapshot,
+};
 pub use config::{BuiltinToolRole, ConfiguredTool, ToolCatalogConfig, ToolCatalogConfigError};
