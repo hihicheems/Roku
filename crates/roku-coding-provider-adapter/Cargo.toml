@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+roku-plugin-coding = { path = "../roku-plugins/coding" }
 roku-common-types = { path = "../roku-common-types" }
 roku-mcp-bridge = { path = "../roku-mcp-bridge" }
 serde = { version = "1", features = ["derive"] }

@@ -12,14 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! MCP protocol bridge boundary.
+//! Backward-compatible shim for the plugin MCP bridge.
 
-mod bridge;
-mod catalog;
-mod error;
-mod types;
-
-pub use bridge::{InMemoryMcpBridge, McpClient};
-pub use catalog::McpToolCatalog;
-pub use error::McpError;
-pub use types::{McpRequest, McpResponse, McpToolDescriptor};
+pub use roku_plugin_mcp::*;
