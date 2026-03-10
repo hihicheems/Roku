@@ -15,6 +15,7 @@
 //! Reusable runtime orchestration service.
 
 mod data_plane;
+mod direct;
 mod execution;
 mod helpers;
 #[cfg(test)]
@@ -23,7 +24,9 @@ mod tests;
 use std::sync::{Arc, Mutex};
 
 use roku_agent_instance_factory::AgentInstanceFactory;
-use roku_agent_runtime::GenericAgentRuntime;
+use roku_agent_runtime::{
+	EscalationAction, EscalationReason, GenericAgentRuntime, RouteDecisionResult,
+};
 use roku_artifact_store::ArtifactStore;
 use roku_capability_auth::CapabilityAuthority;
 use roku_common_types::{
@@ -332,11 +335,8 @@ impl RuntimeService {
 		mode: RunMode,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		self.metrics.inc_requests();
-		let supervisor_plan = self.supervisor.plan(&request);
-		let planning_input = supervisor_plan.input.planning_input.clone();
-		let planning_mode_label = format!("{:?}", supervisor_plan.planning_decision.mode);
-		let mut normalized_request = request.clone();
-		normalized_request.goal = supervisor_plan.input.normalized_goal;
+		let mut normalized_request = normalize_request(&request);
+		let mut route_classified = false;
 		log_runtime(
 			LogLevel::Info,
 			"received runtime request",
@@ -349,7 +349,66 @@ impl RuntimeService {
 		);
 		let mut task = self.orchestrator.create_task(&normalized_request);
 
-		self.record_transition(&mut task, TaskState::Planning, "start planning")?;
+		if matches!(mode, RunMode::Normal) && normalized_request.planning_mode_hint.is_none() {
+			self.record_transition(&mut task, TaskState::Planning, "classify direct route")?;
+			route_classified = true;
+			let route = self
+				.runtime
+				.classify_route(&normalized_request, &normalized_request.session_id);
+			log_route_decision(&normalized_request, &route);
+			match &route {
+				RouteDecisionResult::Direct(plan) => {
+					self.metrics.inc_direct_route_hits();
+					self.start_experiment_run(&task, &normalized_request.goal, "direct_route")?;
+					return self.process_direct_route(&mut task, &normalized_request, plan);
+				}
+				RouteDecisionResult::Escalate(plan) => {
+					self.metrics.inc_route_escalations();
+					match plan.reason {
+						EscalationReason::RouteClassifierFailure => {
+							self.metrics.inc_route_classifier_failures();
+						}
+						EscalationReason::RouteParseGuardFailure => {
+							self.metrics.inc_route_parse_guard_failures();
+						}
+						EscalationReason::MissingArguments
+						| EscalationReason::RequiresMultiStep
+						| EscalationReason::NoEnabledRouteTarget
+						| EscalationReason::RouteModelUnavailable
+						| EscalationReason::LowConfidence => {}
+					}
+					match plan.action {
+						EscalationAction::AskForMoreInfo | EscalationAction::FallbackAnswer => {
+							if matches!(plan.action, EscalationAction::FallbackAnswer) {
+								self.metrics.inc_direct_route_fallbacks();
+							}
+							self.start_experiment_run(
+								&task,
+								&normalized_request.goal,
+								"direct_route",
+							)?;
+							return self.process_direct_escalation(
+								&mut task,
+								&normalized_request,
+								plan,
+							);
+						}
+						EscalationAction::EnterLimitedPlanning => {
+							self.metrics.inc_route_limited_planning();
+						}
+					}
+				}
+			}
+		}
+
+		if !route_classified {
+			self.record_transition(&mut task, TaskState::Planning, "start planning")?;
+		}
+
+		let supervisor_plan = self.supervisor.plan(&normalized_request);
+		let planning_input = supervisor_plan.input.planning_input.clone();
+		let planning_mode_label = format!("{:?}", supervisor_plan.planning_decision.mode);
+		normalized_request.goal = supervisor_plan.input.normalized_goal;
 
 		log_runtime(
 			LogLevel::Info,
@@ -603,6 +662,21 @@ fn truncate_for_log(value: &str, max_chars: usize) -> String {
 	}
 }
 
+fn normalize_request(request: &RequestEnvelope) -> RequestEnvelope {
+	let mut normalized = request.clone();
+	normalized.goal = normalize_goal(&request.goal);
+	normalized
+}
+
+fn normalize_goal(goal: &str) -> String {
+	let normalized = goal.lines().map(str::trim).collect::<Vec<_>>().join("\n");
+	if normalized.trim().is_empty() {
+		goal.trim().to_string()
+	} else {
+		normalized
+	}
+}
+
 fn log_runtime(
 	level: LogLevel,
 	message: &str,
@@ -612,6 +686,38 @@ fn log_runtime(
 		LogRecord::new("roku-runtime-service", level, message),
 		|record, (key, value)| record.with_field(key, value),
 	);
+	let _ = emit_global_log(record);
+}
+
+fn log_route_decision(request: &RequestEnvelope, route: &RouteDecisionResult) {
+	let record = match route {
+		RouteDecisionResult::Direct(plan) => LogRecord::new(
+			"roku-runtime-service",
+			LogLevel::Info,
+			"selected direct route",
+		)
+		.with_field("request_id", request.request_id.0.clone())
+		.with_field("session_id", request.session_id.clone())
+		.with_field(
+			"intent_family",
+			format!("{:?}", plan.decision.intent_family),
+		)
+		.with_field("candidate_tools", plan.decision.candidate_tools.join(","))
+		.with_field("reason", plan.decision.reason.clone()),
+		RouteDecisionResult::Escalate(plan) => LogRecord::new(
+			"roku-runtime-service",
+			LogLevel::Info,
+			"escalated route decision",
+		)
+		.with_field("request_id", request.request_id.0.clone())
+		.with_field("session_id", request.session_id.clone())
+		.with_field(
+			"intent_family",
+			format!("{:?}", plan.decision.intent_family),
+		)
+		.with_field("action", format!("{:?}", plan.action))
+		.with_field("reason", plan.decision.reason.clone()),
+	};
 	let _ = emit_global_log(record);
 }
 
