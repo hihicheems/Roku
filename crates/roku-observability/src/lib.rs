@@ -78,6 +78,12 @@ pub struct Metrics {
 	pub experiments_started_total: AtomicU64,
 	pub experiments_succeeded_total: AtomicU64,
 	pub experiments_failed_total: AtomicU64,
+	pub direct_route_hits_total: AtomicU64,
+	pub direct_route_fallback_total: AtomicU64,
+	pub route_classifier_failures_total: AtomicU64,
+	pub route_parse_guard_failures_total: AtomicU64,
+	pub route_escalations_total: AtomicU64,
+	pub route_limited_planning_total: AtomicU64,
 	pub llm_requests_total: AtomicU64,
 	pub llm_successes_total: AtomicU64,
 	pub llm_failures_total: AtomicU64,
@@ -107,6 +113,12 @@ impl Default for Metrics {
 			experiments_started_total: AtomicU64::new(0),
 			experiments_succeeded_total: AtomicU64::new(0),
 			experiments_failed_total: AtomicU64::new(0),
+			direct_route_hits_total: AtomicU64::new(0),
+			direct_route_fallback_total: AtomicU64::new(0),
+			route_classifier_failures_total: AtomicU64::new(0),
+			route_parse_guard_failures_total: AtomicU64::new(0),
+			route_escalations_total: AtomicU64::new(0),
+			route_limited_planning_total: AtomicU64::new(0),
 			llm_requests_total: AtomicU64::new(0),
 			llm_successes_total: AtomicU64::new(0),
 			llm_failures_total: AtomicU64::new(0),
@@ -137,6 +149,12 @@ pub struct MetricsSnapshot {
 	pub experiments_started_total: u64,
 	pub experiments_succeeded_total: u64,
 	pub experiments_failed_total: u64,
+	pub direct_route_hits_total: u64,
+	pub direct_route_fallback_total: u64,
+	pub route_classifier_failures_total: u64,
+	pub route_parse_guard_failures_total: u64,
+	pub route_escalations_total: u64,
+	pub route_limited_planning_total: u64,
 	pub llm_requests_total: u64,
 	pub llm_successes_total: u64,
 	pub llm_failures_total: u64,
@@ -273,6 +291,34 @@ impl Metrics {
 			.fetch_add(1, Ordering::Relaxed);
 	}
 
+	pub fn inc_direct_route_hits(&self) {
+		self.direct_route_hits_total.fetch_add(1, Ordering::Relaxed);
+	}
+
+	pub fn inc_direct_route_fallbacks(&self) {
+		self.direct_route_fallback_total
+			.fetch_add(1, Ordering::Relaxed);
+	}
+
+	pub fn inc_route_classifier_failures(&self) {
+		self.route_classifier_failures_total
+			.fetch_add(1, Ordering::Relaxed);
+	}
+
+	pub fn inc_route_parse_guard_failures(&self) {
+		self.route_parse_guard_failures_total
+			.fetch_add(1, Ordering::Relaxed);
+	}
+
+	pub fn inc_route_escalations(&self) {
+		self.route_escalations_total.fetch_add(1, Ordering::Relaxed);
+	}
+
+	pub fn inc_route_limited_planning(&self) {
+		self.route_limited_planning_total
+			.fetch_add(1, Ordering::Relaxed);
+	}
+
 	pub fn record_llm_routing_failure(&self) {
 		self.llm_requests_total.fetch_add(1, Ordering::Relaxed);
 		self.llm_failures_total.fetch_add(1, Ordering::Relaxed);
@@ -354,6 +400,16 @@ impl Metrics {
 			experiments_started_total: self.experiments_started_total.load(Ordering::Relaxed),
 			experiments_succeeded_total: self.experiments_succeeded_total.load(Ordering::Relaxed),
 			experiments_failed_total: self.experiments_failed_total.load(Ordering::Relaxed),
+			direct_route_hits_total: self.direct_route_hits_total.load(Ordering::Relaxed),
+			direct_route_fallback_total: self.direct_route_fallback_total.load(Ordering::Relaxed),
+			route_classifier_failures_total: self
+				.route_classifier_failures_total
+				.load(Ordering::Relaxed),
+			route_parse_guard_failures_total: self
+				.route_parse_guard_failures_total
+				.load(Ordering::Relaxed),
+			route_escalations_total: self.route_escalations_total.load(Ordering::Relaxed),
+			route_limited_planning_total: self.route_limited_planning_total.load(Ordering::Relaxed),
 			llm_requests_total: self.llm_requests_total.load(Ordering::Relaxed),
 			llm_successes_total: self.llm_successes_total.load(Ordering::Relaxed),
 			llm_failures_total: self.llm_failures_total.load(Ordering::Relaxed),

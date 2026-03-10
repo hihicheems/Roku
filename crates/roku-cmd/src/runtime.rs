@@ -548,15 +548,15 @@ fn build_live_runtime(
 			);
 		}
 	};
-	let runtime_router = build_openrouter_router_with_metrics(config, metrics)?;
-	Ok(
-		GenericAgentRuntime::with_llm_router_skill_registry_tool_config_and_plugin_snapshot(
-			runtime_router,
-			bootstrap.skill_registry,
-			bootstrap.tool_config,
-			bootstrap.plugin_snapshot,
-		),
-	)
+	let route_router = build_openrouter_router_with_metrics(config.clone(), metrics.clone())?;
+	let execution_router = build_openrouter_router_with_metrics(config, metrics)?;
+	Ok(GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+		route_router,
+		execution_router,
+		bootstrap.skill_registry,
+		bootstrap.tool_config,
+		bootstrap.plugin_snapshot,
+	))
 }
 
 fn build_live_planner(
