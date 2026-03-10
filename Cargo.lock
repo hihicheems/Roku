@@ -1574,25 +1574,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "roku-e2e"
-version = "0.1.0"
-dependencies = [
- "actix-web",
- "roku-agent-runtime",
- "roku-api-gateway",
- "roku-artifact-store",
- "roku-cmd",
- "roku-common-types",
- "roku-experiment-registry",
- "roku-observability",
- "roku-planning-engine",
- "roku-runtime-service",
- "roku-state-store",
- "roku-task-planner",
- "serde",
-]
-
-[[package]]
 name = "roku-execution-graph-builder"
 version = "0.1.0"
 dependencies = [
@@ -1647,6 +1628,42 @@ dependencies = [
 
 [[package]]
 name = "roku-planning-engine"
+version = "0.1.0"
+
+[[package]]
+name = "roku-plugin-catalog"
+version = "0.1.0"
+
+[[package]]
+name = "roku-plugin-coding"
+version = "0.1.0"
+
+[[package]]
+name = "roku-plugin-core"
+version = "0.1.0"
+
+[[package]]
+name = "roku-plugin-host"
+version = "0.1.0"
+
+[[package]]
+name = "roku-plugin-llm"
+version = "0.1.0"
+
+[[package]]
+name = "roku-plugin-mcp"
+version = "0.1.0"
+
+[[package]]
+name = "roku-plugin-skills"
+version = "0.1.0"
+
+[[package]]
+name = "roku-plugin-telegram"
+version = "0.1.0"
+
+[[package]]
+name = "roku-plugin-tools"
 version = "0.1.0"
 
 [[package]]

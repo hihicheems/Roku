@@ -30,6 +30,7 @@ excludes = [
     ".devcontainer",
     ".github",
     ".dockerignore",
+    ".env.example",
     ".gitignore",
     ".gitattributes",
     ".editorconfig",
