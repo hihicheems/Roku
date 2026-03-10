@@ -12,9 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use crate::result::policy_rejection_result;
+use crate::router::{
+	DirectRouteExecutionResult, DirectRouteKind, DirectRoutePlan, EscalationAction, IntentFamily,
+	RouteClassifierContext, RouteDecisionResult, RouteScratchpad, classify_request,
+};
 use crate::tool_config::ToolCatalogConfig;
 use crate::tools::{
 	build_builtin_tool_runtime_with_plugin_snapshot, build_llm_tool_runtime_with_plugin_snapshot,
@@ -25,12 +30,18 @@ use crate::workers::{
 	research_worker_with_config, review_worker_with_config, skill_execute_worker_with_config,
 	skill_worker_with_config,
 };
+use roku_common_types::{
+	AgentContext, AggregationMode, EvidenceItem, JoinPolicy, NodeBudgetSnapshot, NodeId,
+	PolicyBindings, RequestEnvelope, RerunPolicy, ResourceSelector, ResultStatus, RetryPolicy,
+	TaskId, TaskNodeDispatchPolicy, TaskNodeKind,
+};
 use roku_common_types::{AgentInstanceSpec, ResultEnvelope, TaskNode};
 use roku_plugin_catalog::ResourceCatalog;
 use roku_plugin_core::PluginRegistrySnapshot;
 use roku_plugin_host::ToolRuntime;
 use roku_plugin_llm::LlmRouter;
 use roku_plugin_skills::SkillRegistry;
+use serde_json::json;
 
 pub trait AgentWorker {
 	fn execute(&self, spec: &AgentInstanceSpec, node: &TaskNode) -> ResultEnvelope;
@@ -53,6 +64,8 @@ pub struct GenericAgentRuntime {
 	resource_catalog: ResourceCatalog,
 	tool_config: ToolCatalogConfig,
 	plugin_snapshot: PluginRegistrySnapshot,
+	route_router: Option<Arc<LlmRouter>>,
+	scratchpads: Mutex<HashMap<String, RouteScratchpad>>,
 }
 
 impl GenericAgentRuntime {
@@ -82,6 +95,8 @@ impl GenericAgentRuntime {
 			resource_catalog,
 			tool_config: tool_config.clone(),
 			plugin_snapshot,
+			route_router: None,
+			scratchpads: Mutex::new(HashMap::new()),
 		};
 		runtime.register_worker(
 			96,
@@ -185,6 +200,39 @@ impl GenericAgentRuntime {
 		tool_config: ToolCatalogConfig,
 		plugin_snapshot: PluginRegistrySnapshot,
 	) -> Self {
+		let shared_router = Arc::new(router);
+		Self::with_llm_execution_and_route_routers(
+			Arc::clone(&shared_router),
+			shared_router,
+			skill_registry,
+			tool_config,
+			plugin_snapshot,
+		)
+	}
+
+	pub fn with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+		route_router: LlmRouter,
+		execution_router: LlmRouter,
+		skill_registry: SkillRegistry,
+		tool_config: ToolCatalogConfig,
+		plugin_snapshot: PluginRegistrySnapshot,
+	) -> Self {
+		Self::with_llm_execution_and_route_routers(
+			Arc::new(execution_router),
+			Arc::new(route_router),
+			skill_registry,
+			tool_config,
+			plugin_snapshot,
+		)
+	}
+
+	fn with_llm_execution_and_route_routers(
+		execution_router: Arc<LlmRouter>,
+		route_router: Arc<LlmRouter>,
+		skill_registry: SkillRegistry,
+		tool_config: ToolCatalogConfig,
+		plugin_snapshot: PluginRegistrySnapshot,
+	) -> Self {
 		let resource_catalog = build_resource_catalog_with_plugin_snapshot(
 			&skill_registry,
 			&tool_config,
@@ -192,7 +240,7 @@ impl GenericAgentRuntime {
 		);
 		Self::with_tool_runtime_and_plugin_snapshot(
 			build_llm_tool_runtime_with_plugin_snapshot(
-				Arc::new(router),
+				Arc::clone(&execution_router),
 				skill_registry,
 				&tool_config,
 				&resource_catalog,
@@ -202,6 +250,7 @@ impl GenericAgentRuntime {
 			tool_config,
 			plugin_snapshot,
 		)
+		.with_route_router(route_router)
 	}
 
 	pub fn resource_catalog(&self) -> &ResourceCatalog {
@@ -214,6 +263,180 @@ impl GenericAgentRuntime {
 
 	pub fn plugin_snapshot(&self) -> &PluginRegistrySnapshot {
 		&self.plugin_snapshot
+	}
+
+	pub fn classify_route(
+		&self,
+		request: &RequestEnvelope,
+		session_id: &str,
+	) -> RouteDecisionResult {
+		let result = classify_request(
+			RouteClassifierContext {
+				catalog: &self.resource_catalog,
+				tool_config: &self.tool_config,
+				plugin_snapshot: &self.plugin_snapshot,
+				route_router: self.route_router.as_deref(),
+			},
+			request,
+		);
+		self.remember_route_decision(session_id, &result);
+		result
+	}
+
+	pub fn execute_direct_route(
+		&self,
+		task_id: &TaskId,
+		request: &RequestEnvelope,
+		plan: &DirectRoutePlan,
+	) -> DirectRouteExecutionResult {
+		let execution = match &plan.kind {
+			DirectRouteKind::Inventory if self.route_router.is_none() => self
+				.synthetic_message_result(
+					task_id,
+					"direct-route",
+					"direct-route:inventory",
+					render_inventory_message(&self.resource_catalog, &request.goal),
+					0.96,
+				),
+			DirectRouteKind::Conversation if self.route_router.is_none() => self
+				.synthetic_message_result(
+					task_id,
+					"direct-route",
+					"direct-route:conversation",
+					deterministic_chat_message(&request.goal),
+					0.82,
+				),
+			DirectRouteKind::SkillInstall { source_url } => self.execute_tool_like_route(
+				task_id,
+				request,
+				"direct-route",
+				"Install requested skill package directly",
+				vec![ResourceSelector::tool(tool_name_for_role(
+					&self.tool_config,
+					crate::tool_config::BuiltinToolRole::SkillInstall,
+				))],
+				Some(source_url),
+			),
+			DirectRouteKind::SkillAdvisory { selector } => self.execute_tool_like_route(
+				task_id,
+				request,
+				"direct-route",
+				&format!(
+					"Use advisory skill `{}` as authoritative local guidance",
+					selector.name()
+				),
+				vec![selector.clone()],
+				None,
+			),
+			DirectRouteKind::SkillExecutable { selector } => self.execute_tool_like_route(
+				task_id,
+				request,
+				"direct-route",
+				&format!(
+					"Execute installed skill `{}` using its local scripts",
+					selector.name()
+				),
+				vec![
+					ResourceSelector::tool(tool_name_for_role(
+						&self.tool_config,
+						crate::tool_config::BuiltinToolRole::SkillExecute,
+					)),
+					selector.clone(),
+				],
+				None,
+			),
+			DirectRouteKind::Tool { selector } => self.execute_tool_like_route(
+				task_id,
+				request,
+				"direct-route",
+				&format!("Use selected tool `{}` directly", selector.name()),
+				vec![selector.clone()],
+				None,
+			),
+			DirectRouteKind::Inventory => self.execute_tool_like_route(
+				task_id,
+				request,
+				"direct-route",
+				"Describe current runtime inventory directly",
+				vec![ResourceSelector::tool(tool_name_for_role(
+					&self.tool_config,
+					crate::tool_config::BuiltinToolRole::Inventory,
+				))],
+				None,
+			),
+			DirectRouteKind::Conversation => self.execute_tool_like_route(
+				task_id,
+				request,
+				"direct-route",
+				"Answer directly without external resource planning",
+				vec![ResourceSelector::tool(tool_name_for_role(
+					&self.tool_config,
+					crate::tool_config::BuiltinToolRole::General,
+				))],
+				None,
+			),
+		};
+		self.remember_tool_result_summary(&request.session_id, &execution.message);
+		execution
+	}
+
+	pub fn execute_escalation_action(
+		&self,
+		task_id: &TaskId,
+		request: &RequestEnvelope,
+		result: &crate::router::RouteEscalationPlan,
+	) -> DirectRouteExecutionResult {
+		let fallback_message = match result.action {
+			EscalationAction::AskForMoreInfo => {
+				ask_for_more_info_message(&request.goal, &result.decision.missing_arguments)
+			}
+			EscalationAction::FallbackAnswer => fallback_answer_message(
+				&request.goal,
+				result.decision.intent_family,
+				&result.decision.reason,
+			),
+			EscalationAction::EnterLimitedPlanning => fallback_answer_message(
+				&request.goal,
+				result.decision.intent_family,
+				&result.decision.reason,
+			),
+		};
+
+		if self.route_router.is_none() {
+			return self.synthetic_message_result(
+				task_id,
+				"direct-route",
+				"direct-route:escalation",
+				fallback_message,
+				0.70,
+			);
+		}
+
+		let action_hint = match result.action {
+			EscalationAction::AskForMoreInfo => format!(
+				"Ask the user for the missing arguments: {}. Do not claim any execution happened.",
+				result.decision.missing_arguments.join(", ")
+			),
+			EscalationAction::FallbackAnswer => format!(
+				"Explain that the requested capability is not currently available in the runtime inventory. Intent family: {:?}. Do not claim execution success.",
+				result.decision.intent_family
+			),
+			EscalationAction::EnterLimitedPlanning => {
+				"Explain that the request needs a planning-heavy workflow and will be escalated."
+					.to_string()
+			}
+		};
+		self.execute_tool_like_route(
+			task_id,
+			request,
+			"direct-route",
+			&action_hint,
+			vec![ResourceSelector::tool(tool_name_for_role(
+				&self.tool_config,
+				crate::tool_config::BuiltinToolRole::General,
+			))],
+			None,
+		)
 	}
 
 	pub fn register_worker<W>(&mut self, priority: u8, worker: W)
@@ -238,6 +461,154 @@ impl GenericAgentRuntime {
 			.find(|entry| entry.worker.supports(&spec.capabilities))
 			.map(|entry| entry.worker.execute(spec, node))
 	}
+
+	fn with_route_router(mut self, route_router: Arc<LlmRouter>) -> Self {
+		self.route_router = Some(route_router);
+		self
+	}
+
+	fn remember_route_decision(&self, session_id: &str, result: &RouteDecisionResult) {
+		let decision = match result {
+			RouteDecisionResult::Direct(plan) => &plan.decision,
+			RouteDecisionResult::Escalate(plan) => &plan.decision,
+		};
+		let last_explicit_resource = match result {
+			RouteDecisionResult::Direct(plan) => match &plan.kind {
+				DirectRouteKind::SkillAdvisory { selector }
+				| DirectRouteKind::SkillExecutable { selector }
+				| DirectRouteKind::Tool { selector } => Some(selector.display_key()),
+				DirectRouteKind::Inventory
+				| DirectRouteKind::Conversation
+				| DirectRouteKind::SkillInstall { .. } => None,
+			},
+			RouteDecisionResult::Escalate(_) => None,
+		};
+		if let Ok(mut scratchpads) = self.scratchpads.lock() {
+			let pad = scratchpads.entry(session_id.to_string()).or_default();
+			pad.last_decision = Some(decision.clone());
+			if let Some(resource) = last_explicit_resource {
+				pad.last_explicit_resource = Some(resource);
+			}
+			pad.task_completed = false;
+		}
+	}
+
+	fn remember_tool_result_summary(&self, session_id: &str, summary: &str) {
+		if let Ok(mut scratchpads) = self.scratchpads.lock() {
+			let pad = scratchpads.entry(session_id.to_string()).or_default();
+			pad.last_tool_result_summary = Some(summary.to_string());
+			pad.task_completed = true;
+		}
+	}
+
+	fn execute_tool_like_route(
+		&self,
+		task_id: &TaskId,
+		request: &RequestEnvelope,
+		node_id: &str,
+		step_summary: &str,
+		resources: Vec<ResourceSelector>,
+		explicit_source_url: Option<&String>,
+	) -> DirectRouteExecutionResult {
+		let capabilities = route_capabilities(&self.resource_catalog, &resources);
+		let node = TaskNode {
+			node_id: NodeId(node_id.to_string()),
+			kind: TaskNodeKind::Execution,
+			description: step_description(&request.goal, step_summary),
+			resources: resources.clone(),
+			capabilities: capabilities.clone(),
+			dispatch_policy: TaskNodeDispatchPolicy::Automatic,
+			join_policy: JoinPolicy::AllParents,
+			aggregation_mode: AggregationMode::CollectAll,
+			recovery_anchor: Default::default(),
+			budget_snapshot: NodeBudgetSnapshot {
+				token_budget: 8_000,
+				time_budget_ms: 60_000,
+			},
+			deadline_ms: 0,
+			capability_requirements_snapshot: capabilities.clone(),
+			retry_policy: RetryPolicy::default(),
+			rerun_policy: RerunPolicy::SafeToRerun,
+		};
+		let mut spec = AgentInstanceSpec {
+			instance_id: format!("direct-route:{}", node.node_id.0),
+			context: AgentContext {
+				task_id: task_id.clone(),
+				node_id: node.node_id.clone(),
+				summary: node.description.clone(),
+				resources,
+				conversation_history: request.conversation_history.clone(),
+			},
+			capabilities,
+			capability_tokens: Vec::new(),
+			policy_bindings: PolicyBindings {
+				budget_tokens: 8_000,
+				time_budget_ms: 60_000,
+			},
+		};
+		if let Some(source_url) = explicit_source_url {
+			spec.context.summary = format!("{}\nSource URL: {source_url}", spec.context.summary);
+		}
+		let result = self.execute(&spec, &node);
+		let message = extract_result_message(&result);
+		DirectRouteExecutionResult {
+			node,
+			result,
+			message,
+		}
+	}
+
+	fn synthetic_message_result(
+		&self,
+		task_id: &TaskId,
+		node_id: &str,
+		producer: &str,
+		message: String,
+		confidence: f32,
+	) -> DirectRouteExecutionResult {
+		let node = TaskNode {
+			node_id: NodeId(node_id.to_string()),
+			kind: TaskNodeKind::Execution,
+			description: message.clone(),
+			resources: Vec::new(),
+			capabilities: Vec::new(),
+			dispatch_policy: TaskNodeDispatchPolicy::Automatic,
+			join_policy: JoinPolicy::AllParents,
+			aggregation_mode: AggregationMode::CollectAll,
+			recovery_anchor: Default::default(),
+			budget_snapshot: NodeBudgetSnapshot {
+				token_budget: 0,
+				time_budget_ms: 0,
+			},
+			deadline_ms: 0,
+			capability_requirements_snapshot: Vec::new(),
+			retry_policy: RetryPolicy::default(),
+			rerun_policy: RerunPolicy::SafeToRerun,
+		};
+		let result = ResultEnvelope {
+			task_id: task_id.clone(),
+			node_id: node.node_id.clone(),
+			producer: producer.to_string(),
+			schema_version: "result.v1".to_string(),
+			status: ResultStatus::Ok,
+			payload: json!({
+				"message": message,
+				"direct_route": true,
+			})
+			.to_string(),
+			evidence: vec![EvidenceItem {
+				kind: "runtime".to_string(),
+				value: "direct-route".to_string(),
+			}],
+			confidence,
+		};
+		let message = extract_result_message(&result);
+		DirectRouteExecutionResult {
+			node,
+			result,
+			message,
+		}
+	}
 }
 
 impl AgentWorker for GenericAgentRuntime {
@@ -259,6 +630,144 @@ impl Default for GenericAgentRuntime {
 	fn default() -> Self {
 		Self::with_skill_registry(SkillRegistry::disabled())
 	}
+}
+
+fn step_description(goal: &str, step: &str) -> String {
+	format!("Goal: {goal}\nStep: {step}")
+}
+
+fn route_capabilities(catalog: &ResourceCatalog, resources: &[ResourceSelector]) -> Vec<String> {
+	let mut capabilities = Vec::new();
+	for resource in resources {
+		if let Some(descriptor) = catalog.descriptor(resource) {
+			for capability in &descriptor.required_capabilities {
+				if !capabilities.iter().any(|existing| existing == capability) {
+					capabilities.push(capability.clone());
+				}
+			}
+		}
+	}
+	capabilities
+}
+
+fn render_inventory_message(catalog: &ResourceCatalog, goal: &str) -> String {
+	let skill_names = catalog
+		.entries()
+		.iter()
+		.filter(|entry| entry.kind == roku_plugin_catalog::ResourceKind::Skill)
+		.map(|entry| entry.name.clone())
+		.collect::<Vec<_>>();
+	let tool_names = catalog
+		.entries()
+		.iter()
+		.filter(|entry| entry.kind == roku_plugin_catalog::ResourceKind::Tool && entry.discoverable)
+		.map(|entry| entry.name.clone())
+		.collect::<Vec<_>>();
+	let capability_families = catalog
+		.entries()
+		.iter()
+		.flat_map(|entry| entry.required_capabilities.iter())
+		.filter_map(|capability| capability.split('.').next())
+		.collect::<Vec<_>>();
+	let capability_families = {
+		let mut deduped = Vec::new();
+		for family in capability_families {
+			if !deduped.contains(&family) {
+				deduped.push(family);
+			}
+		}
+		deduped
+	};
+	if !goal.is_ascii() {
+		format!(
+			"当前可用的 skills: {}。可发现 tools: {}。能力类别: {}。",
+			joined_or_none(&skill_names),
+			joined_or_none(&tool_names),
+			if capability_families.is_empty() {
+				"(none)".to_string()
+			} else {
+				capability_families.join(", ")
+			},
+		)
+	} else {
+		format!(
+			"Available skills: {}. Discoverable tools: {}. Capability families: {}.",
+			joined_or_none(&skill_names),
+			joined_or_none(&tool_names),
+			if capability_families.is_empty() {
+				"(none)".to_string()
+			} else {
+				capability_families.join(", ")
+			},
+		)
+	}
+}
+
+fn deterministic_chat_message(goal: &str) -> String {
+	if !goal.is_ascii() {
+		"我是 Roku。当前我会优先走 direct route；复杂请求会升级到兼容的 legacy planning 路径。"
+			.to_string()
+	} else {
+		"I'm Roku. I prefer direct routes for simple requests and escalate complex work into the compatibility planning path.".to_string()
+	}
+}
+
+fn ask_for_more_info_message(goal: &str, missing_arguments: &[String]) -> String {
+	if !goal.is_ascii() {
+		format!(
+			"我还缺少继续处理所需的信息：{}。请补充后我再继续。",
+			missing_arguments.join(", ")
+		)
+	} else {
+		format!(
+			"I still need more information before I can continue: {}.",
+			missing_arguments.join(", ")
+		)
+	}
+}
+
+fn fallback_answer_message(goal: &str, intent_family: IntentFamily, reason: &str) -> String {
+	if !goal.is_ascii() {
+		format!(
+			"这个请求目前被识别为 {:?}，但当前运行时还没有对应的 direct tool。{reason} 我还没有执行任何外部操作。",
+			intent_family
+		)
+	} else {
+		format!(
+			"This request was classified as {:?}, but the current runtime does not expose a matching direct tool yet. {reason} No external action has been executed.",
+			intent_family
+		)
+	}
+}
+
+fn joined_or_none(values: &[String]) -> String {
+	if values.is_empty() {
+		"(none)".to_string()
+	} else {
+		values.join(", ")
+	}
+}
+
+fn extract_result_message(result: &ResultEnvelope) -> String {
+	serde_json::from_str::<serde_json::Value>(&result.payload)
+		.ok()
+		.and_then(|payload| {
+			payload
+				.get("message")
+				.and_then(serde_json::Value::as_str)
+				.map(str::to_string)
+		})
+		.unwrap_or_else(|| result.payload.clone())
+}
+
+fn tool_name_for_role(
+	tool_config: &ToolCatalogConfig,
+	role: crate::tool_config::BuiltinToolRole,
+) -> String {
+	tool_config
+		.tool_for_role(role)
+		.map(|tool| tool.name.clone())
+		.unwrap_or_else(|| role.as_str().to_string())
 }
 
 #[cfg(test)]
@@ -485,6 +994,7 @@ mod tests {
 		) -> Result<ProviderResponse, ProviderCallError> {
 			Ok(ProviderResponse {
 				output: "live answer from llm".to_string(),
+				finish_reason: None,
 				prompt_tokens: 32,
 				output_tokens: 8,
 				latency_ms: 50,
@@ -546,6 +1056,7 @@ From the trusted runtime context:
 
 So, I'll output: "星期日""#
 					.to_string(),
+				finish_reason: None,
 				prompt_tokens: 48,
 				output_tokens: 64,
 				latency_ms: 50,
