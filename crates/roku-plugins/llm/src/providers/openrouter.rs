@@ -587,7 +587,7 @@ fn log_openrouter(
 	fields: impl IntoIterator<Item = (&'static str, String)>,
 ) {
 	let record = fields.into_iter().fold(
-		LogRecord::new("roku-llm-adapter", level, message),
+		LogRecord::new("roku-plugin-llm", level, message),
 		|record, (key, value)| record.with_field(key, value),
 	);
 	let _ = emit_global_log(record);
