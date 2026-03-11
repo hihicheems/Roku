@@ -76,6 +76,8 @@ impl FlakyTool {
 					retry_backoff_ms: 0,
 					sandbox_profile: SandboxProfile::NoIsolation,
 					deterministic_hooks: true,
+					allowed_read_roots: Vec::new(),
+					allowed_write_roots: Vec::new(),
 				},
 			},
 			failures_left: Mutex::new(failures_left),
@@ -121,6 +123,8 @@ impl SlowTool {
 					retry_backoff_ms: 0,
 					sandbox_profile: SandboxProfile::ContainerRestricted,
 					deterministic_hooks: true,
+					allowed_read_roots: Vec::new(),
+					allowed_write_roots: Vec::new(),
 				},
 			},
 			sleep_ms,
@@ -170,6 +174,8 @@ fn invoke_registered_tool_with_descriptor_constraints() {
 			retry_backoff_ms: 0,
 			sandbox_profile: SandboxProfile::ReadOnlyFs,
 			deterministic_hooks: true,
+			allowed_read_roots: Vec::new(),
+			allowed_write_roots: Vec::new(),
 		},
 	);
 	runtime.register_tool(tool).expect("register tool");
@@ -180,6 +186,7 @@ fn invoke_registered_tool_with_descriptor_constraints() {
 			input: json!({"text":"hello"}),
 			granted_capabilities: vec!["artifact:read:dataset/*".to_string()],
 			invocation_key: None,
+			attachments: Vec::new(),
 		})
 		.expect("invoke tool");
 
@@ -207,6 +214,7 @@ fn reject_when_capability_is_missing() {
 			input: json!({"text":"hello"}),
 			granted_capabilities: Vec::new(),
 			invocation_key: Some("cap-denied".to_string()),
+			attachments: Vec::new(),
 		})
 		.expect_err("expected capability denied");
 
@@ -245,6 +253,7 @@ fn retry_retriable_failure_then_succeed() {
 			input: json!({}),
 			granted_capabilities: Vec::new(),
 			invocation_key: Some("flaky-invoke".to_string()),
+			attachments: Vec::new(),
 		})
 		.expect("invoke flaky tool");
 	assert_eq!(result.attempts, 3);
@@ -271,6 +280,7 @@ fn timeout_is_reported_when_execution_exceeds_budget() {
 			input: json!({}),
 			granted_capabilities: Vec::new(),
 			invocation_key: Some("slow-invoke".to_string()),
+			attachments: Vec::new(),
 		})
 		.expect_err("timeout expected");
 
@@ -302,6 +312,8 @@ fn deterministic_hook_trace_ids_follow_stable_order() {
 				retry_backoff_ms: 0,
 				sandbox_profile: SandboxProfile::NoIsolation,
 				deterministic_hooks: true,
+				allowed_read_roots: Vec::new(),
+				allowed_write_roots: Vec::new(),
 			},
 		))
 		.expect("register tool");
@@ -312,6 +324,7 @@ fn deterministic_hook_trace_ids_follow_stable_order() {
 			input: json!({"text":"order"}),
 			granted_capabilities: Vec::new(),
 			invocation_key: Some("inv-001".to_string()),
+			attachments: Vec::new(),
 		})
 		.expect("invoke tool");
 

@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::PathBuf;
+
 use roku_common_types::{ResourceSelector, ResultEnvelope, TaskNode};
+use serde_json::Value;
 
 use crate::router::RouteDecision;
 
@@ -20,10 +23,20 @@ use crate::router::RouteDecision;
 pub enum DirectRouteKind {
 	Inventory,
 	Conversation,
-	SkillInstall { source_url: String },
-	SkillAdvisory { selector: ResourceSelector },
-	SkillExecutable { selector: ResourceSelector },
-	Tool { selector: ResourceSelector },
+	SkillInstall {
+		source_url: String,
+	},
+	SkillAdvisory {
+		selector: ResourceSelector,
+	},
+	SkillExecutable {
+		selector: ResourceSelector,
+	},
+	ToolInvocation {
+		selector: ResourceSelector,
+		arguments: Value,
+		attachments: Vec<PathBuf>,
+	},
 }
 
 #[derive(Debug, Clone, PartialEq)]

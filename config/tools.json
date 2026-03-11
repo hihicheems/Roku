@@ -38,6 +38,8 @@
       "tags": ["inventory", "skills", "tools", "capabilities", "listing"],
       "examples": [
         "What skills and tools do you currently have?",
+        "你现在有啥 skill？",
+        "你有哪些技能和工具？",
         "List the installed skills and capability families as bullet points.",
         "Reformat the available inventory as an unordered list."
       ],

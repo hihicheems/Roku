@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+calamine = "0.26"
+csv = "1"
+glob = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 roku-common-types = { path = "../../roku-common-types" }
 roku-observability = { path = "../../roku-observability" }
 roku-plugin-catalog = { path = "../catalog" }

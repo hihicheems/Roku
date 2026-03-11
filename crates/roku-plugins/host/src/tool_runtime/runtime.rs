@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -30,6 +31,7 @@ pub struct ToolInvocation {
 	pub input: Value,
 	pub granted_capabilities: Vec<String>,
 	pub invocation_key: Option<String>,
+	pub attachments: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +40,9 @@ pub struct ToolInvocationRequest {
 	pub attempt: u8,
 	pub input: Value,
 	pub sandbox_profile: SandboxProfile,
+	pub attachments: Vec<PathBuf>,
+	pub allowed_read_roots: Vec<PathBuf>,
+	pub allowed_write_roots: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +170,17 @@ impl ToolRuntime {
 				attempt,
 				input: invocation.input.clone(),
 				sandbox_profile: sandbox_profile.clone(),
+				attachments: invocation.attachments.clone(),
+				allowed_read_roots: registered
+					.descriptor
+					.runtime_constraints
+					.allowed_read_roots
+					.clone(),
+				allowed_write_roots: registered
+					.descriptor
+					.runtime_constraints
+					.allowed_write_roots
+					.clone(),
 			};
 			let started_at = Instant::now();
 			let invocation_outcome = registered.tool.invoke(request);

@@ -95,6 +95,76 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 		},
 		BundledPluginDescriptor {
 			manifest: PluginManifest {
+				id: PluginId::new("core-fs").expect("bundled plugin id should be valid"),
+				kind: roku_plugin_core::PluginKind::Toolset,
+				enabled_by_default: true,
+				capabilities: PluginCapabilities {
+					provides_tools: vec![
+						"fs.inspect".to_string(),
+						"fs.list_dir".to_string(),
+						"fs.read_text".to_string(),
+						"fs.glob".to_string(),
+						"fs.exists".to_string(),
+					],
+					..PluginCapabilities::default()
+				},
+				requirements: PluginRequirements::default(),
+			},
+			required: false,
+		},
+		BundledPluginDescriptor {
+			manifest: PluginManifest {
+				id: PluginId::new("core-table").expect("bundled plugin id should be valid"),
+				kind: roku_plugin_core::PluginKind::Toolset,
+				enabled_by_default: true,
+				capabilities: PluginCapabilities {
+					provides_tools: vec![
+						"table.inspect".to_string(),
+						"table.list_sheets".to_string(),
+						"table.preview".to_string(),
+						"table.schema".to_string(),
+					],
+					..PluginCapabilities::default()
+				},
+				requirements: PluginRequirements::default(),
+			},
+			required: false,
+		},
+		BundledPluginDescriptor {
+			manifest: PluginManifest {
+				id: PluginId::new("core-web").expect("bundled plugin id should be valid"),
+				kind: roku_plugin_core::PluginKind::Toolset,
+				enabled_by_default: true,
+				capabilities: PluginCapabilities {
+					provides_tools: vec!["web.search".to_string()],
+					..PluginCapabilities::default()
+				},
+				requirements: PluginRequirements {
+					env: vec!["ROKU_WEB_SEARCH_URL".to_string()],
+					..PluginRequirements::default()
+				},
+			},
+			required: false,
+		},
+		BundledPluginDescriptor {
+			manifest: PluginManifest {
+				id: PluginId::new("core-python").expect("bundled plugin id should be valid"),
+				kind: roku_plugin_core::PluginKind::Toolset,
+				enabled_by_default: true,
+				capabilities: PluginCapabilities {
+					provides_tools: vec!["python.run".to_string()],
+					has_side_effects: true,
+					..PluginCapabilities::default()
+				},
+				requirements: PluginRequirements {
+					external_bins: vec!["python3".to_string()],
+					..PluginRequirements::default()
+				},
+			},
+			required: false,
+		},
+		BundledPluginDescriptor {
+			manifest: PluginManifest {
 				id: PluginId::new("openrouter").expect("bundled plugin id should be valid"),
 				kind: roku_plugin_core::PluginKind::Provider,
 				enabled_by_default: true,
@@ -159,28 +229,56 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 }
 
 pub(crate) fn profile_decision(profile: PluginProfile, plugin_id: &PluginId) -> Option<bool> {
-	let enabled = match profile {
-		PluginProfile::Minimal => matches!(
-			plugin_id.as_str(),
-			"builtin-tools" | "skill-source-local" | "openrouter"
-		),
-		PluginProfile::Coding => matches!(
-			plugin_id.as_str(),
-			"builtin-tools" | "skill-source-local" | "openrouter" | "coding" | "mcp"
-		),
-		PluginProfile::Messaging => matches!(
-			plugin_id.as_str(),
-			"builtin-tools" | "skill-source-local" | "openrouter" | "telegram"
-		),
-		PluginProfile::Full => matches!(
-			plugin_id.as_str(),
-			"builtin-tools" | "skill-source-local" | "openrouter" | "telegram" | "coding" | "mcp"
-		),
-	};
+	let enabled =
+		match profile {
+			PluginProfile::Minimal => matches!(
+				plugin_id.as_str(),
+				"builtin-tools"
+					| "skill-source-local"
+					| "openrouter" | "core-fs"
+					| "core-table" | "core-web"
+					| "core-python"
+			),
+			PluginProfile::Coding => matches!(
+				plugin_id.as_str(),
+				"builtin-tools"
+					| "skill-source-local"
+					| "openrouter" | "core-fs"
+					| "core-table" | "core-web"
+					| "core-python" | "coding"
+					| "mcp"
+			),
+			PluginProfile::Messaging => matches!(
+				plugin_id.as_str(),
+				"builtin-tools"
+					| "skill-source-local"
+					| "openrouter" | "core-fs"
+					| "core-table" | "core-web"
+					| "core-python" | "telegram"
+			),
+			PluginProfile::Full => matches!(
+				plugin_id.as_str(),
+				"builtin-tools"
+					| "skill-source-local"
+					| "openrouter" | "core-fs"
+					| "core-table" | "core-web"
+					| "core-python" | "telegram"
+					| "coding" | "mcp"
+			),
+		};
 
 	if matches!(
 		plugin_id.as_str(),
-		"builtin-tools" | "skill-source-local" | "openrouter" | "telegram" | "coding" | "mcp"
+		"builtin-tools"
+			| "skill-source-local"
+			| "openrouter"
+			| "core-fs"
+			| "core-table"
+			| "core-web"
+			| "core-python"
+			| "telegram"
+			| "coding"
+			| "mcp"
 	) {
 		Some(enabled)
 	} else {

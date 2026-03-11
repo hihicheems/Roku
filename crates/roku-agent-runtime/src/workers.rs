@@ -75,6 +75,7 @@ impl ToolBackedWorker {
 				"{}:{}:{}",
 				spec.context.task_id.0, node.node_id.0, self.worker_id
 			)),
+			attachments: Vec::new(),
 		}
 	}
 }

@@ -12,7 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod fs;
 pub(crate) mod inventory;
 pub(crate) mod llm_worker;
+pub(crate) mod python;
 pub(crate) mod skill_execute;
 pub(crate) mod skill_install;
+pub(crate) mod table;
+pub(crate) mod web;
