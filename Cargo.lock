@@ -1792,15 +1792,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "roku-resource-catalog"
-version = "0.1.0"
-dependencies = [
- "roku-common-types",
- "roku-plugin-catalog",
- "serde",
-]
-
-[[package]]
 name = "roku-runtime-service"
 version = "0.1.0"
 dependencies = [
