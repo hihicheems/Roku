@@ -131,11 +131,11 @@ impl TelegramOutboundMessage {
 			.unwrap_or_else(|| "Auto".to_string());
 		let detail = planning_mode
 			.map(|_| {
-				"Subsequent messages in this chat will use the selected planning strategy."
+				"Planning mode commands are deprecated compatibility hints. New messages in this chat stay on the direct-route runtime unless the current command explicitly carries a planning hint."
 					.to_string()
 			})
 			.unwrap_or_else(|| {
-				"Subsequent messages in this chat will return to automatic planning selection."
+				"New messages in this chat already use the direct-route runtime by default."
 					.to_string()
 			});
 
@@ -440,5 +440,6 @@ mod tests {
 		assert_eq!(message.parse_mode, TelegramParseMode::MarkdownV2);
 		assert!(message.text.contains("Session Mode Updated"));
 		assert!(message.text.contains("TreeSearch"));
+		assert!(message.text.contains("deprecated compatibility hints"));
 	}
 }
