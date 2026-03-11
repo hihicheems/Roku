@@ -2,6 +2,89 @@
 
 # Changelog
 
+## [v0.0.2] - 2026-03-11
+
+### Features
+
+- **(roku-agent-runtime)** route skill installs through workers (by @[itscheems](https://github.com/itscheems)) - ([79edcbf](https://github.com/itscheems/Roku/commit/79edcbf387418eb35c6897c3f01f7f9aeff578de))
+- **(roku-api-gateway)** expose replay diagnostics (by @[itscheems](https://github.com/itscheems)) - ([1992cf4](https://github.com/itscheems/Roku/commit/1992cf49155cdda7412d72c3c1ab1053312cd4b4))
+- **(roku-cmd)** add telegram preview command (by @[itscheems](https://github.com/itscheems)) - ([387a12b](https://github.com/itscheems/Roku/commit/387a12b5409a143276716fe9bf73f2662ac078d1))
+- **(roku-cmd)** add direct skill registry commands (by @[itscheems](https://github.com/itscheems)) - ([da10f76](https://github.com/itscheems/Roku/commit/da10f76c47f04081caf7afac34534135a6abec6c))
+- **(roku-cmd)** configure project-local skill storage (by @[itscheems](https://github.com/itscheems)) - ([425502b](https://github.com/itscheems/Roku/commit/425502b877799e2c0f2c7ccf2ed9cc8ff663c199))
+- **(roku-cmd)** add artifact and replay ops commands (by @[itscheems](https://github.com/itscheems)) - ([d4cd4c5](https://github.com/itscheems/Roku/commit/d4cd4c584c93f38f45fc1d7836640f4cdf80d4f8))
+- **(roku-execution-graph-builder)** compile conditional graph edges (by @[itscheems](https://github.com/itscheems)) - ([c54464c](https://github.com/itscheems/Roku/commit/c54464c2f52c5caecf2cb247810ed012e1bf310c))
+- **(roku-execution-graph-builder)** inject retry and dead-letter helpers (by @[itscheems](https://github.com/itscheems)) - ([7f10e06](https://github.com/itscheems/Roku/commit/7f10e06c45d60dde3942d8ea56c3dabc8fe6bc2a))
+- **(roku-execution-graph-builder)** add aggregation gate (by @[itscheems](https://github.com/itscheems)) - ([0df55dc](https://github.com/itscheems/Roku/commit/0df55dc95bb24fb09407fbc2ec8c50a5bda2cb2f))
+- **(roku-recovery)** add replay metadata baseline (by @[itscheems](https://github.com/itscheems)) - ([006a5d5](https://github.com/itscheems/Roku/commit/006a5d5832dea3312fb2a597d6a9c47a57b85b6e))
+- **(roku-runtime)** expand direct filesystem routing (by @[itscheems](https://github.com/itscheems)) - ([f5e9ce6](https://github.com/itscheems/Roku/commit/f5e9ce63f0ac73638088e96b98329ff09c2b7b9d))
+- **(roku-runtime)** add core direct-route tools (by @[itscheems](https://github.com/itscheems)) - ([8abb497](https://github.com/itscheems/Roku/commit/8abb497054db80d819c8cf3e9ade03216954b0e6))
+- **(roku-runtime-service)** rebuild recovery from event stream (by @[itscheems](https://github.com/itscheems)) - ([0534aec](https://github.com/itscheems/Roku/commit/0534aecc67ef49b2ad73b8d1c6b67f247ebc0721))
+- **(roku-runtime-service)** reconstruct helper progress from persistence (by @[itscheems](https://github.com/itscheems)) - ([9236581](https://github.com/itscheems/Roku/commit/9236581a5e37b96aa8461b3b56ea71209ff12889))
+- **(roku-runtime-service)** enforce node budget snapshots (by @[itscheems](https://github.com/itscheems)) - ([eed62a6](https://github.com/itscheems/Roku/commit/eed62a676a3dede6f53ae9f912dc228c9da4f2f0))
+- **(roku-runtime-service)** reconstruct recovery progress from results (by @[itscheems](https://github.com/itscheems)) - ([2e45ed7](https://github.com/itscheems/Roku/commit/2e45ed7cd171f649f35224ea4a3b204c7b066ae8))
+- **(roku-runtime-service)** add cancel and timeout recovery flow (by @[itscheems](https://github.com/itscheems)) - ([60bbfa3](https://github.com/itscheems/Roku/commit/60bbfa3abe4daa8e737b35ef888b3a74d8a60066))
+- **(roku-runtime-service)** route scheduling through dispatch queue (by @[itscheems](https://github.com/itscheems)) - ([a6f5d4f](https://github.com/itscheems/Roku/commit/a6f5d4fd4b433ffc7e0f6efb0e8e98debcc23075))
+- **(roku-runtime-service)** add resumable task recovery (by @[itscheems](https://github.com/itscheems)) - ([4ad2b62](https://github.com/itscheems/Roku/commit/4ad2b62087a41365a68a8f5c70003af87d2c8938))
+- **(roku-skill-registry)** add file-backed skill installation (by @[itscheems](https://github.com/itscheems)) - ([f696e42](https://github.com/itscheems/Roku/commit/f696e42dfb6eae79cc206987f982ed93456ca745))
+- **(roku-state-store)** compact replay logs into snapshots (by @[itscheems](https://github.com/itscheems)) - ([f518780](https://github.com/itscheems/Roku/commit/f518780c59df18d380e5b570da7ac271e2720e59))
+- **(roku-supervisor-agent)** own final completion policy (by @[itscheems](https://github.com/itscheems)) - ([8762753](https://github.com/itscheems/Roku/commit/8762753e9893eb3070fa79226446ce89eaed21f9))
+- **(roku-supervisor-agent)** extract planning boundary (by @[itscheems](https://github.com/itscheems)) - ([2b9720b](https://github.com/itscheems/Roku/commit/2b9720b7198a3e583f22cfec3d51d82d81658082))
+- **(skill-runtime)** add layered skill shortcut routing (by @[itscheems](https://github.com/itscheems)) - ([4a09cdf](https://github.com/itscheems/Roku/commit/4a09cdf1945635583a42847c6bb704a88f5cdb47))
+
+### Bug Fixes
+
+- **(roku-agent-runtime)** ground installed skill answers (by @[itscheems](https://github.com/itscheems)) - ([cd1bf65](https://github.com/itscheems/Roku/commit/cd1bf652500e6b2b75ba6ecc7b89ec788bb08511))
+- **(roku-runtime)** stabilize resource routing and service restart (by @[itscheems](https://github.com/itscheems)) - ([0c720e7](https://github.com/itscheems/Roku/commit/0c720e7cbbb8683b0d1f17fc23a8b7681bda4a6c))
+- **(roku-skill)** restore single-root skill discovery and execution (by @[itscheems](https://github.com/itscheems)) - ([14f46a1](https://github.com/itscheems/Roku/commit/14f46a1b1982cd50e44a916a837b4bedf0730167))
+- **(roku-skill-registry)** keep large installed skills activatable (by @[itscheems](https://github.com/itscheems)) - ([413ae19](https://github.com/itscheems/Roku/commit/413ae19247f14089b92092006e769887e6b75024))
+- **(roku-state-store)** support rusqlite 0.38 sqlite integer conversions (by @[itscheems](https://github.com/itscheems)) - ([6597ff8](https://github.com/itscheems/Roku/commit/6597ff8dba0aa96fa102dfe9ae3bf0e873805a55))
+- **(roku-telegram)** keep bot sessions on direct routes (by @[itscheems](https://github.com/itscheems)) - ([2bc0e47](https://github.com/itscheems/Roku/commit/2bc0e4758b4c6e0647cdf07960fab032cc061baf))
+- **(skill-runtime)** stabilize installed skill activation (by @[itscheems](https://github.com/itscheems)) - ([653f90c](https://github.com/itscheems/Roku/commit/653f90c734ac1e95109d7fb5ff3b40ca8639f3e8))
+
+### Refactor
+
+- **(local-storage)** adopt sqlite-first runtime storage (by @[itscheems](https://github.com/itscheems)) - ([7242cd5](https://github.com/itscheems/Roku/commit/7242cd569b6435f8c775a9cc84d81803ab98cc90))
+- **(roku-agent-runtime)** add direct route classifier (by @[itscheems](https://github.com/itscheems)) - ([9889103](https://github.com/itscheems/Roku/commit/9889103964ea8444d995d237be2fe8525fc43907))
+- **(roku-agent-runtime)** extract tool config and rewire plugin crates (by @[itscheems](https://github.com/itscheems)) - ([6024c75](https://github.com/itscheems/Roku/commit/6024c75292e0a60deb7782b86766b82907e5766c))
+- **(roku-plugin-catalog)** migrate resource catalog and skill registry (by @[itscheems](https://github.com/itscheems)) - ([bf5c4a4](https://github.com/itscheems/Roku/commit/bf5c4a4fdf15cce615e965b99f26cb986f472f97))
+- **(roku-plugin-host)** migrate tool runtime into plugin host (by @[itscheems](https://github.com/itscheems)) - ([69b9914](https://github.com/itscheems/Roku/commit/69b9914c64a0c0470926d5b0ee430610b5768336))
+- **(roku-plugin-llm)** add structured route parse guards (by @[itscheems](https://github.com/itscheems)) - ([836803f](https://github.com/itscheems/Roku/commit/836803f5d2943b7c9a4fc8cb99e8baa44f9b8b18))
+- **(roku-plugin-providers)** migrate mcp coding and llm adapters (by @[itscheems](https://github.com/itscheems)) - ([ee2995d](https://github.com/itscheems/Roku/commit/ee2995de8f084cce334b8542c860130d2f421c27))
+- **(roku-plugin-telegram)** migrate telegram connector (by @[itscheems](https://github.com/itscheems)) - ([e60386f](https://github.com/itscheems/Roku/commit/e60386f45b91f366b63f4c9f481473cc53c81984))
+- **(roku-plugins)** remove llm adapter shim crate (by @[itscheems](https://github.com/itscheems)) - ([cd05c2a](https://github.com/itscheems/Roku/commit/cd05c2ae27a13d361dd7365381b6b55c41268610))
+- **(roku-plugins)** remove tool runtime shim crate (by @[itscheems](https://github.com/itscheems)) - ([999f1e2](https://github.com/itscheems/Roku/commit/999f1e237bbd026fdb34c45c3734e14cc141f7b9))
+- **(roku-plugins)** remove resource catalog shim crate (by @[itscheems](https://github.com/itscheems)) - ([e83e14d](https://github.com/itscheems/Roku/commit/e83e14d4daeefb00d4f39aaaa9a50f23f6ac5f2a))
+- **(roku-plugins)** remove skill registry shim crate (by @[itscheems](https://github.com/itscheems)) - ([1dd67eb](https://github.com/itscheems/Roku/commit/1dd67ebe0f50dca740b2e2631572954155e8ce32))
+- **(roku-plugins)** remove mcp shim crate (by @[itscheems](https://github.com/itscheems)) - ([5705f0d](https://github.com/itscheems/Roku/commit/5705f0d547d2833469679dec0684eac08a4a4784))
+- **(roku-plugins)** remove coding adapter shim crate (by @[itscheems](https://github.com/itscheems)) - ([e2d0869](https://github.com/itscheems/Roku/commit/e2d0869bad07e21895d6eb0cfa1f4d3d53f97f5c))
+- **(roku-plugins)** remove telegram shim crate (by @[itscheems](https://github.com/itscheems)) - ([432bac6](https://github.com/itscheems/Roku/commit/432bac6499e773f2379e078380235478ee7f706a))
+- **(roku-plugins)** add startup-governed plugin snapshot (by @[itscheems](https://github.com/itscheems)) - ([e501c74](https://github.com/itscheems/Roku/commit/e501c7458e23eb22ce50979fef3a1475950f647c))
+- **(roku-plugins)** align plugin layout with refactor plan (by @[itscheems](https://github.com/itscheems)) - ([ce3ad08](https://github.com/itscheems/Roku/commit/ce3ad086f4938e75c6b1de9a22860f25265049b4))
+- **(roku-runtime)** rewire command and service consumers (by @[itscheems](https://github.com/itscheems)) - ([4eb0afd](https://github.com/itscheems/Roku/commit/4eb0afd11537fb111d65766d277b566fd865ac73))
+- **(roku-runtime)** route through resource catalogs (by @[itscheems](https://github.com/itscheems)) - ([6b4606a](https://github.com/itscheems/Roku/commit/6b4606a99c206380985839b274b532e02630ac80))
+- **(roku-runtime-service)** retire legacy planning crates (by @[itscheems](https://github.com/itscheems)) - ([caa3499](https://github.com/itscheems/Roku/commit/caa3499f8c2f38155e7386e90ad074bb204d8e45))
+- **(roku-runtime-service)** default to direct route execution (by @[itscheems](https://github.com/itscheems)) - ([03c9d3b](https://github.com/itscheems/Roku/commit/03c9d3b6b67136b72fe3e22f5fb81d6f2689b2fc))
+- **(roku-runtime-service)** centralize replay reporting (by @[itscheems](https://github.com/itscheems)) - ([b6ca53d](https://github.com/itscheems/Roku/commit/b6ca53dc0246556f5b523bd9f14989d58f993ac5))
+
+### Documentation
+
+- **(phase-1)** record closure decision (by @[itscheems](https://github.com/itscheems)) - ([6c82103](https://github.com/itscheems/Roku/commit/6c82103ec2ec4f825b89e02e3b59236999e6f98b))
+- **(skill-runtime)** capture operator commands and validation findings (by @[itscheems](https://github.com/itscheems)) - ([a8db407](https://github.com/itscheems/Roku/commit/a8db4075a299aab86df6c0dddfff755124519d6e))
+- **(skill-runtime)** record installation slice progress (by @[itscheems](https://github.com/itscheems)) - ([48d51a4](https://github.com/itscheems/Roku/commit/48d51a4ab94cc3c15b1040d9117beb17c0fb1216))
+
+### Testing
+
+- **(roku-e2e)** close control-plane chaos coverage (by @[itscheems](https://github.com/itscheems)) - ([69a138b](https://github.com/itscheems/Roku/commit/69a138bfb71de46e7d01226a520cc60bbc7d9e80))
+
+### Miscellaneous Tasks
+
+- **(roku-e2e)** remove obsolete e2e crate (by @[itscheems](https://github.com/itscheems)) - ([640f271](https://github.com/itscheems/Roku/commit/640f27198992c7c1457b9363e4afac840f327f8b))
+- **(roku-llm)** default openrouter to deepseek-chat (by @[itscheems](https://github.com/itscheems)) - ([50cf400](https://github.com/itscheems/Roku/commit/50cf4000edfe89a28555d49110d13929bfbee025))
+- **(roku-plugins)** scaffold plugin namespace crates (by @[itscheems](https://github.com/itscheems)) - ([3e46ebe](https://github.com/itscheems/Roku/commit/3e46ebe8625d641851c2eaf72e109748532a1ae7))
+
+## New Contributors ❤️
+
+* @github-actions[bot] made their first contribution
 ## [v0.0.1] - 2026-03-08
 
 ### Features
