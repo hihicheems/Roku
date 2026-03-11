@@ -11,7 +11,6 @@ members = [
     "crates/roku-common-types",
     "crates/roku-orchestrator",
     "crates/roku-agent-runtime",
-    "crates/roku-llm-adapter",
     "crates/roku-capability-auth",
     "crates/roku-validation-plane",
     "crates/roku-api-gateway",

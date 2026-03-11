@@ -1649,18 +1649,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "roku-llm-adapter"
-version = "0.1.0"
-dependencies = [
- "reqwest",
- "roku-observability",
- "roku-plugin-llm",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "roku-observability"
 version = "0.1.0"
 dependencies = [
