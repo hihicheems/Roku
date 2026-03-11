@@ -8,4 +8,4 @@ authors.workspace = true
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-toml = "0.8"
+toml = "1.0"
