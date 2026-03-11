@@ -16,7 +16,6 @@ members = [
     "crates/roku-capability-auth",
     "crates/roku-validation-plane",
     "crates/roku-tool-runtime",
-    "crates/roku-skill-registry",
     "crates/roku-api-gateway",
     "crates/roku-state-store",
     "crates/roku-artifact-store",

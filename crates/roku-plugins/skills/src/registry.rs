@@ -1704,7 +1704,7 @@ fn now_unix_ms() -> u64 {
 }
 
 fn log_skill_event(message: &str, fields: impl IntoIterator<Item = (&'static str, String)>) {
-	let mut record = LogRecord::new("roku-skill-registry", LogLevel::Info, message);
+	let mut record = LogRecord::new("roku-plugin-skills", LogLevel::Info, message);
 	for (key, value) in fields {
 		record = record.with_field(key, value);
 	}
