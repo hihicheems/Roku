@@ -31,8 +31,8 @@ use crate::types::{
 
 const OPENROUTER_PROVIDER: &str = "openrouter";
 const DEFAULT_OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-const DEFAULT_OPENROUTER_PRIMARY_MODEL: &str = "step-3.5-flash:free";
-const DEFAULT_OPENROUTER_FALLBACK_MODELS: [&str; 2] = ["deepseek-chat", "gemini-2.0-flash"];
+const DEFAULT_OPENROUTER_PRIMARY_MODEL: &str = "deepseek-chat";
+const DEFAULT_OPENROUTER_FALLBACK_MODELS: [&str; 1] = ["gemini-2.0-flash"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenRouterConfig {
@@ -717,14 +717,8 @@ mod tests {
 		))
 		.expect("request body should serialize");
 
-		assert_eq!(body["model"], "stepfun/step-3.5-flash:free");
-		assert_eq!(
-			body["models"],
-			json!(vec![
-				"deepseek/deepseek-chat",
-				"google/gemini-2.0-flash-001"
-			]),
-		);
+		assert_eq!(body["model"], "deepseek/deepseek-chat");
+		assert_eq!(body["models"], json!(vec!["google/gemini-2.0-flash-001"]),);
 		assert_eq!(body["messages"][0]["role"], "user");
 	}
 
@@ -756,7 +750,7 @@ mod tests {
 		assert_eq!(body["messages"][0]["content"], "You are Roku.");
 		assert_eq!(body["messages"][1]["role"], "user");
 		assert_eq!(body["reasoning"]["exclude"], true);
-		assert!(body["reasoning"].get("effort").is_none());
+		assert_eq!(body["reasoning"]["effort"], "none");
 	}
 
 	#[test]
@@ -860,7 +854,6 @@ mod tests {
 		assert_eq!(
 			attempt_model_sequence(&config, &config.primary_model),
 			vec![
-				"stepfun/step-3.5-flash:free".to_string(),
 				"deepseek/deepseek-chat".to_string(),
 				"google/gemini-2.0-flash-001".to_string(),
 			],
