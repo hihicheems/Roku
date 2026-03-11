@@ -18,14 +18,15 @@ mod data_plane;
 mod direct;
 mod execution;
 mod helpers;
+mod legacy_graph;
 #[cfg(test)]
 mod tests;
 
 use std::sync::{Arc, Mutex};
 
-use roku_agent_instance_factory::AgentInstanceFactory;
 use roku_agent_runtime::{
-	EscalationAction, EscalationReason, GenericAgentRuntime, RouteDecisionResult,
+	EscalationAction, EscalationReason, GenericAgentRuntime, IntentFamily, RouteDecision,
+	RouteDecisionResult, RouteEscalationPlan, RouteRisk,
 };
 use roku_artifact_store::ArtifactStore;
 use roku_capability_auth::CapabilityAuthority;
@@ -33,7 +34,6 @@ use roku_common_types::{
 	ApprovalDecision, ApprovalId, ApprovalStatus, ApprovalTicket, ErrorClass, RequestEnvelope,
 	ResponseEnvelope, ResponseStatus, RuntimeError, Task, TaskEventKind, TaskNode, TaskState,
 };
-use roku_execution_graph_builder::{ExecutionGraphBuilder, GraphBuildConfig};
 use roku_experiment_registry::ExperimentRegistry;
 use roku_observability::{
 	AuditCorrelation, AuditRecord, AuditSink, InMemoryAuditSink, LogLevel, LogRecord, Metrics,
@@ -45,8 +45,6 @@ use roku_state_store::{
 	InMemoryEventRepository, InMemoryResultRepository, InMemoryTaskRepository, ResultRepository,
 	TaskRepository,
 };
-use roku_supervisor_agent::{DefaultSupervisorAgent, SupervisorAgent};
-use roku_task_planner::{AdaptiveTaskPlanner, TaskPlanner};
 use roku_validation_plane::ValidationPipeline;
 
 use crate::helpers::{approval_artifact, failure_message, ticket_status_label};
@@ -85,10 +83,6 @@ pub struct RuntimeDataPlane {
 
 pub struct RuntimeService {
 	orchestrator: Orchestrator,
-	supervisor: Box<dyn SupervisorAgent + Send + Sync>,
-	planner: Box<dyn TaskPlanner + Send + Sync>,
-	builder: ExecutionGraphBuilder,
-	factory: AgentInstanceFactory,
 	runtime: GenericAgentRuntime,
 	validator: ValidationPipeline,
 	metrics: Arc<Metrics>,
@@ -105,9 +99,6 @@ impl RuntimeService {
 		audit_sink: Arc<dyn AuditSink>,
 	) -> Self {
 		let runtime = GenericAgentRuntime::default();
-		let planner = Box::new(AdaptiveTaskPlanner::with_resource_catalog(
-			runtime.resource_catalog().clone(),
-		));
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
 				task_repo,
@@ -121,7 +112,6 @@ impl RuntimeService {
 			audit_sink,
 			runtime,
 			Arc::new(Metrics::default()),
-			planner,
 		)
 	}
 
@@ -135,9 +125,6 @@ impl RuntimeService {
 		audit_sink: Arc<dyn AuditSink>,
 	) -> Self {
 		let runtime = GenericAgentRuntime::default();
-		let planner = Box::new(AdaptiveTaskPlanner::with_resource_catalog(
-			runtime.resource_catalog().clone(),
-		));
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
 				task_repo,
@@ -151,7 +138,6 @@ impl RuntimeService {
 			audit_sink,
 			runtime,
 			Arc::new(Metrics::default()),
-			planner,
 		)
 	}
 
@@ -165,9 +151,6 @@ impl RuntimeService {
 		audit_sink: Arc<dyn AuditSink>,
 		runtime: GenericAgentRuntime,
 	) -> Self {
-		let planner = Box::new(AdaptiveTaskPlanner::with_resource_catalog(
-			runtime.resource_catalog().clone(),
-		));
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
 				task_repo,
@@ -181,7 +164,6 @@ impl RuntimeService {
 			audit_sink,
 			runtime,
 			Arc::new(Metrics::default()),
-			planner,
 		)
 	}
 
@@ -195,7 +177,6 @@ impl RuntimeService {
 		audit_sink: Arc<dyn AuditSink>,
 		runtime: GenericAgentRuntime,
 		metrics: Arc<Metrics>,
-		planner: Box<dyn TaskPlanner + Send + Sync>,
 	) -> Self {
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
@@ -210,7 +191,6 @@ impl RuntimeService {
 			audit_sink,
 			runtime,
 			metrics,
-			planner,
 		)
 	}
 
@@ -219,7 +199,6 @@ impl RuntimeService {
 		audit_sink: Arc<dyn AuditSink>,
 		runtime: GenericAgentRuntime,
 		metrics: Arc<Metrics>,
-		planner: Box<dyn TaskPlanner + Send + Sync>,
 	) -> Self {
 		let RuntimeDataPlane {
 			task_repo,
@@ -233,10 +212,6 @@ impl RuntimeService {
 
 		Self {
 			orchestrator: Orchestrator::default(),
-			supervisor: Box::new(DefaultSupervisorAgent::default()),
-			planner,
-			builder: ExecutionGraphBuilder,
-			factory: AgentInstanceFactory::default(),
 			runtime,
 			validator: ValidationPipeline::default(),
 			metrics,
@@ -259,9 +234,6 @@ impl RuntimeService {
 	}
 
 	pub fn in_memory_with_agent_runtime(runtime: GenericAgentRuntime) -> Self {
-		let planner = Box::new(AdaptiveTaskPlanner::with_resource_catalog(
-			runtime.resource_catalog().clone(),
-		));
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
 				task_repo: Box::new(InMemoryTaskRepository::default()),
@@ -275,7 +247,6 @@ impl RuntimeService {
 			Arc::new(InMemoryAuditSink::default()),
 			runtime,
 			Arc::new(Metrics::default()),
-			planner,
 		)
 	}
 
@@ -283,9 +254,6 @@ impl RuntimeService {
 		runtime: GenericAgentRuntime,
 		metrics: Arc<Metrics>,
 	) -> Self {
-		let planner = Box::new(AdaptiveTaskPlanner::with_resource_catalog(
-			runtime.resource_catalog().clone(),
-		));
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
 				task_repo: Box::new(InMemoryTaskRepository::default()),
@@ -299,29 +267,6 @@ impl RuntimeService {
 			Arc::new(InMemoryAuditSink::default()),
 			runtime,
 			metrics,
-			planner,
-		)
-	}
-
-	pub fn in_memory_with_agent_runtime_planner_and_metrics(
-		runtime: GenericAgentRuntime,
-		planner: Box<dyn TaskPlanner + Send + Sync>,
-		metrics: Arc<Metrics>,
-	) -> Self {
-		Self::new_with_runtime_data_plane_and_metrics(
-			RuntimeDataPlane {
-				task_repo: Box::new(InMemoryTaskRepository::default()),
-				event_repo: Box::new(InMemoryEventRepository::default()),
-				approval_repo: Box::new(InMemoryApprovalRepository::default()),
-				result_repo: Box::new(InMemoryResultRepository::default()),
-				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
-				artifact_store: ArtifactStore::default(),
-				experiment_registry: ExperimentRegistry::default(),
-			},
-			Arc::new(InMemoryAuditSink::default()),
-			runtime,
-			metrics,
-			planner,
 		)
 	}
 
@@ -335,8 +280,7 @@ impl RuntimeService {
 		mode: RunMode,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		self.metrics.inc_requests();
-		let mut normalized_request = normalize_request(&request);
-		let mut route_classified = false;
+		let normalized_request = normalize_request(&request);
 		log_runtime(
 			LogLevel::Info,
 			"received runtime request",
@@ -349,134 +293,77 @@ impl RuntimeService {
 		);
 		let mut task = self.orchestrator.create_task(&normalized_request);
 
-		if matches!(mode, RunMode::Normal) && normalized_request.planning_mode_hint.is_none() {
-			self.record_transition(&mut task, TaskState::Planning, "classify direct route")?;
-			route_classified = true;
-			let route = self
-				.runtime
-				.classify_route(&normalized_request, &normalized_request.session_id);
-			log_route_decision(&normalized_request, &route);
-			match &route {
-				RouteDecisionResult::Direct(plan) => {
-					self.metrics.inc_direct_route_hits();
-					self.start_experiment_run(&task, &normalized_request.goal, "direct_route")?;
-					return self.process_direct_route(&mut task, &normalized_request, plan);
-				}
-				RouteDecisionResult::Escalate(plan) => {
-					self.metrics.inc_route_escalations();
-					match plan.reason {
-						EscalationReason::RouteClassifierFailure => {
-							self.metrics.inc_route_classifier_failures();
-						}
-						EscalationReason::RouteParseGuardFailure => {
-							self.metrics.inc_route_parse_guard_failures();
-						}
-						EscalationReason::MissingArguments
-						| EscalationReason::RequiresMultiStep
-						| EscalationReason::NoEnabledRouteTarget
-						| EscalationReason::RouteModelUnavailable
-						| EscalationReason::LowConfidence => {}
+		self.record_transition(&mut task, TaskState::Planning, "classify direct route")?;
+
+		if let Some(planning_mode_hint) = normalized_request.planning_mode_hint {
+			self.metrics.inc_route_escalations();
+			self.metrics.inc_route_limited_planning();
+			log_runtime(
+				LogLevel::Info,
+				"planning mode hint resolved as compatibility fallback",
+				[
+					("request_id", normalized_request.request_id.0.clone()),
+					("planning_mode_hint", format!("{planning_mode_hint:?}")),
+				],
+			);
+			self.start_experiment_run(&task, &normalized_request.goal, "compatibility_fallback")?;
+			return self.process_direct_escalation(
+				&mut task,
+				&normalized_request,
+				&compatibility_fallback_plan(
+					"planning mode hints are deprecated compatibility signals; planning-heavy workflow is not enabled in this runtime",
+				),
+			);
+		}
+
+		let route = self
+			.runtime
+			.classify_route(&normalized_request, &normalized_request.session_id);
+		log_route_decision(&normalized_request, &route);
+		match &route {
+			RouteDecisionResult::Direct(plan) => {
+				self.metrics.inc_direct_route_hits();
+				self.start_experiment_run(&task, &normalized_request.goal, "direct_route")?;
+				self.process_direct_route(&mut task, &normalized_request, plan)
+			}
+			RouteDecisionResult::Escalate(plan) => {
+				self.metrics.inc_route_escalations();
+				match plan.reason {
+					EscalationReason::RouteClassifierFailure => {
+						self.metrics.inc_route_classifier_failures();
 					}
-					match plan.action {
-						EscalationAction::AskForMoreInfo | EscalationAction::FallbackAnswer => {
-							if matches!(plan.action, EscalationAction::FallbackAnswer) {
-								self.metrics.inc_direct_route_fallbacks();
-							}
-							self.start_experiment_run(
-								&task,
-								&normalized_request.goal,
-								"direct_route",
-							)?;
-							return self.process_direct_escalation(
-								&mut task,
-								&normalized_request,
-								plan,
-							);
-						}
-						EscalationAction::EnterLimitedPlanning => {
-							self.metrics.inc_route_limited_planning();
-						}
+					EscalationReason::RouteParseGuardFailure => {
+						self.metrics.inc_route_parse_guard_failures();
+					}
+					EscalationReason::MissingArguments
+					| EscalationReason::RequiresMultiStep
+					| EscalationReason::NoEnabledRouteTarget
+					| EscalationReason::RouteModelUnavailable
+					| EscalationReason::LowConfidence => {}
+				}
+				match plan.action {
+					EscalationAction::AskForMoreInfo => {
+						self.start_experiment_run(&task, &normalized_request.goal, "direct_route")?;
+						self.process_direct_escalation(&mut task, &normalized_request, plan)
+					}
+					EscalationAction::FallbackAnswer => {
+						self.metrics.inc_direct_route_fallbacks();
+						self.start_experiment_run(&task, &normalized_request.goal, "direct_route")?;
+						self.process_direct_escalation(&mut task, &normalized_request, plan)
+					}
+					EscalationAction::EnterLimitedPlanning => {
+						self.metrics.inc_route_limited_planning();
+						self.metrics.inc_direct_route_fallbacks();
+						self.start_experiment_run(
+							&task,
+							&normalized_request.goal,
+							"compatibility_fallback",
+						)?;
+						self.process_direct_escalation(&mut task, &normalized_request, plan)
 					}
 				}
 			}
 		}
-
-		if !route_classified {
-			self.record_transition(&mut task, TaskState::Planning, "start planning")?;
-		}
-
-		let supervisor_plan = self.supervisor.plan(&normalized_request);
-		let planning_input = supervisor_plan.input.planning_input.clone();
-		let planning_mode_label = format!("{:?}", supervisor_plan.planning_decision.mode);
-		normalized_request.goal = supervisor_plan.input.normalized_goal;
-
-		log_runtime(
-			LogLevel::Info,
-			"selected planning mode",
-			[
-				("request_id", normalized_request.request_id.0.clone()),
-				("planning_mode", planning_mode_label.clone()),
-				(
-					"complexity_score",
-					planning_input.complexity_score.to_string(),
-				),
-				(
-					"uncertainty_score",
-					planning_input.uncertainty_score.to_string(),
-				),
-				("risk_level", format!("{:?}", planning_input.risk_level)),
-				("budget_tokens", planning_input.budget_tokens.to_string()),
-			],
-		);
-		self.metrics.inc_planning_run();
-		self.metrics.inc_planning_strategy(&planning_mode_label);
-		let mut outline = self
-			.planner
-			.build_outline(&normalized_request, &supervisor_plan.planning_decision);
-		log_runtime(
-			LogLevel::Info,
-			"built plan outline",
-			[
-				("request_id", normalized_request.request_id.0.clone()),
-				("outline_steps", outline.steps.len().to_string()),
-			],
-		);
-		if matches!(mode, RunMode::ApprovalRequired)
-			&& let Some(step) = outline.steps.last_mut()
-		{
-			step.requires_approval = true;
-		}
-
-		self.record_transition(&mut task, TaskState::GraphBuilding, "build graph")?;
-		let graph = match self.builder.compile(
-			task.task_id.clone(),
-			&outline,
-			self.runtime.resource_catalog(),
-			&GraphBuildConfig::default(),
-		) {
-			Ok(graph) => graph,
-			Err(error) => {
-				self.metrics.inc_failures();
-				let terminal_state =
-					self.fail_task(&mut task, "graph build failed", ErrorClass::Dependency)?;
-				self.save_task(task)?;
-				return Ok(ResponseEnvelope {
-					request_id: request.request_id,
-					status: ResponseStatus::Failed,
-					message: failure_message(&error.to_string(), terminal_state),
-					artifacts: Vec::new(),
-				});
-			}
-		};
-		task.graph = Some(graph);
-		task.completed_nodes = Vec::new();
-		task.next_node_index = 0;
-		task.pending_approval_id = None;
-		task.last_result = None;
-		self.start_experiment_run(&task, &normalized_request.goal, &planning_mode_label)?;
-
-		self.record_transition(&mut task, TaskState::Delegating, "delegate")?;
-		self.process_task(&mut task, mode)
 	}
 
 	pub fn get_approval(
@@ -674,6 +561,23 @@ fn normalize_goal(goal: &str) -> String {
 		goal.trim().to_string()
 	} else {
 		normalized
+	}
+}
+
+fn compatibility_fallback_plan(reason: &str) -> RouteEscalationPlan {
+	RouteEscalationPlan {
+		decision: RouteDecision::new(
+			IntentFamily::MultiStep,
+			0.0,
+			true,
+			RouteRisk::Medium,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			reason,
+		),
+		reason: EscalationReason::RequiresMultiStep,
+		action: EscalationAction::EnterLimitedPlanning,
 	}
 }
 

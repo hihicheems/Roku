@@ -125,7 +125,7 @@ where
 }
 
 pub fn help_text() -> &'static str {
-	"Usage:\n  roku-cmd once [--session-id <id>] [--planning-mode <mode>] [--generated-skill-root <path>] <goal>\n  roku-cmd live-once [--session-id <id>] [--planning-mode <mode>] [--generated-skill-root <path>] <goal>\n  roku-cmd telegram-once [--session-id <id>] [--planning-mode <mode>] [--generated-skill-root <path>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n  roku-cmd task show <task-id>\n  roku-cmd task replay <task-id>\n  roku-cmd task resume <task-id>\n  roku-cmd approval show <approval-id>\n  roku-cmd approval approve <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd approval reject <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd artifact list <task-id>\n  roku-cmd artifact content <task-id> <artifact-id>\n  roku-cmd artifact download <task-id> <artifact-id> --output <path>\n  roku-cmd experiment show <task-id>\n  roku-cmd skill install <source-url>\n  roku-cmd skill list\n  roku-cmd skill show <skill-name>\n\nCommands:\n  once              Run the deterministic in-process pipeline.\n  live-once         Run the OpenRouter-backed live pipeline from environment.\n  telegram-once     Run one live Telegram handler turn and print the outbound bot message.\n  telegram-bot      Start the Telegram polling bot using environment configuration.\n  api-gateway       Start the Actix HTTP gateway using environment configuration.\n  task show         Render a persisted task snapshot with its event timeline.\n  task replay       Rebuild a state-transition report from persisted task events.\n  task resume       Continue a resumable persisted task using the live runtime path.\n  approval          Show or decide an approval ticket from persisted state.\n  artifact          List artifacts, print artifact content, or download an artifact payload.\n  experiment show   Render the persisted experiment run for a task.\n  skill install     Install a skill package into the local file-backed registry.\n  skill list        List installed skills from the local registry.\n  skill show        Render installed skill metadata and prompt context.\n\nPlanning Modes:\n  react | taskdecomposition | treesearch | iterativerefinement\n\nNote:\n  --planning-mode is a compatibility hint that forces the legacy planning path instead of the default direct-route classifier."
+	"Usage:\n  roku-cmd once [--session-id <id>] [--planning-mode <mode>] [--generated-skill-root <path>] <goal>\n  roku-cmd live-once [--session-id <id>] [--planning-mode <mode>] [--generated-skill-root <path>] <goal>\n  roku-cmd telegram-once [--session-id <id>] [--planning-mode <mode>] [--generated-skill-root <path>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n  roku-cmd task show <task-id>\n  roku-cmd task replay <task-id>\n  roku-cmd task resume <task-id>\n  roku-cmd approval show <approval-id>\n  roku-cmd approval approve <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd approval reject <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd artifact list <task-id>\n  roku-cmd artifact content <task-id> <artifact-id>\n  roku-cmd artifact download <task-id> <artifact-id> --output <path>\n  roku-cmd experiment show <task-id>\n  roku-cmd skill install <source-url>\n  roku-cmd skill list\n  roku-cmd skill show <skill-name>\n\nCommands:\n  once              Run the deterministic in-process pipeline.\n  live-once         Run the OpenRouter-backed live pipeline from environment.\n  telegram-once     Run one live Telegram handler turn and print the outbound bot message.\n  telegram-bot      Start the Telegram polling bot using environment configuration.\n  api-gateway       Start the Actix HTTP gateway using environment configuration.\n  task show         Render a persisted task snapshot with its event timeline.\n  task replay       Rebuild a state-transition report from persisted task events.\n  task resume       Continue a resumable persisted task using the live runtime path.\n  approval          Show or decide an approval ticket from persisted state.\n  artifact          List artifacts, print artifact content, or download an artifact payload.\n  experiment show   Render the persisted experiment run for a task.\n  skill install     Install a skill package into the local file-backed registry.\n  skill list        List installed skills from the local registry.\n  skill show        Render installed skill metadata and prompt context.\n\nPlanning Modes:\n  react | taskdecomposition | treesearch | iterativerefinement\n\nNote:\n  --planning-mode is a deprecated compatibility hint. New requests stay on the direct-route runtime and produce a compatibility fallback instead of entering a planning-heavy workflow."
 }
 
 fn join_goal(parts: &[String]) -> Result<String, CommandError> {
@@ -536,19 +536,23 @@ mod tests {
 	}
 
 	#[test]
-	fn run_with_missing_evidence_fails_validation() {
-		let response = run_with_mode("analyze market", RunMode::MissingEvidence)
-			.expect("pipeline should execute and fail validation");
-		assert!(matches!(response.status, ResponseStatus::Failed));
-		assert!(response.message.contains("evidence is required"));
+	fn run_with_missing_evidence_keeps_new_requests_on_direct_runtime() {
+		let response = run_with_mode(
+			"Read the first part of Cargo.toml.",
+			RunMode::MissingEvidence,
+		)
+		.expect("pipeline should execute through the direct runtime");
+		assert!(matches!(response.status, ResponseStatus::Succeeded));
 	}
 
 	#[test]
-	fn run_with_capability_denied_fails() {
-		let response = run_with_mode("analyze market", RunMode::CapabilityDenied)
-			.expect("pipeline should execute and fail with capability denial");
-		assert!(matches!(response.status, ResponseStatus::Failed));
-		assert!(response.message.contains("capability denied"));
+	fn run_with_capability_denied_keeps_new_requests_on_direct_runtime() {
+		let response = run_with_mode(
+			"Read the first part of Cargo.toml.",
+			RunMode::CapabilityDenied,
+		)
+		.expect("pipeline should execute through the direct runtime");
+		assert!(matches!(response.status, ResponseStatus::Succeeded));
 	}
 
 	#[test]

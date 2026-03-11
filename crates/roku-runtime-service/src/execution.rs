@@ -21,10 +21,12 @@ use roku_common_types::{
 	ResultEnvelope, ResultStatus, RuntimeError, Task, TaskEventKind, TaskId, TaskNode,
 	TaskNodeKind, TaskState,
 };
-use roku_execution_graph_builder::TaskGraphScheduler;
 use roku_observability::{AuditCorrelation, AuditRecord};
 
 use crate::helpers::{failure_message, result_message};
+use crate::legacy_graph::{
+	LegacyTaskGraphScheduler, assess_graph_completion, build_agent_instance_for_node_with_history,
+};
 use crate::{RunMode, RuntimeService};
 
 impl RuntimeService {
@@ -38,7 +40,7 @@ impl RuntimeService {
 			.graph
 			.clone()
 			.ok_or_else(|| RuntimeError::new("task graph is missing"))?;
-		let scheduler = TaskGraphScheduler;
+		let scheduler = LegacyTaskGraphScheduler;
 
 		while !scheduler
 			.is_complete(&graph, &task.completed_nodes)
@@ -269,11 +271,7 @@ impl RuntimeService {
 		node: &TaskNode,
 		mode: RunMode,
 	) -> Result<Option<ResponseEnvelope>, RuntimeError> {
-		let mut spec = self.factory.build_for_node_with_history(
-			&task.task_id,
-			node,
-			&task.conversation_history,
-		);
+		let mut spec = build_agent_instance_for_node_with_history(task, node);
 		let capability_allowed = {
 			let mut state = self.lock_state()?;
 			let capability_tokens = issue_node_capability_tokens(
@@ -585,7 +583,7 @@ impl RuntimeService {
 		request_id: roku_common_types::RequestId,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let results = self.list_results(&task.task_id)?;
-		let completion = self.supervisor.assess_completion(task, &results)?;
+		let completion = assess_graph_completion(task, &results)?;
 		if !completion.completed {
 			return Err(RuntimeError::new(completion.reason));
 		}

@@ -347,7 +347,25 @@ mod tests {
 			_model: &ModelProfile,
 			request: &GenerationRequest,
 		) -> Result<ProviderResponse, ProviderCallError> {
-			let output = if request.prompt.contains("User request:\n沙县小吃是什么？") {
+			let output = if request
+				.system_prompt
+				.as_deref()
+				.is_some_and(|prompt| prompt.contains("route classifier"))
+			{
+				serde_json::json!({
+					"intent_family": "chat",
+					"confidence": 0.98,
+					"requires_multi_step": false,
+					"risk": "low",
+					"candidate_tools": [],
+					"candidate_plugins": [],
+					"missing_arguments": [],
+					"reason": "plain conversational request"
+				})
+				.to_string()
+			} else if request.prompt.contains("User request:\n今天周几？") {
+				"今天是星期三。".to_string()
+			} else if request.prompt.contains("User request:\n沙县小吃是什么？") {
 				"沙县小吃是福建沙县起源的一类大众化中式快餐小吃。".to_string()
 			} else if request.prompt.contains("User request:\n我刚问了你什么？") {
 				let last_user_turn = extract_last_user_turn(&request.prompt)
@@ -368,7 +386,7 @@ mod tests {
 	}
 
 	#[test]
-	fn telegram_handler_persists_mode_and_multi_turn_memory() {
+	fn telegram_handler_uses_planning_mode_as_compatibility_hint_and_keeps_memory() {
 		let mut router = LlmRouter::new(RoutingPolicy {
 			max_request_cost_usd: 1.0,
 			max_latency_ms: 5_000,
@@ -397,7 +415,11 @@ mod tests {
 			.handle_request(request(session_id, "今天周几？"))
 			.expect("first request should succeed");
 		assert_eq!(first.status, ResponseStatus::Succeeded);
-		assert!(first.message.starts_with("星期"));
+		assert!(first.message.contains("planning-heavy"));
+
+		handler
+			.update_session_planning_mode(session_id, None)
+			.expect("session mode clear should succeed");
 
 		let second = handler
 			.handle_request(request(session_id, "沙县小吃是什么？"))
@@ -415,7 +437,7 @@ mod tests {
 			.session_state
 			.load_preferences(session_id)
 			.expect("preferences should load");
-		assert_eq!(preferences.planning_mode, Some(PlanningModeHint::ReAct));
+		assert_eq!(preferences.planning_mode, None);
 
 		let turns = handler
 			.session_state
