@@ -1822,16 +1822,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "roku-tool-runtime"
-version = "0.1.0"
-dependencies = [
- "roku-plugin-host",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "roku-validation-plane"
 version = "0.1.0"
 dependencies = [
