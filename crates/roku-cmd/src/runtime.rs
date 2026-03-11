@@ -38,7 +38,6 @@ use roku_state_store::{
 	SqliteApprovalRepository, SqliteDispatchQueue, SqliteEventRepository, SqliteResultRepository,
 	SqliteStoreConfig, SqliteTaskRepository,
 };
-use roku_task_planner::llm::LlmTaskPlanner;
 use serde_json::json;
 
 use crate::CommandError;
@@ -279,11 +278,6 @@ fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandEr
 		bootstrap.tool_config,
 		bootstrap.plugin_snapshot,
 	);
-	let planner = Box::new(
-		roku_task_planner::AdaptiveTaskPlanner::with_resource_catalog(
-			runtime.resource_catalog().clone(),
-		),
-	);
 	let store_config = sqlite_store_config(&layout);
 	let (artifact_store, experiment_registry) = build_runtime_data_plane(&layout);
 
@@ -300,7 +294,6 @@ fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandEr
 		Arc::new(InMemoryAuditSink::default()),
 		runtime,
 		Arc::new(Metrics::default()),
-		planner,
 	))
 }
 
@@ -493,7 +486,6 @@ pub(crate) fn build_live_runtime_service_from_layout_and_bootstrap(
 ) -> Result<RuntimeService, CommandError> {
 	let metrics = Arc::new(Metrics::default());
 	let runtime = build_live_runtime(bootstrap.clone(), metrics.clone())?;
-	let planner = build_live_planner(&runtime, metrics.clone(), &bootstrap.plugin_snapshot)?;
 	let store_config = sqlite_store_config(layout);
 	let (artifact_store, experiment_registry) = build_runtime_data_plane(layout);
 
@@ -510,7 +502,6 @@ pub(crate) fn build_live_runtime_service_from_layout_and_bootstrap(
 		Arc::new(InMemoryAuditSink::default()),
 		runtime,
 		metrics,
-		planner,
 	))
 }
 
@@ -557,37 +548,6 @@ fn build_live_runtime(
 		bootstrap.tool_config,
 		bootstrap.plugin_snapshot,
 	))
-}
-
-fn build_live_planner(
-	runtime: &GenericAgentRuntime,
-	metrics: Arc<Metrics>,
-	plugin_snapshot: &PluginRegistrySnapshot,
-) -> Result<Box<dyn roku_task_planner::TaskPlanner + Send + Sync>, CommandError> {
-	if !plugin_snapshot.is_plugin_enabled("openrouter") {
-		return Ok(Box::new(
-			roku_task_planner::AdaptiveTaskPlanner::with_resource_catalog(
-				runtime.resource_catalog().clone(),
-			),
-		));
-	}
-
-	let config = match OpenRouterConfig::from_env() {
-		Ok(config) => config,
-		Err(error) => {
-			log_optional_plugin_fallback("openrouter", &error.to_string());
-			return Ok(Box::new(
-				roku_task_planner::AdaptiveTaskPlanner::with_resource_catalog(
-					runtime.resource_catalog().clone(),
-				),
-			));
-		}
-	};
-	let planner_router = build_openrouter_router_with_metrics(config, metrics)?;
-	Ok(Box::new(LlmTaskPlanner::with_resource_catalog(
-		planner_router,
-		runtime.resource_catalog().clone(),
-	)))
 }
 
 fn log_optional_plugin_fallback(plugin_id: &str, reason: &str) {

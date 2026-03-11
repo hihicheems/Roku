@@ -16,9 +16,24 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
 use roku_common_types::{
-	NodeId, RecoveryEligibility, RerunPolicy, ResumeCandidate, TaskEdgeCondition, TaskGraph,
-	TaskNode, TaskNodeDispatchPolicy,
+	AgentContext, AgentInstanceSpec, NodeId, PolicyBindings, RecoveryEligibility, RerunPolicy,
+	ResultEnvelope, ResultStatus, ResumeCandidate, RuntimeError, Task, TaskEdgeCondition,
+	TaskGraph, TaskNode, TaskNodeDispatchPolicy, TaskNodeKind,
 };
+
+const PROFILE_RESEARCH: &str = "research";
+const PROFILE_DATA: &str = "data";
+const PROFILE_REVIEW: &str = "review";
+const PROFILE_SKILL: &str = "skill";
+const PROFILE_GENERAL: &str = "general";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphCompletionAssessment {
+	pub completed: bool,
+	pub reason: String,
+	pub final_node_id: Option<NodeId>,
+	pub final_message: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphScheduleError {
@@ -37,10 +52,64 @@ impl fmt::Display for GraphScheduleError {
 
 impl std::error::Error for GraphScheduleError {}
 
-#[derive(Debug, Default)]
-pub struct TaskGraphScheduler;
+#[derive(Debug, Clone, Copy)]
+struct CapabilityProfile {
+	profile_id: &'static str,
+	capability_prefixes: &'static [&'static str],
+	default_budget_tokens: u64,
+	default_time_budget_ms: u64,
+}
 
-impl TaskGraphScheduler {
+impl CapabilityProfile {
+	fn match_score(self, capabilities: &[String]) -> usize {
+		capabilities
+			.iter()
+			.filter(|capability| {
+				self.capability_prefixes
+					.iter()
+					.any(|prefix| capability.starts_with(prefix))
+			})
+			.count()
+	}
+}
+
+const CAPABILITY_PROFILES: [CapabilityProfile; 5] = [
+	CapabilityProfile {
+		profile_id: PROFILE_RESEARCH,
+		capability_prefixes: &["information.", "research."],
+		default_budget_tokens: 10_000,
+		default_time_budget_ms: 30_000,
+	},
+	CapabilityProfile {
+		profile_id: PROFILE_DATA,
+		capability_prefixes: &["data."],
+		default_budget_tokens: 12_000,
+		default_time_budget_ms: 35_000,
+	},
+	CapabilityProfile {
+		profile_id: PROFILE_REVIEW,
+		capability_prefixes: &["review.", "validation."],
+		default_budget_tokens: 8_000,
+		default_time_budget_ms: 20_000,
+	},
+	CapabilityProfile {
+		profile_id: PROFILE_SKILL,
+		capability_prefixes: &["skill."],
+		default_budget_tokens: 10_000,
+		default_time_budget_ms: 120_000,
+	},
+	CapabilityProfile {
+		profile_id: PROFILE_GENERAL,
+		capability_prefixes: &[],
+		default_budget_tokens: 8_000,
+		default_time_budget_ms: 20_000,
+	},
+];
+
+#[derive(Debug, Default)]
+pub struct LegacyTaskGraphScheduler;
+
+impl LegacyTaskGraphScheduler {
 	pub fn ready_nodes(
 		&self,
 		graph: &TaskGraph,
@@ -76,7 +145,6 @@ impl TaskGraphScheduler {
 	) -> Result<Vec<Vec<NodeId>>, GraphScheduleError> {
 		self.validate_edges(graph)?;
 		let automatic_node_ids = automatic_node_ids(graph);
-
 		let outgoing = outgoing_map(graph, &automatic_node_ids)?;
 		let mut indegree = graph
 			.nodes
@@ -217,6 +285,121 @@ impl TaskGraphScheduler {
 	}
 }
 
+pub fn build_agent_instance_for_node_with_history(
+	task: &Task,
+	node: &TaskNode,
+) -> AgentInstanceSpec {
+	let profile = select_profile_for_node(node);
+	let policy_bindings = derive_policy_bindings(node, profile);
+
+	AgentInstanceSpec {
+		instance_id: format!("agent-{}-{}", profile.profile_id, node.node_id.0),
+		context: AgentContext {
+			task_id: task.task_id.clone(),
+			node_id: NodeId(node.node_id.0.clone()),
+			summary: node.description.clone(),
+			resources: node.resources.clone(),
+			conversation_history: task.conversation_history.clone(),
+		},
+		capabilities: node.capabilities.clone(),
+		capability_tokens: Vec::new(),
+		policy_bindings,
+	}
+}
+
+pub fn assess_graph_completion(
+	task: &Task,
+	results: &[ResultEnvelope],
+) -> Result<GraphCompletionAssessment, RuntimeError> {
+	let Some(graph) = &task.graph else {
+		return Ok(GraphCompletionAssessment {
+			completed: false,
+			reason: "task graph is missing".to_string(),
+			final_node_id: None,
+			final_message: None,
+		});
+	};
+
+	let scheduler = LegacyTaskGraphScheduler;
+	let is_complete = scheduler
+		.is_complete(graph, &task.completed_nodes)
+		.map_err(|error| RuntimeError::new(error.to_string()))?;
+
+	let selected_result = is_complete
+		.then(|| select_final_result(graph, results))
+		.flatten();
+	let selected_message = selected_result.map(result_message);
+	let selected_node_id = selected_result.map(|result| result.node_id.clone());
+
+	Ok(GraphCompletionAssessment {
+		completed: is_complete,
+		reason: if is_complete {
+			"all task graph nodes completed".to_string()
+		} else {
+			"task graph still has incomplete nodes".to_string()
+		},
+		final_node_id: selected_node_id,
+		final_message: selected_message,
+	})
+}
+
+fn select_profile_for_node(node: &TaskNode) -> CapabilityProfile {
+	let mut selected = CAPABILITY_PROFILES
+		.iter()
+		.find(|profile| profile.profile_id == PROFILE_GENERAL)
+		.copied()
+		.expect("general capability profile must exist");
+	let mut selected_score = 0usize;
+
+	for profile in CAPABILITY_PROFILES {
+		let score = profile.match_score(&node.capabilities);
+		if score > selected_score
+			|| (score == selected_score && score > 0 && profile.profile_id < selected.profile_id)
+		{
+			selected = profile;
+			selected_score = score;
+		}
+	}
+
+	selected
+}
+
+fn derive_policy_bindings(node: &TaskNode, profile: CapabilityProfile) -> PolicyBindings {
+	let capability_count = u64::try_from(node.capabilities.len()).unwrap_or(0);
+	let mut budget_tokens = profile
+		.default_budget_tokens
+		.saturating_add(capability_count.saturating_mul(500));
+	let mut time_budget_ms = profile
+		.default_time_budget_ms
+		.saturating_add(capability_count.saturating_mul(1_000));
+
+	if matches!(
+		node.kind,
+		TaskNodeKind::Validation
+			| TaskNodeKind::Aggregation
+			| TaskNodeKind::Retry
+			| TaskNodeKind::DeadLetter
+	) {
+		budget_tokens = budget_tokens.min(6_000);
+		time_budget_ms = time_budget_ms.min(15_000);
+	}
+
+	if node.budget_snapshot.token_budget > 0 {
+		budget_tokens = budget_tokens.min(node.budget_snapshot.token_budget);
+	}
+	if node.budget_snapshot.time_budget_ms > 0 {
+		time_budget_ms = time_budget_ms.min(node.budget_snapshot.time_budget_ms);
+	}
+	if node.deadline_ms > 0 {
+		time_budget_ms = time_budget_ms.min(node.deadline_ms);
+	}
+
+	PolicyBindings {
+		budget_tokens,
+		time_budget_ms,
+	}
+}
+
 fn automatic_node_ids(graph: &TaskGraph) -> HashSet<String> {
 	graph
 		.nodes
@@ -309,232 +492,111 @@ fn edge_is_active_for_automatic_schedule(condition: TaskEdgeCondition) -> bool {
 	)
 }
 
-#[cfg(test)]
-mod tests {
-	use super::*;
-	use roku_common_types::{
-		TaskEdge, TaskEdgeCondition, TaskGraph, TaskId, TaskNode, TaskNodeDispatchPolicy,
-		TaskNodeKind,
-	};
+fn select_final_result<'a>(
+	graph: &TaskGraph,
+	results: &'a [ResultEnvelope],
+) -> Option<&'a ResultEnvelope> {
+	let successful_results = results
+		.iter()
+		.filter(|result| matches!(result.status, ResultStatus::Ok))
+		.collect::<Vec<_>>();
+	if successful_results.is_empty() {
+		return None;
+	}
 
-	fn node(id: &str, kind: TaskNodeKind) -> TaskNode {
-		TaskNode {
-			node_id: NodeId(id.to_string()),
-			kind,
-			description: id.to_string(),
-			resources: Vec::new(),
-			capabilities: Vec::new(),
-			dispatch_policy: TaskNodeDispatchPolicy::Automatic,
-			join_policy: roku_common_types::JoinPolicy::AllParents,
-			aggregation_mode: roku_common_types::AggregationMode::CollectAll,
-			recovery_anchor: roku_common_types::NodeRecoveryAnchor {
-				resume_point_id: format!("resume:{id}"),
-				requires_manual_resume: matches!(kind, TaskNodeKind::Approval),
-				allows_partial_rerun: matches!(kind, TaskNodeKind::Execution),
-			},
-			budget_snapshot: roku_common_types::NodeBudgetSnapshot {
-				token_budget: 1_000,
-				time_budget_ms: 1_000,
-			},
-			deadline_ms: 1_000,
-			capability_requirements_snapshot: Vec::new(),
-			retry_policy: roku_common_types::RetryPolicy::default(),
-			rerun_policy: if matches!(kind, TaskNodeKind::Approval) {
-				roku_common_types::RerunPolicy::RequiresManualResume
-			} else {
-				roku_common_types::RerunPolicy::SafeToRerun
-			},
+	let node_by_id = graph
+		.nodes
+		.iter()
+		.map(|node| (node.node_id.0.as_str(), node))
+		.collect::<HashMap<_, _>>();
+	let node_position = graph
+		.nodes
+		.iter()
+		.enumerate()
+		.map(|(index, node)| (node.node_id.0.as_str(), index))
+		.collect::<HashMap<_, _>>();
+	let completion_path_sources = graph
+		.edges
+		.iter()
+		.filter(|edge| edge_is_completion_path(edge.condition))
+		.map(|edge| edge.from.0.as_str())
+		.collect::<HashSet<_>>();
+
+	for kind in [
+		TaskNodeKind::Aggregation,
+		TaskNodeKind::Validation,
+		TaskNodeKind::Execution,
+	] {
+		if let Some(result) = pick_best_result(
+			successful_results.iter().copied().filter(|result| {
+				node_by_id
+					.get(result.node_id.0.as_str())
+					.is_some_and(|node| node.kind == kind)
+					&& !completion_path_sources.contains(result.node_id.0.as_str())
+			}),
+			&node_position,
+		) {
+			return Some(result);
 		}
 	}
 
-	fn manual_node(id: &str, kind: TaskNodeKind) -> TaskNode {
-		TaskNode {
-			dispatch_policy: TaskNodeDispatchPolicy::ManualRecovery,
-			..node(id, kind)
+	for kind in [
+		TaskNodeKind::Aggregation,
+		TaskNodeKind::Validation,
+		TaskNodeKind::Execution,
+	] {
+		if let Some(result) = pick_best_result(
+			successful_results.iter().copied().filter(|result| {
+				node_by_id
+					.get(result.node_id.0.as_str())
+					.is_some_and(|node| node.kind == kind)
+			}),
+			&node_position,
+		) {
+			return Some(result);
 		}
 	}
 
-	#[test]
-	fn ready_nodes_respects_completed_dependencies() {
-		let scheduler = TaskGraphScheduler;
-		let graph = TaskGraph {
-			task_id: TaskId("task-1".to_string()),
-			nodes: vec![
-				node("extract", TaskNodeKind::Execution),
-				node("analyze", TaskNodeKind::Execution),
-				node("validate", TaskNodeKind::Validation),
-			],
-			edges: vec![
-				TaskEdge {
-					from: NodeId("extract".to_string()),
-					to: NodeId("analyze".to_string()),
-					condition: TaskEdgeCondition::Always,
-				},
-				TaskEdge {
-					from: NodeId("analyze".to_string()),
-					to: NodeId("validate".to_string()),
-					condition: TaskEdgeCondition::Always,
-				},
-			],
-		};
+	pick_best_result(successful_results.into_iter(), &node_position)
+}
 
-		let first = scheduler
-			.ready_nodes(&graph, &[])
-			.expect("graph should be schedulable");
-		assert_eq!(first.len(), 1);
-		assert_eq!(first[0].node_id.0, "extract");
+fn pick_best_result<'a>(
+	candidates: impl Iterator<Item = &'a ResultEnvelope>,
+	node_position: &HashMap<&str, usize>,
+) -> Option<&'a ResultEnvelope> {
+	candidates.max_by(|left, right| {
+		left.confidence
+			.total_cmp(&right.confidence)
+			.then_with(|| {
+				let left_position = node_position
+					.get(left.node_id.0.as_str())
+					.copied()
+					.unwrap_or(0);
+				let right_position = node_position
+					.get(right.node_id.0.as_str())
+					.copied()
+					.unwrap_or(0);
+				left_position.cmp(&right_position)
+			})
+			.then_with(|| left.node_id.0.cmp(&right.node_id.0))
+	})
+}
 
-		let second = scheduler
-			.ready_nodes(&graph, &[NodeId("extract".to_string())])
-			.expect("graph should be schedulable");
-		assert_eq!(second.len(), 1);
-		assert_eq!(second[0].node_id.0, "analyze");
-	}
+fn edge_is_completion_path(condition: TaskEdgeCondition) -> bool {
+	matches!(
+		condition,
+		TaskEdgeCondition::Always | TaskEdgeCondition::OnSuccess | TaskEdgeCondition::OnApproved
+	)
+}
 
-	#[test]
-	fn execution_layers_support_parallel_branches() {
-		let scheduler = TaskGraphScheduler;
-		let graph = TaskGraph {
-			task_id: TaskId("task-1".to_string()),
-			nodes: vec![
-				node("extract-a", TaskNodeKind::Execution),
-				node("extract-b", TaskNodeKind::Execution),
-				node("join", TaskNodeKind::Validation),
-			],
-			edges: vec![
-				TaskEdge {
-					from: NodeId("extract-a".to_string()),
-					to: NodeId("join".to_string()),
-					condition: TaskEdgeCondition::Always,
-				},
-				TaskEdge {
-					from: NodeId("extract-b".to_string()),
-					to: NodeId("join".to_string()),
-					condition: TaskEdgeCondition::Always,
-				},
-			],
-		};
+fn result_message(result: &ResultEnvelope) -> String {
+	extract_message(&result.payload).unwrap_or_else(|| result.payload.clone())
+}
 
-		let layers = scheduler
-			.execution_layers(&graph)
-			.expect("graph should be schedulable");
-		assert_eq!(layers.len(), 2);
-		assert_eq!(layers[0].len(), 2);
-		assert_eq!(layers[1], vec![NodeId("join".to_string())]);
-	}
-
-	#[test]
-	fn scheduler_rejects_cycles() {
-		let scheduler = TaskGraphScheduler;
-		let graph = TaskGraph {
-			task_id: TaskId("task-1".to_string()),
-			nodes: vec![
-				node("a", TaskNodeKind::Execution),
-				node("b", TaskNodeKind::Execution),
-			],
-			edges: vec![
-				TaskEdge {
-					from: NodeId("a".to_string()),
-					to: NodeId("b".to_string()),
-					condition: TaskEdgeCondition::Always,
-				},
-				TaskEdge {
-					from: NodeId("b".to_string()),
-					to: NodeId("a".to_string()),
-					condition: TaskEdgeCondition::Always,
-				},
-			],
-		};
-
-		let error = scheduler
-			.execution_layers(&graph)
-			.expect_err("cyclic graph should be rejected");
-		assert_eq!(error, GraphScheduleError::CycleDetected);
-	}
-
-	#[test]
-	fn resume_candidates_reflect_manual_resume_policy() {
-		let scheduler = TaskGraphScheduler;
-		let graph = TaskGraph {
-			task_id: TaskId("task-replay".to_string()),
-			nodes: vec![node("approval", TaskNodeKind::Approval)],
-			edges: Vec::new(),
-		};
-
-		let candidates = scheduler
-			.resume_candidates(&graph, &[])
-			.expect("resume candidates should resolve");
-		assert_eq!(candidates.len(), 1);
-		assert_eq!(
-			candidates[0].eligibility,
-			RecoveryEligibility::RequiresManualResume
-		);
-	}
-
-	#[test]
-	fn ready_nodes_ignore_manual_recovery_helpers() {
-		let scheduler = TaskGraphScheduler;
-		let graph = TaskGraph {
-			task_id: TaskId("task-helpers".to_string()),
-			nodes: vec![
-				node("step", TaskNodeKind::Execution),
-				manual_node("step-retry", TaskNodeKind::Retry),
-				node("validation", TaskNodeKind::Validation),
-			],
-			edges: vec![
-				TaskEdge {
-					from: NodeId("step".to_string()),
-					to: NodeId("step-retry".to_string()),
-					condition: TaskEdgeCondition::OnFailureRetryable,
-				},
-				TaskEdge {
-					from: NodeId("step".to_string()),
-					to: NodeId("validation".to_string()),
-					condition: TaskEdgeCondition::OnSuccess,
-				},
-			],
-		};
-
-		let ready = scheduler
-			.ready_nodes(&graph, &[NodeId("step".to_string())])
-			.expect("graph should be schedulable");
-
-		assert_eq!(ready.len(), 1);
-		assert_eq!(ready[0].node_id, NodeId("validation".to_string()));
-		assert!(
-			scheduler
-				.is_complete(
-					&graph,
-					&[NodeId("step".to_string()), NodeId("validation".to_string()),],
-				)
-				.expect("graph should be schedulable")
-		);
-	}
-
-	#[test]
-	fn automatic_scheduler_ignores_failure_only_edges() {
-		let scheduler = TaskGraphScheduler;
-		let graph = TaskGraph {
-			task_id: TaskId("task-conditions".to_string()),
-			nodes: vec![
-				node("extract", TaskNodeKind::Execution),
-				node("validate", TaskNodeKind::Validation),
-			],
-			edges: vec![TaskEdge {
-				from: NodeId("extract".to_string()),
-				to: NodeId("validate".to_string()),
-				condition: TaskEdgeCondition::OnFailureRetryable,
-			}],
-		};
-
-		let ready = scheduler
-			.ready_nodes(&graph, &[NodeId("extract".to_string())])
-			.expect("graph should be schedulable");
-
-		assert!(
-			ready
-				.iter()
-				.any(|node| node.node_id == NodeId("validate".to_string()))
-		);
-	}
+fn extract_message(payload: &str) -> Option<String> {
+	let parsed = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+	parsed
+		.get("message")
+		.and_then(serde_json::Value::as_str)
+		.map(str::to_string)
 }

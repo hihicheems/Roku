@@ -19,7 +19,6 @@ use roku_common_types::{
 	TaskEventKind, TaskId, TaskNode, TaskNodeKind, TaskReplayCursor, TaskReplayReport,
 	TaskReplaySnapshot, TaskState, ValidationEvidenceSet,
 };
-use roku_execution_graph_builder::TaskGraphScheduler;
 use roku_orchestrator::{
 	build_idempotency_key, recovery_eligibility_for_state, replay_consistency_status,
 	replay_consistency_status_from, replayed_state, replayed_state_from,
@@ -28,6 +27,7 @@ use roku_state_store::{DispatchClaim, DispatchEnvelope, DispatchLease, RetryClai
 use std::collections::{HashMap, HashSet};
 
 use crate::RuntimeService;
+use crate::legacy_graph::LegacyTaskGraphScheduler;
 
 impl RuntimeService {
 	pub fn get_task(&self, task_id: &TaskId) -> Result<Option<Task>, RuntimeError> {
@@ -380,52 +380,6 @@ impl RuntimeService {
 			.map_err(|error| RuntimeError::new(error.to_string()))
 	}
 
-	#[cfg(test)]
-	pub(super) fn collect_upstream_results(
-		&self,
-		task: &Task,
-		node_id: &NodeId,
-	) -> Result<Vec<ResultEnvelope>, RuntimeError> {
-		let graph = task
-			.graph
-			.as_ref()
-			.ok_or_else(|| RuntimeError::new("task graph is missing"))?;
-		let mut pending = graph
-			.edges
-			.iter()
-			.filter(|edge| edge.to == *node_id)
-			.map(|edge| edge.from.clone())
-			.collect::<Vec<_>>();
-		let mut visited = std::collections::HashSet::new();
-		let mut results = Vec::new();
-		let state = self.lock_state()?;
-
-		while let Some(current) = pending.pop() {
-			if !visited.insert(current.0.clone()) {
-				continue;
-			}
-
-			if let Some(result) = state
-				.result_repo
-				.load_result(&task.task_id, &current)
-				.map_err(|error| RuntimeError::new(error.to_string()))?
-			{
-				results.push(result);
-				continue;
-			}
-
-			pending.extend(
-				graph
-					.edges
-					.iter()
-					.filter(|edge| edge.to == current)
-					.map(|edge| edge.from.clone()),
-			);
-		}
-
-		Ok(results)
-	}
-
 	pub(super) fn collect_node_result_set(
 		&self,
 		task: &Task,
@@ -575,7 +529,7 @@ impl RuntimeService {
 
 		let (resume_candidates, ready_nodes, is_complete) =
 			if let Some(graph) = &reconstructed_task.graph {
-				let scheduler = TaskGraphScheduler;
+				let scheduler = LegacyTaskGraphScheduler;
 				let ready_nodes = scheduler
 					.replay_ready_nodes(graph, &reconstructed_task.completed_nodes)
 					.map_err(|error| RuntimeError::new(error.to_string()))?;
