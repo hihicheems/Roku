@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use crate::ToolRuntimeError;
@@ -37,6 +39,10 @@ pub struct RuntimeConstraints {
 	pub retry_backoff_ms: u64,
 	pub sandbox_profile: SandboxProfile,
 	pub deterministic_hooks: bool,
+	#[serde(default)]
+	pub allowed_read_roots: Vec<PathBuf>,
+	#[serde(default)]
+	pub allowed_write_roots: Vec<PathBuf>,
 }
 
 impl RuntimeConstraints {
@@ -53,6 +59,8 @@ impl Default for RuntimeConstraints {
 			retry_backoff_ms: 0,
 			sandbox_profile: SandboxProfile::NoIsolation,
 			deterministic_hooks: true,
+			allowed_read_roots: Vec::new(),
+			allowed_write_roots: Vec::new(),
 		}
 	}
 }

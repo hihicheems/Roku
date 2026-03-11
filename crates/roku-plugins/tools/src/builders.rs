@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+use crate::builtin::{fs as core_fs, python as core_python, table as core_table, web as core_web};
 use crate::config::{BuiltinToolRole, ConfiguredTool, ToolCatalogConfig};
 use roku_common_types::{
 	ResourceSelector, SkillExecutionMode, SkillExecutionPlan, SkillExecutionRequest,
@@ -59,12 +60,41 @@ pub fn build_resource_catalog_with_plugin_snapshot(
 	tool_config: &ToolCatalogConfig,
 	plugin_snapshot: &PluginRegistrySnapshot,
 ) -> ResourceCatalog {
-	let entries = tool_config
+	build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities(
+		skill_registry,
+		tool_config,
+		plugin_snapshot,
+		true,
+	)
+}
+
+pub fn build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities(
+	skill_registry: &SkillRegistry,
+	tool_config: &ToolCatalogConfig,
+	plugin_snapshot: &PluginRegistrySnapshot,
+	skill_execution_enabled: bool,
+) -> ResourceCatalog {
+	let mut entries = tool_config
 		.tools
 		.iter()
-		.filter(|_| plugin_snapshot.is_plugin_enabled("builtin-tools"))
+		.filter(|tool| {
+			plugin_snapshot.is_plugin_enabled("builtin-tools")
+				&& builtin_tool_is_runtime_enabled(tool, skill_execution_enabled)
+		})
 		.map(tool_catalog_descriptor)
 		.collect::<Vec<_>>();
+	if plugin_snapshot.is_plugin_enabled("core-fs") {
+		entries.extend(core_fs::catalog_descriptors());
+	}
+	if plugin_snapshot.is_plugin_enabled("core-table") {
+		entries.extend(core_table::catalog_descriptors());
+	}
+	if plugin_snapshot.is_plugin_enabled("core-web") {
+		entries.extend(core_web::catalog_descriptors());
+	}
+	if plugin_snapshot.is_plugin_enabled("core-python") {
+		entries.extend(core_python::catalog_descriptors());
+	}
 	let skill_entries = if plugin_snapshot.is_plugin_enabled("skill-source-local") {
 		skill_registry.catalog_descriptors().unwrap_or_default()
 	} else {
@@ -89,14 +119,46 @@ pub fn build_builtin_tool_runtime_with_plugin_snapshot(
 	tool_config: &ToolCatalogConfig,
 	plugin_snapshot: &PluginRegistrySnapshot,
 ) -> ToolRuntime {
+	build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities(
+		skill_registry,
+		tool_config,
+		plugin_snapshot,
+		true,
+	)
+}
+
+pub fn build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities(
+	skill_registry: SkillRegistry,
+	tool_config: &ToolCatalogConfig,
+	plugin_snapshot: &PluginRegistrySnapshot,
+	skill_execution_enabled: bool,
+) -> ToolRuntime {
 	let mut runtime = ToolRuntime::default();
 	if !plugin_snapshot.is_plugin_enabled("builtin-tools") {
+		if plugin_snapshot.is_plugin_enabled("core-fs") {
+			core_fs::register_tools(&mut runtime)
+				.expect("filesystem tools must register successfully");
+		}
+		if plugin_snapshot.is_plugin_enabled("core-table") {
+			core_table::register_tools(&mut runtime)
+				.expect("table tools must register successfully");
+		}
+		if plugin_snapshot.is_plugin_enabled("core-web") {
+			core_web::register_tools(&mut runtime).expect("web tools must register successfully");
+		}
+		if plugin_snapshot.is_plugin_enabled("core-python") {
+			core_python::register_tools(&mut runtime)
+				.expect("python tools must register successfully");
+		}
 		return runtime;
 	}
 	runtime
 		.register_tool(SkillInstallTool::legacy(skill_registry.clone()))
 		.expect("skill install tool must register successfully");
 	for tool in &tool_config.tools {
+		if !builtin_tool_is_runtime_enabled(tool, skill_execution_enabled) {
+			continue;
+		}
 		match tool.role {
 			BuiltinToolRole::SkillInstall => runtime
 				.register_tool(SkillInstallTool::new(tool, skill_registry.clone()))
@@ -116,6 +178,18 @@ pub fn build_builtin_tool_runtime_with_plugin_snapshot(
 				.register_tool(WorkerReportTool::from_config(tool))
 				.expect("default runtime tools must register successfully"),
 		}
+	}
+	if plugin_snapshot.is_plugin_enabled("core-fs") {
+		core_fs::register_tools(&mut runtime).expect("filesystem tools must register successfully");
+	}
+	if plugin_snapshot.is_plugin_enabled("core-table") {
+		core_table::register_tools(&mut runtime).expect("table tools must register successfully");
+	}
+	if plugin_snapshot.is_plugin_enabled("core-web") {
+		core_web::register_tools(&mut runtime).expect("web tools must register successfully");
+	}
+	if plugin_snapshot.is_plugin_enabled("core-python") {
+		core_python::register_tools(&mut runtime).expect("python tools must register successfully");
 	}
 	runtime
 }
@@ -144,6 +218,21 @@ pub fn build_llm_tool_runtime_with_plugin_snapshot(
 ) -> ToolRuntime {
 	let mut runtime = ToolRuntime::default();
 	if !plugin_snapshot.is_plugin_enabled("builtin-tools") {
+		if plugin_snapshot.is_plugin_enabled("core-fs") {
+			core_fs::register_tools(&mut runtime)
+				.expect("filesystem tools must register successfully");
+		}
+		if plugin_snapshot.is_plugin_enabled("core-table") {
+			core_table::register_tools(&mut runtime)
+				.expect("table tools must register successfully");
+		}
+		if plugin_snapshot.is_plugin_enabled("core-web") {
+			core_web::register_tools(&mut runtime).expect("web tools must register successfully");
+		}
+		if plugin_snapshot.is_plugin_enabled("core-python") {
+			core_python::register_tools(&mut runtime)
+				.expect("python tools must register successfully");
+		}
 		return runtime;
 	}
 	runtime
@@ -174,6 +263,18 @@ pub fn build_llm_tool_runtime_with_plugin_snapshot(
 				))
 				.expect("llm runtime tools must register successfully"),
 		}
+	}
+	if plugin_snapshot.is_plugin_enabled("core-fs") {
+		core_fs::register_tools(&mut runtime).expect("filesystem tools must register successfully");
+	}
+	if plugin_snapshot.is_plugin_enabled("core-table") {
+		core_table::register_tools(&mut runtime).expect("table tools must register successfully");
+	}
+	if plugin_snapshot.is_plugin_enabled("core-web") {
+		core_web::register_tools(&mut runtime).expect("web tools must register successfully");
+	}
+	if plugin_snapshot.is_plugin_enabled("core-python") {
+		core_python::register_tools(&mut runtime).expect("python tools must register successfully");
 	}
 	runtime
 }
@@ -314,21 +415,7 @@ impl Tool for SkillExecuteTool {
 			allowed_output_root: Some(display_path(&output_root)),
 			expected_artifacts: Vec::new(),
 		};
-		let result = if !request_wants_skill_execution(input.goal) {
-			SkillExecutionResult {
-				selected_skill: record.descriptor.name.clone(),
-				execution_mode: Some(SkillExecutionMode::Advisory),
-				success: false,
-				message: format!(
-					"Referenced skill `{}` for guidance only. No scripts were run and no files were created.",
-					record.descriptor.name
-				),
-				created_paths: Vec::new(),
-				executed_scripts: Vec::new(),
-				validation_status: Some("not_executed".to_string()),
-				generated_skill_name: None,
-			}
-		} else if skill_name_is(&record.descriptor.name, "skill-creator") {
+		let result = if skill_name_is(&record.descriptor.name, "skill-creator") {
 			execute_skill_creator(
 				&self.registry,
 				self.router.as_deref(),
@@ -455,31 +542,6 @@ impl Tool for PromptedLlmTool {
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
 		let input = request_input(&request)?;
 		let skill_query = skill_context_query(&input);
-		if let Some(answer) = direct_runtime_answer(input.goal) {
-			log_runtime_output(
-				"used deterministic runtime answer",
-				[
-					("worker_id", self.worker_id.to_string()),
-					("node_id", input.node_id.to_string()),
-				],
-			);
-			return Ok(json!({
-				"worker_id": self.worker_id,
-				"message": answer,
-				"raw_message": Value::Null,
-				"task_id": input.task_id,
-				"node_id": input.node_id,
-				"goal": input.goal,
-				"summary": input.summary,
-				"provider": "runtime-context",
-				"model_id": "deterministic",
-				"prompt_tokens": 0,
-				"output_tokens": 0,
-				"latency_ms": 0,
-				"attempt": request.attempt,
-				"invocation_key": request.invocation_key,
-			}));
-		}
 		let skill_context = self
 			.skill_registry
 			.render_prompt_context_for_query(&skill_query, skill_prompt_context_budget(&input))
@@ -677,159 +739,12 @@ fn current_runtime_time() -> OffsetDateTime {
 	OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc())
 }
 
-fn direct_runtime_answer(goal: &str) -> Option<String> {
-	let normalized = goal.trim().to_lowercase();
-	if normalized.is_empty() {
-		return None;
-	}
-
-	let asks_weekday = normalized.contains("星期几")
-		|| normalized.contains("周几")
-		|| normalized.contains("weekday")
-		|| normalized.contains("what day is today")
-		|| normalized.contains("what day is it today");
-	let asks_date = normalized.contains("今天几号")
-		|| normalized.contains("今天多少号")
-		|| normalized.contains("today date")
-		|| normalized.contains("today's date")
-		|| normalized.contains("what date is it")
-		|| normalized == "几号"
-		|| normalized == "几号？";
-	let asks_time = normalized.contains("现在几点")
-		|| normalized.contains("几点了")
-		|| normalized.contains("现在时间")
-		|| normalized.contains("what time is it")
-		|| normalized.contains("current time")
-		|| normalized == "几点"
-		|| normalized == "几点？";
-
-	if !asks_weekday && !asks_date && !asks_time {
-		return None;
-	}
-
-	let now = current_runtime_time();
-	let date = now.date();
-	let time = now.time();
-	let weekday = chinese_weekday(now.weekday());
-	let date_label = format!(
-		"{:04}年{}月{}日",
-		date.year(),
-		u8::from(date.month()),
-		date.day()
-	);
-	let time_label = format!("{:02}:{:02}", time.hour(), time.minute());
-
-	match (asks_date, asks_weekday, asks_time) {
-		(true, true, true) | (true, false, true) => Some(format!(
-			"今天是{date_label}，{weekday}，现在是{time_label}。"
-		)),
-		(true, true, false) => Some(format!("今天是{date_label}，{weekday}。")),
-		(true, false, false) => Some(format!("今天是{date_label}。")),
-		(false, true, true) => Some(format!("今天是{weekday}，现在是{time_label}。")),
-		(false, true, false) => Some(format!("{weekday}。")),
-		(false, false, true) => Some(format!("现在是{time_label}。")),
-		(false, false, false) => None,
-	}
-}
-
 fn selected_skill_from_input(input: &ToolInput<'_>) -> Option<String> {
 	input
 		.resource_selectors
 		.iter()
 		.find_map(|selector| selector.strip_prefix("skill:"))
 		.map(str::to_string)
-}
-
-fn request_wants_skill_execution(goal: &str) -> bool {
-	let normalized = goal.to_ascii_lowercase();
-	let advisory_intent = [
-		"summarize",
-		"summary",
-		"explain",
-		"describe",
-		"what is",
-		"how does",
-		"overview",
-		"list",
-		"show me",
-		"总结",
-		"概括",
-		"解释",
-		"说明",
-		"介绍",
-		"是什么",
-		"怎么用",
-		"有哪些",
-		"列出",
-	]
-	.iter()
-	.any(|pattern| normalized.contains(pattern) || goal.contains(pattern));
-	let execution_intent = [
-		"create",
-		"build",
-		"generate",
-		"make",
-		"write",
-		"run",
-		"execute",
-		"install",
-		"modify",
-		"update",
-		"fix",
-		"帮我",
-		"请帮",
-		"创建",
-		"新建",
-		"生成",
-		"制作",
-		"写一个",
-		"运行",
-		"执行",
-		"安装",
-		"修改",
-		"更新",
-		"修复",
-	]
-	.iter()
-	.any(|pattern| normalized.contains(pattern) || goal.contains(pattern));
-
-	execution_intent || (!advisory_intent && has_goal_work_intent(goal))
-}
-
-fn has_goal_work_intent(goal: &str) -> bool {
-	let normalized = goal.to_ascii_lowercase();
-	[
-		"install",
-		"setup",
-		"use ",
-		"create",
-		"build",
-		"generate",
-		"analyze",
-		"analyse",
-		"review",
-		"search",
-		"find",
-		"summarize",
-		"debug",
-		"fix",
-		"帮我",
-		"请帮",
-		"安装",
-		"装一个",
-		"使用",
-		"创建",
-		"新建",
-		"生成",
-		"分析",
-		"总结",
-		"检索",
-		"搜索",
-		"修复",
-		"排查",
-	]
-	.iter()
-	.any(|pattern| normalized.contains(pattern) || goal.contains(pattern))
 }
 
 fn skill_name_is(left: &str, right: &str) -> bool {
@@ -1004,37 +919,36 @@ fn plan_skill_creator(
 	input: &ToolInput<'_>,
 	execution_request: &SkillExecutionRequest,
 ) -> Result<SkillCreatorExecutionPlan, ToolFailure> {
-	if let Some(router) = router {
-		let prompt = format!(
-			"Return JSON only.\nYou are planning a local skill scaffold.\nCurrent installed skill: {}\nUser goal: {}\nAllowed output root: {}\nKnown resources in the installed skill: {}\nProduce a compact JSON object with keys skill_name, description, overview, short_description, default_prompt, resources.\nRules:\n- skill_name must be lowercase hyphen-case.\n- description must say when to use the skill.\n- overview must be 1 short paragraph.\n- resources must be zero or more of scripts,references,assets.\n- Do not claim any files already exist.",
-			record.descriptor.name,
-			input.goal,
-			execution_request
-				.allowed_output_root
-				.as_deref()
-				.unwrap_or("(unknown)"),
-			execution_request.allowed_script_paths.join(", "),
-		);
-		let response = router
-			.generate(&GenerationRequest {
-				system_prompt: Some(
-					"You generate structured plans for local skill creation. Return JSON only."
-						.to_string(),
-				),
-				prompt,
-				expected_output_tokens: 300,
-				risk_tier: RiskTier::Medium,
-				preferred_provider: None,
-				budget_tokens_remaining: input.budget_tokens,
-				budget_cost_remaining_usd: 1.0,
-			})
-			.map_err(llm_failure)?;
-		if let Some(plan) = parse_json_reply::<SkillCreatorExecutionPlan>(&response.output) {
-			return Ok(plan);
-		}
-	}
-
-	Ok(infer_skill_creator_plan(input.goal))
+	let router = router.ok_or_else(|| {
+		ToolFailure::terminal("skill-creator execution requires a live llm router")
+	})?;
+	let prompt = format!(
+		"Return JSON only.\nYou are planning a local skill scaffold.\nCurrent installed skill: {}\nUser goal: {}\nAllowed output root: {}\nKnown resources in the installed skill: {}\nProduce a compact JSON object with keys skill_name, description, overview, short_description, default_prompt, resources.\nRules:\n- skill_name must be lowercase hyphen-case.\n- description must say when to use the skill.\n- overview must be 1 short paragraph.\n- resources must be zero or more of scripts,references,assets.\n- Do not claim any files already exist.",
+		record.descriptor.name,
+		input.goal,
+		execution_request
+			.allowed_output_root
+			.as_deref()
+			.unwrap_or("(unknown)"),
+		execution_request.allowed_script_paths.join(", "),
+	);
+	let response = router
+		.generate(&GenerationRequest {
+			system_prompt: Some(
+				"You generate structured plans for local skill creation. Return JSON only."
+					.to_string(),
+			),
+			prompt,
+			expected_output_tokens: 300,
+			risk_tier: RiskTier::Medium,
+			preferred_provider: None,
+			budget_tokens_remaining: input.budget_tokens,
+			budget_cost_remaining_usd: 1.0,
+		})
+		.map_err(llm_failure)?;
+	parse_json_reply::<SkillCreatorExecutionPlan>(&response.output).ok_or_else(|| {
+		ToolFailure::terminal("skill-creator execution planner did not return valid json")
+	})
 }
 
 fn plan_script_execution(
@@ -1069,48 +983,6 @@ fn plan_script_execution(
 		.map_err(llm_failure)?;
 	parse_json_reply::<SkillExecutionPlan>(&response.output)
 		.ok_or_else(|| ToolFailure::terminal("skill execution planner did not return valid json"))
-}
-
-fn infer_skill_creator_plan(goal: &str) -> SkillCreatorExecutionPlan {
-	let inferred_name = infer_skill_name_from_goal(goal).unwrap_or_else(|| "new-skill".to_string());
-	let description = format!(
-		"Use this skill when the user needs help with {}.",
-		inferred_name.replace('-', " ")
-	);
-	SkillCreatorExecutionPlan {
-		skill_name: inferred_name.clone(),
-		description,
-		overview: format!(
-			"This skill provides concise guidance and reusable workflow context for {} tasks.",
-			inferred_name.replace('-', " ")
-		),
-		short_description: Some(format!(
-			"Help with {} workflows",
-			display_name(&inferred_name)
-		)),
-		default_prompt: Some(format!("Use the {} skill for this task.", inferred_name)),
-		resources: Vec::new(),
-	}
-}
-
-fn infer_skill_name_from_goal(goal: &str) -> Option<String> {
-	let normalized = goal
-		.split_whitespace()
-		.collect::<Vec<_>>()
-		.join(" ")
-		.to_ascii_lowercase();
-	for marker in ["叫", "named", "called", "name it", "名称"] {
-		if let Some((_, suffix)) = normalized.split_once(marker) {
-			let candidate = normalize_skill_name(suffix);
-			if !candidate.is_empty() {
-				return Some(candidate);
-			}
-		}
-	}
-	if normalized.contains("python") {
-		return Some("python-skill".to_string());
-	}
-	None
 }
 
 fn skill_markdown(skill_name: &str, plan: &SkillCreatorExecutionPlan) -> String {
@@ -1353,18 +1225,6 @@ pub(crate) fn inventory_context_json(
 	.unwrap_or_else(|_| "{}".to_string())
 }
 
-fn chinese_weekday(weekday: time::Weekday) -> &'static str {
-	match weekday {
-		time::Weekday::Monday => "星期一",
-		time::Weekday::Tuesday => "星期二",
-		time::Weekday::Wednesday => "星期三",
-		time::Weekday::Thursday => "星期四",
-		time::Weekday::Friday => "星期五",
-		time::Weekday::Saturday => "星期六",
-		time::Weekday::Sunday => "星期日",
-	}
-}
-
 #[derive(Debug, Clone, Serialize)]
 struct RuntimeInventory {
 	tools: Vec<InventoryTool>,
@@ -1438,7 +1298,7 @@ fn short_description(value: &str, max_chars: usize) -> String {
 	}
 }
 
-fn finalize_llm_message(worker_id: &str, goal: &str, output: &str) -> String {
+fn finalize_llm_message(worker_id: &str, _goal: &str, output: &str) -> String {
 	let trimmed = output.trim();
 	if trimmed.is_empty() {
 		return String::new();
@@ -1449,7 +1309,7 @@ fn finalize_llm_message(worker_id: &str, goal: &str, output: &str) -> String {
 
 	let sanitized = sanitize_final_reply(trimmed);
 	if sanitized.is_empty() {
-		direct_runtime_answer(goal).unwrap_or_else(|| trimmed.to_string())
+		trimmed.to_string()
 	} else {
 		sanitized
 	}
@@ -1687,6 +1547,8 @@ fn tool_descriptor(
 			retry_backoff_ms: 0,
 			sandbox_profile,
 			deterministic_hooks: true,
+			allowed_read_roots: Vec::new(),
+			allowed_write_roots: Vec::new(),
 		},
 	}
 }
@@ -1709,6 +1571,10 @@ fn tool_catalog_descriptor(tool: &ConfiguredTool) -> CatalogDescriptor {
 		key_commands: Vec::new(),
 		use_cases: Vec::new(),
 	}
+}
+
+fn builtin_tool_is_runtime_enabled(tool: &ConfiguredTool, skill_execution_enabled: bool) -> bool {
+	!matches!(tool.role, BuiltinToolRole::SkillExecute) || skill_execution_enabled
 }
 
 fn worker_id_for_role(role: BuiltinToolRole) -> &'static str {
@@ -1824,9 +1690,9 @@ mod tests {
 	use std::sync::{Arc, Mutex};
 
 	use super::{
-		PromptedLlmTool, allowed_script_paths, build_resource_catalog, direct_runtime_answer,
-		execute_skill_creator, first_url_in_text, inventory_context_json, request_input,
-		runtime_context_block, sanitize_final_reply, user_visible_prompt,
+		PromptedLlmTool, allowed_script_paths, build_resource_catalog, execute_skill_creator,
+		first_url_in_text, inventory_context_json, request_input, runtime_context_block,
+		sanitize_final_reply, user_visible_prompt,
 	};
 	use crate::config::{BuiltinToolRole, ToolCatalogConfig};
 	use roku_plugin_host::{SandboxProfile, Tool, ToolInvocationRequest};
@@ -1862,6 +1728,9 @@ mod tests {
 			}),
 			attempt: 1,
 			sandbox_profile: SandboxProfile::NoIsolation,
+			attachments: Vec::new(),
+			allowed_read_roots: Vec::new(),
+			allowed_write_roots: Vec::new(),
 		};
 
 		let input = request_input(&request).expect("tool input should parse");
@@ -1880,20 +1749,6 @@ mod tests {
 		assert!(prompt.contains("Authoritative local inventory JSON"));
 		assert!(prompt.contains("Execution authority"));
 		assert!(prompt.contains("side_effects_allowed"));
-	}
-
-	#[test]
-	fn direct_runtime_answer_returns_grounded_weekday() {
-		let answer = direct_runtime_answer("今天周几？").expect("runtime answer should exist");
-		assert!(answer.starts_with("星期"));
-	}
-
-	#[test]
-	fn direct_runtime_answer_returns_grounded_date_and_time() {
-		let answer =
-			direct_runtime_answer("今天几号？现在几点了？").expect("runtime answer should exist");
-		assert!(answer.contains("今天是"));
-		assert!(answer.contains("现在是"));
 	}
 
 	#[test]
@@ -1983,6 +1838,30 @@ So, I'll output: "星期日""#;
 		}
 	}
 
+	struct StaticOutputProvider {
+		output: String,
+	}
+
+	impl LlmProvider for StaticOutputProvider {
+		fn provider_name(&self) -> &'static str {
+			"static-output-provider"
+		}
+
+		fn complete(
+			&self,
+			_model: &ModelProfile,
+			_request: &GenerationRequest,
+		) -> Result<ProviderResponse, ProviderCallError> {
+			Ok(ProviderResponse {
+				output: self.output.clone(),
+				finish_reason: None,
+				prompt_tokens: 12,
+				output_tokens: 32,
+				latency_ms: 10,
+			})
+		}
+	}
+
 	#[test]
 	fn prompted_tool_injects_installed_skill_context_when_referenced() {
 		let tool_config = ToolCatalogConfig::default();
@@ -2039,6 +1918,9 @@ So, I'll output: "星期日""#;
 			}),
 			attempt: 1,
 			sandbox_profile: SandboxProfile::NoIsolation,
+			attachments: Vec::new(),
+			allowed_read_roots: Vec::new(),
+			allowed_write_roots: Vec::new(),
 		})
 		.expect("invoke should succeed");
 
@@ -2160,6 +2042,9 @@ So, I'll output: "星期日""#;
 			}),
 			attempt: 1,
 			sandbox_profile: SandboxProfile::NoIsolation,
+			attachments: Vec::new(),
+			allowed_read_roots: Vec::new(),
+			allowed_write_roots: Vec::new(),
 		})
 		.expect("invoke should succeed");
 
@@ -2233,6 +2118,9 @@ So, I'll output: "星期日""#;
 			}),
 			attempt: 1,
 			sandbox_profile: SandboxProfile::NoIsolation,
+			attachments: Vec::new(),
+			allowed_read_roots: Vec::new(),
+			allowed_write_roots: Vec::new(),
 		})
 		.expect("invoke should succeed");
 
@@ -2272,6 +2160,21 @@ print("ok")
 		registry
 			.register_local_skill(&creator_dir, "test-suite")
 			.expect("creator skill should register");
+		let mut router = LlmRouter::new(RoutingPolicy {
+			max_request_cost_usd: 1.0,
+			max_latency_ms: 5_000,
+		});
+		router.register_provider(StaticOutputProvider {
+			output: r#"{"skill_name":"python-skill","description":"Use this skill when the user needs help with python workflows.","overview":"This skill provides concise guidance and reusable workflow context for python tasks.","short_description":"Help with python workflows","default_prompt":"Use the python-skill skill for this task.","resources":[]}"#.to_string(),
+		});
+		router.register_model(ModelProfile {
+			model_id: "static-output-model".to_string(),
+			provider: "static-output-provider".to_string(),
+			max_context_tokens: 16_000,
+			cost_per_1k_tokens_usd: 0.0,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		});
 
 		let generated_root = registry_root.path().join("generated");
 		let record = registry
@@ -2302,7 +2205,7 @@ print("ok")
 
 		let result = execute_skill_creator(
 			&registry,
-			None,
+			Some(&router),
 			&record,
 			&input,
 			&generated_root,

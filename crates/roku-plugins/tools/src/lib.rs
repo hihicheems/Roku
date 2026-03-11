@@ -20,7 +20,9 @@ mod config;
 
 pub use builders::{
 	build_builtin_tool_runtime, build_builtin_tool_runtime_with_plugin_snapshot,
+	build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities,
 	build_llm_tool_runtime, build_llm_tool_runtime_with_plugin_snapshot, build_resource_catalog,
 	build_resource_catalog_with_plugin_snapshot,
+	build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities,
 };
 pub use config::{BuiltinToolRole, ConfiguredTool, ToolCatalogConfig, ToolCatalogConfigError};

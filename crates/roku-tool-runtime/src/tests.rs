@@ -70,13 +70,15 @@ impl FlakyTool {
 				input_schema: ToolSchema::default(),
 				output_schema: "flaky.v1".to_string(),
 				required_capabilities: Vec::new(),
-				runtime_constraints: RuntimeConstraints {
-					timeout_ms: 1_000,
-					max_retries: 3,
-					retry_backoff_ms: 0,
-					sandbox_profile: SandboxProfile::NoIsolation,
-					deterministic_hooks: true,
-				},
+					runtime_constraints: RuntimeConstraints {
+						timeout_ms: 1_000,
+						max_retries: 3,
+						retry_backoff_ms: 0,
+						sandbox_profile: SandboxProfile::NoIsolation,
+						deterministic_hooks: true,
+						allowed_read_roots: Vec::new(),
+						allowed_write_roots: Vec::new(),
+					},
 			},
 			failures_left: Mutex::new(failures_left),
 		}
@@ -115,13 +117,15 @@ impl SlowTool {
 				input_schema: ToolSchema::default(),
 				output_schema: "slow.v1".to_string(),
 				required_capabilities: Vec::new(),
-				runtime_constraints: RuntimeConstraints {
-					timeout_ms,
-					max_retries: 0,
-					retry_backoff_ms: 0,
-					sandbox_profile: SandboxProfile::ContainerRestricted,
-					deterministic_hooks: true,
-				},
+					runtime_constraints: RuntimeConstraints {
+						timeout_ms,
+						max_retries: 0,
+						retry_backoff_ms: 0,
+						sandbox_profile: SandboxProfile::ContainerRestricted,
+						deterministic_hooks: true,
+						allowed_read_roots: Vec::new(),
+						allowed_write_roots: Vec::new(),
+					},
 			},
 			sleep_ms,
 		}
@@ -164,23 +168,26 @@ fn invoke_registered_tool_with_descriptor_constraints() {
 	let mut runtime = ToolRuntime::default();
 	let tool = EchoJsonTool::new(
 		vec!["artifact:read:dataset/*".to_string()],
-		RuntimeConstraints {
-			timeout_ms: 1_000,
-			max_retries: 0,
-			retry_backoff_ms: 0,
-			sandbox_profile: SandboxProfile::ReadOnlyFs,
-			deterministic_hooks: true,
-		},
+			RuntimeConstraints {
+				timeout_ms: 1_000,
+				max_retries: 0,
+				retry_backoff_ms: 0,
+				sandbox_profile: SandboxProfile::ReadOnlyFs,
+				deterministic_hooks: true,
+				allowed_read_roots: Vec::new(),
+				allowed_write_roots: Vec::new(),
+			},
 	);
 	runtime.register_tool(tool).expect("register tool");
 
 	let result = runtime
-		.invoke(ToolInvocation {
-			tool_name: "echo-json".to_string(),
-			input: json!({"text":"hello"}),
-			granted_capabilities: vec!["artifact:read:dataset/*".to_string()],
-			invocation_key: None,
-		})
+			.invoke(ToolInvocation {
+				tool_name: "echo-json".to_string(),
+				input: json!({"text":"hello"}),
+				granted_capabilities: vec!["artifact:read:dataset/*".to_string()],
+				invocation_key: None,
+				attachments: Vec::new(),
+			})
 		.expect("invoke tool");
 
 	assert_eq!(result.attempts, 1);
@@ -202,12 +209,13 @@ fn reject_when_capability_is_missing() {
 		.expect("register tool");
 
 	let error = runtime
-		.invoke(ToolInvocation {
-			tool_name: "echo-json".to_string(),
-			input: json!({"text":"hello"}),
-			granted_capabilities: Vec::new(),
-			invocation_key: Some("cap-denied".to_string()),
-		})
+			.invoke(ToolInvocation {
+				tool_name: "echo-json".to_string(),
+				input: json!({"text":"hello"}),
+				granted_capabilities: Vec::new(),
+				invocation_key: Some("cap-denied".to_string()),
+				attachments: Vec::new(),
+			})
 		.expect_err("expected capability denied");
 
 	match error {
@@ -240,12 +248,13 @@ fn retry_retriable_failure_then_succeed() {
 		.expect("register flaky tool");
 
 	let result = runtime
-		.invoke(ToolInvocation {
-			tool_name: "flaky".to_string(),
-			input: json!({}),
-			granted_capabilities: Vec::new(),
-			invocation_key: Some("flaky-invoke".to_string()),
-		})
+			.invoke(ToolInvocation {
+				tool_name: "flaky".to_string(),
+				input: json!({}),
+				granted_capabilities: Vec::new(),
+				invocation_key: Some("flaky-invoke".to_string()),
+				attachments: Vec::new(),
+			})
 		.expect("invoke flaky tool");
 	assert_eq!(result.attempts, 3);
 	assert_eq!(result.output["status"], "ok");
@@ -266,12 +275,13 @@ fn timeout_is_reported_when_execution_exceeds_budget() {
 		.expect("register slow tool");
 
 	let error = runtime
-		.invoke(ToolInvocation {
-			tool_name: "slow".to_string(),
-			input: json!({}),
-			granted_capabilities: Vec::new(),
-			invocation_key: Some("slow-invoke".to_string()),
-		})
+			.invoke(ToolInvocation {
+				tool_name: "slow".to_string(),
+				input: json!({}),
+				granted_capabilities: Vec::new(),
+				invocation_key: Some("slow-invoke".to_string()),
+				attachments: Vec::new(),
+			})
 		.expect_err("timeout expected");
 
 	match error {
@@ -296,23 +306,26 @@ fn deterministic_hook_trace_ids_follow_stable_order() {
 	runtime
 		.register_tool(EchoJsonTool::new(
 			Vec::new(),
-			RuntimeConstraints {
-				timeout_ms: 1_000,
-				max_retries: 0,
-				retry_backoff_ms: 0,
-				sandbox_profile: SandboxProfile::NoIsolation,
-				deterministic_hooks: true,
-			},
+				RuntimeConstraints {
+					timeout_ms: 1_000,
+					max_retries: 0,
+					retry_backoff_ms: 0,
+					sandbox_profile: SandboxProfile::NoIsolation,
+					deterministic_hooks: true,
+					allowed_read_roots: Vec::new(),
+					allowed_write_roots: Vec::new(),
+				},
 		))
 		.expect("register tool");
 
 	runtime
-		.invoke(ToolInvocation {
-			tool_name: "echo-json".to_string(),
-			input: json!({"text":"order"}),
-			granted_capabilities: Vec::new(),
-			invocation_key: Some("inv-001".to_string()),
-		})
+			.invoke(ToolInvocation {
+				tool_name: "echo-json".to_string(),
+				input: json!({"text":"order"}),
+				granted_capabilities: Vec::new(),
+				invocation_key: Some("inv-001".to_string()),
+				attachments: Vec::new(),
+			})
 		.expect("invoke tool");
 
 	let events = hook.events();

@@ -13,17 +13,19 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use crate::result::policy_rejection_result;
+use crate::result::{policy_rejection_result, tool_failure_result, tool_success_result};
 use crate::router::{
 	DirectRouteExecutionResult, DirectRouteKind, DirectRoutePlan, EscalationAction, IntentFamily,
 	RouteClassifierContext, RouteDecisionResult, RouteScratchpad, classify_request,
 };
 use crate::tool_config::ToolCatalogConfig;
 use crate::tools::{
-	build_builtin_tool_runtime_with_plugin_snapshot, build_llm_tool_runtime_with_plugin_snapshot,
-	build_resource_catalog_with_plugin_snapshot,
+	build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities,
+	build_llm_tool_runtime_with_plugin_snapshot,
+	build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities,
 };
 use crate::workers::{
 	data_worker_with_config, generic_worker_with_config, inventory_worker_with_config,
@@ -31,17 +33,17 @@ use crate::workers::{
 	skill_worker_with_config,
 };
 use roku_common_types::{
-	AgentContext, AggregationMode, EvidenceItem, JoinPolicy, NodeBudgetSnapshot, NodeId,
-	PolicyBindings, RequestEnvelope, RerunPolicy, ResourceSelector, ResultStatus, RetryPolicy,
-	TaskId, TaskNodeDispatchPolicy, TaskNodeKind,
+	AgentContext, AggregationMode, ConversationRole, ConversationTurn, EvidenceItem, JoinPolicy,
+	NodeBudgetSnapshot, NodeId, PolicyBindings, RequestEnvelope, RerunPolicy, ResourceSelector,
+	ResultStatus, RetryPolicy, TaskId, TaskNodeDispatchPolicy, TaskNodeKind,
 };
 use roku_common_types::{AgentInstanceSpec, ResultEnvelope, TaskNode};
 use roku_plugin_catalog::ResourceCatalog;
 use roku_plugin_core::PluginRegistrySnapshot;
-use roku_plugin_host::ToolRuntime;
+use roku_plugin_host::{ToolInvocation, ToolRuntime};
 use roku_plugin_llm::LlmRouter;
 use roku_plugin_skills::SkillRegistry;
-use serde_json::json;
+use serde_json::{Value, json};
 
 pub trait AgentWorker {
 	fn execute(&self, spec: &AgentInstanceSpec, node: &TaskNode) -> ResultEnvelope;
@@ -65,6 +67,7 @@ pub struct GenericAgentRuntime {
 	tool_config: ToolCatalogConfig,
 	plugin_snapshot: PluginRegistrySnapshot,
 	route_router: Option<Arc<LlmRouter>>,
+	skill_execution_available: bool,
 	scratchpads: Mutex<HashMap<String, RouteScratchpad>>,
 }
 
@@ -88,6 +91,10 @@ impl GenericAgentRuntime {
 		tool_config: ToolCatalogConfig,
 		plugin_snapshot: PluginRegistrySnapshot,
 	) -> Self {
+		let skill_execution_available = resource_catalog
+			.entries()
+			.iter()
+			.any(|entry| entry.name == "skill.execute");
 		let shared_tool_runtime = Arc::new(tool_runtime);
 		let mut runtime = Self {
 			workers: Vec::new(),
@@ -96,6 +103,7 @@ impl GenericAgentRuntime {
 			tool_config: tool_config.clone(),
 			plugin_snapshot,
 			route_router: None,
+			skill_execution_available,
 			scratchpads: Mutex::new(HashMap::new()),
 		};
 		runtime.register_worker(
@@ -149,16 +157,18 @@ impl GenericAgentRuntime {
 		tool_config: ToolCatalogConfig,
 		plugin_snapshot: PluginRegistrySnapshot,
 	) -> Self {
-		let resource_catalog = build_resource_catalog_with_plugin_snapshot(
+		let resource_catalog = build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities(
 			&skill_registry,
 			&tool_config,
 			&plugin_snapshot,
+			false,
 		);
 		Self::with_tool_runtime_and_plugin_snapshot(
-			build_builtin_tool_runtime_with_plugin_snapshot(
+			build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities(
 				skill_registry,
 				&tool_config,
 				&plugin_snapshot,
+				false,
 			),
 			resource_catalog,
 			tool_config,
@@ -233,10 +243,11 @@ impl GenericAgentRuntime {
 		tool_config: ToolCatalogConfig,
 		plugin_snapshot: PluginRegistrySnapshot,
 	) -> Self {
-		let resource_catalog = build_resource_catalog_with_plugin_snapshot(
+		let resource_catalog = build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities(
 			&skill_registry,
 			&tool_config,
 			&plugin_snapshot,
+			true,
 		);
 		Self::with_tool_runtime_and_plugin_snapshot(
 			build_llm_tool_runtime_with_plugin_snapshot(
@@ -276,6 +287,7 @@ impl GenericAgentRuntime {
 				tool_config: &self.tool_config,
 				plugin_snapshot: &self.plugin_snapshot,
 				route_router: self.route_router.as_deref(),
+				skill_execution_available: self.skill_execution_available,
 			},
 			request,
 		);
@@ -345,13 +357,16 @@ impl GenericAgentRuntime {
 				],
 				None,
 			),
-			DirectRouteKind::Tool { selector } => self.execute_tool_like_route(
+			DirectRouteKind::ToolInvocation {
+				selector,
+				arguments,
+				attachments,
+			} => self.execute_direct_tool_invocation(
 				task_id,
 				request,
-				"direct-route",
-				&format!("Use selected tool `{}` directly", selector.name()),
-				vec![selector.clone()],
-				None,
+				selector,
+				arguments,
+				attachments,
 			),
 			DirectRouteKind::Inventory => self.execute_tool_like_route(
 				task_id,
@@ -395,12 +410,20 @@ impl GenericAgentRuntime {
 				result.decision.intent_family,
 				&result.decision.reason,
 			),
-			EscalationAction::EnterLimitedPlanning => fallback_answer_message(
-				&request.goal,
-				result.decision.intent_family,
-				&result.decision.reason,
-			),
+			EscalationAction::EnterLimitedPlanning => {
+				limited_planning_compatibility_message(&request.goal, &result.decision.reason)
+			}
 		};
+
+		if matches!(result.action, EscalationAction::EnterLimitedPlanning) {
+			return self.synthetic_message_result(
+				task_id,
+				"direct-route",
+				"direct-route:compatibility-fallback",
+				fallback_message,
+				0.74,
+			);
+		}
 
 		if self.route_router.is_none() {
 			return self.synthetic_message_result(
@@ -421,10 +444,8 @@ impl GenericAgentRuntime {
 				"Explain that the requested capability is not currently available in the runtime inventory. Intent family: {:?}. Do not claim execution success.",
 				result.decision.intent_family
 			),
-			EscalationAction::EnterLimitedPlanning => {
-				"Explain that the request needs a planning-heavy workflow and will be escalated."
-					.to_string()
-			}
+			EscalationAction::EnterLimitedPlanning =>
+				"Explain that the request would need a planning-heavy workflow, but this runtime only exposes direct routes and compatibility fallback responses for new requests. Do not claim any execution happened.".to_string(),
 		};
 		self.execute_tool_like_route(
 			task_id,
@@ -476,7 +497,7 @@ impl GenericAgentRuntime {
 			RouteDecisionResult::Direct(plan) => match &plan.kind {
 				DirectRouteKind::SkillAdvisory { selector }
 				| DirectRouteKind::SkillExecutable { selector }
-				| DirectRouteKind::Tool { selector } => Some(selector.display_key()),
+				| DirectRouteKind::ToolInvocation { selector, .. } => Some(selector.display_key()),
 				DirectRouteKind::Inventory
 				| DirectRouteKind::Conversation
 				| DirectRouteKind::SkillInstall { .. } => None,
@@ -609,6 +630,113 @@ impl GenericAgentRuntime {
 			message,
 		}
 	}
+
+	fn execute_direct_tool_invocation(
+		&self,
+		task_id: &TaskId,
+		request: &RequestEnvelope,
+		selector: &ResourceSelector,
+		arguments: &Value,
+		attachments: &[PathBuf],
+	) -> DirectRouteExecutionResult {
+		let resources = vec![selector.clone()];
+		let capabilities = route_capabilities(&self.resource_catalog, &resources);
+		let node = TaskNode {
+			node_id: NodeId("direct-route".to_string()),
+			kind: TaskNodeKind::Execution,
+			description: step_description(
+				&request.goal,
+				&format!("Invoke selected tool `{}` directly", selector.name()),
+			),
+			resources: resources.clone(),
+			capabilities: capabilities.clone(),
+			dispatch_policy: TaskNodeDispatchPolicy::Automatic,
+			join_policy: JoinPolicy::AllParents,
+			aggregation_mode: AggregationMode::CollectAll,
+			recovery_anchor: Default::default(),
+			budget_snapshot: NodeBudgetSnapshot {
+				token_budget: 8_000,
+				time_budget_ms: 60_000,
+			},
+			deadline_ms: 0,
+			capability_requirements_snapshot: capabilities.clone(),
+			retry_policy: RetryPolicy::default(),
+			rerun_policy: RerunPolicy::SafeToRerun,
+		};
+		let spec = AgentInstanceSpec {
+			instance_id: format!("direct-route:{}", node.node_id.0),
+			context: AgentContext {
+				task_id: task_id.clone(),
+				node_id: node.node_id.clone(),
+				summary: node.description.clone(),
+				resources,
+				conversation_history: request.conversation_history.clone(),
+			},
+			capabilities: capabilities.clone(),
+			capability_tokens: Vec::new(),
+			policy_bindings: PolicyBindings {
+				budget_tokens: 8_000,
+				time_budget_ms: 60_000,
+			},
+		};
+		let mut input = json!({
+			"task_id": task_id.0,
+			"node_id": node.node_id.0,
+			"goal": request.goal.clone(),
+			"summary": node.description.clone(),
+			"granted_capabilities": capabilities.clone(),
+			"resource_selectors": spec
+				.context
+				.resources
+				.iter()
+				.map(|resource| resource.display_key())
+				.collect::<Vec<_>>(),
+			"conversation_history": render_conversation_history(&request.conversation_history),
+			"budget_tokens": spec.policy_bindings.budget_tokens,
+			"time_budget_ms": spec.policy_bindings.time_budget_ms,
+		});
+		merge_json_object(&mut input, arguments.clone());
+		let invocation = ToolInvocation {
+			tool_name: selector.name().to_string(),
+			input,
+			granted_capabilities: spec.capabilities.clone(),
+			invocation_key: Some(format!(
+				"{}:{}:{}",
+				task_id.0,
+				node.node_id.0,
+				selector.display_key()
+			)),
+			attachments: attachments.to_vec(),
+		};
+		match self.tool_runtime.invoke(invocation) {
+			Ok(execution) => {
+				let result = tool_success_result(
+					&spec,
+					&node,
+					"direct-route",
+					selector.name(),
+					execution,
+					0.9,
+				);
+				let message = extract_result_message(&result);
+				DirectRouteExecutionResult {
+					node,
+					result,
+					message,
+				}
+			}
+			Err(error) => {
+				let result =
+					tool_failure_result(&spec, &node, "direct-route", selector.name(), error);
+				let message = extract_result_message(&result);
+				DirectRouteExecutionResult {
+					node,
+					result,
+					message,
+				}
+			}
+		}
+	}
 }
 
 impl AgentWorker for GenericAgentRuntime {
@@ -634,6 +762,34 @@ impl Default for GenericAgentRuntime {
 
 fn step_description(goal: &str, step: &str) -> String {
 	format!("Goal: {goal}\nStep: {step}")
+}
+
+fn merge_json_object(target: &mut Value, overlay: Value) {
+	let Some(target_object) = target.as_object_mut() else {
+		return;
+	};
+	let Some(overlay_object) = overlay.as_object() else {
+		return;
+	};
+	for (key, value) in overlay_object {
+		target_object.insert(key.clone(), value.clone());
+	}
+}
+
+fn render_conversation_history(history: &[ConversationTurn]) -> String {
+	history
+		.iter()
+		.map(|turn| format!("{}: {}", role_label(turn.role), turn.content))
+		.collect::<Vec<_>>()
+		.join("\n")
+}
+
+fn role_label(role: ConversationRole) -> &'static str {
+	match role {
+		ConversationRole::User => "user",
+		ConversationRole::Assistant => "assistant",
+		ConversationRole::System => "system",
+	}
 }
 
 fn route_capabilities(catalog: &ResourceCatalog, resources: &[ResourceSelector]) -> Vec<String> {
@@ -705,10 +861,10 @@ fn render_inventory_message(catalog: &ResourceCatalog, goal: &str) -> String {
 
 fn deterministic_chat_message(goal: &str) -> String {
 	if !goal.is_ascii() {
-		"我是 Roku。当前我会优先走 direct route；复杂请求会升级到兼容的 legacy planning 路径。"
+		"我是 Roku。当前我会优先走 direct route；复杂请求会返回兼容降级答复，而不是进入 planning-heavy 工作流。"
 			.to_string()
 	} else {
-		"I'm Roku. I prefer direct routes for simple requests and escalate complex work into the compatibility planning path.".to_string()
+		"I'm Roku. I prefer direct routes for simple requests and return compatibility fallback answers for planning-heavy work.".to_string()
 	}
 }
 
@@ -729,13 +885,25 @@ fn ask_for_more_info_message(goal: &str, missing_arguments: &[String]) -> String
 fn fallback_answer_message(goal: &str, intent_family: IntentFamily, reason: &str) -> String {
 	if !goal.is_ascii() {
 		format!(
-			"这个请求目前被识别为 {:?}，但当前运行时还没有对应的 direct tool。{reason} 我还没有执行任何外部操作。",
+			"这个请求目前被识别为 {:?}，但当前运行时还没有对应的 direct tool。{reason} 当前也没有启用 planning-heavy workflow，所以我只返回兼容降级说明，没有执行任何外部操作。",
 			intent_family
 		)
 	} else {
 		format!(
-			"This request was classified as {:?}, but the current runtime does not expose a matching direct tool yet. {reason} No external action has been executed.",
+			"This request was classified as {:?}, but the current runtime does not expose a matching direct tool and does not enable planning-heavy workflows for new requests. {reason} No external action has been executed.",
 			intent_family
+		)
+	}
+}
+
+fn limited_planning_compatibility_message(goal: &str, reason: &str) -> String {
+	if !goal.is_ascii() {
+		format!(
+			"当前 runtime 没有启用 planning-heavy workflow，所以这个请求不会进入旧 planner。{reason} 请把请求缩小成单步可执行操作，或先明确你要读取的文件、表格、网页查询或 Python 代码。"
+		)
+	} else {
+		format!(
+			"This runtime does not enable planning-heavy workflows for new requests, so the request will not enter the legacy planner. {reason} Please narrow it to a single executable step or specify the exact file, table, web query, or Python code you want."
 		)
 	}
 }
@@ -1098,8 +1266,7 @@ So, I'll output: "星期日""#
 		let message = payload["message"]
 			.as_str()
 			.expect("message should be a string");
-		assert!(message.starts_with("星期"));
-		assert!(message.ends_with('。'));
+		assert_eq!(message, "星期日");
 	}
 
 	fn test_skill_archive_bytes() -> Vec<u8> {
