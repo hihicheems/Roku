@@ -20,7 +20,9 @@ mod scratchpad;
 
 pub(crate) use classifier::{RouteClassifierContext, classify_request};
 pub use decision::{IntentFamily, RouteDecision, RouteRisk};
-pub use direct_route::{DirectRouteExecutionResult, DirectRouteKind, DirectRoutePlan};
+pub use direct_route::{
+	DirectRouteExecutionResult, DirectRouteKind, DirectRoutePlan, FsCommandStep,
+};
 pub use escalation::{
 	EscalationAction, EscalationReason, RouteDecisionResult, RouteEscalationPlan,
 };

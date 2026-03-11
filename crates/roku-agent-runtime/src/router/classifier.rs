@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeSet;
+use std::fs;
 use std::path::PathBuf;
 
-use roku_common_types::{ConversationRole, RequestEnvelope, ResourceSelector};
+use roku_common_types::{RequestEnvelope, ResourceSelector};
 use roku_plugin_catalog::{CatalogDescriptor, CatalogMatch, ResourceCatalog, ResourceKind};
 use roku_plugin_core::PluginRegistrySnapshot;
 use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier, StructuredGenerationError};
@@ -22,8 +24,8 @@ use roku_plugin_skills::SkillSource;
 use serde_json::{Value, json};
 
 use crate::router::{
-	DirectRouteKind, DirectRoutePlan, EscalationAction, EscalationReason, IntentFamily,
-	RouteDecision, RouteDecisionResult, RouteEscalationPlan, RouteRisk,
+	DirectRouteKind, DirectRoutePlan, EscalationAction, EscalationReason, FsCommandStep,
+	IntentFamily, RouteDecision, RouteDecisionResult, RouteEscalationPlan, RouteRisk,
 };
 use crate::tool_config::{BuiltinToolRole, ToolCatalogConfig};
 
@@ -57,6 +59,14 @@ fn deterministic_pre_classify(
 	context: &RouteClassifierContext<'_>,
 	request: &RequestEnvelope,
 ) -> Option<RouteDecisionResult> {
+	if let Some(result) = classify_shell_like_fs_sequence(context, request) {
+		return Some(result);
+	}
+
+	if let Some(result) = classify_structured_multi_step_request(request) {
+		return Some(result);
+	}
+
 	if let Some(source_url) = extract_skill_source_url(&request.goal) {
 		let decision = RouteDecision::new(
 			IntentFamily::TextTransform,
@@ -78,6 +88,10 @@ fn deterministic_pre_classify(
 			decision,
 			kind: DirectRouteKind::SkillInstall { source_url },
 		}));
+	}
+
+	if let Some(result) = classify_grounded_direct_route(context, request) {
+		return Some(result);
 	}
 
 	let query = request.goal.trim();
@@ -103,6 +117,9 @@ fn deterministic_pre_classify(
 
 	let selected_tools = best_tool_selectors(&tool_matches);
 	if selected_tools.len() > 1 {
+		if context.route_router.is_some() {
+			return None;
+		}
 		let decision = RouteDecision::new(
 			IntentFamily::MultiStep,
 			0.72,
@@ -129,6 +146,405 @@ fn deterministic_pre_classify(
 	}
 
 	None
+}
+
+fn classify_structured_multi_step_request(
+	request: &RequestEnvelope,
+) -> Option<RouteDecisionResult> {
+	let explicit_paths = extract_path_candidates(&request.goal);
+	let has_explicit_code = extract_explicit_python_code(&request.goal).is_some();
+	let looks_multi_step =
+		has_shell_command_chain(&request.goal) || (!has_explicit_code && explicit_paths.len() > 1);
+	if !looks_multi_step {
+		return None;
+	}
+	let decision = RouteDecision::new(
+		IntentFamily::MultiStep,
+		0.9,
+		true,
+		RouteRisk::Medium,
+		Vec::new(),
+		Vec::new(),
+		Vec::new(),
+		"structured request contains multiple grounded targets or chained commands that cannot be satisfied by a single direct tool invocation",
+	);
+	Some(RouteDecisionResult::Escalate(RouteEscalationPlan {
+		decision,
+		reason: EscalationReason::RequiresMultiStep,
+		action: EscalationAction::EnterLimitedPlanning,
+	}))
+}
+
+fn has_shell_command_chain(goal: &str) -> bool {
+	goal.contains("&&") || goal.contains("||") || goal.contains(';')
+}
+
+fn classify_grounded_direct_route(
+	context: &RouteClassifierContext<'_>,
+	request: &RequestEnvelope,
+) -> Option<RouteDecisionResult> {
+	if let Some(result) = classify_shell_like_fs_command(context, request) {
+		return Some(result);
+	}
+
+	if let Some(code) = extract_explicit_python_code(&request.goal)
+		&& let Some(selector) = tool_selector(context.catalog, "python.run")
+	{
+		let decision = RouteDecision::new(
+			IntentFamily::CodeExec,
+			0.93,
+			false,
+			RouteRisk::Medium,
+			vec!["python.run".to_string()],
+			candidate_plugins_for_tool(context.plugin_snapshot, "python.run"),
+			Vec::new(),
+			"grounded explicit Python code allows a direct `python.run` route",
+		);
+		return Some(RouteDecisionResult::Direct(DirectRoutePlan {
+			decision,
+			kind: DirectRouteKind::ToolInvocation {
+				selector,
+				arguments: json!({ "code": code }),
+				attachments: extract_path_candidates(&request.goal)
+					.into_iter()
+					.map(PathBuf::from)
+					.collect(),
+			},
+		}));
+	}
+
+	if let Some(pattern) = extract_glob_pattern(&request.goal)
+		&& let Some(selector) = tool_selector(context.catalog, "fs.glob")
+	{
+		let decision = RouteDecision::new(
+			IntentFamily::FilesystemRead,
+			0.92,
+			false,
+			RouteRisk::Low,
+			vec!["fs.glob".to_string()],
+			candidate_plugins_for_tool(context.plugin_snapshot, "fs.glob"),
+			Vec::new(),
+			"grounded filesystem glob allows a direct `fs.glob` route",
+		);
+		return Some(RouteDecisionResult::Direct(DirectRoutePlan {
+			decision,
+			kind: DirectRouteKind::ToolInvocation {
+				selector,
+				arguments: json!({ "pattern": pattern }),
+				attachments: Vec::new(),
+			},
+		}));
+	}
+
+	let explicit_paths = extract_path_candidates(&request.goal);
+	let path = single_explicit_path(&explicit_paths)?;
+	let resolved_path = resolve_grounded_path_candidate(path).unwrap_or_else(|| path.to_string());
+	let tool_name = grounded_fs_tool_name(&resolved_path)?;
+	let selector = tool_selector(context.catalog, tool_name)?;
+	let mut arguments = json!({ "path": resolved_path });
+	if tool_name == "fs.read_text" {
+		arguments["max_bytes"] = Value::from(4_096_u64);
+	}
+	let decision = RouteDecision::new(
+		IntentFamily::FilesystemRead,
+		0.91,
+		false,
+		RouteRisk::Low,
+		vec![tool_name.to_string()],
+		candidate_plugins_for_tool(context.plugin_snapshot, tool_name),
+		Vec::new(),
+		format!("grounded filesystem target resolved to direct `{tool_name}`"),
+	);
+	Some(RouteDecisionResult::Direct(DirectRoutePlan {
+		decision,
+		kind: DirectRouteKind::ToolInvocation {
+			selector,
+			arguments,
+			attachments: Vec::new(),
+		},
+	}))
+}
+
+fn classify_shell_like_fs_command(
+	context: &RouteClassifierContext<'_>,
+	request: &RequestEnvelope,
+) -> Option<RouteDecisionResult> {
+	let command = parse_shell_like_fs_command(&request.goal)?;
+	let selector = tool_selector(context.catalog, command.tool_name)?;
+	let decision = RouteDecision::new(
+		IntentFamily::FilesystemRead,
+		0.94,
+		false,
+		RouteRisk::Low,
+		vec![command.tool_name.to_string()],
+		candidate_plugins_for_tool(context.plugin_snapshot, command.tool_name),
+		Vec::new(),
+		format!(
+			"structured shell-style filesystem command resolved to direct `{}`",
+			command.tool_name
+		),
+	);
+	Some(RouteDecisionResult::Direct(DirectRoutePlan {
+		decision,
+		kind: DirectRouteKind::ToolInvocation {
+			selector,
+			arguments: command.arguments,
+			attachments: Vec::new(),
+		},
+	}))
+}
+
+fn classify_shell_like_fs_sequence(
+	context: &RouteClassifierContext<'_>,
+	request: &RequestEnvelope,
+) -> Option<RouteDecisionResult> {
+	let commands = parse_shell_like_fs_sequence(&request.goal)?;
+	if commands.len() < 2 && !matches!(commands.as_slice(), [FsCommandStep::PrintWorkingDir]) {
+		return None;
+	}
+	let mut candidate_tools = Vec::new();
+	for command in &commands {
+		let tool_name = match command {
+			FsCommandStep::ChangeDir { .. } | FsCommandStep::ListDir { .. } => "fs.list_dir",
+			FsCommandStep::ReadText { .. } => "fs.read_text",
+			FsCommandStep::PrintWorkingDir | FsCommandStep::Inspect { .. } => "fs.inspect",
+			FsCommandStep::Exists { .. } => "fs.exists",
+		};
+		if !candidate_tools.iter().any(|existing| existing == tool_name) {
+			candidate_tools.push(tool_name.to_string());
+		}
+	}
+	let decision = RouteDecision::new(
+		IntentFamily::FilesystemRead,
+		0.95,
+		false,
+		RouteRisk::Low,
+		candidate_tools,
+		candidate_plugins_for_tool(context.plugin_snapshot, "fs.list_dir"),
+		Vec::new(),
+		"structured shell-style filesystem command sequence resolved to a bounded direct route",
+	);
+	Some(RouteDecisionResult::Direct(DirectRoutePlan {
+		decision,
+		kind: DirectRouteKind::FilesystemSequence { commands },
+	}))
+}
+
+struct ShellLikeFsCommand {
+	tool_name: &'static str,
+	arguments: Value,
+}
+
+fn parse_shell_like_fs_command(goal: &str) -> Option<ShellLikeFsCommand> {
+	let tokens = goal.split_whitespace().map(clean_token).collect::<Vec<_>>();
+	let first = tokens.first()?.as_str();
+	match first {
+		"ls" | "dir" => {
+			let path = command_path_argument(goal, &tokens).unwrap_or_else(|| ".".to_string());
+			Some(ShellLikeFsCommand {
+				tool_name: "fs.list_dir",
+				arguments: json!({ "path": path }),
+			})
+		}
+		"cat" | "more" => command_path_argument(goal, &tokens).map(|path| ShellLikeFsCommand {
+			tool_name: "fs.read_text",
+			arguments: json!({ "path": path, "max_bytes": 4_096_u64 }),
+		}),
+		"pwd" => Some(ShellLikeFsCommand {
+			tool_name: "fs.inspect",
+			arguments: json!({ "path": "." }),
+		}),
+		"stat" => command_path_argument(goal, &tokens).map(|path| ShellLikeFsCommand {
+			tool_name: "fs.inspect",
+			arguments: json!({ "path": path }),
+		}),
+		"exists" => command_path_argument(goal, &tokens).map(|path| ShellLikeFsCommand {
+			tool_name: "fs.exists",
+			arguments: json!({ "path": path }),
+		}),
+		"test" => {
+			if tokens.get(1).is_some_and(|flag| flag == "-e") {
+				command_path_argument(goal, &tokens[1..]).map(|path| ShellLikeFsCommand {
+					tool_name: "fs.exists",
+					arguments: json!({ "path": path }),
+				})
+			} else {
+				None
+			}
+		}
+		_ => None,
+	}
+}
+
+fn parse_shell_like_fs_sequence(goal: &str) -> Option<Vec<FsCommandStep>> {
+	let segments = split_shell_like_segments(goal);
+	if segments.is_empty() {
+		return None;
+	}
+	let mut commands = Vec::new();
+	for segment in segments {
+		commands.push(parse_shell_like_fs_step(&segment)?);
+	}
+	Some(commands)
+}
+
+fn split_shell_like_segments(goal: &str) -> Vec<String> {
+	goal.replace("\r\n", "\n")
+		.replace("&&", "\n")
+		.replace("||", "\n")
+		.replace(';', "\n")
+		.replace("；", "\n")
+		.replace("，然后", "\n")
+		.replace(",然后", "\n")
+		.replace("然后", "\n")
+		.replace("，", "\n")
+		.lines()
+		.filter_map(normalize_shell_segment)
+		.collect()
+}
+
+fn normalize_shell_segment(segment: &str) -> Option<String> {
+	let trimmed = segment.trim();
+	if trimmed.is_empty() {
+		return None;
+	}
+	let mut candidates = vec![trimmed.to_string()];
+	if let Some((_, suffix)) = trimmed.rsplit_once(':') {
+		candidates.push(suffix.trim().to_string());
+	}
+	if let Some((_, suffix)) = trimmed.rsplit_once('：') {
+		candidates.push(suffix.trim().to_string());
+	}
+	candidates.into_iter().find(|candidate| {
+		shell_command_name(candidate.split_whitespace().next().unwrap_or_default()).is_some()
+	})
+}
+
+fn parse_shell_like_fs_step(segment: &str) -> Option<FsCommandStep> {
+	let tokens = segment
+		.split_whitespace()
+		.map(clean_token)
+		.filter(|token| !token.is_empty())
+		.collect::<Vec<_>>();
+	let first = tokens.first()?.as_str();
+	match shell_command_name(first)? {
+		"cd" => {
+			command_path_argument(segment, &tokens).map(|path| FsCommandStep::ChangeDir { path })
+		}
+		"ls" => Some(FsCommandStep::ListDir {
+			path: command_path_argument(segment, &tokens),
+		}),
+		"cat" => {
+			command_path_argument(segment, &tokens).map(|path| FsCommandStep::ReadText { path })
+		}
+		"pwd" => Some(FsCommandStep::PrintWorkingDir),
+		"stat" => {
+			command_path_argument(segment, &tokens).map(|path| FsCommandStep::Inspect { path })
+		}
+		"exists" => {
+			command_path_argument(segment, &tokens).map(|path| FsCommandStep::Exists { path })
+		}
+		_ => None,
+	}
+}
+
+fn shell_command_name(token: &str) -> Option<&'static str> {
+	match token {
+		"cd" => Some("cd"),
+		"ls" | "ll" | "dir" => Some("ls"),
+		"cat" | "more" => Some("cat"),
+		"pwd" => Some("pwd"),
+		"stat" => Some("stat"),
+		"exists" => Some("exists"),
+		"test" => Some("exists"),
+		_ => None,
+	}
+}
+
+fn command_path_argument(goal: &str, tokens: &[String]) -> Option<String> {
+	let explicit_paths = extract_path_candidates(goal);
+	if let Some(path) = explicit_paths.first() {
+		return Some(resolve_grounded_path_candidate(path).unwrap_or_else(|| path.clone()));
+	}
+	tokens
+		.iter()
+		.skip(1)
+		.filter(|token| !token.is_empty() && !token.starts_with('-'))
+		.find(|token| looks_like_path_candidate(token))
+		.map(|token| resolve_grounded_path_candidate(token).unwrap_or_else(|| token.clone()))
+}
+
+fn grounded_fs_tool_name(path: &str) -> Option<&'static str> {
+	if path == "." || path == ".." || path.ends_with('/') || path.ends_with('\\') {
+		return Some("fs.list_dir");
+	}
+	let candidate = std::env::current_dir().ok()?.join(path);
+	if let Ok(metadata) = std::fs::metadata(&candidate) {
+		if metadata.is_dir() {
+			return Some("fs.list_dir");
+		}
+		if metadata.is_file() {
+			return Some("fs.read_text");
+		}
+	}
+	Some("fs.inspect")
+}
+
+fn resolve_grounded_path_candidate(raw: &str) -> Option<String> {
+	let path = PathBuf::from(raw);
+	if path.is_absolute() {
+		return path
+			.exists()
+			.then(|| path.canonicalize().ok())
+			.flatten()
+			.map(|resolved| resolved.display().to_string());
+	}
+	let cwd = std::env::current_dir().ok()?;
+	let candidate = cwd.join(&path);
+	if candidate.exists() {
+		return candidate
+			.canonicalize()
+			.ok()
+			.map(|resolved| resolved.display().to_string());
+	}
+	if raw.contains('/') || raw.contains('\\') || raw == "." || raw == ".." {
+		return Some(candidate.display().to_string());
+	}
+	find_unique_workspace_match(&cwd, raw).map(|resolved| resolved.display().to_string())
+}
+
+fn find_unique_workspace_match(root: &std::path::Path, target_name: &str) -> Option<PathBuf> {
+	let mut stack = vec![root.to_path_buf()];
+	let mut visited = 0_usize;
+	let mut matches = Vec::new();
+	while let Some(directory) = stack.pop() {
+		let entries = fs::read_dir(&directory).ok()?;
+		for entry in entries.filter_map(Result::ok) {
+			visited += 1;
+			if visited > 8_000 {
+				return None;
+			}
+			let path = entry.path();
+			let name = entry.file_name().to_string_lossy().to_string();
+			if name == target_name {
+				matches.push(path.clone());
+				if matches.len() > 1 {
+					return None;
+				}
+			}
+			if path.is_dir() && !should_skip_workspace_search_dir(&name) {
+				stack.push(path);
+			}
+		}
+	}
+	matches.into_iter().next()
+}
+
+fn should_skip_workspace_search_dir(name: &str) -> bool {
+	matches!(
+		name,
+		".git" | ".roku" | "target" | "node_modules" | "dist" | "build"
+	)
 }
 
 fn classify_with_llm(
@@ -295,15 +711,6 @@ fn llm_candidates(catalog: &ResourceCatalog) -> Vec<serde_json::Value> {
 }
 
 fn route_classifier_prompt(request: &RequestEnvelope, candidates: &[serde_json::Value]) -> String {
-	let history = request
-		.conversation_history
-		.iter()
-		.rev()
-		.take(4)
-		.map(|turn| format!("{}: {}", role_label(turn.role), turn.content))
-		.collect::<Vec<_>>()
-		.join("\n");
-
 	format!(
 		r#"Return only JSON with exactly these keys:
 {{
@@ -319,6 +726,7 @@ fn route_classifier_prompt(request: &RequestEnvelope, candidates: &[serde_json::
 
 Rules:
 - Use only candidate tool names from the provided inventory if you name tools.
+- Base the decision on the current user goal and the current inventory. Do not inherit intent from prior conversation turns unless the current goal explicitly restates it.
 - Use `chat` for greetings or direct assistant conversation.
 - Use `filesystem_read`, `table_read`, `web_lookup`, or `code_exec` when the intent clearly asks for those families even if no tool is available yet.
 - Use `multi_step` when the request obviously needs a planning-heavy workflow.
@@ -330,17 +738,9 @@ Rules:
 User goal:
 {goal}
 
-Recent history:
-{history}
-
 Current inventory:
 {candidates}"#,
 		goal = request.goal,
-		history = if history.is_empty() {
-			"(none)"
-		} else {
-			&history
-		},
 		candidates = serde_json::to_string_pretty(candidates).unwrap_or_default(),
 	)
 }
@@ -363,8 +763,15 @@ fn classify_catalog_selected_route(
 	request: &RequestEnvelope,
 	tool_matches: &[CatalogMatch],
 ) -> Option<RouteDecisionResult> {
-	let primary = stable_primary_tool_match(tool_matches)?;
+	let primary = preferred_catalog_tool_match(tool_matches)?;
 	let descriptor = context.catalog.descriptor(&primary.descriptor.selector)?;
+	if context.route_router.is_some()
+		&& matches!(
+			descriptor.name.as_str(),
+			"inventory.describe" | "general.execute"
+		) {
+		return None;
+	}
 	let decision = RouteDecision::new(
 		intent_family_for_tool(&descriptor.name),
 		stable_tool_confidence(primary.score),
@@ -422,6 +829,25 @@ fn classify_skill_route_from_decision(
 			descriptor.name
 		),
 	))
+}
+
+fn preferred_catalog_tool_match(matches: &[CatalogMatch]) -> Option<&CatalogMatch> {
+	let primary = stable_primary_tool_match(matches)?;
+	if !matches!(
+		primary.descriptor.name.as_str(),
+		"inventory.describe" | "general.execute"
+	) {
+		return Some(primary);
+	}
+	let secondary = matches.get(1)?;
+	let secondary_threshold = direct_route_threshold(&secondary.descriptor.name);
+	let secondary_is_specific_tool =
+		intent_family_for_tool(&secondary.descriptor.name) != IntentFamily::Chat;
+	(secondary_is_specific_tool
+		&& secondary.score >= secondary_threshold
+		&& secondary.score >= primary.score * 0.85)
+		.then_some(secondary)
+		.or(Some(primary))
 }
 
 fn stable_primary_tool_match(matches: &[CatalogMatch]) -> Option<&CatalogMatch> {
@@ -526,6 +952,17 @@ fn build_direct_tool_plan(
 	selector: ResourceSelector,
 ) -> RouteDecisionResult {
 	let tool_name = selector.name().to_string();
+	if let Some(result) = build_grounded_tool_plan(context, request, &decision, &tool_name) {
+		return result;
+	}
+	if let Some(router) = context.route_router
+		&& supports_structured_tool_arguments(&tool_name)
+	{
+		return resolve_structured_tool_invocation(
+			context, request, decision, selector, tool_name, router,
+		);
+	}
+
 	match tool_name.as_str() {
 		"fs.inspect" => extract_path_candidates(&request.goal)
 			.into_iter()
@@ -535,16 +972,19 @@ fn build_direct_tool_plan(
 					context,
 					request,
 					&tool_name,
-					decision,
+					decision.clone(),
 					json!({ "path": path }),
 					Vec::new(),
 				)
 			})
 			.unwrap_or_else(|| {
-				missing_argument_route(
-					IntentFamily::FilesystemRead,
-					"filesystem inspect request needs an explicit path",
-					"path",
+				build_generic_tool_route(
+					context,
+					request,
+					&tool_name,
+					decision,
+					json!({ "path": "." }),
+					Vec::new(),
 				)
 			}),
 		"fs.list_dir" => {
@@ -694,6 +1134,406 @@ fn build_direct_tool_plan(
 	}
 }
 
+fn build_grounded_tool_plan(
+	context: &RouteClassifierContext<'_>,
+	request: &RequestEnvelope,
+	decision: &RouteDecision,
+	tool_name: &str,
+) -> Option<RouteDecisionResult> {
+	let explicit_paths = extract_path_candidates(&request.goal);
+	let explicit_code = extract_explicit_python_code(&request.goal);
+	match tool_name {
+		"python.run" => explicit_code.map(|code| {
+			let attachments = explicit_paths.iter().map(PathBuf::from).collect::<Vec<_>>();
+			build_generic_tool_route(
+				context,
+				request,
+				tool_name,
+				decision.clone(),
+				json!({ "code": code }),
+				attachments,
+			)
+		}),
+		"fs.glob" => extract_glob_pattern(&request.goal).map(|pattern| {
+			build_generic_tool_route(
+				context,
+				request,
+				tool_name,
+				decision.clone(),
+				json!({ "pattern": pattern }),
+				Vec::new(),
+			)
+		}),
+		"fs.inspect" | "fs.list_dir" | "fs.read_text" | "fs.exists" => {
+			single_explicit_path(&explicit_paths).map(|path| {
+				let mut arguments = json!({ "path": path });
+				if tool_name == "fs.read_text" {
+					arguments["max_bytes"] = Value::from(4_096_u64);
+				}
+				build_generic_tool_route(
+					context,
+					request,
+					tool_name,
+					decision.clone(),
+					arguments,
+					Vec::new(),
+				)
+			})
+		}
+		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
+			extract_table_path(&request.goal).map(|path| {
+				let mut arguments = json!({ "path": path });
+				if tool_name == "table.preview" {
+					arguments["rows"] =
+						Value::from(extract_row_limit(&request.goal).unwrap_or(5_u64));
+				}
+				if let Some(sheet) = extract_sheet_name(&request.goal) {
+					arguments["sheet"] = Value::String(sheet);
+				}
+				build_generic_tool_route(
+					context,
+					request,
+					tool_name,
+					decision.clone(),
+					arguments,
+					Vec::new(),
+				)
+			})
+		}
+		_ => None,
+	}
+}
+
+fn supports_structured_tool_arguments(tool_name: &str) -> bool {
+	matches!(
+		tool_name,
+		"fs.inspect"
+			| "fs.list_dir"
+			| "fs.read_text"
+			| "fs.glob"
+			| "fs.exists"
+			| "table.inspect"
+			| "table.list_sheets"
+			| "table.preview"
+			| "table.schema"
+			| "web.search"
+			| "python.run"
+	)
+}
+
+fn resolve_structured_tool_invocation(
+	context: &RouteClassifierContext<'_>,
+	request: &RequestEnvelope,
+	decision: RouteDecision,
+	selector: ResourceSelector,
+	tool_name: String,
+	router: &LlmRouter,
+) -> RouteDecisionResult {
+	let Some(descriptor) = context.catalog.descriptor(&selector) else {
+		return RouteDecisionResult::Escalate(RouteEscalationPlan {
+			decision,
+			reason: EscalationReason::NoEnabledRouteTarget,
+			action: EscalationAction::FallbackAnswer,
+		});
+	};
+	let response = router.generate_json_value(&GenerationRequest {
+		system_prompt: Some(
+			"You are Roku's direct-route tool argument resolver. Return only valid JSON matching the requested schema."
+				.to_string(),
+		),
+		prompt: tool_argument_prompt(request, descriptor, &tool_name),
+		expected_output_tokens: 220,
+		risk_tier: RiskTier::Low,
+		preferred_provider: None,
+		budget_tokens_remaining: 1_500,
+		budget_cost_remaining_usd: 0.05,
+	});
+	let resolution = match response {
+		Ok(response) => match ToolArgumentResolution::from_json_value(&response.value) {
+			Ok(resolution) => resolution,
+			Err(error) => {
+				return route_argument_resolution_failure(
+					decision,
+					format!("tool argument resolver returned invalid schema: {error}"),
+					EscalationReason::RouteClassifierFailure,
+				);
+			}
+		},
+		Err(error) => {
+			let (reason, escalation_reason) = match error {
+				StructuredGenerationError::ParseGuard(error) => (
+					format!("tool argument resolver parse guard rejected provider output: {error}"),
+					EscalationReason::RouteParseGuardFailure,
+				),
+				StructuredGenerationError::Llm(error) => (
+					format!(
+						"tool argument resolver failed before producing a usable payload: {error}"
+					),
+					EscalationReason::RouteClassifierFailure,
+				),
+			};
+			return route_argument_resolution_failure(decision, reason, escalation_reason);
+		}
+	};
+	let mut arguments = resolution.arguments;
+	ground_structured_tool_arguments(&tool_name, request, &mut arguments);
+	if let Some(object) = arguments.as_object_mut() {
+		apply_structured_tool_defaults(&tool_name, object);
+	}
+	let missing_arguments = collect_missing_tool_arguments(&tool_name, &arguments);
+	if !resolution.missing_arguments.is_empty() || !missing_arguments.is_empty() {
+		let mut merged_missing = resolution.missing_arguments;
+		for missing in missing_arguments {
+			if !merged_missing.iter().any(|existing| existing == &missing) {
+				merged_missing.push(missing);
+			}
+		}
+		let mut updated_decision = decision;
+		updated_decision.missing_arguments = merged_missing.clone();
+		updated_decision.reason = resolution.reason;
+		return RouteDecisionResult::Escalate(RouteEscalationPlan {
+			decision: updated_decision,
+			reason: EscalationReason::MissingArguments,
+			action: EscalationAction::AskForMoreInfo,
+		});
+	}
+	let attachments = resolution
+		.attachments
+		.into_iter()
+		.filter(|path| {
+			extract_path_candidates(&request.goal)
+				.iter()
+				.any(|candidate| candidate == path)
+		})
+		.map(PathBuf::from)
+		.collect::<Vec<_>>();
+	build_generic_tool_route(
+		context,
+		request,
+		&tool_name,
+		decision,
+		arguments,
+		attachments,
+	)
+}
+
+fn route_argument_resolution_failure(
+	mut decision: RouteDecision,
+	reason: impl Into<String>,
+	escalation_reason: EscalationReason,
+) -> RouteDecisionResult {
+	decision.reason = reason.into();
+	RouteDecisionResult::Escalate(RouteEscalationPlan {
+		decision,
+		reason: escalation_reason,
+		action: EscalationAction::EnterLimitedPlanning,
+	})
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ToolArgumentResolution {
+	arguments: Value,
+	attachments: Vec<String>,
+	missing_arguments: Vec<String>,
+	reason: String,
+}
+
+impl ToolArgumentResolution {
+	fn from_json_value(value: &Value) -> Result<Self, &'static str> {
+		let object = value.as_object().ok_or("root must be an object")?;
+		let arguments = object
+			.get("arguments")
+			.cloned()
+			.filter(Value::is_object)
+			.ok_or("missing `arguments` object")?;
+		let attachments = object
+			.get("attachments")
+			.and_then(Value::as_array)
+			.ok_or("missing `attachments` array")?
+			.iter()
+			.map(|value| value.as_str().map(str::to_string))
+			.collect::<Option<Vec<_>>>()
+			.ok_or("`attachments` must contain strings")?;
+		let missing_arguments = object
+			.get("missing_arguments")
+			.and_then(Value::as_array)
+			.ok_or("missing `missing_arguments` array")?
+			.iter()
+			.map(|value| value.as_str().map(str::to_string))
+			.collect::<Option<Vec<_>>>()
+			.ok_or("`missing_arguments` must contain strings")?;
+		let reason = object
+			.get("reason")
+			.and_then(Value::as_str)
+			.filter(|value| !value.trim().is_empty())
+			.ok_or("missing `reason` string")?
+			.to_string();
+		Ok(Self {
+			arguments,
+			attachments,
+			missing_arguments,
+			reason,
+		})
+	}
+}
+
+fn tool_argument_prompt(
+	request: &RequestEnvelope,
+	descriptor: &CatalogDescriptor,
+	tool_name: &str,
+) -> String {
+	format!(
+		r#"Return only JSON with exactly these keys:
+{{
+  "arguments": {{ }},
+  "attachments": ["optional file paths"],
+  "missing_arguments": ["argument names"],
+  "reason": "short explanation"
+}}
+
+Tool:
+- name: {tool_name}
+- description: {description}
+- allowed_argument_keys: {allowed_keys}
+- required_argument_keys: {required_keys}
+- examples: {examples}
+
+Rules:
+- Only use argument keys from `allowed_argument_keys`.
+- Ground every concrete argument in the current user request or the runtime grounding context below.
+- Do not reuse concrete file paths, sheet names, code, or search queries from prior conversation turns.
+- If a required value is not explicit enough, leave it out of `arguments` and list it in `missing_arguments`.
+- Keep `attachments` empty unless the user explicitly mentioned concrete file paths.
+- Apply these defaults when the user omitted them:
+  - `fs.read_text.max_bytes = 4096`
+  - `table.preview.rows = 5`
+  - `web.search.top_k = 5`
+- `python.run` only accepts explicit code already present in the request. If the runtime grounding context includes `explicit_python_code`, copy it verbatim.
+- For filesystem and table tools, preserve explicit relative paths like `../` if the current user request asks for them. Do not silently rewrite them to another in-root directory.
+- Use `"."` for `fs.list_dir.path` only when the current user request clearly asks for the current project root/current directory.
+
+User goal:
+{goal}
+
+Runtime grounding context:
+{grounding}"#,
+		tool_name = tool_name,
+		description = descriptor.description,
+		allowed_keys = serde_json::to_string(tool_allowed_argument_keys(tool_name))
+			.unwrap_or_else(|_| "[]".to_string()),
+		required_keys = serde_json::to_string(tool_required_argument_keys(tool_name))
+			.unwrap_or_else(|_| "[]".to_string()),
+		examples = serde_json::to_string(&descriptor.examples).unwrap_or_else(|_| "[]".to_string()),
+		goal = request.goal,
+		grounding = structured_tool_grounding_context(request, tool_name),
+	)
+}
+
+fn tool_allowed_argument_keys(tool_name: &str) -> &'static [&'static str] {
+	match tool_name {
+		"fs.inspect" | "fs.list_dir" | "fs.exists" => &["path"],
+		"fs.read_text" => &["path", "max_bytes"],
+		"fs.glob" => &["pattern"],
+		"table.inspect" | "table.list_sheets" | "table.schema" => &["path", "sheet"],
+		"table.preview" => &["path", "sheet", "rows"],
+		"web.search" => &["query", "top_k"],
+		"python.run" => &["code", "timeout_ms"],
+		_ => &[],
+	}
+}
+
+fn tool_required_argument_keys(tool_name: &str) -> &'static [&'static str] {
+	match tool_name {
+		"fs.inspect" | "fs.read_text" | "fs.exists" => &["path"],
+		"fs.list_dir" => &["path"],
+		"fs.glob" => &["pattern"],
+		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => &["path"],
+		"web.search" => &["query"],
+		"python.run" => &["code"],
+		_ => &[],
+	}
+}
+
+fn apply_structured_tool_defaults(tool_name: &str, arguments: &mut serde_json::Map<String, Value>) {
+	match tool_name {
+		"fs.read_text" => {
+			arguments
+				.entry("max_bytes".to_string())
+				.or_insert_with(|| Value::from(4_096_u64));
+		}
+		"table.preview" => {
+			arguments
+				.entry("rows".to_string())
+				.or_insert_with(|| Value::from(5_u64));
+		}
+		"web.search" => {
+			arguments
+				.entry("top_k".to_string())
+				.or_insert_with(|| Value::from(5_u64));
+		}
+		_ => {}
+	}
+}
+
+fn ground_structured_tool_arguments(
+	tool_name: &str,
+	request: &RequestEnvelope,
+	arguments: &mut Value,
+) {
+	let explicit_paths = extract_path_candidates(&request.goal);
+	let explicit_code = extract_explicit_python_code(&request.goal);
+	match tool_name {
+		"python.run" => {
+			if let Some(code) = explicit_code
+				&& let Some(object) = arguments.as_object_mut()
+			{
+				object.insert("code".to_string(), Value::String(code));
+			}
+		}
+		"fs.glob" => {
+			if let Some(pattern) = extract_glob_pattern(&request.goal)
+				&& let Some(object) = arguments.as_object_mut()
+			{
+				object.insert("pattern".to_string(), Value::String(pattern));
+			}
+		}
+		"fs.inspect" | "fs.list_dir" | "fs.read_text" | "fs.exists" => {
+			if let Some(path) = single_explicit_path(&explicit_paths)
+				&& let Some(object) = arguments.as_object_mut()
+			{
+				object.insert("path".to_string(), Value::String(path.to_string()));
+			}
+		}
+		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
+			if let Some(path) = extract_table_path(&request.goal)
+				&& let Some(object) = arguments.as_object_mut()
+			{
+				object.insert("path".to_string(), Value::String(path));
+			}
+		}
+		_ => {}
+	}
+}
+
+fn collect_missing_tool_arguments(tool_name: &str, arguments: &Value) -> Vec<String> {
+	let object = arguments.as_object();
+	tool_required_argument_keys(tool_name)
+		.iter()
+		.filter(|key| {
+			object
+				.and_then(|value| value.get(**key))
+				.is_none_or(|value| match value {
+					Value::Null => true,
+					Value::String(text) => text.trim().is_empty(),
+					Value::Array(values) => values.is_empty(),
+					Value::Object(values) => values.is_empty(),
+					_ => false,
+				})
+		})
+		.map(|key| (*key).to_string())
+		.collect()
+}
+
 fn build_skill_route_result(
 	context: &RouteClassifierContext<'_>,
 	selector: ResourceSelector,
@@ -808,14 +1648,6 @@ fn tool_selector(catalog: &ResourceCatalog, tool_name: &str) -> Option<ResourceS
 		.map(|entry| entry.selector.clone())
 }
 
-fn role_label(role: ConversationRole) -> &'static str {
-	match role {
-		ConversationRole::User => "user",
-		ConversationRole::Assistant => "assistant",
-		ConversationRole::System => "system",
-	}
-}
-
 fn discoverable_tool_matches(matches: Vec<CatalogMatch>) -> Vec<CatalogMatch> {
 	matches
 		.into_iter()
@@ -868,12 +1700,21 @@ fn best_skill_selector(
 }
 
 fn extract_path_candidates(goal: &str) -> Vec<String> {
-	let mut paths = goal
-		.split_whitespace()
-		.map(clean_token)
-		.filter(|token| looks_like_path_candidate(token))
-		.filter(|token| !token.starts_with("http://") && !token.starts_with("https://"))
-		.collect::<Vec<_>>();
+	let workspace_entries = visible_workspace_entries(64);
+	let mut paths = Vec::new();
+	for token in goal.split_whitespace().map(clean_token) {
+		if token.is_empty() || token.starts_with("http://") || token.starts_with("https://") {
+			continue;
+		}
+		if looks_like_path_candidate(&token) || workspace_entries.contains(&token) {
+			paths.push(token.clone());
+		}
+		for fragment in embedded_path_fragments(&token, &workspace_entries) {
+			if !paths.iter().any(|existing| existing == &fragment) {
+				paths.push(fragment);
+			}
+		}
+	}
 	paths.dedup();
 	paths
 }
@@ -935,10 +1776,16 @@ fn extract_explicit_python_code(goal: &str) -> Option<String> {
 	if let Some(code) = extract_fenced_python_code(goal) {
 		return Some(code);
 	}
-	extract_inline_code(goal)
+	if let Some(code) = extract_inline_code(goal) {
+		return Some(code);
+	}
+	extract_line_or_block_python_code(goal)
 }
 
 fn clean_token(token: &str) -> String {
+	if matches!(token, "." | "..") {
+		return token.to_string();
+	}
 	token
 		.trim_matches(|character: char| {
 			matches!(
@@ -966,6 +1813,48 @@ fn looks_like_path_candidate(token: &str) -> bool {
 					.chars()
 					.all(|character| character.is_ascii_alphanumeric())
 		})
+}
+
+fn embedded_path_fragments(token: &str, workspace_entries: &[String]) -> Vec<String> {
+	let mut fragments = Vec::new();
+	let mut current = String::new();
+	for character in token.chars() {
+		if is_path_fragment_char(character) {
+			current.push(character);
+			continue;
+		}
+		push_grounded_path_fragment(&mut fragments, &mut current, workspace_entries);
+	}
+	push_grounded_path_fragment(&mut fragments, &mut current, workspace_entries);
+	fragments
+}
+
+fn push_grounded_path_fragment(
+	fragments: &mut Vec<String>,
+	current: &mut String,
+	workspace_entries: &[String],
+) {
+	if current.is_empty() {
+		return;
+	}
+	let fragment = current.clone();
+	current.clear();
+	if fragment.starts_with("http://") || fragment.starts_with("https://") {
+		return;
+	}
+	if (looks_like_path_candidate(&fragment) || workspace_entries.contains(&fragment))
+		&& !fragments.iter().any(|existing| existing == &fragment)
+	{
+		fragments.push(fragment);
+	}
+}
+
+fn is_path_fragment_char(character: char) -> bool {
+	character.is_ascii_alphanumeric() || matches!(character, '.' | '/' | '\\' | '_' | '-')
+}
+
+fn single_explicit_path(paths: &[String]) -> Option<&str> {
+	(paths.len() == 1).then(|| paths[0].as_str())
 }
 
 fn best_tool_selectors(matches: &[CatalogMatch]) -> Vec<ResourceSelector> {
@@ -1046,6 +1935,139 @@ fn extract_inline_code(goal: &str) -> Option<String> {
 	let end = rest.find('`')?;
 	let code = rest.get(..end)?.trim();
 	(!code.is_empty()).then(|| code.to_string())
+}
+
+fn extract_line_or_block_python_code(goal: &str) -> Option<String> {
+	let trimmed = goal.trim();
+	if let Some(suffix) = extract_python_suffix_after_separator(trimmed) {
+		return Some(suffix);
+	}
+	if is_probable_python_snippet(trimmed) {
+		return Some(trimmed.to_string());
+	}
+
+	let mut lines = trimmed.lines().map(str::trim_end).collect::<Vec<_>>();
+	while lines.first().is_some_and(|line| line.trim().is_empty()) {
+		lines.remove(0);
+	}
+	while lines.last().is_some_and(|line| line.trim().is_empty()) {
+		lines.pop();
+	}
+	if lines.len() < 2 {
+		return None;
+	}
+	let block_start = lines
+		.iter()
+		.position(|line| is_probable_python_snippet(line.trim()))
+		.unwrap_or(1);
+	let code = lines
+		.iter()
+		.skip(block_start)
+		.copied()
+		.collect::<Vec<_>>()
+		.join("\n")
+		.trim()
+		.to_string();
+	(!code.is_empty() && is_probable_python_snippet(code.lines().next().unwrap_or_default()))
+		.then_some(code)
+}
+
+fn extract_python_suffix_after_separator(value: &str) -> Option<String> {
+	value
+		.match_indices([':', '：'])
+		.filter_map(|(index, _)| {
+			let prefix = value.get(..index)?.trim();
+			let suffix = value.get(index + 1..)?.trim();
+			(!suffix.is_empty()
+				&& is_probable_python_snippet(suffix)
+				&& !is_probable_python_snippet(prefix))
+			.then(|| suffix.to_string())
+		})
+		.next_back()
+}
+
+fn is_probable_python_snippet(value: &str) -> bool {
+	let trimmed = value.trim();
+	if trimmed.is_empty() {
+		return false;
+	}
+	if trimmed.lines().count() > 1 {
+		return trimmed.lines().all(|line| {
+			let line = line.trim();
+			line.is_empty() || is_probable_python_statement(line)
+		});
+	}
+	is_probable_python_statement(trimmed)
+}
+
+fn is_probable_python_statement(line: &str) -> bool {
+	let trimmed = line.trim();
+	if trimmed.is_empty() {
+		return false;
+	}
+	let punctuation_score = [
+		trimmed.contains('('),
+		trimmed.contains(')'),
+		trimmed.contains(':'),
+		trimmed.contains('='),
+		trimmed.contains('['),
+		trimmed.contains(']'),
+	]
+	.into_iter()
+	.filter(|flag| *flag)
+	.count();
+	let keyword_score = [
+		trimmed.starts_with("print"),
+		trimmed.starts_with("for "),
+		trimmed.starts_with("if "),
+		trimmed.starts_with("while "),
+		trimmed.starts_with("def "),
+		trimmed.starts_with("class "),
+		trimmed.starts_with("import "),
+		trimmed.starts_with("from "),
+		trimmed.starts_with("return "),
+	]
+	.into_iter()
+	.filter(|flag| *flag)
+	.count();
+	(keyword_score > 0 || punctuation_score >= 2)
+		&& !trimmed.contains("://")
+		&& !trimmed.contains('，')
+}
+
+fn structured_tool_grounding_context(request: &RequestEnvelope, tool_name: &str) -> String {
+	let explicit_paths = extract_path_candidates(&request.goal);
+	let explicit_table_path = extract_table_path(&request.goal);
+	let explicit_glob = extract_glob_pattern(&request.goal);
+	let explicit_python_code = extract_explicit_python_code(&request.goal);
+	let workspace_entries = visible_workspace_entries(40);
+	serde_json::to_string_pretty(&json!({
+		"tool_name": tool_name,
+		"workspace_root_alias": ".",
+		"explicit_path_candidates": explicit_paths,
+		"explicit_table_path": explicit_table_path,
+		"explicit_glob_pattern": explicit_glob,
+		"explicit_python_code": explicit_python_code,
+		"visible_workspace_entries": workspace_entries,
+	}))
+	.unwrap_or_else(|_| "{}".to_string())
+}
+
+fn visible_workspace_entries(limit: usize) -> Vec<String> {
+	let Ok(cwd) = std::env::current_dir() else {
+		return Vec::new();
+	};
+	let Ok(entries) = fs::read_dir(cwd) else {
+		return Vec::new();
+	};
+	let mut names = entries
+		.filter_map(Result::ok)
+		.filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+		.collect::<BTreeSet<_>>()
+		.into_iter()
+		.collect::<Vec<_>>();
+	names.truncate(limit);
+	names
 }
 
 fn tool_name_for_role(tool_config: &ToolCatalogConfig, role: BuiltinToolRole) -> String {
