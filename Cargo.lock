@@ -1821,25 +1821,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "roku-skill-registry"
-version = "0.1.0"
-dependencies = [
- "reqwest",
- "roku-common-types",
- "roku-observability",
- "roku-plugin-skills",
- "roku-resource-catalog",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "thiserror",
- "url",
- "walkdir",
- "zip 8.2.0",
-]
-
-[[package]]
 name = "roku-state-store"
 version = "0.1.0"
 dependencies = [
