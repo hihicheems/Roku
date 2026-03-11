@@ -20,7 +20,6 @@ members = [
     "crates/roku-mcp-bridge",
     "crates/roku-coding-provider-adapter",
     "crates/roku-api-gateway",
-    "crates/roku-connectors-telegram",
     "crates/roku-state-store",
     "crates/roku-artifact-store",
     "crates/roku-experiment-registry",
