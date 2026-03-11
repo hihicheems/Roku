@@ -92,10 +92,6 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 		mut request: RequestEnvelope,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let session_id = request.session_id.clone();
-		let preferences = self.session_state.load_preferences(&session_id)?;
-		if request.planning_mode_hint.is_none() {
-			request.planning_mode_hint = preferences.planning_mode;
-		}
 		request.conversation_history = self.session_state.load_recent_turns(&session_id, 12)?;
 		self.session_state.append_turn(
 			&session_id,
@@ -135,10 +131,14 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 	fn update_session_planning_mode(
 		&self,
 		session_id: &str,
-		planning_mode: Option<PlanningModeHint>,
+		_planning_mode: Option<PlanningModeHint>,
 	) -> Result<(), RuntimeError> {
-		self.session_state
-			.save_preferences(session_id, SessionPreferences { planning_mode })
+		self.session_state.save_preferences(
+			session_id,
+			SessionPreferences {
+				planning_mode: None,
+			},
+		)
 	}
 
 	fn handle_approval_decision(
@@ -237,6 +237,7 @@ impl TelegramSessionState {
 		Ok(())
 	}
 
+	#[cfg(test)]
 	fn load_preferences(&self, session_id: &str) -> Result<SessionPreferences, RuntimeError> {
 		let store = self.lock_preferences()?;
 		Ok(store
@@ -386,7 +387,7 @@ mod tests {
 	}
 
 	#[test]
-	fn telegram_handler_uses_planning_mode_as_compatibility_hint_and_keeps_memory() {
+	fn telegram_handler_keeps_memory_without_inheriting_session_planning_mode() {
 		let mut router = LlmRouter::new(RoutingPolicy {
 			max_request_cost_usd: 1.0,
 			max_latency_ms: 5_000,
@@ -415,7 +416,7 @@ mod tests {
 			.handle_request(request(session_id, "今天周几？"))
 			.expect("first request should succeed");
 		assert_eq!(first.status, ResponseStatus::Succeeded);
-		assert!(first.message.contains("planning-heavy"));
+		assert_eq!(first.message, "今天是星期三。");
 
 		handler
 			.update_session_planning_mode(session_id, None)

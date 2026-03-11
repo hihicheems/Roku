@@ -80,6 +80,18 @@ impl TelegramPollingRunner {
 		loop {
 			let updates = match self.client.get_updates(next_offset) {
 				Ok(updates) => {
+					if consecutive_poll_failures >= self.poll_error_log_threshold
+						&& self.poll_error_log_threshold > 0
+					{
+						log_telegram(
+							LogLevel::Info,
+							"telegram polling recovered",
+							[(
+								"consecutive_failures",
+								consecutive_poll_failures.to_string(),
+							)],
+						);
+					}
 					consecutive_poll_failures = 0;
 					updates
 				}
@@ -90,8 +102,8 @@ impl TelegramPollingRunner {
 						self.poll_error_log_threshold,
 					) {
 						log_telegram(
-							LogLevel::Warn,
-							"poll error threshold reached",
+							LogLevel::Debug,
+							"telegram polling retrying after transport failure",
 							[
 								(
 									"consecutive_failures",

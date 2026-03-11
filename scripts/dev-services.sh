@@ -18,8 +18,8 @@ load_env_file
 RUN_DIR="${ROKU_RUN_DIR:-$ROOT_DIR/run/dev-services}"
 LOG_DIR="${ROKU_DEV_SERVICE_LOG_DIR:-$ROOT_DIR/logs/dev-services}"
 DEFAULT_API_BIND_ADDR="127.0.0.1:8787"
-DEFAULT_OPENROUTER_PRIMARY_MODEL="step-3.5-flash:free"
-DEFAULT_OPENROUTER_FALLBACK_MODELS="deepseek-chat,gemini-2.0-flash"
+DEFAULT_OPENROUTER_PRIMARY_MODEL="deepseek-chat"
+DEFAULT_OPENROUTER_FALLBACK_MODELS="gemini-2.0-flash"
 
 readonly ROOT_DIR RUN_DIR LOG_DIR DEFAULT_API_BIND_ADDR DEFAULT_OPENROUTER_PRIMARY_MODEL DEFAULT_OPENROUTER_FALLBACK_MODELS
 
@@ -39,9 +39,6 @@ managed_services() {
 embedded_components() {
 	printf '%s\n' \
 		"roku-runtime-service" \
-		"roku-planning-engine" \
-		"roku-task-planner" \
-		"roku-execution-graph-builder" \
 		"roku-agent-runtime" \
 		"roku-validation-plane" \
 		"roku-state-store" \
@@ -73,7 +70,7 @@ service_command() {
 		printf '%s\n' "cargo run -p roku-cmd -- api-gateway"
 		;;
 	telegram-bot)
-		printf '%s\n' "cargo run -p roku-cmd -- telegram-bot"
+		printf '%s\n' "env ROKU_PLUGIN_CONFIG_PATH='$ROOT_DIR/config/plugins.messaging.toml' cargo run -p roku-cmd -- telegram-bot"
 		;;
 	*)
 		echo "unknown service: ${1:-}" >&2
@@ -421,15 +418,6 @@ component_detail() {
 	case "${1:-}" in
 	roku-runtime-service)
 		printf '%s\n' 'embedded via api-gateway, telegram-bot'
-		;;
-	roku-planning-engine)
-		printf '%s\n' 'embedded via roku-runtime-service'
-		;;
-	roku-task-planner)
-		printf '%s\n' 'embedded via roku-runtime-service'
-		;;
-	roku-execution-graph-builder)
-		printf '%s\n' 'embedded via roku-runtime-service'
 		;;
 	roku-agent-runtime)
 		printf '%s\n' 'embedded via roku-runtime-service'
