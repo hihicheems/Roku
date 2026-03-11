@@ -1661,15 +1661,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "roku-mcp-bridge"
-version = "0.1.0"
-dependencies = [
- "roku-plugin-mcp",
- "serde",
- "thiserror",
-]
-
-[[package]]
 name = "roku-observability"
 version = "0.1.0"
 dependencies = [
