@@ -1652,19 +1652,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "roku-connectors-telegram"
-version = "0.1.0"
-dependencies = [
- "reqwest",
- "roku-common-types",
- "roku-observability",
- "roku-plugin-telegram",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "roku-experiment-registry"
 version = "0.1.0"
 dependencies = [

@@ -393,7 +393,7 @@ fn log_telegram(
 	fields: impl IntoIterator<Item = (&'static str, String)>,
 ) {
 	let record = fields.into_iter().fold(
-		LogRecord::new("roku-connectors-telegram", level, message),
+		LogRecord::new("roku-plugin-telegram", level, message),
 		|record: LogRecord, (key, value)| record.with_field(key, value),
 	);
 	let _ = emit_global_log(record);
