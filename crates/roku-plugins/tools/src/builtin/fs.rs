@@ -28,32 +28,72 @@ use serde_json::{Value, json};
 const MAX_DIR_ENTRIES: usize = 200;
 const DEFAULT_MAX_BYTES: usize = 4_096;
 const MAX_GLOB_MATCHES: usize = 200;
+const MAX_DESCENDANT_SCAN_ENTRIES: usize = 8_000;
 
 pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
 	vec![
 		descriptor_catalog(
 			"fs.inspect",
-			"Inspect a filesystem path and return metadata such as kind, size, and timestamps.",
-			&["file metadata", "inspect a path"],
-			&["Read metadata for Cargo.toml."],
+			"Inspect a filesystem path or the current working directory and return bounded metadata such as kind, size, and timestamps.",
+			&[
+				"file metadata",
+				"path inspection",
+				"working directory",
+				"cwd",
+				"目录",
+				"路径",
+			],
+			&["pwd", "stat Cargo.toml"],
 			&["path"],
 			&["fs.inspect"],
+			&["pwd", "stat <path>"],
+			&[
+				"inspect the current working directory",
+				"inspect a file or directory path",
+				"return metadata for a grounded path",
+			],
 		),
 		descriptor_catalog(
 			"fs.list_dir",
-			"List entries in a directory with bounded output and truncation metadata.",
-			&["list files", "directory contents", "folder listing"],
-			&["List the files under crates/roku-plugins."],
+			"List entries in a directory, including hidden entries, with bounded output and truncation metadata.",
+			&[
+				"list files",
+				"directory contents",
+				"folder listing",
+				"hidden files",
+				"current directory",
+				"目录内容",
+			],
+			&["ls .", "ls .cursor", "ls crates/roku-plugins"],
 			&["path"],
 			&["fs.list_dir"],
+			&["ls <path>", "ll <path>", "dir <path>"],
+			&[
+				"list the current directory",
+				"list a nested subdirectory",
+				"show hidden files and folders in a grounded directory",
+			],
 		),
 		descriptor_catalog(
 			"fs.read_text",
-			"Read a text file with a maximum byte budget and truncation metadata.",
-			&["read file", "open text", "show file contents"],
-			&["Read the first part of Cargo.toml."],
+			"Read a text file with a maximum byte budget and truncation metadata after grounding the requested path inside the allowed workspace roots.",
+			&[
+				"read file",
+				"open text",
+				"show file contents",
+				"read named file",
+				"文件内容",
+				"读取文件",
+			],
+			&["cat Cargo.toml", "cat .env.example"],
 			&["path", "max_bytes"],
 			&["fs.read_text"],
+			&["cat <path>", "more <path>"],
+			&[
+				"read a file from the current directory",
+				"read a uniquely grounded file by basename",
+				"show the first part of a text file",
+			],
 		),
 		descriptor_catalog(
 			"fs.glob",
@@ -62,14 +102,18 @@ pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
 			&["Find all Rust files under crates/roku-plugins/**/*.rs."],
 			&["pattern"],
 			&["fs.glob"],
+			&["glob <pattern>"],
+			&["find files that match a glob pattern inside the workspace"],
 		),
 		descriptor_catalog(
 			"fs.exists",
 			"Check whether a filesystem path exists and report its kind if present.",
-			&["path exists", "does file exist", "check directory"],
+			&["path exists", "does file exist", "check directory", "存在"],
 			&["Does tmp/test-excel.xlsx exist?"],
 			&["path"],
 			&["fs.exists"],
+			&["test -e <path>", "exists <path>"],
+			&["check whether a grounded file or directory exists"],
 		),
 	]
 }
@@ -291,6 +335,8 @@ fn descriptor_catalog(
 	examples: &[&str],
 	input_schema: &[&str],
 	required_capabilities: &[&str],
+	key_commands: &[&str],
+	use_cases: &[&str],
 ) -> CatalogDescriptor {
 	CatalogDescriptor {
 		selector: roku_common_types::ResourceSelector::tool(name),
@@ -315,8 +361,11 @@ fn descriptor_catalog(
 			.map(|value| (*value).to_string())
 			.collect(),
 		summary: description.to_string(),
-		key_commands: Vec::new(),
-		use_cases: Vec::new(),
+		key_commands: key_commands
+			.iter()
+			.map(|value| (*value).to_string())
+			.collect(),
+		use_cases: use_cases.iter().map(|value| (*value).to_string()).collect(),
 	}
 }
 
@@ -421,13 +470,13 @@ fn resolve_existing_path(raw: &str, roots: &[PathBuf]) -> Result<PathBuf, ToolFa
 fn resolve_candidate_path(raw: &str, roots: &[PathBuf]) -> Result<PathBuf, ToolFailure> {
 	let path = PathBuf::from(raw);
 	let candidate = if path.is_absolute() {
-		path
+		path.clone()
 	} else {
 		roots
 			.first()
 			.cloned()
 			.unwrap_or_else(|| PathBuf::from("."))
-			.join(path)
+			.join(&path)
 	};
 	if candidate.exists() {
 		let canonical = candidate.canonicalize().map_err(|error| {
@@ -435,6 +484,14 @@ fn resolve_candidate_path(raw: &str, roots: &[PathBuf]) -> Result<PathBuf, ToolF
 		})?;
 		ensure_allowed(&canonical, roots)?;
 		return Ok(canonical);
+	}
+	if !path.is_absolute()
+		&& !raw.contains('/')
+		&& !raw.contains('\\')
+		&& let Some(resolved) = find_unique_descendant_match(raw, roots)?
+	{
+		ensure_allowed(&resolved, roots)?;
+		return Ok(resolved);
 	}
 	if let Some(parent) = candidate.parent() {
 		let canonical_parent = parent.canonicalize().map_err(|error| {
@@ -445,6 +502,58 @@ fn resolve_candidate_path(raw: &str, roots: &[PathBuf]) -> Result<PathBuf, ToolF
 	}
 	ensure_allowed(&candidate, roots)?;
 	Ok(candidate)
+}
+
+fn find_unique_descendant_match(
+	target_name: &str,
+	roots: &[PathBuf],
+) -> Result<Option<PathBuf>, ToolFailure> {
+	let mut matches = Vec::new();
+	let mut visited = 0_usize;
+	for root in roots {
+		let mut stack = vec![root.clone()];
+		while let Some(directory) = stack.pop() {
+			let entries = fs::read_dir(&directory).map_err(|error| {
+				ToolFailure::terminal(format!(
+					"failed to search under `{}`: {error}",
+					directory.display()
+				))
+			})?;
+			for entry in entries.filter_map(Result::ok) {
+				visited += 1;
+				if visited > MAX_DESCENDANT_SCAN_ENTRIES {
+					return Ok(None);
+				}
+				let path = entry.path();
+				let name = entry.file_name().to_string_lossy().to_string();
+				if entry.file_name().to_string_lossy() == target_name {
+					let resolved = path.canonicalize().map_err(|error| {
+						ToolFailure::terminal(format!(
+							"failed to resolve `{}` while searching for `{target_name}`: {error}",
+							path.display()
+						))
+					})?;
+					matches.push(resolved);
+					if matches.len() > 1 {
+						return Err(ToolFailure::terminal(format!(
+							"`{target_name}` is ambiguous under the allowed read roots; please provide a more specific path"
+						)));
+					}
+				}
+				if path.is_dir() && !should_skip_workspace_search_dir(&name) {
+					stack.push(path);
+				}
+			}
+		}
+	}
+	Ok(matches.into_iter().next())
+}
+
+fn should_skip_workspace_search_dir(name: &str) -> bool {
+	matches!(
+		name,
+		".git" | ".roku" | "target" | "node_modules" | "dist" | "build"
+	)
 }
 
 fn ensure_allowed(path: &Path, roots: &[PathBuf]) -> Result<(), ToolFailure> {

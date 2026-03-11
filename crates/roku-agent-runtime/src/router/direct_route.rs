@@ -37,6 +37,19 @@ pub enum DirectRouteKind {
 		arguments: Value,
 		attachments: Vec<PathBuf>,
 	},
+	FilesystemSequence {
+		commands: Vec<FsCommandStep>,
+	},
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FsCommandStep {
+	ChangeDir { path: String },
+	ListDir { path: Option<String> },
+	ReadText { path: String },
+	PrintWorkingDir,
+	Inspect { path: String },
+	Exists { path: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]

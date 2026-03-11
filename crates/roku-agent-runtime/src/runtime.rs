@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::result::{policy_rejection_result, tool_failure_result, tool_success_result};
 use crate::router::{
-	DirectRouteExecutionResult, DirectRouteKind, DirectRoutePlan, EscalationAction, IntentFamily,
-	RouteClassifierContext, RouteDecisionResult, RouteScratchpad, classify_request,
+	DirectRouteExecutionResult, DirectRouteKind, DirectRoutePlan, EscalationAction, FsCommandStep,
+	IntentFamily, RouteClassifierContext, RouteDecisionResult, RouteScratchpad, classify_request,
 };
 use crate::tool_config::ToolCatalogConfig;
 use crate::tools::{
@@ -368,6 +368,9 @@ impl GenericAgentRuntime {
 				arguments,
 				attachments,
 			),
+			DirectRouteKind::FilesystemSequence { commands } => {
+				self.execute_filesystem_sequence(task_id, request, commands)
+			}
 			DirectRouteKind::Inventory => self.execute_tool_like_route(
 				task_id,
 				request,
@@ -422,6 +425,16 @@ impl GenericAgentRuntime {
 				"direct-route:compatibility-fallback",
 				fallback_message,
 				0.74,
+			);
+		}
+
+		if matches!(result.action, EscalationAction::AskForMoreInfo) {
+			return self.synthetic_message_result(
+				task_id,
+				"direct-route",
+				"direct-route:ask-for-more-info",
+				fallback_message,
+				0.72,
 			);
 		}
 
@@ -500,7 +513,8 @@ impl GenericAgentRuntime {
 				| DirectRouteKind::ToolInvocation { selector, .. } => Some(selector.display_key()),
 				DirectRouteKind::Inventory
 				| DirectRouteKind::Conversation
-				| DirectRouteKind::SkillInstall { .. } => None,
+				| DirectRouteKind::SkillInstall { .. }
+				| DirectRouteKind::FilesystemSequence { .. } => None,
 			},
 			RouteDecisionResult::Escalate(_) => None,
 		};
@@ -629,6 +643,269 @@ impl GenericAgentRuntime {
 			result,
 			message,
 		}
+	}
+
+	fn synthetic_status_result(
+		&self,
+		task_id: &TaskId,
+		node_id: &str,
+		producer: &str,
+		message: String,
+		confidence: f32,
+		status: ResultStatus,
+	) -> DirectRouteExecutionResult {
+		let node = TaskNode {
+			node_id: NodeId(node_id.to_string()),
+			kind: TaskNodeKind::Execution,
+			description: message.clone(),
+			resources: Vec::new(),
+			capabilities: Vec::new(),
+			dispatch_policy: TaskNodeDispatchPolicy::Automatic,
+			join_policy: JoinPolicy::AllParents,
+			aggregation_mode: AggregationMode::CollectAll,
+			recovery_anchor: Default::default(),
+			budget_snapshot: NodeBudgetSnapshot {
+				token_budget: 0,
+				time_budget_ms: 0,
+			},
+			deadline_ms: 0,
+			capability_requirements_snapshot: Vec::new(),
+			retry_policy: RetryPolicy::default(),
+			rerun_policy: RerunPolicy::SafeToRerun,
+		};
+		let result = ResultEnvelope {
+			task_id: task_id.clone(),
+			node_id: node.node_id.clone(),
+			producer: producer.to_string(),
+			schema_version: "result.v1".to_string(),
+			status,
+			payload: json!({
+				"message": message,
+				"direct_route": true,
+			})
+			.to_string(),
+			evidence: vec![EvidenceItem {
+				kind: "runtime".to_string(),
+				value: "direct-route".to_string(),
+			}],
+			confidence,
+		};
+		let message = extract_result_message(&result);
+		DirectRouteExecutionResult {
+			node,
+			result,
+			message,
+		}
+	}
+
+	fn execute_filesystem_sequence(
+		&self,
+		task_id: &TaskId,
+		request: &RequestEnvelope,
+		commands: &[FsCommandStep],
+	) -> DirectRouteExecutionResult {
+		let mut cwd = std::env::current_dir()
+			.ok()
+			.and_then(|path| path.canonicalize().ok())
+			.unwrap_or_else(|| PathBuf::from("."));
+		let mut rendered_steps = Vec::new();
+
+		for command in commands {
+			match command {
+				FsCommandStep::ChangeDir { path } => {
+					let target = resolve_sequence_path(&cwd, path);
+					let result = self.invoke_sequence_tool(
+						task_id,
+						request,
+						"fs.inspect",
+						json!({ "path": target.display().to_string() }),
+					);
+					let payload = match result {
+						Ok(payload) => payload,
+						Err(message) => {
+							return self.synthetic_status_result(
+								task_id,
+								"direct-route:filesystem-sequence",
+								"direct-route",
+								message,
+								0.70,
+								ResultStatus::Error,
+							);
+						}
+					};
+					if payload.get("kind").and_then(Value::as_str) != Some("directory") {
+						return self.synthetic_status_result(
+							task_id,
+							"direct-route:filesystem-sequence",
+							"direct-route",
+							format!("`{path}` is not a directory."),
+							0.70,
+							ResultStatus::Error,
+						);
+					}
+					if let Some(resolved) = payload.get("path").and_then(Value::as_str) {
+						cwd = PathBuf::from(resolved);
+					}
+					rendered_steps.push(format!("$ cd {path}\n{}", cwd.display()));
+				}
+				FsCommandStep::ListDir { path } => {
+					let target = path
+						.as_ref()
+						.map(|path| resolve_sequence_path(&cwd, path))
+						.unwrap_or_else(|| cwd.clone());
+					let result = self.invoke_sequence_tool(
+						task_id,
+						request,
+						"fs.list_dir",
+						json!({ "path": target.display().to_string() }),
+					);
+					match result {
+						Ok(payload) => rendered_steps.push(format!(
+							"$ ls {}\n{}",
+							path.as_deref().unwrap_or("."),
+							payload
+								.get("message")
+								.and_then(Value::as_str)
+								.unwrap_or_default()
+						)),
+						Err(message) => {
+							return self.synthetic_status_result(
+								task_id,
+								"direct-route:filesystem-sequence",
+								"direct-route",
+								message,
+								0.70,
+								ResultStatus::Error,
+							);
+						}
+					}
+				}
+				FsCommandStep::ReadText { path } => {
+					let target = resolve_sequence_path(&cwd, path);
+					let result = self.invoke_sequence_tool(
+						task_id,
+						request,
+						"fs.read_text",
+						json!({ "path": target.display().to_string(), "max_bytes": 4_096_u64 }),
+					);
+					match result {
+						Ok(payload) => rendered_steps.push(format!(
+							"$ cat {path}\n{}",
+							payload
+								.get("message")
+								.and_then(Value::as_str)
+								.unwrap_or_default()
+						)),
+						Err(message) => {
+							return self.synthetic_status_result(
+								task_id,
+								"direct-route:filesystem-sequence",
+								"direct-route",
+								message,
+								0.70,
+								ResultStatus::Error,
+							);
+						}
+					}
+				}
+				FsCommandStep::PrintWorkingDir => {
+					rendered_steps.push(format!("$ pwd\n{}", cwd.display()));
+				}
+				FsCommandStep::Inspect { path } => {
+					let target = resolve_sequence_path(&cwd, path);
+					let result = self.invoke_sequence_tool(
+						task_id,
+						request,
+						"fs.inspect",
+						json!({ "path": target.display().to_string() }),
+					);
+					match result {
+						Ok(payload) => rendered_steps.push(format!(
+							"$ stat {path}\n{}",
+							payload
+								.get("message")
+								.and_then(Value::as_str)
+								.unwrap_or_default()
+						)),
+						Err(message) => {
+							return self.synthetic_status_result(
+								task_id,
+								"direct-route:filesystem-sequence",
+								"direct-route",
+								message,
+								0.70,
+								ResultStatus::Error,
+							);
+						}
+					}
+				}
+				FsCommandStep::Exists { path } => {
+					let target = resolve_sequence_path(&cwd, path);
+					let result = self.invoke_sequence_tool(
+						task_id,
+						request,
+						"fs.exists",
+						json!({ "path": target.display().to_string() }),
+					);
+					match result {
+						Ok(payload) => rendered_steps.push(format!(
+							"$ test -e {path}\n{}",
+							payload
+								.get("message")
+								.and_then(Value::as_str)
+								.unwrap_or_default()
+						)),
+						Err(message) => {
+							return self.synthetic_status_result(
+								task_id,
+								"direct-route:filesystem-sequence",
+								"direct-route",
+								message,
+								0.70,
+								ResultStatus::Error,
+							);
+						}
+					}
+				}
+			}
+		}
+
+		self.synthetic_status_result(
+			task_id,
+			"direct-route:filesystem-sequence",
+			"direct-route",
+			rendered_steps.join("\n\n"),
+			0.90,
+			ResultStatus::Ok,
+		)
+	}
+
+	fn invoke_sequence_tool(
+		&self,
+		task_id: &TaskId,
+		request: &RequestEnvelope,
+		tool_name: &str,
+		arguments: Value,
+	) -> Result<Value, String> {
+		let selector = self
+			.resource_catalog
+			.entries()
+			.iter()
+			.find(|entry| {
+				entry.kind == roku_plugin_catalog::ResourceKind::Tool && entry.name == tool_name
+			})
+			.map(|entry| entry.selector.clone())
+			.ok_or_else(|| {
+				format!("tool `{tool_name}` is not enabled in the current runtime inventory")
+			})?;
+		let execution =
+			self.execute_direct_tool_invocation(task_id, request, &selector, &arguments, &[]);
+		if execution.result.status != ResultStatus::Ok {
+			return Err(execution.message);
+		}
+		let payload = serde_json::from_str::<Value>(&execution.result.payload)
+			.map_err(|error| format!("failed to parse `{tool_name}` payload: {error}"))?;
+		Ok(payload.get("output").cloned().unwrap_or(payload))
 	}
 
 	fn execute_direct_tool_invocation(
@@ -773,6 +1050,15 @@ fn merge_json_object(target: &mut Value, overlay: Value) {
 	};
 	for (key, value) in overlay_object {
 		target_object.insert(key.clone(), value.clone());
+	}
+}
+
+fn resolve_sequence_path(cwd: &std::path::Path, raw: &str) -> PathBuf {
+	let path = PathBuf::from(raw);
+	if path.is_absolute() {
+		path
+	} else {
+		cwd.join(path)
 	}
 }
 
