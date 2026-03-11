@@ -1633,18 +1633,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "roku-coding-provider-adapter"
-version = "0.1.0"
-dependencies = [
- "roku-common-types",
- "roku-mcp-bridge",
- "roku-plugin-coding",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "roku-common-types"
 version = "0.1.0"
 dependencies = [

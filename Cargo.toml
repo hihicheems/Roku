@@ -18,7 +18,6 @@ members = [
     "crates/roku-tool-runtime",
     "crates/roku-skill-registry",
     "crates/roku-mcp-bridge",
-    "crates/roku-coding-provider-adapter",
     "crates/roku-api-gateway",
     "crates/roku-state-store",
     "crates/roku-artifact-store",
