@@ -30,6 +30,14 @@ const DEFAULT_MAX_BYTES: usize = 4_096;
 const MAX_GLOB_MATCHES: usize = 200;
 const MAX_DESCENDANT_SCAN_ENTRIES: usize = 8_000;
 
+/// Returns catalog metadata for all fs builtin tools (fs.inspect, fs.list_dir, fs.read_text, fs.glob, fs.exists).
+///
+/// Used when the core-fs plugin is enabled: [`build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities`]
+/// in `builders` extends its tool entries with this list, then builds a [`ResourceCatalog`]. That catalog is
+/// used by the router/classifier for: retrieval over descriptor text (BM25 + embedding), building the LLM
+/// "Current inventory" in the route classifier prompt, resolving a chosen tool name to a [`ResourceSelector`],
+/// and risk/cost for routing decisions. Tool names here must match the tools registered for execution via
+/// [`register_tools`] in this module.
 pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
 	vec![
 		descriptor_catalog(

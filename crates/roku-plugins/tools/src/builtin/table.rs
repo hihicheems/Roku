@@ -27,6 +27,14 @@ use serde_json::{Value, json};
 
 const DEFAULT_PREVIEW_ROWS: usize = 5;
 
+/// Returns catalog metadata for all table builtin tools (table.inspect, table.list_sheets, table.preview, table.schema).
+///
+/// Used when the core-table plugin is enabled: [`build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities`]
+/// in `builders` extends its tool entries with this list, then builds a [`ResourceCatalog`]. That catalog is
+/// used by the router/classifier for: retrieval over descriptor text (BM25 + embedding), building the LLM
+/// "Current inventory" in the route classifier prompt, resolving a chosen tool name to a [`ResourceSelector`],
+/// and risk/cost for routing decisions. Tool names here must match the tools registered for execution via
+/// [`register_tools`] in this module.
 pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
 	vec![
 		descriptor_catalog(
