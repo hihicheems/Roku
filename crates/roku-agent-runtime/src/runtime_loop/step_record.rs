@@ -43,6 +43,32 @@ pub struct StepRecord {
 }
 
 impl StepRecord {
+	pub fn tool_call(
+		step_index: u32,
+		tool_name: impl Into<String>,
+		decision_reason: impl Into<String>,
+		observation: StepObservation,
+		tool_latency_ms: Option<u64>,
+		remaining_step_budget_after: u32,
+		remaining_recovery_budget_after: u32,
+		working_directory_after: impl Into<String>,
+	) -> Self {
+		let timestamp = now_rfc3339();
+		Self {
+			step_index,
+			action: StepAction::CallTool,
+			tool_name: Some(tool_name.into()),
+			decision_reason: decision_reason.into(),
+			started_at: timestamp.clone(),
+			finished_at: timestamp,
+			tool_latency_ms,
+			observation: Some(observation),
+			remaining_step_budget_after,
+			remaining_recovery_budget_after,
+			working_directory_after: working_directory_after.into(),
+		}
+	}
+
 	pub fn terminal(
 		step_index: u32,
 		action: StepAction,

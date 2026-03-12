@@ -24,8 +24,9 @@ mod workers;
 
 pub use roku_plugin_core::PluginRegistrySnapshot;
 pub use router::{
-	DirectRouteExecutionResult, DirectRoutePlan, EscalationAction, EscalationReason, IntentFamily,
-	RouteDecision, RouteDecisionResult, RouteEscalationPlan, RouteRisk, RouteScratchpad,
+	DirectRouteExecutionResult, DirectRouteKind, DirectRoutePlan, EscalationAction,
+	EscalationReason, IntentFamily, RouteDecision, RouteDecisionResult, RouteEscalationPlan,
+	RouteRisk, RouteScratchpad,
 };
 pub use runtime::{AgentWorker, GenericAgentRuntime, RuntimeWorker};
 pub use runtime_loop::{

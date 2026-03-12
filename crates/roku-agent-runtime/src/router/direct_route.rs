@@ -18,6 +18,7 @@ use roku_common_types::{ResourceSelector, ResultEnvelope, TaskNode};
 use serde_json::Value;
 
 use crate::router::RouteDecision;
+use crate::runtime_loop::StepAction;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirectRouteKind {
@@ -37,6 +38,7 @@ pub enum DirectRouteKind {
 		arguments: Value,
 		attachments: Vec<PathBuf>,
 	},
+	FilesystemLoop,
 	FilesystemSequence {
 		commands: Vec<FsCommandStep>,
 	},
@@ -63,4 +65,5 @@ pub struct DirectRouteExecutionResult {
 	pub node: TaskNode,
 	pub result: ResultEnvelope,
 	pub message: String,
+	pub terminal_step_action: Option<StepAction>,
 }

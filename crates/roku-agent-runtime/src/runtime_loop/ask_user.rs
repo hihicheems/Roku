@@ -14,7 +14,68 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::runtime_loop::ToolObservation;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AskUserPayload {
 	pub final_message: String,
+}
+
+pub(crate) fn ask_user_from_observation(
+	goal: &str,
+	observation: &ToolObservation,
+) -> AskUserPayload {
+	let final_message = if !goal.is_ascii() {
+		match observation.error_type.as_deref() {
+			Some("multiple_candidates") => {
+				let matches = observation
+					.data
+					.get("matches")
+					.and_then(serde_json::Value::as_array)
+					.map(|values| {
+						values
+							.iter()
+							.filter_map(serde_json::Value::as_str)
+							.collect::<Vec<_>>()
+					})
+					.unwrap_or_default();
+				if matches.is_empty() {
+					"我找到了多个候选路径。请告诉我你想看哪一个更具体的路径。".to_string()
+				} else {
+					format!(
+						"我找到了多个候选路径：{}。你想看哪一个？",
+						matches.join("、")
+					)
+				}
+			}
+			_ => observation.message.clone(),
+		}
+	} else {
+		match observation.error_type.as_deref() {
+			Some("multiple_candidates") => {
+				let matches = observation
+					.data
+					.get("matches")
+					.and_then(serde_json::Value::as_array)
+					.map(|values| {
+						values
+							.iter()
+							.filter_map(serde_json::Value::as_str)
+							.collect::<Vec<_>>()
+					})
+					.unwrap_or_default();
+				if matches.is_empty() {
+					"I found multiple candidate paths. Please tell me which one you want."
+						.to_string()
+				} else {
+					format!(
+						"I found multiple candidate paths: {}. Which one do you want?",
+						matches.join(", ")
+					)
+				}
+			}
+			_ => observation.message.clone(),
+		}
+	};
+	AskUserPayload { final_message }
 }
