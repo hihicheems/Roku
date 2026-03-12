@@ -54,9 +54,13 @@ impl RuntimeService {
 		route: &RouteDecisionResult,
 	) -> LoopState {
 		let decision = route_decision(route);
-		let loop_state =
-			self.runtime
-				.initialize_runtime_loop(request, &request.session_id, decision);
+		let bound_resources = route_bound_resources(route);
+		let loop_state = self.runtime.initialize_runtime_loop(
+			request,
+			&request.session_id,
+			decision,
+			bound_resources,
+		);
 		log_runtime(
 			LogLevel::Info,
 			"runtime loop initialized",
@@ -138,11 +142,11 @@ impl RuntimeService {
 		message: &str,
 	) -> StepRecord {
 		let reason = match response_status {
-			ResponseStatus::Succeeded => "phase1 loop bridge captured direct route completion",
+			ResponseStatus::Succeeded => "runtime loop captured direct route completion",
 			ResponseStatus::PendingApproval => {
-				"phase1 loop bridge captured pending approval terminal state"
+				"runtime loop captured pending approval terminal state"
 			}
-			ResponseStatus::Failed => "phase1 loop bridge captured direct route failure",
+			ResponseStatus::Failed => "runtime loop captured direct route failure",
 		};
 		let step = self.runtime.record_terminal_step(
 			loop_state,
@@ -168,5 +172,12 @@ fn route_decision(route: &RouteDecisionResult) -> &roku_agent_runtime::RouteDeci
 	match route {
 		RouteDecisionResult::Direct(plan) => &plan.decision,
 		RouteDecisionResult::Escalate(plan) => &plan.decision,
+	}
+}
+
+fn route_bound_resources(route: &RouteDecisionResult) -> Vec<roku_common_types::ResourceSelector> {
+	match route {
+		RouteDecisionResult::Direct(plan) => plan.bound_resources.clone(),
+		RouteDecisionResult::Escalate(_) => Vec::new(),
 	}
 }

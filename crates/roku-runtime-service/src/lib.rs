@@ -19,7 +19,7 @@ mod direct;
 mod execution;
 mod helpers;
 mod legacy_graph;
-mod runtime_loop_bridge;
+mod runtime_loop_lifecycle;
 mod runtime_loop_recovery;
 #[cfg(test)]
 mod tests;
