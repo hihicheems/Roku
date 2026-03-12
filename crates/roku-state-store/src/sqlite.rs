@@ -1009,6 +1009,7 @@ mod tests {
 				"session-1",
 				SessionPreferences {
 					planning_mode: Some(PlanningModeHint::TreeSearch),
+					pending_loop: None,
 				},
 			)
 			.expect("save preferences");

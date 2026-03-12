@@ -658,6 +658,7 @@ mod tests {
 				"session-1",
 				SessionPreferences {
 					planning_mode: Some(PlanningModeHint::TreeSearch),
+					pending_loop: None,
 				},
 			)
 			.expect("save session preferences should succeed");
@@ -739,6 +740,7 @@ mod tests {
 				"session-1",
 				SessionPreferences {
 					planning_mode: Some(PlanningModeHint::ReAct),
+					pending_loop: None,
 				},
 			)
 			.expect("save session preferences should succeed");

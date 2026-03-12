@@ -18,6 +18,7 @@ mod api;
 mod bot;
 mod runtime;
 mod storage;
+mod telegram_loop_bridge;
 
 use std::env;
 use std::path::PathBuf;
