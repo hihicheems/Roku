@@ -13,13 +13,18 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::result::{policy_rejection_result, tool_failure_result, tool_success_result};
 use crate::router::{
 	DirectRouteExecutionResult, DirectRouteKind, DirectRoutePlan, EscalationAction, FsCommandStep,
-	IntentFamily, RouteClassifierContext, RouteDecisionResult, RouteScratchpad, classify_request,
+	IntentFamily, RouteClassifierContext, RouteDecisionResult, RouteScratchpad,
+};
+use crate::runtime_loop::{
+	LoopContext, LoopState, StepAction, StepObservation, StepRecord, ToolObservation,
+	build_loop_context, intake_request,
 };
 use crate::tool_config::ToolCatalogConfig;
 use crate::tools::{
@@ -38,9 +43,9 @@ use roku_common_types::{
 	ResultStatus, RetryPolicy, TaskId, TaskNodeDispatchPolicy, TaskNodeKind,
 };
 use roku_common_types::{AgentInstanceSpec, ResultEnvelope, TaskNode};
-use roku_plugin_catalog::ResourceCatalog;
+use roku_plugin_catalog::{ResourceCatalog, ResourceKind};
 use roku_plugin_core::PluginRegistrySnapshot;
-use roku_plugin_host::{ToolInvocation, ToolRuntime};
+use roku_plugin_host::{ToolExecutionResult, ToolInvocation, ToolRuntime, ToolRuntimeError};
 use roku_plugin_llm::LlmRouter;
 use roku_plugin_skills::SkillRegistry;
 use serde_json::{Value, json};
@@ -281,7 +286,7 @@ impl GenericAgentRuntime {
 		request: &RequestEnvelope,
 		session_id: &str,
 	) -> RouteDecisionResult {
-		let result = classify_request(
+		let result = crate::runtime_loop::classify_existing_route(
 			RouteClassifierContext {
 				catalog: &self.resource_catalog,
 				tool_config: &self.tool_config,
@@ -293,6 +298,71 @@ impl GenericAgentRuntime {
 		);
 		self.remember_route_decision(session_id, &result);
 		result
+	}
+
+	pub fn build_loop_context(
+		&self,
+		request: &RequestEnvelope,
+		_session_id: &str,
+		route_decision: &crate::router::RouteDecision,
+	) -> LoopContext {
+		let loop_request = intake_request(request);
+		build_loop_context(
+			&loop_request,
+			route_decision,
+			self.visible_tools_for_decision(route_decision),
+		)
+	}
+
+	pub fn initialize_runtime_loop(
+		&self,
+		request: &RequestEnvelope,
+		session_id: &str,
+		route_decision: &crate::router::RouteDecision,
+	) -> LoopState {
+		let context = self.build_loop_context(request, session_id, route_decision);
+		LoopState::new(format!("loop-{}", request.request_id.0), &context)
+	}
+
+	pub fn record_terminal_step(
+		&self,
+		loop_state: &mut LoopState,
+		action: StepAction,
+		reason: impl Into<String>,
+		final_message: Option<String>,
+	) -> StepRecord {
+		let observation = final_message.map(|message| StepObservation::FinalMessage {
+			final_message: message,
+		});
+		let step = StepRecord::terminal(
+			loop_state.step_index + 1,
+			action,
+			reason,
+			observation,
+			loop_state.remaining_step_budget.saturating_sub(1),
+			loop_state.remaining_recovery_budget,
+			loop_state.working_directory.clone(),
+		);
+		loop_state.record_step(step.clone());
+		loop_state.status = match action {
+			StepAction::FinalAnswer => crate::runtime_loop::LoopStatus::Succeeded,
+			StepAction::Fail => crate::runtime_loop::LoopStatus::Failed,
+			StepAction::AskUser => crate::runtime_loop::LoopStatus::AwaitingUser,
+			StepAction::CallTool => crate::runtime_loop::LoopStatus::LoopRunning,
+		};
+		step
+	}
+
+	pub fn tool_result_to_observation(&self, execution: &ToolExecutionResult) -> ToolObservation {
+		ToolObservation::from_execution_result(execution)
+	}
+
+	pub fn tool_error_to_observation(
+		&self,
+		tool_name: &str,
+		error: &ToolRuntimeError,
+	) -> ToolObservation {
+		ToolObservation::from_runtime_error(tool_name, error)
 	}
 
 	pub fn execute_direct_route(
@@ -499,6 +569,33 @@ impl GenericAgentRuntime {
 	fn with_route_router(mut self, route_router: Arc<LlmRouter>) -> Self {
 		self.route_router = Some(route_router);
 		self
+	}
+
+	fn visible_tools_for_decision(
+		&self,
+		route_decision: &crate::router::RouteDecision,
+	) -> Vec<String> {
+		let enabled_tools = self
+			.resource_catalog
+			.descriptors_for_kind(ResourceKind::Tool)
+			.into_iter()
+			.map(|descriptor| descriptor.name)
+			.collect::<HashSet<_>>();
+		if route_decision.candidate_tools.is_empty() {
+			let mut visible_tools = enabled_tools.into_iter().collect::<Vec<_>>();
+			visible_tools.sort();
+			return visible_tools;
+		}
+
+		let mut visible_tools = route_decision
+			.candidate_tools
+			.iter()
+			.filter(|tool_name| enabled_tools.contains(*tool_name))
+			.cloned()
+			.collect::<Vec<_>>();
+		visible_tools.sort();
+		visible_tools.dedup();
+		visible_tools
 	}
 
 	fn remember_route_decision(&self, session_id: &str, result: &RouteDecisionResult) {
@@ -1553,6 +1650,72 @@ So, I'll output: "星期日""#
 			.as_str()
 			.expect("message should be a string");
 		assert_eq!(message, "星期日");
+	}
+
+	#[test]
+	fn initialize_runtime_loop_uses_shortlisted_visible_tools() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-loop".to_string()),
+			session_id: "session-loop".to_string(),
+			goal: "Read Cargo.toml".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::FilesystemRead,
+			0.92,
+			false,
+			crate::router::RouteRisk::Low,
+			vec!["fs.read_text".to_string(), "not.enabled".to_string()],
+			vec!["core-fs".to_string()],
+			Vec::new(),
+			"filesystem request",
+		);
+
+		let loop_state = runtime.initialize_runtime_loop(&request, &request.session_id, &decision);
+
+		assert_eq!(loop_state.run_id, "loop-req-loop");
+		assert_eq!(loop_state.visible_tools, vec!["fs.read_text".to_string()]);
+		assert_eq!(loop_state.history.len(), 0);
+	}
+
+	#[test]
+	fn record_terminal_step_updates_history_and_status() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-terminal".to_string()),
+			session_id: "session-terminal".to_string(),
+			goal: "hello".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::Chat,
+			0.8,
+			false,
+			crate::router::RouteRisk::Low,
+			vec!["general.execute".to_string()],
+			Vec::new(),
+			Vec::new(),
+			"chat request",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision);
+
+		let step = runtime.record_terminal_step(
+			&mut loop_state,
+			crate::runtime_loop::StepAction::FinalAnswer,
+			"phase1 skeleton terminal step",
+			Some("hello".to_string()),
+		);
+
+		assert_eq!(step.step_index, 1);
+		assert_eq!(loop_state.history.len(), 1);
+		assert_eq!(
+			loop_state.status,
+			crate::runtime_loop::LoopStatus::Succeeded
+		);
 	}
 
 	fn test_skill_archive_bytes() -> Vec<u8> {

@@ -17,6 +17,7 @@
 mod result;
 mod router;
 mod runtime;
+mod runtime_loop;
 mod tool_config;
 mod tools;
 mod workers;
@@ -27,4 +28,9 @@ pub use router::{
 	RouteDecision, RouteDecisionResult, RouteEscalationPlan, RouteRisk, RouteScratchpad,
 };
 pub use runtime::{AgentWorker, GenericAgentRuntime, RuntimeWorker};
+pub use runtime_loop::{
+	AskUserPayload, FinalSummary, InterpretedObservation, LoopContext, LoopRequest, LoopState,
+	LoopStatus, NextStepAction, NextStepDecision, NextStepDecisionSchemaError, StepAction,
+	StepRecord, ToolObservation, interpret_observation,
+};
 pub use tool_config::{BuiltinToolRole, ConfiguredTool, ToolCatalogConfig, ToolCatalogConfigError};
