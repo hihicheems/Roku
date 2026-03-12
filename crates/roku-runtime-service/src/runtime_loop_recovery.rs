@@ -108,11 +108,13 @@ impl RuntimeService {
 				request,
 				loop_state,
 				Some(&request.goal),
+				None,
 			),
 			IntentFamily::TableRead
 			| IntentFamily::WebLookup
 			| IntentFamily::CodeExec
-			| IntentFamily::Chat => self.runtime.execute_tool_loop(
+			| IntentFamily::Chat
+			| IntentFamily::TextTransform => self.runtime.execute_tool_loop(
 				&task.task_id,
 				request,
 				loop_state,

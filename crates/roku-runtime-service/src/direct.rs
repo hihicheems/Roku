@@ -31,17 +31,17 @@ impl RuntimeService {
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let initial_history_len = loop_state.history.len();
 		let execution = match &plan.kind {
-			DirectRouteKind::FilesystemLoop => {
-				self.runtime
-					.execute_filesystem_loop(&task.task_id, request, loop_state, None)
-			}
+			DirectRouteKind::FilesystemLoop { commands } => self.runtime.execute_filesystem_loop(
+				&task.task_id,
+				request,
+				loop_state,
+				None,
+				commands.as_deref(),
+			),
 			DirectRouteKind::ToolLoop => {
 				self.runtime
 					.execute_tool_loop(&task.task_id, request, loop_state, None)
 			}
-			_ => self
-				.runtime
-				.execute_direct_route(&task.task_id, request, plan),
 		};
 		self.record_runtime_loop_history(loop_state, initial_history_len);
 		let response =
