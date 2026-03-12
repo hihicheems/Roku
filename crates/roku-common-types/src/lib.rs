@@ -75,6 +75,14 @@ pub struct ConversationTurn {
 pub struct SessionPreferences {
 	#[serde(default)]
 	pub planning_mode: Option<PlanningModeHint>,
+	#[serde(default)]
+	pub pending_loop: Option<PendingLoopBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingLoopBinding {
+	pub run_id: String,
+	pub loop_state_json: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

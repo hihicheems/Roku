@@ -37,6 +37,9 @@ use crate::runtime::{
 	build_plugin_bootstrap_from_env, ensure_plugin_enabled_for_command,
 };
 use crate::storage::LocalStorageLayout;
+use crate::telegram_loop_bridge::{
+	restore_pending_loop_from_session, sync_pending_loop_to_session,
+};
 
 pub fn run_telegram_bot_from_env() -> Result<(), CommandError> {
 	let handler = build_live_telegram_handler_from_env()?;
@@ -92,6 +95,7 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 		mut request: RequestEnvelope,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let session_id = request.session_id.clone();
+		restore_pending_loop_from_session(&self.service, &self.session_state, &session_id)?;
 		request.conversation_history = self.session_state.load_recent_turns(&session_id, 12)?;
 		self.session_state.append_turn(
 			&session_id,
@@ -104,6 +108,7 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 
 		match self.service.execute(request) {
 			Ok(response) => {
+				sync_pending_loop_to_session(&self.service, &self.session_state, &session_id)?;
 				self.session_state.append_turn(
 					&session_id,
 					ConversationTurn {
@@ -115,6 +120,7 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 				Ok(response)
 			}
 			Err(error) => {
+				sync_pending_loop_to_session(&self.service, &self.session_state, &session_id)?;
 				self.session_state.append_turn(
 					&session_id,
 					ConversationTurn {
@@ -137,6 +143,7 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 			session_id,
 			SessionPreferences {
 				planning_mode: None,
+				pending_loop: None,
 			},
 		)
 	}
@@ -185,7 +192,7 @@ fn telegram_parse_mode_label(mode: TelegramParseMode) -> &'static str {
 	}
 }
 
-struct TelegramSessionState {
+pub(crate) struct TelegramSessionState {
 	preferences: Mutex<Box<dyn SessionPreferenceRepository + Send>>,
 	conversation: Mutex<Box<dyn ConversationRepository + Send>>,
 }
@@ -225,7 +232,7 @@ impl TelegramSessionState {
 		}
 	}
 
-	fn save_preferences(
+	pub(crate) fn save_preferences(
 		&self,
 		session_id: &str,
 		preferences: SessionPreferences,
@@ -237,8 +244,10 @@ impl TelegramSessionState {
 		Ok(())
 	}
 
-	#[cfg(test)]
-	fn load_preferences(&self, session_id: &str) -> Result<SessionPreferences, RuntimeError> {
+	pub(crate) fn load_preferences_or_default(
+		&self,
+		session_id: &str,
+	) -> Result<SessionPreferences, RuntimeError> {
 		let store = self.lock_preferences()?;
 		Ok(store
 			.load_preferences(session_id)
@@ -436,7 +445,7 @@ mod tests {
 
 		let preferences = handler
 			.session_state
-			.load_preferences(session_id)
+			.load_preferences_or_default(session_id)
 			.expect("preferences should load");
 		assert_eq!(preferences.planning_mode, None);
 
