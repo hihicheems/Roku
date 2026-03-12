@@ -2,6 +2,28 @@
 
 # Changelog
 
+## [v0.0.3] - 2026-03-12
+
+### Features
+
+- **(roku-plugin-tools)** add filesystem grounding support (by @[itscheems](https://github.com/itscheems)) - ([59f6495](https://github.com/itscheems/Roku/commit/59f6495b92ad1dba533ee383d71ba696aaa3103d))
+- **(roku-runtime)** extend loop execution across direct families (by @[itscheems](https://github.com/itscheems)) - ([7c3f22b](https://github.com/itscheems/Roku/commit/7c3f22be887439ce1cf4aae49c3cc0f6710950b9))
+- **(roku-runtime-service)** execute filesystem requests through loop (by @[itscheems](https://github.com/itscheems)) - ([ae211a2](https://github.com/itscheems/Roku/commit/ae211a2ee05384b8a1b8295a12883a10e193d40b))
+- **(roku-telegram)** persist pending loop recovery in session state (by @[itscheems](https://github.com/itscheems)) - ([ea0e7fa](https://github.com/itscheems/Roku/commit/ea0e7fa5e080972fe1a122e36bdd6e9c19be8646))
+
+### Refactor
+
+- **(roku-agent-runtime)** remove stale route scratchpad (by @[itscheems](https://github.com/itscheems)) - ([d724396](https://github.com/itscheems/Roku/commit/d72439616310e6f05297c960e1e6bfc0d3450db3))
+- **(roku-agent-runtime)** cut direct routes over to runtime loop (by @[itscheems](https://github.com/itscheems)) - ([9fc3222](https://github.com/itscheems/Roku/commit/9fc3222d044fb9b3000e3ecbb663f7edd03a176f))
+- **(roku-agent-runtime)** move fs next-step logic into runtime loop (by @[itscheems](https://github.com/itscheems)) - ([741f0ba](https://github.com/itscheems/Roku/commit/741f0ba77e5bc5598b8df3f962e77ac2c0a17621))
+- **(roku-agent-runtime)** add runtime loop contracts (by @[itscheems](https://github.com/itscheems)) - ([a79d7ff](https://github.com/itscheems/Roku/commit/a79d7ff955a376a7c5b511ce22cb36d5c23a432a))
+- **(roku-runtime-service)** remove transitional loop bridge (by @[itscheems](https://github.com/itscheems)) - ([3940115](https://github.com/itscheems/Roku/commit/394011507eb43a46bf74f77e3d7de2306c138fd9))
+- **(roku-runtime-service)** add runtime loop bridge (by @[itscheems](https://github.com/itscheems)) - ([3b79923](https://github.com/itscheems/Roku/commit/3b7992367ce55850f19c4da83fea729dfe56f745))
+
+### Documentation
+
+- **(roku-plugins)** clarify catalog descriptor usage (by @[itscheems](https://github.com/itscheems)) - ([088fce2](https://github.com/itscheems/Roku/commit/088fce2e56aa2f1cfd32983dc0d0abf453415ec0))
+
 ## [v0.0.2] - 2026-03-11
 
 ### Features
