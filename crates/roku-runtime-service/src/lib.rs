@@ -19,6 +19,7 @@ mod direct;
 mod execution;
 mod helpers;
 mod legacy_graph;
+mod runtime_loop_bridge;
 #[cfg(test)]
 mod tests;
 
@@ -307,12 +308,18 @@ impl RuntimeService {
 				],
 			);
 			self.start_experiment_run(&task, &normalized_request.goal, "compatibility_fallback")?;
+			let compatibility_plan = compatibility_fallback_plan(
+				"planning mode hints are deprecated compatibility signals; planning-heavy workflow is not enabled in this runtime",
+			);
+			let mut loop_state = self.initialize_runtime_loop_for_route(
+				&normalized_request,
+				&RouteDecisionResult::Escalate(compatibility_plan.clone()),
+			);
 			return self.process_direct_escalation(
 				&mut task,
 				&normalized_request,
-				&compatibility_fallback_plan(
-					"planning mode hints are deprecated compatibility signals; planning-heavy workflow is not enabled in this runtime",
-				),
+				&compatibility_plan,
+				&mut loop_state,
 			);
 		}
 
@@ -320,11 +327,12 @@ impl RuntimeService {
 			.runtime
 			.classify_route(&normalized_request, &normalized_request.session_id);
 		log_route_decision(&normalized_request, &route);
+		let mut loop_state = self.initialize_runtime_loop_for_route(&normalized_request, &route);
 		match &route {
 			RouteDecisionResult::Direct(plan) => {
 				self.metrics.inc_direct_route_hits();
 				self.start_experiment_run(&task, &normalized_request.goal, "direct_route")?;
-				self.process_direct_route(&mut task, &normalized_request, plan)
+				self.process_direct_route(&mut task, &normalized_request, plan, &mut loop_state)
 			}
 			RouteDecisionResult::Escalate(plan) => {
 				self.metrics.inc_route_escalations();
@@ -344,12 +352,22 @@ impl RuntimeService {
 				match plan.action {
 					EscalationAction::AskForMoreInfo => {
 						self.start_experiment_run(&task, &normalized_request.goal, "direct_route")?;
-						self.process_direct_escalation(&mut task, &normalized_request, plan)
+						self.process_direct_escalation(
+							&mut task,
+							&normalized_request,
+							plan,
+							&mut loop_state,
+						)
 					}
 					EscalationAction::FallbackAnswer => {
 						self.metrics.inc_direct_route_fallbacks();
 						self.start_experiment_run(&task, &normalized_request.goal, "direct_route")?;
-						self.process_direct_escalation(&mut task, &normalized_request, plan)
+						self.process_direct_escalation(
+							&mut task,
+							&normalized_request,
+							plan,
+							&mut loop_state,
+						)
 					}
 					EscalationAction::EnterLimitedPlanning => {
 						self.metrics.inc_route_limited_planning();
@@ -359,7 +377,12 @@ impl RuntimeService {
 							&normalized_request.goal,
 							"compatibility_fallback",
 						)?;
-						self.process_direct_escalation(&mut task, &normalized_request, plan)
+						self.process_direct_escalation(
+							&mut task,
+							&normalized_request,
+							plan,
+							&mut loop_state,
+						)
 					}
 				}
 			}
