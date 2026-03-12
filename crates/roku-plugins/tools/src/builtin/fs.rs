@@ -30,7 +30,8 @@ const DEFAULT_MAX_BYTES: usize = 4_096;
 const MAX_GLOB_MATCHES: usize = 200;
 const MAX_DESCENDANT_SCAN_ENTRIES: usize = 8_000;
 
-/// Returns catalog metadata for all fs builtin tools (fs.inspect, fs.list_dir, fs.read_text, fs.glob, fs.exists).
+/// Returns catalog metadata for all fs builtin tools (`fs.find`, `fs.inspect`, `fs.list_dir`,
+/// `fs.read_text`, `fs.glob`, `fs.exists`).
 ///
 /// Used when the core-fs plugin is enabled: [`build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities`]
 /// in `builders` extends its tool entries with this list, then builds a [`ResourceCatalog`]. That catalog is
@@ -41,6 +42,26 @@ const MAX_DESCENDANT_SCAN_ENTRIES: usize = 8_000;
 pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
 	vec![
 		descriptor_catalog(
+			"fs.find",
+			"Resolve a basename or fuzzy filesystem reference inside the allowed workspace roots and report whether it matched zero, one, or many candidates.",
+			&[
+				"find file",
+				"basename grounding",
+				"resolve file name",
+				"模糊文件定位",
+				"文件定位",
+			],
+			&["Find pr-check-ci.yml", "Find temp.log"],
+			&["name", "kind"],
+			&["fs.find"],
+			&["find <name>"],
+			&[
+				"resolve a basename before reading a file",
+				"ground a fuzzy file reference within the workspace",
+				"locate a directory or file when only its name is known",
+			],
+		),
+		descriptor_catalog(
 			"fs.inspect",
 			"Inspect a filesystem path or the current working directory and return bounded metadata such as kind, size, and timestamps.",
 			&[
@@ -48,8 +69,14 @@ pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
 				"path inspection",
 				"working directory",
 				"cwd",
+				"current directory",
+				"current path",
+				"project root",
 				"目录",
 				"路径",
+				"当前目录",
+				"当前路径",
+				"工作目录",
 			],
 			&["pwd", "stat Cargo.toml"],
 			&["path"],
@@ -57,6 +84,7 @@ pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
 			&["pwd", "stat <path>"],
 			&[
 				"inspect the current working directory",
+				"report the current directory path",
 				"inspect a file or directory path",
 				"return metadata for a grounded path",
 			],
@@ -70,7 +98,11 @@ pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
 				"folder listing",
 				"hidden files",
 				"current directory",
+				"working directory contents",
 				"目录内容",
+				"当前目录",
+				"隐藏文件",
+				"隐藏文件夹",
 			],
 			&["ls .", "ls .cursor", "ls crates/roku-plugins"],
 			&["path"],
@@ -78,6 +110,7 @@ pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
 			&["ls <path>", "ll <path>", "dir <path>"],
 			&[
 				"list the current directory",
+				"show the current working directory contents",
 				"list a nested subdirectory",
 				"show hidden files and folders in a grounded directory",
 			],
@@ -127,6 +160,7 @@ pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
 }
 
 pub(crate) fn register_tools(runtime: &mut ToolRuntime) -> Result<(), ToolRuntimeError> {
+	runtime.register_tool(FsFindTool)?;
 	runtime.register_tool(FsInspectTool)?;
 	runtime.register_tool(FsListDirTool)?;
 	runtime.register_tool(FsReadTextTool)?;
@@ -135,11 +169,57 @@ pub(crate) fn register_tools(runtime: &mut ToolRuntime) -> Result<(), ToolRuntim
 	Ok(())
 }
 
+struct FsFindTool;
 struct FsInspectTool;
 struct FsListDirTool;
 struct FsReadTextTool;
 struct FsGlobTool;
 struct FsExistsTool;
+
+impl Tool for FsFindTool {
+	fn descriptor(&self) -> ToolDescriptor {
+		tool_descriptor("fs.find", &["name"], &["fs.find"])
+	}
+
+	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
+		let name = required_string(&request.input, "name")?;
+		let kind = request
+			.input
+			.get("kind")
+			.and_then(Value::as_str)
+			.unwrap_or("any");
+		let roots = allowed_read_roots(&request)?;
+		let matches = find_descendant_matches(name, kind, &roots)?;
+		let (ok, error_type, message) = match matches.len() {
+			0 => (
+				false,
+				Some("path_not_found"),
+				format!("Path `{name}` was not found within allowed workspace roots."),
+			),
+			1 => (
+				true,
+				None,
+				format!("Found 1 matching candidate for `{name}`."),
+			),
+			count => (
+				false,
+				Some("multiple_candidates"),
+				format!("Found {count} matching candidates for `{name}`."),
+			),
+		};
+		let resolved_path = (matches.len() == 1).then(|| matches[0].clone());
+		let data = json!({
+			"name": name,
+			"kind": kind,
+			"match_count": matches.len(),
+			"matches": matches,
+			"resolved_path": resolved_path,
+		});
+		Ok(observation_like_output(
+			message, ok, error_type, false, data,
+		))
+	}
+}
 
 impl Tool for FsInspectTool {
 	fn descriptor(&self) -> ToolDescriptor {
@@ -155,14 +235,14 @@ impl Tool for FsInspectTool {
 		})?;
 		let kind = path_kind(&metadata);
 		let message = format!("Inspected `{}` ({kind}).", resolved.display());
-		Ok(json!({
-			"message": message,
+		let data = json!({
 			"path": resolved.display().to_string(),
 			"kind": kind,
 			"exists": true,
 			"size": metadata.len(),
 			"readonly": metadata.permissions().readonly(),
-		}))
+		});
+		Ok(observation_like_output(message, true, None, false, data))
 	}
 }
 
@@ -204,12 +284,12 @@ impl Tool for FsListDirTool {
 			})
 			.collect::<Vec<_>>();
 		let message = render_directory_message(&resolved, &items, truncated);
-		Ok(json!({
-			"message": message,
+		let data = json!({
 			"path": resolved.display().to_string(),
 			"entries": items,
 			"truncated": truncated,
-		}))
+		});
+		Ok(observation_like_output(message, true, None, false, data))
 	}
 }
 
@@ -248,14 +328,14 @@ impl Tool for FsReadTextTool {
 		} else {
 			content.clone()
 		};
-		Ok(json!({
-			"message": message,
+		let data = json!({
 			"path": resolved.display().to_string(),
 			"content": content,
 			"bytes_read": bytes_read.min(max_bytes),
 			"truncated": truncated,
 			"encoding": "utf-8-lossy",
-		}))
+		});
+		Ok(observation_like_output(message, true, None, false, data))
 	}
 }
 
@@ -291,12 +371,12 @@ impl Tool for FsGlobTool {
 		} else {
 			format!("Found {} matches for `{pattern}`.", matches.len())
 		};
-		Ok(json!({
-			"message": message,
+		let data = json!({
 			"pattern": pattern,
 			"matches": matches,
 			"truncated": truncated,
-		}))
+		});
+		Ok(observation_like_output(message, true, None, false, data))
 	}
 }
 
@@ -326,14 +406,39 @@ impl Tool for FsExistsTool {
 		} else {
 			format!("`{}` does not exist.", candidate.display())
 		};
-		Ok(json!({
-			"message": message,
+		let data = json!({
 			"path": candidate.display().to_string(),
 			"exists": exists,
 			"kind": kind,
 			"size": size,
-		}))
+		});
+		Ok(observation_like_output(
+			message,
+			exists,
+			(!exists).then_some("path_not_found"),
+			false,
+			data,
+		))
 	}
+}
+
+fn observation_like_output(
+	message: String,
+	ok: bool,
+	error_type: Option<&str>,
+	terminal: bool,
+	data: Value,
+) -> Value {
+	let mut object = data.as_object().cloned().unwrap_or_default();
+	object.insert("message".to_string(), Value::String(message));
+	object.insert("ok".to_string(), Value::Bool(ok));
+	object.insert(
+		"error_type".to_string(),
+		error_type.map(Value::from).unwrap_or(Value::Null),
+	);
+	object.insert("terminal".to_string(), Value::Bool(terminal));
+	object.insert("data".to_string(), data);
+	Value::Object(object)
 }
 
 fn descriptor_catalog(
@@ -516,6 +621,27 @@ fn find_unique_descendant_match(
 	target_name: &str,
 	roots: &[PathBuf],
 ) -> Result<Option<PathBuf>, ToolFailure> {
+	let matches = find_descendant_matches(target_name, "any", roots)?;
+	if matches.len() > 1 {
+		return Err(ToolFailure::terminal(format!(
+			"`{target_name}` is ambiguous under the allowed read roots; please provide a more specific path"
+		)));
+	}
+	Ok(matches.into_iter().next().map(PathBuf::from))
+}
+
+fn should_skip_workspace_search_dir(name: &str) -> bool {
+	matches!(
+		name,
+		".git" | ".roku" | "target" | "node_modules" | "dist" | "build"
+	)
+}
+
+fn find_descendant_matches(
+	target_name: &str,
+	kind: &str,
+	roots: &[PathBuf],
+) -> Result<Vec<String>, ToolFailure> {
 	let mut matches = Vec::new();
 	let mut visited = 0_usize;
 	for root in roots {
@@ -530,38 +656,40 @@ fn find_unique_descendant_match(
 			for entry in entries.filter_map(Result::ok) {
 				visited += 1;
 				if visited > MAX_DESCENDANT_SCAN_ENTRIES {
-					return Ok(None);
+					return Ok(matches);
 				}
 				let path = entry.path();
 				let name = entry.file_name().to_string_lossy().to_string();
-				if entry.file_name().to_string_lossy() == target_name {
+				let metadata = fs::symlink_metadata(&path).map_err(|error| {
+					ToolFailure::terminal(format!(
+						"failed to inspect `{}` while searching for `{target_name}`: {error}",
+						path.display()
+					))
+				})?;
+				if name == target_name && matches_kind(kind, &metadata) {
 					let resolved = path.canonicalize().map_err(|error| {
 						ToolFailure::terminal(format!(
 							"failed to resolve `{}` while searching for `{target_name}`: {error}",
 							path.display()
 						))
 					})?;
-					matches.push(resolved);
-					if matches.len() > 1 {
-						return Err(ToolFailure::terminal(format!(
-							"`{target_name}` is ambiguous under the allowed read roots; please provide a more specific path"
-						)));
-					}
+					matches.push(resolved.display().to_string());
 				}
-				if path.is_dir() && !should_skip_workspace_search_dir(&name) {
+				if metadata.is_dir() && !should_skip_workspace_search_dir(&name) {
 					stack.push(path);
 				}
 			}
 		}
 	}
-	Ok(matches.into_iter().next())
+	Ok(matches)
 }
 
-fn should_skip_workspace_search_dir(name: &str) -> bool {
-	matches!(
-		name,
-		".git" | ".roku" | "target" | "node_modules" | "dist" | "build"
-	)
+fn matches_kind(kind: &str, metadata: &fs::Metadata) -> bool {
+	match kind {
+		"file" => metadata.is_file(),
+		"directory" => metadata.is_dir(),
+		_ => true,
+	}
 }
 
 fn ensure_allowed(path: &Path, roots: &[PathBuf]) -> Result<(), ToolFailure> {
