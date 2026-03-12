@@ -16,7 +16,6 @@ mod classifier;
 mod decision;
 mod direct_route;
 mod escalation;
-mod scratchpad;
 
 pub(crate) use classifier::{RouteClassifierContext, classify_request};
 pub use decision::{IntentFamily, RouteDecision, RouteRisk};
@@ -26,4 +25,3 @@ pub use direct_route::{
 pub use escalation::{
 	EscalationAction, EscalationReason, RouteDecisionResult, RouteEscalationPlan,
 };
-pub use scratchpad::RouteScratchpad;

@@ -12,15 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::result::{policy_rejection_result, tool_failure_result, tool_success_result};
 use crate::router::{
 	DirectRouteExecutionResult, EscalationAction, FsCommandStep, IntentFamily,
-	RouteClassifierContext, RouteDecisionResult, RouteScratchpad,
+	RouteClassifierContext, RouteDecisionResult,
 };
 use crate::runtime_loop::{
 	LoopContext, LoopState, StepAction, StepObservation, StepRecord, ToolObservation,
@@ -76,7 +75,6 @@ pub struct GenericAgentRuntime {
 	plugin_snapshot: PluginRegistrySnapshot,
 	route_router: Option<Arc<LlmRouter>>,
 	skill_execution_available: bool,
-	scratchpads: Mutex<HashMap<String, RouteScratchpad>>,
 }
 
 impl GenericAgentRuntime {
@@ -112,7 +110,6 @@ impl GenericAgentRuntime {
 			plugin_snapshot,
 			route_router: None,
 			skill_execution_available,
-			scratchpads: Mutex::new(HashMap::new()),
 		};
 		runtime.register_worker(
 			96,
@@ -287,9 +284,9 @@ impl GenericAgentRuntime {
 	pub fn classify_route(
 		&self,
 		request: &RequestEnvelope,
-		session_id: &str,
+		_session_id: &str,
 	) -> RouteDecisionResult {
-		let result = crate::runtime_loop::classify_existing_route(
+		crate::runtime_loop::classify_existing_route(
 			RouteClassifierContext {
 				catalog: &self.resource_catalog,
 				tool_config: &self.tool_config,
@@ -298,9 +295,7 @@ impl GenericAgentRuntime {
 				skill_execution_available: self.skill_execution_available,
 			},
 			request,
-		);
-		self.remember_route_decision(session_id, &result);
-		result
+		)
 	}
 
 	pub fn build_loop_context(
@@ -811,28 +806,6 @@ impl GenericAgentRuntime {
 			.collect::<Vec<_>>();
 		visible_tools.dedup();
 		visible_tools
-	}
-
-	fn remember_route_decision(&self, session_id: &str, result: &RouteDecisionResult) {
-		let decision = match result {
-			RouteDecisionResult::Direct(plan) => &plan.decision,
-			RouteDecisionResult::Escalate(plan) => &plan.decision,
-		};
-		let last_explicit_resource = match result {
-			RouteDecisionResult::Direct(plan) => plan
-				.bound_resources
-				.first()
-				.map(|selector| selector.display_key()),
-			RouteDecisionResult::Escalate(_) => None,
-		};
-		if let Ok(mut scratchpads) = self.scratchpads.lock() {
-			let pad = scratchpads.entry(session_id.to_string()).or_default();
-			pad.last_decision = Some(decision.clone());
-			if let Some(resource) = last_explicit_resource {
-				pad.last_explicit_resource = Some(resource);
-			}
-			pad.task_completed = false;
-		}
 	}
 
 	fn execute_tool_like_route(
