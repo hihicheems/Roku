@@ -23,25 +23,33 @@ pub struct FinalSummary {
 
 pub(crate) fn summarize_observation(goal: &str, observation: &ToolObservation) -> FinalSummary {
 	let failure_message = summarize_failure(goal, observation);
-	let final_message = match observation.tool_name.as_str() {
-		"fs.read_text" | "fs.list_dir" | "fs.inspect" | "fs.exists" | "fs.find"
-			if failure_message.is_some() =>
-		{
-			failure_message.unwrap_or_else(|| observation.message.clone())
-		}
-		"fs.read_text" => observation
-			.data
-			.get("content")
-			.and_then(serde_json::Value::as_str)
-			.and_then(|content| (!content.trim().is_empty()).then_some(content))
-			.map(str::to_string)
-			.unwrap_or_else(|| observation.message.clone()),
-		"fs.list_dir" | "fs.inspect" | "fs.exists" | "fs.find" => observation.message.clone(),
-		_ => {
-			if !goal.is_ascii() {
-				format!("已完成：{}", observation.message)
-			} else {
-				format!("Completed: {}", observation.message)
+	let final_message = if !observation.ok {
+		failure_message.unwrap_or_else(|| observation.message.clone())
+	} else {
+		match observation.tool_name.as_str() {
+			"fs.read_text" => observation
+				.data
+				.get("content")
+				.and_then(serde_json::Value::as_str)
+				.and_then(|content| (!content.trim().is_empty()).then_some(content))
+				.map(str::to_string)
+				.unwrap_or_else(|| observation.message.clone()),
+			"fs.list_dir" | "fs.inspect" | "fs.exists" | "fs.find" => observation.message.clone(),
+			"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema"
+			| "web.search" | "general.execute" => observation.message.clone(),
+			"python.run" => observation
+				.data
+				.get("stdout")
+				.and_then(serde_json::Value::as_str)
+				.and_then(|stdout| (!stdout.trim().is_empty()).then_some(stdout.trim()))
+				.map(str::to_string)
+				.unwrap_or_else(|| observation.message.clone()),
+			_ => {
+				if !goal.is_ascii() {
+					format!("已完成：{}", observation.message)
+				} else {
+					format!("Completed: {}", observation.message)
+				}
 			}
 		}
 	};

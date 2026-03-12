@@ -39,6 +39,7 @@ pub enum DirectRouteKind {
 		attachments: Vec<PathBuf>,
 	},
 	FilesystemLoop,
+	ToolLoop,
 	FilesystemSequence {
 		commands: Vec<FsCommandStep>,
 	},

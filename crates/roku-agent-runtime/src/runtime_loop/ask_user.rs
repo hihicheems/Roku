@@ -21,6 +21,17 @@ pub struct AskUserPayload {
 	pub final_message: String,
 }
 
+pub(crate) fn effective_ask_user_message(
+	goal: &str,
+	last_observation: Option<&ToolObservation>,
+	proposed_message: Option<String>,
+) -> String {
+	if let Some(observation) = last_observation {
+		return ask_user_from_observation(goal, observation).final_message;
+	}
+	proposed_message.unwrap_or_else(|| "I need more information before I can continue.".to_string())
+}
+
 pub(crate) fn ask_user_from_observation(
 	goal: &str,
 	observation: &ToolObservation,
@@ -78,4 +89,39 @@ pub(crate) fn ask_user_from_observation(
 		}
 	};
 	AskUserPayload { final_message }
+}
+
+#[cfg(test)]
+mod tests {
+	use serde_json::json;
+
+	use super::{ask_user_from_observation, effective_ask_user_message};
+	use crate::runtime_loop::ToolObservation;
+
+	#[test]
+	fn effective_ask_user_message_prefers_structured_observation_over_model_text() {
+		let observation = ToolObservation {
+			ok: false,
+			tool_name: "fs.find".to_string(),
+			error_type: Some("multiple_candidates".to_string()),
+			terminal: false,
+			data: json!({
+				"matches": [
+					"/Users/jojo/cjj_project/Roku/crates/roku-agent-runtime/src/lib.rs",
+					"/Users/jojo/cjj_project/Roku/crates/roku-runtime-service/src/lib.rs"
+				]
+			}),
+			message: "llm wrote something else".to_string(),
+		};
+
+		let expected =
+			ask_user_from_observation("帮我看下 lib.rs 里有啥", &observation).final_message;
+		let actual = effective_ask_user_message(
+			"帮我看下 lib.rs 里有啥",
+			Some(&observation),
+			Some("请看 agent-runtime 那个".to_string()),
+		);
+
+		assert_eq!(actual, expected);
+	}
 }

@@ -33,7 +33,11 @@ impl RuntimeService {
 		let execution = match &plan.kind {
 			DirectRouteKind::FilesystemLoop => {
 				self.runtime
-					.execute_filesystem_loop(&task.task_id, request, loop_state)
+					.execute_filesystem_loop(&task.task_id, request, loop_state, None)
+			}
+			DirectRouteKind::ToolLoop => {
+				self.runtime
+					.execute_tool_loop(&task.task_id, request, loop_state, None)
 			}
 			_ => self
 				.runtime
@@ -52,6 +56,7 @@ impl RuntimeService {
 		} else {
 			self.record_runtime_loop_terminal_step(loop_state, response.status, &response.message);
 		}
+		self.sync_pending_loop(loop_state)?;
 		Ok(response)
 	}
 
@@ -73,10 +78,11 @@ impl RuntimeService {
 			response.status,
 			&response.message,
 		);
+		self.sync_pending_loop(loop_state)?;
 		Ok(response)
 	}
 
-	fn finalize_direct_path(
+	pub(super) fn finalize_direct_path(
 		&self,
 		task: &mut Task,
 		node: TaskNode,

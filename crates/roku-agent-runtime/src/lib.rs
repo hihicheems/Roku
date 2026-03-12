@@ -32,6 +32,6 @@ pub use runtime::{AgentWorker, GenericAgentRuntime, RuntimeWorker};
 pub use runtime_loop::{
 	AskUserPayload, FinalSummary, InterpretedObservation, LoopContext, LoopRequest, LoopState,
 	LoopStatus, NextStepAction, NextStepDecision, NextStepDecisionSchemaError, StepAction,
-	StepRecord, ToolObservation, interpret_observation,
+	StepRecord, ToolObservation, interpret_observation, should_resume_awaiting_user,
 };
 pub use tool_config::{BuiltinToolRole, ConfiguredTool, ToolCatalogConfig, ToolCatalogConfigError};

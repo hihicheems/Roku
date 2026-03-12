@@ -27,6 +27,7 @@ use crate::router::{
 	DirectRouteKind, DirectRoutePlan, EscalationAction, EscalationReason, FsCommandStep,
 	IntentFamily, RouteDecision, RouteDecisionResult, RouteEscalationPlan, RouteRisk,
 };
+use crate::runtime_loop::extract_path_candidates as shared_extract_path_candidates;
 use crate::tool_config::{BuiltinToolRole, ToolCatalogConfig};
 
 const MIN_TOOL_SCORE: f32 = 0.60;
@@ -145,6 +146,25 @@ fn deterministic_pre_classify(
 		return Some(result);
 	}
 
+	if context.route_router.is_none() && tool_selector(context.catalog, "general.execute").is_some()
+	{
+		let decision = RouteDecision::new(
+			IntentFamily::Chat,
+			0.68,
+			false,
+			RouteRisk::Low,
+			vec!["general.execute".to_string()],
+			candidate_plugins_for_tool(context.plugin_snapshot, "general.execute"),
+			Vec::new(),
+			"no grounded direct tool route matched; fall back to the general assistant loop in deterministic mode",
+		);
+		return Some(build_tool_loop_route(
+			context,
+			decision,
+			Some("general.execute"),
+		));
+	}
+
 	None
 }
 
@@ -200,17 +220,9 @@ fn classify_grounded_direct_route(
 			Vec::new(),
 			"grounded explicit Python code allows a direct `python.run` route",
 		);
-		return Some(RouteDecisionResult::Direct(DirectRoutePlan {
-			decision,
-			kind: DirectRouteKind::ToolInvocation {
-				selector,
-				arguments: json!({ "code": code }),
-				attachments: extract_path_candidates(&request.goal)
-					.into_iter()
-					.map(PathBuf::from)
-					.collect(),
-			},
-		}));
+		let _ = selector;
+		let _ = code;
+		return Some(build_tool_loop_route(context, decision, Some("python.run")));
 	}
 
 	if let Some(pattern) = extract_glob_pattern(&request.goal)
@@ -234,6 +246,12 @@ fn classify_grounded_direct_route(
 				attachments: Vec::new(),
 			},
 		}));
+	}
+
+	if extract_table_path(&request.goal).is_some()
+		&& has_enabled_tool_with_prefix(context.catalog, "table.")
+	{
+		return None;
 	}
 
 	let explicit_paths = extract_path_candidates(&request.goal);
@@ -610,10 +628,7 @@ fn classify_with_llm(
 		return result;
 	}
 	if decision.intent_family == IntentFamily::Chat {
-		return RouteDecisionResult::Direct(DirectRoutePlan {
-			decision,
-			kind: DirectRouteKind::Conversation,
-		});
+		return build_tool_loop_route(context, decision, Some("general.execute"));
 	}
 	if decision.intent_family == IntentFamily::FilesystemRead
 		&& has_enabled_tool_with_prefix(context.catalog, "fs.")
@@ -624,6 +639,13 @@ fn classify_with_llm(
 			.find(|tool_name| tool_name.starts_with("fs."))
 			.cloned();
 		return build_filesystem_loop_route(context, request, decision, preferred_tool.as_deref());
+	}
+	if matches!(
+		decision.intent_family,
+		IntentFamily::TableRead | IntentFamily::WebLookup | IntentFamily::CodeExec
+	) {
+		let preferred_tool = decision.candidate_tools.first().cloned();
+		return build_tool_loop_route(context, decision, preferred_tool.as_deref());
 	}
 	if let Some(selector) = select_tool_from_candidates(context.catalog, &decision.candidate_tools)
 	{
@@ -787,10 +809,11 @@ fn classify_catalog_selected_route(
 			decision,
 			kind: DirectRouteKind::Inventory,
 		})),
-		"general.execute" => Some(RouteDecisionResult::Direct(DirectRoutePlan {
+		"general.execute" => Some(build_tool_loop_route(
+			context,
 			decision,
-			kind: DirectRouteKind::Conversation,
-		})),
+			Some("general.execute"),
+		)),
 		_ => Some(build_direct_tool_plan(
 			context,
 			request,
@@ -903,7 +926,8 @@ fn stable_primary_tool_match(matches: &[CatalogMatch]) -> Option<&CatalogMatch> 
 
 fn direct_route_threshold(tool_name: &str) -> f32 {
 	match tool_name {
-		"inventory.describe" | "general.execute" => 0.42,
+		"inventory.describe" => 0.42,
+		"general.execute" => 0.28,
 		_ => MIN_TOOL_SCORE,
 	}
 }
@@ -991,6 +1015,18 @@ fn build_direct_tool_plan(
 	let tool_name = selector.name().to_string();
 	if tool_name.starts_with("fs.") && tool_name != "fs.glob" {
 		return build_filesystem_loop_route(context, request, decision, Some(&tool_name));
+	}
+	if matches!(
+		tool_name.as_str(),
+		"general.execute"
+			| "table.inspect"
+			| "table.list_sheets"
+			| "table.preview"
+			| "table.schema"
+			| "web.search"
+			| "python.run"
+	) {
+		return build_tool_loop_route(context, decision, Some(&tool_name));
 	}
 	if let Some(result) = build_grounded_tool_plan(context, request, &decision, &tool_name) {
 		return result;
@@ -1194,6 +1230,33 @@ fn build_filesystem_loop_route(
 	})
 }
 
+fn build_tool_loop_route(
+	context: &RouteClassifierContext<'_>,
+	mut decision: RouteDecision,
+	preferred_tool: Option<&str>,
+) -> RouteDecisionResult {
+	decision.candidate_tools =
+		tool_loop_candidate_tools(context.catalog, decision.intent_family, preferred_tool);
+	if decision.candidate_tools.is_empty() {
+		return RouteDecisionResult::Escalate(RouteEscalationPlan {
+			decision,
+			reason: EscalationReason::NoEnabledRouteTarget,
+			action: EscalationAction::FallbackAnswer,
+		});
+	}
+	if decision.candidate_plugins.is_empty() {
+		decision.candidate_plugins = decision
+			.candidate_tools
+			.first()
+			.map(|tool_name| candidate_plugins_for_tool(context.plugin_snapshot, tool_name))
+			.unwrap_or_default();
+	}
+	RouteDecisionResult::Direct(DirectRoutePlan {
+		decision,
+		kind: DirectRouteKind::ToolLoop,
+	})
+}
+
 fn filesystem_loop_candidate_tools(
 	catalog: &ResourceCatalog,
 	request: &RequestEnvelope,
@@ -1223,6 +1286,41 @@ fn filesystem_loop_candidate_tools(
 		&& !tools.iter().any(|existing| existing == "fs.glob")
 	{
 		tools.push("fs.glob".to_string());
+	}
+	tools
+}
+
+fn tool_loop_candidate_tools(
+	catalog: &ResourceCatalog,
+	intent_family: IntentFamily,
+	preferred_tool: Option<&str>,
+) -> Vec<String> {
+	let family_tools = match intent_family {
+		IntentFamily::Chat => vec!["general.execute"],
+		IntentFamily::TableRead => {
+			vec![
+				"table.preview",
+				"table.inspect",
+				"table.list_sheets",
+				"table.schema",
+			]
+		}
+		IntentFamily::WebLookup => vec!["web.search"],
+		IntentFamily::CodeExec => vec!["python.run"],
+		_ => Vec::new(),
+	};
+	let mut tools = Vec::new();
+	if let Some(preferred_tool) = preferred_tool
+		&& tool_selector(catalog, preferred_tool).is_some()
+	{
+		tools.push(preferred_tool.to_string());
+	}
+	for tool_name in family_tools {
+		if tool_selector(catalog, tool_name).is_some()
+			&& !tools.iter().any(|existing| existing == tool_name)
+		{
+			tools.push(tool_name.to_string());
+		}
 	}
 	tools
 }
@@ -1793,23 +1891,7 @@ fn best_skill_selector(
 }
 
 fn extract_path_candidates(goal: &str) -> Vec<String> {
-	let workspace_entries = visible_workspace_entries(64);
-	let mut paths = Vec::new();
-	for token in goal.split_whitespace().map(clean_token) {
-		if token.is_empty() || token.starts_with("http://") || token.starts_with("https://") {
-			continue;
-		}
-		if looks_like_path_candidate(&token) || workspace_entries.contains(&token) {
-			paths.push(token.clone());
-		}
-		for fragment in embedded_path_fragments(&token, &workspace_entries) {
-			if !paths.iter().any(|existing| existing == &fragment) {
-				paths.push(fragment);
-			}
-		}
-	}
-	paths.dedup();
-	paths
+	shared_extract_path_candidates(goal)
 }
 
 fn explicit_skill_tokens(goal: &str) -> Vec<String> {
@@ -1915,44 +1997,6 @@ fn looks_like_path_candidate(token: &str) -> bool {
 					.chars()
 					.all(|character| character.is_ascii_alphanumeric())
 		})
-}
-
-fn embedded_path_fragments(token: &str, workspace_entries: &[String]) -> Vec<String> {
-	let mut fragments = Vec::new();
-	let mut current = String::new();
-	for character in token.chars() {
-		if is_path_fragment_char(character) {
-			current.push(character);
-			continue;
-		}
-		push_grounded_path_fragment(&mut fragments, &mut current, workspace_entries);
-	}
-	push_grounded_path_fragment(&mut fragments, &mut current, workspace_entries);
-	fragments
-}
-
-fn push_grounded_path_fragment(
-	fragments: &mut Vec<String>,
-	current: &mut String,
-	workspace_entries: &[String],
-) {
-	if current.is_empty() {
-		return;
-	}
-	let fragment = current.clone();
-	current.clear();
-	if fragment.starts_with("http://") || fragment.starts_with("https://") {
-		return;
-	}
-	if (looks_like_path_candidate(&fragment) || workspace_entries.contains(&fragment))
-		&& !fragments.iter().any(|existing| existing == &fragment)
-	{
-		fragments.push(fragment);
-	}
-}
-
-fn is_path_fragment_char(character: char) -> bool {
-	character.is_ascii_alphanumeric() || matches!(character, '.' | '/' | '\\' | '_' | '-')
 }
 
 fn single_explicit_path(paths: &[String]) -> Option<&str> {
