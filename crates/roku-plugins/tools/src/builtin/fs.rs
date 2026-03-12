@@ -642,7 +642,8 @@ fn find_descendant_matches(
 	kind: &str,
 	roots: &[PathBuf],
 ) -> Result<Vec<String>, ToolFailure> {
-	let mut matches = Vec::new();
+	let mut exact_matches = Vec::new();
+	let mut fuzzy_matches = Vec::new();
 	let mut visited = 0_usize;
 	for root in roots {
 		let mut stack = vec![root.clone()];
@@ -656,7 +657,7 @@ fn find_descendant_matches(
 			for entry in entries.filter_map(Result::ok) {
 				visited += 1;
 				if visited > MAX_DESCENDANT_SCAN_ENTRIES {
-					return Ok(matches);
+					return Ok(select_best_descendant_matches(exact_matches, fuzzy_matches));
 				}
 				let path = entry.path();
 				let name = entry.file_name().to_string_lossy().to_string();
@@ -666,14 +667,18 @@ fn find_descendant_matches(
 						path.display()
 					))
 				})?;
-				if name == target_name && matches_kind(kind, &metadata) {
+				if matches_kind(kind, &metadata) {
 					let resolved = path.canonicalize().map_err(|error| {
 						ToolFailure::terminal(format!(
 							"failed to resolve `{}` while searching for `{target_name}`: {error}",
 							path.display()
 						))
 					})?;
-					matches.push(resolved.display().to_string());
+					if name == target_name {
+						exact_matches.push(resolved.display().to_string());
+					} else if let Some(score) = fuzzy_basename_match_score(target_name, &name) {
+						fuzzy_matches.push((score, resolved.display().to_string()));
+					}
 				}
 				if metadata.is_dir() && !should_skip_workspace_search_dir(&name) {
 					stack.push(path);
@@ -681,7 +686,84 @@ fn find_descendant_matches(
 			}
 		}
 	}
-	Ok(matches)
+	Ok(select_best_descendant_matches(exact_matches, fuzzy_matches))
+}
+
+fn select_best_descendant_matches(
+	exact_matches: Vec<String>,
+	mut fuzzy_matches: Vec<(u8, String)>,
+) -> Vec<String> {
+	if !exact_matches.is_empty() {
+		return exact_matches;
+	}
+	if fuzzy_matches.is_empty() {
+		return Vec::new();
+	}
+	fuzzy_matches.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+	let best_score = fuzzy_matches.first().map(|(score, _)| *score).unwrap_or(0);
+	fuzzy_matches
+		.into_iter()
+		.filter(|(score, _)| *score == best_score)
+		.map(|(_, path)| path)
+		.collect()
+}
+
+fn fuzzy_basename_match_score(target_name: &str, candidate_name: &str) -> Option<u8> {
+	let normalized_target = target_name.trim().to_ascii_lowercase();
+	let normalized_candidate = candidate_name.trim().to_ascii_lowercase();
+	if normalized_target.is_empty() || normalized_candidate.is_empty() {
+		return None;
+	}
+	if normalized_target == normalized_candidate {
+		return Some(0);
+	}
+	let target_path = Path::new(&normalized_target);
+	let candidate_path = Path::new(&normalized_candidate);
+	let target_extension = target_path.extension().and_then(|value| value.to_str());
+	let candidate_extension = candidate_path.extension().and_then(|value| value.to_str());
+	if target_extension != candidate_extension {
+		return None;
+	}
+	if bounded_edit_distance(&normalized_target, &normalized_candidate, 2) <= 2 {
+		return Some(1);
+	}
+	let target_stem = target_path.file_stem().and_then(|value| value.to_str())?;
+	let candidate_stem = candidate_path
+		.file_stem()
+		.and_then(|value| value.to_str())?;
+	(bounded_edit_distance(target_stem, candidate_stem, 2) <= 2).then_some(2)
+}
+
+fn bounded_edit_distance(left: &str, right: &str, max_distance: usize) -> usize {
+	let left_chars = left.chars().collect::<Vec<_>>();
+	let right_chars = right.chars().collect::<Vec<_>>();
+	if left_chars.is_empty() {
+		return right_chars.len();
+	}
+	if right_chars.is_empty() {
+		return left_chars.len();
+	}
+	if left_chars.len().abs_diff(right_chars.len()) > max_distance {
+		return max_distance.saturating_add(1);
+	}
+	let mut previous = (0..=right_chars.len()).collect::<Vec<_>>();
+	let mut current = vec![0; right_chars.len() + 1];
+	for (left_index, left_char) in left_chars.iter().enumerate() {
+		current[0] = left_index + 1;
+		let mut row_min = current[0];
+		for (right_index, right_char) in right_chars.iter().enumerate() {
+			let substitution_cost = usize::from(left_char != right_char);
+			current[right_index + 1] = (previous[right_index + 1] + 1)
+				.min(current[right_index] + 1)
+				.min(previous[right_index] + substitution_cost);
+			row_min = row_min.min(current[right_index + 1]);
+		}
+		if row_min > max_distance {
+			return max_distance.saturating_add(1);
+		}
+		std::mem::swap(&mut previous, &mut current);
+	}
+	previous[right_chars.len()]
 }
 
 fn matches_kind(kind: &str, metadata: &fs::Metadata) -> bool {
