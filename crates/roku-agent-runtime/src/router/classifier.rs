@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -20,14 +19,15 @@ use roku_common_types::{RequestEnvelope, ResourceSelector};
 use roku_plugin_catalog::{CatalogDescriptor, CatalogMatch, ResourceCatalog, ResourceKind};
 use roku_plugin_core::PluginRegistrySnapshot;
 use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier, StructuredGenerationError};
-use roku_plugin_skills::SkillSource;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::router::{
 	DirectRouteKind, DirectRoutePlan, EscalationAction, EscalationReason, FsCommandStep,
 	IntentFamily, RouteDecision, RouteDecisionResult, RouteEscalationPlan, RouteRisk,
 };
-use crate::runtime_loop::extract_path_candidates as shared_extract_path_candidates;
+use crate::runtime_loop::{
+	extract_path_candidates as shared_extract_path_candidates, extract_skill_source_url,
+};
 use crate::tool_config::{BuiltinToolRole, ToolCatalogConfig};
 
 const MIN_TOOL_SCORE: f32 = 0.60;
@@ -68,7 +68,7 @@ fn deterministic_pre_classify(
 		return Some(result);
 	}
 
-	if let Some(source_url) = extract_skill_source_url(&request.goal) {
+	if extract_skill_source_url(&request.goal).is_some() {
 		let decision = RouteDecision::new(
 			IntentFamily::TextTransform,
 			0.98,
@@ -87,7 +87,8 @@ fn deterministic_pre_classify(
 		);
 		return Some(RouteDecisionResult::Direct(DirectRoutePlan {
 			decision,
-			kind: DirectRouteKind::SkillInstall { source_url },
+			kind: DirectRouteKind::ToolLoop,
+			bound_resources: Vec::new(),
 		}));
 	}
 
@@ -162,6 +163,7 @@ fn deterministic_pre_classify(
 			context,
 			decision,
 			Some("general.execute"),
+			Vec::new(),
 		));
 	}
 
@@ -222,11 +224,16 @@ fn classify_grounded_direct_route(
 		);
 		let _ = selector;
 		let _ = code;
-		return Some(build_tool_loop_route(context, decision, Some("python.run")));
+		return Some(build_tool_loop_route(
+			context,
+			decision,
+			Some("python.run"),
+			Vec::new(),
+		));
 	}
 
-	if let Some(pattern) = extract_glob_pattern(&request.goal)
-		&& let Some(selector) = tool_selector(context.catalog, "fs.glob")
+	if extract_glob_pattern(&request.goal).is_some()
+		&& tool_selector(context.catalog, "fs.glob").is_some()
 	{
 		let decision = RouteDecision::new(
 			IntentFamily::FilesystemRead,
@@ -238,14 +245,13 @@ fn classify_grounded_direct_route(
 			Vec::new(),
 			"grounded filesystem glob allows a direct `fs.glob` route",
 		);
-		return Some(RouteDecisionResult::Direct(DirectRoutePlan {
+		return Some(build_filesystem_loop_route(
+			context,
+			request,
 			decision,
-			kind: DirectRouteKind::ToolInvocation {
-				selector,
-				arguments: json!({ "pattern": pattern }),
-				attachments: Vec::new(),
-			},
-		}));
+			Some("fs.glob"),
+			None,
+		));
 	}
 
 	if extract_table_path(&request.goal).is_some()
@@ -273,6 +279,7 @@ fn classify_grounded_direct_route(
 		request,
 		decision,
 		Some(tool_name),
+		None,
 	))
 }
 
@@ -300,6 +307,7 @@ fn classify_shell_like_fs_command(
 		request,
 		decision,
 		Some(command.tool_name),
+		None,
 	))
 }
 
@@ -333,10 +341,13 @@ fn classify_shell_like_fs_sequence(
 		Vec::new(),
 		"structured shell-style filesystem command sequence resolved to a bounded direct route",
 	);
-	Some(RouteDecisionResult::Direct(DirectRoutePlan {
+	Some(build_filesystem_loop_route(
+		context,
+		request,
 		decision,
-		kind: DirectRouteKind::FilesystemSequence { commands },
-	}))
+		Some("fs.list_dir"),
+		Some(commands),
+	))
 }
 
 struct ShellLikeFsCommand {
@@ -628,7 +639,7 @@ fn classify_with_llm(
 		return result;
 	}
 	if decision.intent_family == IntentFamily::Chat {
-		return build_tool_loop_route(context, decision, Some("general.execute"));
+		return build_tool_loop_route(context, decision, Some("general.execute"), Vec::new());
 	}
 	if decision.intent_family == IntentFamily::FilesystemRead
 		&& has_enabled_tool_with_prefix(context.catalog, "fs.")
@@ -638,14 +649,20 @@ fn classify_with_llm(
 			.iter()
 			.find(|tool_name| tool_name.starts_with("fs."))
 			.cloned();
-		return build_filesystem_loop_route(context, request, decision, preferred_tool.as_deref());
+		return build_filesystem_loop_route(
+			context,
+			request,
+			decision,
+			preferred_tool.as_deref(),
+			None,
+		);
 	}
 	if matches!(
 		decision.intent_family,
 		IntentFamily::TableRead | IntentFamily::WebLookup | IntentFamily::CodeExec
 	) {
 		let preferred_tool = decision.candidate_tools.first().cloned();
-		return build_tool_loop_route(context, decision, preferred_tool.as_deref());
+		return build_tool_loop_route(context, decision, preferred_tool.as_deref(), Vec::new());
 	}
 	if let Some(selector) = select_tool_from_candidates(context.catalog, &decision.candidate_tools)
 	{
@@ -807,12 +824,14 @@ fn classify_catalog_selected_route(
 	match descriptor.name.as_str() {
 		"inventory.describe" => Some(RouteDecisionResult::Direct(DirectRoutePlan {
 			decision,
-			kind: DirectRouteKind::Inventory,
+			kind: DirectRouteKind::ToolLoop,
+			bound_resources: Vec::new(),
 		})),
 		"general.execute" => Some(build_tool_loop_route(
 			context,
 			decision,
 			Some("general.execute"),
+			Vec::new(),
 		)),
 		_ => Some(build_direct_tool_plan(
 			context,
@@ -1013,201 +1032,10 @@ fn build_direct_tool_plan(
 	selector: ResourceSelector,
 ) -> RouteDecisionResult {
 	let tool_name = selector.name().to_string();
-	if tool_name.starts_with("fs.") && tool_name != "fs.glob" {
-		return build_filesystem_loop_route(context, request, decision, Some(&tool_name));
+	if tool_name.starts_with("fs.") {
+		return build_filesystem_loop_route(context, request, decision, Some(&tool_name), None);
 	}
-	if matches!(
-		tool_name.as_str(),
-		"general.execute"
-			| "table.inspect"
-			| "table.list_sheets"
-			| "table.preview"
-			| "table.schema"
-			| "web.search"
-			| "python.run"
-	) {
-		return build_tool_loop_route(context, decision, Some(&tool_name));
-	}
-	if let Some(result) = build_grounded_tool_plan(context, request, &decision, &tool_name) {
-		return result;
-	}
-	if let Some(router) = context.route_router
-		&& supports_structured_tool_arguments(&tool_name)
-	{
-		return resolve_structured_tool_invocation(
-			context, request, decision, selector, tool_name, router,
-		);
-	}
-
-	match tool_name.as_str() {
-		"fs.inspect" => extract_path_candidates(&request.goal)
-			.into_iter()
-			.next()
-			.map(|path| {
-				build_generic_tool_route(
-					context,
-					request,
-					&tool_name,
-					decision.clone(),
-					json!({ "path": path }),
-					Vec::new(),
-				)
-			})
-			.unwrap_or_else(|| {
-				build_generic_tool_route(
-					context,
-					request,
-					&tool_name,
-					decision,
-					json!({ "path": "." }),
-					Vec::new(),
-				)
-			}),
-		"fs.list_dir" => {
-			let path = extract_path_candidates(&request.goal)
-				.into_iter()
-				.next()
-				.unwrap_or_else(|| ".".to_string());
-			build_generic_tool_route(
-				context,
-				request,
-				&tool_name,
-				decision,
-				json!({ "path": path }),
-				Vec::new(),
-			)
-		}
-		"fs.read_text" => extract_path_candidates(&request.goal)
-			.into_iter()
-			.next()
-			.map(|path| {
-				build_generic_tool_route(
-					context,
-					request,
-					&tool_name,
-					decision,
-					json!({ "path": path, "max_bytes": 4096_u64 }),
-					Vec::new(),
-				)
-			})
-			.unwrap_or_else(|| {
-				missing_argument_route(
-					IntentFamily::FilesystemRead,
-					"filesystem read request needs an explicit path",
-					"path",
-				)
-			}),
-		"fs.glob" => extract_glob_pattern(&request.goal)
-			.map(|pattern| {
-				build_generic_tool_route(
-					context,
-					request,
-					&tool_name,
-					decision,
-					json!({ "pattern": pattern }),
-					Vec::new(),
-				)
-			})
-			.unwrap_or_else(|| {
-				missing_argument_route(
-					IntentFamily::FilesystemRead,
-					"filesystem glob request needs an explicit pattern",
-					"pattern",
-				)
-			}),
-		"fs.exists" => extract_path_candidates(&request.goal)
-			.into_iter()
-			.next()
-			.map(|path| {
-				build_generic_tool_route(
-					context,
-					request,
-					&tool_name,
-					decision,
-					json!({ "path": path }),
-					Vec::new(),
-				)
-			})
-			.unwrap_or_else(|| {
-				missing_argument_route(
-					IntentFamily::FilesystemRead,
-					"filesystem existence check needs an explicit path",
-					"path",
-				)
-			}),
-		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
-			let Some(path) = extract_table_path(&request.goal) else {
-				return missing_argument_route(
-					IntentFamily::TableRead,
-					"table request needs an explicit csv/tsv/xlsx path",
-					"path",
-				);
-			};
-			let mut arguments = json!({ "path": path });
-			if tool_name == "table.preview" {
-				arguments["rows"] = Value::from(extract_row_limit(&request.goal).unwrap_or(5_u64));
-			}
-			if let Some(sheet) = extract_sheet_name(&request.goal) {
-				arguments["sheet"] = Value::String(sheet);
-			}
-			build_generic_tool_route(
-				context,
-				request,
-				&tool_name,
-				decision,
-				arguments,
-				Vec::new(),
-			)
-		}
-		"web.search" => extract_web_query(&request.goal)
-			.map(|query| {
-				build_generic_tool_route(
-					context,
-					request,
-					&tool_name,
-					decision,
-					json!({ "query": query, "top_k": 5_u64 }),
-					Vec::new(),
-				)
-			})
-			.unwrap_or_else(|| {
-				missing_argument_route(
-					IntentFamily::WebLookup,
-					"web search request needs a concrete query",
-					"query",
-				)
-			}),
-		"python.run" => extract_explicit_python_code(&request.goal)
-			.map(|code| {
-				let attachments = extract_path_candidates(&request.goal)
-					.into_iter()
-					.map(PathBuf::from)
-					.collect::<Vec<_>>();
-				build_generic_tool_route(
-					context,
-					request,
-					&tool_name,
-					decision,
-					json!({ "code": code }),
-					attachments,
-				)
-			})
-			.unwrap_or_else(|| {
-				missing_argument_route(
-					IntentFamily::CodeExec,
-					"python.run only accepts explicit code blocks or inline code in Phase 4",
-					"code",
-				)
-			}),
-		_ => build_generic_tool_route(
-			context,
-			request,
-			&tool_name,
-			decision,
-			json!({}),
-			Vec::new(),
-		),
-	}
+	build_tool_loop_route(context, decision, Some(&tool_name), Vec::new())
 }
 
 fn build_filesystem_loop_route(
@@ -1215,6 +1043,7 @@ fn build_filesystem_loop_route(
 	request: &RequestEnvelope,
 	mut decision: RouteDecision,
 	preferred_tool: Option<&str>,
+	commands: Option<Vec<FsCommandStep>>,
 ) -> RouteDecisionResult {
 	decision.intent_family = IntentFamily::FilesystemRead;
 	decision.candidate_tools =
@@ -1226,7 +1055,8 @@ fn build_filesystem_loop_route(
 	};
 	RouteDecisionResult::Direct(DirectRoutePlan {
 		decision,
-		kind: DirectRouteKind::FilesystemLoop,
+		kind: DirectRouteKind::FilesystemLoop { commands },
+		bound_resources: Vec::new(),
 	})
 }
 
@@ -1234,6 +1064,7 @@ fn build_tool_loop_route(
 	context: &RouteClassifierContext<'_>,
 	mut decision: RouteDecision,
 	preferred_tool: Option<&str>,
+	bound_resources: Vec<ResourceSelector>,
 ) -> RouteDecisionResult {
 	decision.candidate_tools =
 		tool_loop_candidate_tools(context.catalog, decision.intent_family, preferred_tool);
@@ -1254,6 +1085,7 @@ fn build_tool_loop_route(
 	RouteDecisionResult::Direct(DirectRoutePlan {
 		decision,
 		kind: DirectRouteKind::ToolLoop,
+		bound_resources,
 	})
 }
 
@@ -1325,406 +1157,6 @@ fn tool_loop_candidate_tools(
 	tools
 }
 
-fn build_grounded_tool_plan(
-	context: &RouteClassifierContext<'_>,
-	request: &RequestEnvelope,
-	decision: &RouteDecision,
-	tool_name: &str,
-) -> Option<RouteDecisionResult> {
-	let explicit_paths = extract_path_candidates(&request.goal);
-	let explicit_code = extract_explicit_python_code(&request.goal);
-	match tool_name {
-		"python.run" => explicit_code.map(|code| {
-			let attachments = explicit_paths.iter().map(PathBuf::from).collect::<Vec<_>>();
-			build_generic_tool_route(
-				context,
-				request,
-				tool_name,
-				decision.clone(),
-				json!({ "code": code }),
-				attachments,
-			)
-		}),
-		"fs.glob" => extract_glob_pattern(&request.goal).map(|pattern| {
-			build_generic_tool_route(
-				context,
-				request,
-				tool_name,
-				decision.clone(),
-				json!({ "pattern": pattern }),
-				Vec::new(),
-			)
-		}),
-		"fs.inspect" | "fs.list_dir" | "fs.read_text" | "fs.exists" => {
-			single_explicit_path(&explicit_paths).map(|path| {
-				let mut arguments = json!({ "path": path });
-				if tool_name == "fs.read_text" {
-					arguments["max_bytes"] = Value::from(4_096_u64);
-				}
-				build_generic_tool_route(
-					context,
-					request,
-					tool_name,
-					decision.clone(),
-					arguments,
-					Vec::new(),
-				)
-			})
-		}
-		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
-			extract_table_path(&request.goal).map(|path| {
-				let mut arguments = json!({ "path": path });
-				if tool_name == "table.preview" {
-					arguments["rows"] =
-						Value::from(extract_row_limit(&request.goal).unwrap_or(5_u64));
-				}
-				if let Some(sheet) = extract_sheet_name(&request.goal) {
-					arguments["sheet"] = Value::String(sheet);
-				}
-				build_generic_tool_route(
-					context,
-					request,
-					tool_name,
-					decision.clone(),
-					arguments,
-					Vec::new(),
-				)
-			})
-		}
-		_ => None,
-	}
-}
-
-fn supports_structured_tool_arguments(tool_name: &str) -> bool {
-	matches!(
-		tool_name,
-		"fs.inspect"
-			| "fs.list_dir"
-			| "fs.read_text"
-			| "fs.glob"
-			| "fs.exists"
-			| "table.inspect"
-			| "table.list_sheets"
-			| "table.preview"
-			| "table.schema"
-			| "web.search"
-			| "python.run"
-	)
-}
-
-fn resolve_structured_tool_invocation(
-	context: &RouteClassifierContext<'_>,
-	request: &RequestEnvelope,
-	decision: RouteDecision,
-	selector: ResourceSelector,
-	tool_name: String,
-	router: &LlmRouter,
-) -> RouteDecisionResult {
-	let Some(descriptor) = context.catalog.descriptor(&selector) else {
-		return RouteDecisionResult::Escalate(RouteEscalationPlan {
-			decision,
-			reason: EscalationReason::NoEnabledRouteTarget,
-			action: EscalationAction::FallbackAnswer,
-		});
-	};
-	let response = router.generate_json_value(&GenerationRequest {
-		system_prompt: Some(
-			"You are Roku's direct-route tool argument resolver. Return only valid JSON matching the requested schema."
-				.to_string(),
-		),
-		prompt: tool_argument_prompt(request, descriptor, &tool_name),
-		expected_output_tokens: 220,
-		risk_tier: RiskTier::Low,
-		preferred_provider: None,
-		budget_tokens_remaining: 1_500,
-		budget_cost_remaining_usd: 0.05,
-	});
-	let resolution = match response {
-		Ok(response) => match ToolArgumentResolution::from_json_value(&response.value) {
-			Ok(resolution) => resolution,
-			Err(error) => {
-				return route_argument_resolution_failure(
-					decision,
-					format!("tool argument resolver returned invalid schema: {error}"),
-					EscalationReason::RouteClassifierFailure,
-				);
-			}
-		},
-		Err(error) => {
-			let (reason, escalation_reason) = match error {
-				StructuredGenerationError::ParseGuard(error) => (
-					format!("tool argument resolver parse guard rejected provider output: {error}"),
-					EscalationReason::RouteParseGuardFailure,
-				),
-				StructuredGenerationError::Llm(error) => (
-					format!(
-						"tool argument resolver failed before producing a usable payload: {error}"
-					),
-					EscalationReason::RouteClassifierFailure,
-				),
-			};
-			return route_argument_resolution_failure(decision, reason, escalation_reason);
-		}
-	};
-	let mut arguments = resolution.arguments;
-	ground_structured_tool_arguments(&tool_name, request, &mut arguments);
-	if let Some(object) = arguments.as_object_mut() {
-		apply_structured_tool_defaults(&tool_name, object);
-	}
-	let missing_arguments = collect_missing_tool_arguments(&tool_name, &arguments);
-	if !resolution.missing_arguments.is_empty() || !missing_arguments.is_empty() {
-		let mut merged_missing = resolution.missing_arguments;
-		for missing in missing_arguments {
-			if !merged_missing.iter().any(|existing| existing == &missing) {
-				merged_missing.push(missing);
-			}
-		}
-		let mut updated_decision = decision;
-		updated_decision.missing_arguments = merged_missing.clone();
-		updated_decision.reason = resolution.reason;
-		return RouteDecisionResult::Escalate(RouteEscalationPlan {
-			decision: updated_decision,
-			reason: EscalationReason::MissingArguments,
-			action: EscalationAction::AskForMoreInfo,
-		});
-	}
-	let attachments = resolution
-		.attachments
-		.into_iter()
-		.filter(|path| {
-			extract_path_candidates(&request.goal)
-				.iter()
-				.any(|candidate| candidate == path)
-		})
-		.map(PathBuf::from)
-		.collect::<Vec<_>>();
-	build_generic_tool_route(
-		context,
-		request,
-		&tool_name,
-		decision,
-		arguments,
-		attachments,
-	)
-}
-
-fn route_argument_resolution_failure(
-	mut decision: RouteDecision,
-	reason: impl Into<String>,
-	escalation_reason: EscalationReason,
-) -> RouteDecisionResult {
-	decision.reason = reason.into();
-	RouteDecisionResult::Escalate(RouteEscalationPlan {
-		decision,
-		reason: escalation_reason,
-		action: EscalationAction::EnterLimitedPlanning,
-	})
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct ToolArgumentResolution {
-	arguments: Value,
-	attachments: Vec<String>,
-	missing_arguments: Vec<String>,
-	reason: String,
-}
-
-impl ToolArgumentResolution {
-	fn from_json_value(value: &Value) -> Result<Self, &'static str> {
-		let object = value.as_object().ok_or("root must be an object")?;
-		let arguments = object
-			.get("arguments")
-			.cloned()
-			.filter(Value::is_object)
-			.ok_or("missing `arguments` object")?;
-		let attachments = object
-			.get("attachments")
-			.and_then(Value::as_array)
-			.ok_or("missing `attachments` array")?
-			.iter()
-			.map(|value| value.as_str().map(str::to_string))
-			.collect::<Option<Vec<_>>>()
-			.ok_or("`attachments` must contain strings")?;
-		let missing_arguments = object
-			.get("missing_arguments")
-			.and_then(Value::as_array)
-			.ok_or("missing `missing_arguments` array")?
-			.iter()
-			.map(|value| value.as_str().map(str::to_string))
-			.collect::<Option<Vec<_>>>()
-			.ok_or("`missing_arguments` must contain strings")?;
-		let reason = object
-			.get("reason")
-			.and_then(Value::as_str)
-			.filter(|value| !value.trim().is_empty())
-			.ok_or("missing `reason` string")?
-			.to_string();
-		Ok(Self {
-			arguments,
-			attachments,
-			missing_arguments,
-			reason,
-		})
-	}
-}
-
-fn tool_argument_prompt(
-	request: &RequestEnvelope,
-	descriptor: &CatalogDescriptor,
-	tool_name: &str,
-) -> String {
-	format!(
-		r#"Return only JSON with exactly these keys:
-{{
-  "arguments": {{ }},
-  "attachments": ["optional file paths"],
-  "missing_arguments": ["argument names"],
-  "reason": "short explanation"
-}}
-
-Tool:
-- name: {tool_name}
-- description: {description}
-- allowed_argument_keys: {allowed_keys}
-- required_argument_keys: {required_keys}
-- examples: {examples}
-
-Rules:
-- Only use argument keys from `allowed_argument_keys`.
-- Ground every concrete argument in the current user request or the runtime grounding context below.
-- Do not reuse concrete file paths, sheet names, code, or search queries from prior conversation turns.
-- If a required value is not explicit enough, leave it out of `arguments` and list it in `missing_arguments`.
-- Keep `attachments` empty unless the user explicitly mentioned concrete file paths.
-- Apply these defaults when the user omitted them:
-  - `fs.read_text.max_bytes = 4096`
-  - `table.preview.rows = 5`
-  - `web.search.top_k = 5`
-- `python.run` only accepts explicit code already present in the request. If the runtime grounding context includes `explicit_python_code`, copy it verbatim.
-- For filesystem and table tools, preserve explicit relative paths like `../` if the current user request asks for them. Do not silently rewrite them to another in-root directory.
-- Use `"."` for `fs.list_dir.path` only when the current user request clearly asks for the current project root/current directory.
-
-User goal:
-{goal}
-
-Runtime grounding context:
-{grounding}"#,
-		tool_name = tool_name,
-		description = descriptor.description,
-		allowed_keys = serde_json::to_string(tool_allowed_argument_keys(tool_name))
-			.unwrap_or_else(|_| "[]".to_string()),
-		required_keys = serde_json::to_string(tool_required_argument_keys(tool_name))
-			.unwrap_or_else(|_| "[]".to_string()),
-		examples = serde_json::to_string(&descriptor.examples).unwrap_or_else(|_| "[]".to_string()),
-		goal = request.goal,
-		grounding = structured_tool_grounding_context(request, tool_name),
-	)
-}
-
-fn tool_allowed_argument_keys(tool_name: &str) -> &'static [&'static str] {
-	match tool_name {
-		"fs.inspect" | "fs.list_dir" | "fs.exists" => &["path"],
-		"fs.read_text" => &["path", "max_bytes"],
-		"fs.glob" => &["pattern"],
-		"table.inspect" | "table.list_sheets" | "table.schema" => &["path", "sheet"],
-		"table.preview" => &["path", "sheet", "rows"],
-		"web.search" => &["query", "top_k"],
-		"python.run" => &["code", "timeout_ms"],
-		_ => &[],
-	}
-}
-
-fn tool_required_argument_keys(tool_name: &str) -> &'static [&'static str] {
-	match tool_name {
-		"fs.inspect" | "fs.read_text" | "fs.exists" => &["path"],
-		"fs.list_dir" => &["path"],
-		"fs.glob" => &["pattern"],
-		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => &["path"],
-		"web.search" => &["query"],
-		"python.run" => &["code"],
-		_ => &[],
-	}
-}
-
-fn apply_structured_tool_defaults(tool_name: &str, arguments: &mut serde_json::Map<String, Value>) {
-	match tool_name {
-		"fs.read_text" => {
-			arguments
-				.entry("max_bytes".to_string())
-				.or_insert_with(|| Value::from(4_096_u64));
-		}
-		"table.preview" => {
-			arguments
-				.entry("rows".to_string())
-				.or_insert_with(|| Value::from(5_u64));
-		}
-		"web.search" => {
-			arguments
-				.entry("top_k".to_string())
-				.or_insert_with(|| Value::from(5_u64));
-		}
-		_ => {}
-	}
-}
-
-fn ground_structured_tool_arguments(
-	tool_name: &str,
-	request: &RequestEnvelope,
-	arguments: &mut Value,
-) {
-	let explicit_paths = extract_path_candidates(&request.goal);
-	let explicit_code = extract_explicit_python_code(&request.goal);
-	match tool_name {
-		"python.run" => {
-			if let Some(code) = explicit_code
-				&& let Some(object) = arguments.as_object_mut()
-			{
-				object.insert("code".to_string(), Value::String(code));
-			}
-		}
-		"fs.glob" => {
-			if let Some(pattern) = extract_glob_pattern(&request.goal)
-				&& let Some(object) = arguments.as_object_mut()
-			{
-				object.insert("pattern".to_string(), Value::String(pattern));
-			}
-		}
-		"fs.inspect" | "fs.list_dir" | "fs.read_text" | "fs.exists" => {
-			if let Some(path) = single_explicit_path(&explicit_paths)
-				&& let Some(object) = arguments.as_object_mut()
-			{
-				object.insert("path".to_string(), Value::String(path.to_string()));
-			}
-		}
-		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
-			if let Some(path) = extract_table_path(&request.goal)
-				&& let Some(object) = arguments.as_object_mut()
-			{
-				object.insert("path".to_string(), Value::String(path));
-			}
-		}
-		_ => {}
-	}
-}
-
-fn collect_missing_tool_arguments(tool_name: &str, arguments: &Value) -> Vec<String> {
-	let object = arguments.as_object();
-	tool_required_argument_keys(tool_name)
-		.iter()
-		.filter(|key| {
-			object
-				.and_then(|value| value.get(**key))
-				.is_none_or(|value| match value {
-					Value::Null => true,
-					Value::String(text) => text.trim().is_empty(),
-					Value::Array(values) => values.is_empty(),
-					Value::Object(values) => values.is_empty(),
-					_ => false,
-				})
-		})
-		.map(|key| (*key).to_string())
-		.collect()
-}
-
 fn build_skill_route_result(
 	context: &RouteClassifierContext<'_>,
 	selector: ResourceSelector,
@@ -1777,57 +1209,8 @@ fn build_skill_route_result(
 	);
 	RouteDecisionResult::Direct(DirectRoutePlan {
 		decision,
-		kind: if executable {
-			DirectRouteKind::SkillExecutable { selector }
-		} else {
-			DirectRouteKind::SkillAdvisory { selector }
-		},
-	})
-}
-
-fn build_generic_tool_route(
-	context: &RouteClassifierContext<'_>,
-	_request: &RequestEnvelope,
-	tool_name: &str,
-	decision: RouteDecision,
-	arguments: Value,
-	attachments: Vec<PathBuf>,
-) -> RouteDecisionResult {
-	let Some(selector) = tool_selector(context.catalog, tool_name) else {
-		return RouteDecisionResult::Escalate(RouteEscalationPlan {
-			decision,
-			reason: EscalationReason::NoEnabledRouteTarget,
-			action: EscalationAction::FallbackAnswer,
-		});
-	};
-	RouteDecisionResult::Direct(DirectRoutePlan {
-		decision,
-		kind: DirectRouteKind::ToolInvocation {
-			selector,
-			arguments,
-			attachments,
-		},
-	})
-}
-
-fn missing_argument_route(
-	intent_family: IntentFamily,
-	reason: impl Into<String>,
-	argument: &str,
-) -> RouteDecisionResult {
-	RouteDecisionResult::Escalate(RouteEscalationPlan {
-		decision: RouteDecision::new(
-			intent_family,
-			0.72,
-			false,
-			RouteRisk::Low,
-			Vec::new(),
-			Vec::new(),
-			vec![argument.to_string()],
-			reason,
-		),
-		reason: EscalationReason::MissingArguments,
-		action: EscalationAction::AskForMoreInfo,
+		kind: DirectRouteKind::ToolLoop,
+		bound_resources: vec![selector],
 	})
 }
 
@@ -1844,19 +1227,6 @@ fn discoverable_tool_matches(matches: Vec<CatalogMatch>) -> Vec<CatalogMatch> {
 		.into_iter()
 		.filter(|entry| entry.descriptor.discoverable)
 		.collect()
-}
-
-fn extract_skill_source_url(goal: &str) -> Option<String> {
-	goal.split_whitespace().find_map(|token| {
-		SkillSource::parse(token.trim_matches(|character: char| {
-			matches!(
-				character,
-				'(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | '"' | '\'' | ',' | ';' | '.'
-			)
-		}))
-		.ok()
-		.map(|source| source.original_url().to_string())
-	})
 }
 
 fn explicit_skill_selector(catalog: &ResourceCatalog, goal: &str) -> Option<ResourceSelector> {
@@ -1921,30 +1291,6 @@ fn extract_glob_pattern(goal: &str) -> Option<String> {
 	goal.split_whitespace()
 		.map(clean_token)
 		.find(|token| token.contains('*') || token.contains('?') || token.contains('['))
-}
-
-fn extract_sheet_name(goal: &str) -> Option<String> {
-	let lower = goal.to_ascii_lowercase();
-	let marker = "sheet ";
-	let index = lower.find(marker)?;
-	let suffix = goal.get(index + marker.len()..)?.trim();
-	let name = suffix
-		.trim_matches(|character: char| matches!(character, '"' | '\'' | '`' | ',' | '.' | ';'));
-	(!name.is_empty() && !name.contains(' ')).then(|| name.to_string())
-}
-
-fn extract_row_limit(goal: &str) -> Option<u64> {
-	let digits = goal
-		.split_whitespace()
-		.find_map(|part| clean_token(part).parse::<u64>().ok())?;
-	Some(digits.clamp(1, 50))
-}
-
-fn extract_web_query(goal: &str) -> Option<String> {
-	let query = goal
-		.trim()
-		.trim_matches(|character: char| matches!(character, '"' | '\'' | '.' | '!' | '?'));
-	(!query.is_empty()).then(|| query.to_string())
 }
 
 fn extract_explicit_python_code(goal: &str) -> Option<String> {
@@ -2179,41 +1525,6 @@ fn is_probable_python_statement(line: &str) -> bool {
 	(keyword_score > 0 || punctuation_score >= 2)
 		&& !trimmed.contains("://")
 		&& !trimmed.contains('，')
-}
-
-fn structured_tool_grounding_context(request: &RequestEnvelope, tool_name: &str) -> String {
-	let explicit_paths = extract_path_candidates(&request.goal);
-	let explicit_table_path = extract_table_path(&request.goal);
-	let explicit_glob = extract_glob_pattern(&request.goal);
-	let explicit_python_code = extract_explicit_python_code(&request.goal);
-	let workspace_entries = visible_workspace_entries(40);
-	serde_json::to_string_pretty(&json!({
-		"tool_name": tool_name,
-		"workspace_root_alias": ".",
-		"explicit_path_candidates": explicit_paths,
-		"explicit_table_path": explicit_table_path,
-		"explicit_glob_pattern": explicit_glob,
-		"explicit_python_code": explicit_python_code,
-		"visible_workspace_entries": workspace_entries,
-	}))
-	.unwrap_or_else(|_| "{}".to_string())
-}
-
-fn visible_workspace_entries(limit: usize) -> Vec<String> {
-	let Ok(cwd) = std::env::current_dir() else {
-		return Vec::new();
-	};
-	let Ok(entries) = fs::read_dir(cwd) else {
-		return Vec::new();
-	};
-	let mut names = entries
-		.filter_map(Result::ok)
-		.filter_map(|entry| entry.file_name().to_str().map(str::to_string))
-		.collect::<BTreeSet<_>>()
-		.into_iter()
-		.collect::<Vec<_>>();
-	names.truncate(limit);
-	names
 }
 
 fn tool_name_for_role(tool_config: &ToolCatalogConfig, role: BuiltinToolRole) -> String {

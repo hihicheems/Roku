@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use crate::router::IntentFamily;
 use crate::runtime_loop::grounding::{
 	extract_explicit_python_code, extract_path_candidates, extract_row_limit, extract_sheet_name,
-	extract_table_path, extract_web_query,
+	extract_skill_source_url, extract_table_path, extract_web_query,
 };
 use crate::runtime_loop::{
 	LoopState, NextStepAction, NextStepDecision, ToolObservation,
@@ -168,13 +168,42 @@ fn initial_next_step(
 	grounding_input: &str,
 	router_available: bool,
 ) -> NextStepDecision {
-	match loop_state.route_decision.intent_family {
-		IntentFamily::TableRead => initial_table_step(loop_state, grounding_input),
-		IntentFamily::WebLookup => initial_web_step(loop_state, grounding_input),
-		IntentFamily::CodeExec => initial_python_step(loop_state, grounding_input),
-		IntentFamily::Chat => initial_chat_step(loop_state, router_available),
-		_ => fail("tool loop does not support this intent family".to_string()),
+	match preferred_tool(
+		loop_state,
+		fallback_tool_for_intent(loop_state.route_decision.intent_family),
+	) {
+		"inventory.describe" => call_tool(
+			"inventory.describe",
+			json!({}),
+			"Use the inventory tool to answer the runtime inventory request directly.",
+		),
+		"skill.install" => initial_skill_install_step(grounding_input),
+		"skill.execute" => call_tool(
+			"skill.execute",
+			json!({}),
+			"Invoke the selected installed skill through the runtime loop.",
+		),
+		"general.execute" => initial_chat_step(loop_state, router_available),
+		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
+			initial_table_step(loop_state, grounding_input)
+		}
+		"web.search" => initial_web_step(loop_state, grounding_input),
+		"python.run" => initial_python_step(loop_state, grounding_input),
+		other => initial_generic_step(loop_state, other),
 	}
+}
+
+fn initial_skill_install_step(grounding_input: &str) -> NextStepDecision {
+	let Some(source_url) = extract_skill_source_url(grounding_input) else {
+		return ask_user(
+			"I need a concrete skill source URL before I can install that skill.".to_string(),
+		);
+	};
+	call_tool(
+		"skill.install",
+		json!({ "source_url": source_url }),
+		"Grounded a concrete skill source URL; call the skill install tool.",
+	)
 }
 
 fn initial_table_step(loop_state: &LoopState, grounding_input: &str) -> NextStepDecision {
@@ -226,6 +255,15 @@ fn initial_python_step(loop_state: &LoopState, grounding_input: &str) -> NextSte
 }
 
 fn initial_chat_step(loop_state: &LoopState, router_available: bool) -> NextStepDecision {
+	if preferred_tool(loop_state, "general.execute") == "inventory.describe"
+		&& tool_visible(loop_state, "inventory.describe")
+	{
+		return call_tool(
+			"inventory.describe",
+			json!({}),
+			"Use the inventory tool to answer a runtime inventory question directly.",
+		);
+	}
 	if router_available && tool_visible(loop_state, "general.execute") {
 		return call_tool(
 			"general.execute",
@@ -234,6 +272,24 @@ fn initial_chat_step(loop_state: &LoopState, router_available: bool) -> NextStep
 		);
 	}
 	final_answer(deterministic_chat_loop_message(&loop_state.goal))
+}
+
+fn initial_generic_step(loop_state: &LoopState, tool_name: &str) -> NextStepDecision {
+	if !tool_visible(loop_state, tool_name) {
+		return fail(format!(
+			"tool loop cannot see the shortlisted tool `{tool_name}`"
+		));
+	}
+	if tool_required_argument_keys(tool_name).is_empty() {
+		return call_tool(
+			tool_name,
+			json!({}),
+			"The shortlisted direct tool does not require any grounded arguments.",
+		);
+	}
+	fail(format!(
+		"tool loop does not know how to ground required arguments for `{tool_name}`"
+	))
 }
 
 fn next_step_from_observation(
@@ -283,7 +339,7 @@ fn tool_required_argument_keys(tool_name: &str) -> &'static [&'static str] {
 		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => &["path"],
 		"web.search" => &["query"],
 		"python.run" => &["code"],
-		"general.execute" => &[],
+		"inventory.describe" | "general.execute" | "skill.install" | "skill.execute" => &[],
 		_ => &[],
 	}
 }
@@ -294,6 +350,19 @@ fn preferred_tool<'a>(loop_state: &'a LoopState, fallback: &'a str) -> &'a str {
 		.first()
 		.map(String::as_str)
 		.unwrap_or(fallback)
+}
+
+fn fallback_tool_for_intent(intent_family: IntentFamily) -> &'static str {
+	match intent_family {
+		IntentFamily::Chat => "general.execute",
+		IntentFamily::TableRead => "table.preview",
+		IntentFamily::WebLookup => "web.search",
+		IntentFamily::CodeExec => "python.run",
+		IntentFamily::TextTransform => "general.execute",
+		IntentFamily::FilesystemRead | IntentFamily::MultiStep | IntentFamily::Unknown => {
+			"general.execute"
+		}
+	}
 }
 
 fn tool_visible(loop_state: &LoopState, tool_name: &str) -> bool {

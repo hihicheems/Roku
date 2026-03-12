@@ -12,37 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::PathBuf;
-
 use roku_common_types::{ResourceSelector, ResultEnvelope, TaskNode};
-use serde_json::Value;
 
 use crate::router::RouteDecision;
 use crate::runtime_loop::StepAction;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirectRouteKind {
-	Inventory,
-	Conversation,
-	SkillInstall {
-		source_url: String,
+	FilesystemLoop {
+		commands: Option<Vec<FsCommandStep>>,
 	},
-	SkillAdvisory {
-		selector: ResourceSelector,
-	},
-	SkillExecutable {
-		selector: ResourceSelector,
-	},
-	ToolInvocation {
-		selector: ResourceSelector,
-		arguments: Value,
-		attachments: Vec<PathBuf>,
-	},
-	FilesystemLoop,
 	ToolLoop,
-	FilesystemSequence {
-		commands: Vec<FsCommandStep>,
-	},
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +39,7 @@ pub enum FsCommandStep {
 pub struct DirectRoutePlan {
 	pub decision: RouteDecision,
 	pub kind: DirectRouteKind,
+	pub bound_resources: Vec<ResourceSelector>,
 }
 
 #[derive(Debug, Clone)]

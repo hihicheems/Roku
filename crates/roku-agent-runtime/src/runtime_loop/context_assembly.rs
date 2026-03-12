@@ -14,6 +14,7 @@
 
 use std::env;
 
+use roku_common_types::ResourceSelector;
 use serde::{Deserialize, Serialize};
 
 use crate::router::RouteDecision;
@@ -27,6 +28,7 @@ pub struct LoopContext {
 	pub workspace_root: String,
 	pub working_directory: String,
 	pub visible_tools: Vec<String>,
+	pub bound_resources: Vec<ResourceSelector>,
 	pub route_decision: RouteDecision,
 	pub last_observation: Option<ToolObservation>,
 }
@@ -35,6 +37,7 @@ pub(crate) fn build_loop_context(
 	request: &LoopRequest,
 	route_decision: &RouteDecision,
 	visible_tools: Vec<String>,
+	bound_resources: Vec<ResourceSelector>,
 ) -> LoopContext {
 	let working_directory = env::current_dir()
 		.ok()
@@ -49,6 +52,7 @@ pub(crate) fn build_loop_context(
 		workspace_root: working_directory.clone(),
 		working_directory,
 		visible_tools,
+		bound_resources,
 		route_decision: route_decision.clone(),
 		last_observation: None,
 	}
