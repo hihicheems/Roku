@@ -33,6 +33,7 @@ pub use context_assembly::LoopContext;
 pub(crate) use context_assembly::build_loop_context;
 pub(crate) use filesystem::{decide_filesystem_next_step, next_working_directory_from_observation};
 pub(crate) use grounding::extract_path_candidates;
+pub(crate) use grounding::extract_skill_source_url;
 pub use loop_state::{LoopState, LoopStatus};
 pub use next_step::{NextStepAction, NextStepDecision, NextStepDecisionSchemaError};
 pub use observation::{StepObservation, ToolObservation};

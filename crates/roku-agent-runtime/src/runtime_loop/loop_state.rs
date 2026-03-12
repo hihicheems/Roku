@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use roku_common_types::ResourceSelector;
 use serde::{Deserialize, Serialize};
 
 use crate::router::RouteDecision;
@@ -42,6 +43,7 @@ pub struct LoopState {
 	pub remaining_recovery_budget: u32,
 	pub working_directory: String,
 	pub visible_tools: Vec<String>,
+	pub bound_resources: Vec<ResourceSelector>,
 	pub history: Vec<StepRecord>,
 	pub last_observation: Option<ToolObservation>,
 }
@@ -60,6 +62,7 @@ impl LoopState {
 			remaining_recovery_budget: 2,
 			working_directory: context.working_directory.clone(),
 			visible_tools: context.visible_tools.clone(),
+			bound_resources: context.bound_resources.clone(),
 			history: Vec::new(),
 			last_observation: context.last_observation.clone(),
 		}

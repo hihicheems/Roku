@@ -16,6 +16,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
+use roku_plugin_skills::SkillSource;
+
 pub(crate) fn clean_token(token: &str) -> String {
 	if matches!(token, "." | "..") {
 		return token.to_string();
@@ -93,6 +95,19 @@ pub(crate) fn extract_explicit_python_code(goal: &str) -> Option<String> {
 		return Some(code);
 	}
 	extract_line_or_block_python_code(goal)
+}
+
+pub(crate) fn extract_skill_source_url(goal: &str) -> Option<String> {
+	goal.split_whitespace().find_map(|token| {
+		SkillSource::parse(token.trim_matches(|character: char| {
+			matches!(
+				character,
+				'(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | '"' | '\'' | ',' | ';' | '.'
+			)
+		}))
+		.ok()
+		.map(|source| source.original_url().to_string())
+	})
 }
 
 pub(crate) fn file_name_from_path(path: &str) -> Option<String> {

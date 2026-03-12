@@ -606,7 +606,8 @@ mod tests {
 			Vec::new(),
 			"filesystem read",
 		);
-		let loop_state = runtime.initialize_runtime_loop(&request, &request.session_id, &decision);
+		let loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
 
 		assert_eq!(
 			follow_up_tool_for_resolved_path(&loop_state, &file_path.display().to_string()),

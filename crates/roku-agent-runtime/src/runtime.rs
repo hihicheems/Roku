@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::result::{policy_rejection_result, tool_failure_result, tool_success_result};
 use crate::router::{
-	DirectRouteExecutionResult, DirectRouteKind, DirectRoutePlan, EscalationAction, FsCommandStep,
-	IntentFamily, RouteClassifierContext, RouteDecisionResult, RouteScratchpad,
+	DirectRouteExecutionResult, EscalationAction, FsCommandStep, IntentFamily,
+	RouteClassifierContext, RouteDecisionResult, RouteScratchpad,
 };
 use crate::runtime_loop::{
 	LoopContext, LoopState, StepAction, StepObservation, StepRecord, ToolObservation,
@@ -308,12 +308,14 @@ impl GenericAgentRuntime {
 		request: &RequestEnvelope,
 		_session_id: &str,
 		route_decision: &crate::router::RouteDecision,
+		bound_resources: Vec<ResourceSelector>,
 	) -> LoopContext {
 		let loop_request = intake_request(request);
 		build_loop_context(
 			&loop_request,
 			route_decision,
 			self.visible_tools_for_decision(route_decision),
+			bound_resources,
 		)
 	}
 
@@ -322,8 +324,9 @@ impl GenericAgentRuntime {
 		request: &RequestEnvelope,
 		session_id: &str,
 		route_decision: &crate::router::RouteDecision,
+		bound_resources: Vec<ResourceSelector>,
 	) -> LoopState {
-		let context = self.build_loop_context(request, session_id, route_decision);
+		let context = self.build_loop_context(request, session_id, route_decision, bound_resources);
 		LoopState::new(format!("loop-{}", request.request_id.0), &context)
 	}
 
@@ -381,7 +384,11 @@ impl GenericAgentRuntime {
 		request: &RequestEnvelope,
 		loop_state: &mut LoopState,
 		user_reply: Option<&str>,
+		sequence_commands: Option<&[FsCommandStep]>,
 	) -> DirectRouteExecutionResult {
+		if let Some(commands) = sequence_commands {
+			return self.execute_filesystem_sequence_loop(task_id, request, loop_state, commands);
+		}
 		loop {
 			let next_step =
 				decide_filesystem_next_step(loop_state, self.route_router.as_deref(), user_reply);
@@ -399,6 +406,7 @@ impl GenericAgentRuntime {
 					let execution = self.execute_loop_tool_invocation(
 						task_id,
 						request,
+						loop_state,
 						tool_name,
 						next_step.arguments.clone().unwrap_or_else(|| json!({})),
 						&[],
@@ -521,6 +529,7 @@ impl GenericAgentRuntime {
 					let execution = self.execute_loop_tool_invocation(
 						task_id,
 						request,
+						loop_state,
 						tool_name,
 						next_step.arguments.clone().unwrap_or_else(|| json!({})),
 						&attachments,
@@ -609,124 +618,70 @@ impl GenericAgentRuntime {
 		}
 	}
 
-	pub fn execute_direct_route(
+	fn execute_filesystem_sequence_loop(
 		&self,
 		task_id: &TaskId,
 		request: &RequestEnvelope,
-		plan: &DirectRoutePlan,
+		loop_state: &mut LoopState,
+		commands: &[FsCommandStep],
 	) -> DirectRouteExecutionResult {
-		let execution = match &plan.kind {
-			DirectRouteKind::Inventory if self.route_router.is_none() => self
-				.synthetic_message_result(
-					task_id,
-					"direct-route",
-					"direct-route:inventory",
-					render_inventory_message(&self.resource_catalog, &request.goal),
-					0.96,
-				),
-			DirectRouteKind::Conversation if self.route_router.is_none() => self
-				.synthetic_message_result(
-					task_id,
-					"direct-route",
-					"direct-route:conversation",
-					deterministic_chat_message(&request.goal),
-					0.82,
-				),
-			DirectRouteKind::SkillInstall { source_url } => self.execute_tool_like_route(
+		let mut rendered_steps = Vec::new();
+		for command in commands {
+			let (tool_name, arguments, rendered_command) =
+				sequence_command_invocation(loop_state, command);
+			let execution = self.execute_loop_tool_invocation(
 				task_id,
 				request,
-				"direct-route",
-				"Install requested skill package directly",
-				vec![ResourceSelector::tool(tool_name_for_role(
-					&self.tool_config,
-					crate::tool_config::BuiltinToolRole::SkillInstall,
-				))],
-				Some(source_url),
-			),
-			DirectRouteKind::SkillAdvisory { selector } => self.execute_tool_like_route(
-				task_id,
-				request,
-				"direct-route",
-				&format!(
-					"Use advisory skill `{}` as authoritative local guidance",
-					selector.name()
-				),
-				vec![selector.clone()],
-				None,
-			),
-			DirectRouteKind::SkillExecutable { selector } => self.execute_tool_like_route(
-				task_id,
-				request,
-				"direct-route",
-				&format!(
-					"Execute installed skill `{}` using its local scripts",
-					selector.name()
-				),
-				vec![
-					ResourceSelector::tool(tool_name_for_role(
-						&self.tool_config,
-						crate::tool_config::BuiltinToolRole::SkillExecute,
-					)),
-					selector.clone(),
-				],
-				None,
-			),
-			DirectRouteKind::ToolInvocation {
-				selector,
+				loop_state,
+				tool_name,
 				arguments,
-				attachments,
-			} => self.execute_direct_tool_invocation(
-				task_id,
-				request,
-				selector,
-				arguments,
-				attachments,
-			),
-			DirectRouteKind::FilesystemLoop => self.synthetic_status_result(
-				task_id,
-				"direct-route:filesystem-loop",
-				"direct-route",
-				"filesystem loop routes must be executed through the runtime loop bridge"
-					.to_string(),
-				0.0,
-				ResultStatus::Error,
-			),
-			DirectRouteKind::ToolLoop => self.synthetic_status_result(
-				task_id,
-				"direct-route:tool-loop",
-				"direct-route",
-				"tool loop routes must be executed through the runtime loop bridge".to_string(),
-				0.0,
-				ResultStatus::Error,
-			),
-			DirectRouteKind::FilesystemSequence { commands } => {
-				self.execute_filesystem_sequence(task_id, request, commands)
+				&[],
+			);
+			let observation = self.loop_observation_from_execution(tool_name, &execution.result);
+			let interpreted = interpret_observation(
+				loop_state,
+				observation.clone(),
+				next_working_directory_from_observation(
+					&observation,
+					&loop_state.working_directory,
+				),
+			);
+			let step = StepRecord::tool_call(
+				loop_state.step_index + 1,
+				tool_name,
+				format!("Execute structured filesystem sequence step `{rendered_command}`"),
+				StepObservation::Tool(observation.clone()),
+				execution_elapsed_ms(&execution.result),
+				interpreted.remaining_step_budget,
+				interpreted.remaining_recovery_budget,
+				interpreted
+					.new_working_directory
+					.clone()
+					.unwrap_or_else(|| loop_state.working_directory.clone()),
+			);
+			loop_state.record_step(step);
+			if execution.result.status != ResultStatus::Ok {
+				return self.synthetic_loop_terminal_result(
+					task_id,
+					"filesystem",
+					summarize_filesystem_observation(&loop_state.goal, &observation).final_message,
+					StepAction::Fail,
+					ResultStatus::Error,
+				);
 			}
-			DirectRouteKind::Inventory => self.execute_tool_like_route(
-				task_id,
-				request,
-				"direct-route",
-				"Describe current runtime inventory directly",
-				vec![ResourceSelector::tool(tool_name_for_role(
-					&self.tool_config,
-					crate::tool_config::BuiltinToolRole::Inventory,
-				))],
-				None,
-			),
-			DirectRouteKind::Conversation => self.execute_tool_like_route(
-				task_id,
-				request,
-				"direct-route",
-				"Answer directly without external resource planning",
-				vec![ResourceSelector::tool(tool_name_for_role(
-					&self.tool_config,
-					crate::tool_config::BuiltinToolRole::General,
-				))],
-				None,
-			),
-		};
-		self.remember_tool_result_summary(&request.session_id, &execution.message);
-		execution
+			rendered_steps.push(render_sequence_output(
+				&rendered_command,
+				&observation,
+				&loop_state.working_directory,
+			));
+		}
+		self.synthetic_loop_terminal_result(
+			task_id,
+			"filesystem",
+			rendered_steps.join("\n\n"),
+			StepAction::FinalAnswer,
+			ResultStatus::Ok,
+		)
 	}
 
 	pub fn execute_escalation_action(
@@ -864,17 +819,10 @@ impl GenericAgentRuntime {
 			RouteDecisionResult::Escalate(plan) => &plan.decision,
 		};
 		let last_explicit_resource = match result {
-			RouteDecisionResult::Direct(plan) => match &plan.kind {
-				DirectRouteKind::SkillAdvisory { selector }
-				| DirectRouteKind::SkillExecutable { selector }
-				| DirectRouteKind::ToolInvocation { selector, .. } => Some(selector.display_key()),
-				DirectRouteKind::Inventory
-				| DirectRouteKind::Conversation
-				| DirectRouteKind::SkillInstall { .. }
-				| DirectRouteKind::FilesystemLoop
-				| DirectRouteKind::ToolLoop
-				| DirectRouteKind::FilesystemSequence { .. } => None,
-			},
+			RouteDecisionResult::Direct(plan) => plan
+				.bound_resources
+				.first()
+				.map(|selector| selector.display_key()),
 			RouteDecisionResult::Escalate(_) => None,
 		};
 		if let Ok(mut scratchpads) = self.scratchpads.lock() {
@@ -884,14 +832,6 @@ impl GenericAgentRuntime {
 				pad.last_explicit_resource = Some(resource);
 			}
 			pad.task_completed = false;
-		}
-	}
-
-	fn remember_tool_result_summary(&self, session_id: &str, summary: &str) {
-		if let Ok(mut scratchpads) = self.scratchpads.lock() {
-			let pad = scratchpads.entry(session_id.to_string()).or_default();
-			pad.last_tool_result_summary = Some(summary.to_string());
-			pad.task_completed = true;
 		}
 	}
 
@@ -1060,225 +1000,21 @@ impl GenericAgentRuntime {
 		}
 	}
 
-	fn execute_filesystem_sequence(
-		&self,
-		task_id: &TaskId,
-		request: &RequestEnvelope,
-		commands: &[FsCommandStep],
-	) -> DirectRouteExecutionResult {
-		let mut cwd = std::env::current_dir()
-			.ok()
-			.and_then(|path| path.canonicalize().ok())
-			.unwrap_or_else(|| PathBuf::from("."));
-		let mut rendered_steps = Vec::new();
-
-		for command in commands {
-			match command {
-				FsCommandStep::ChangeDir { path } => {
-					let target = resolve_sequence_path(&cwd, path);
-					let result = self.invoke_sequence_tool(
-						task_id,
-						request,
-						"fs.inspect",
-						json!({ "path": target.display().to_string() }),
-					);
-					let payload = match result {
-						Ok(payload) => payload,
-						Err(message) => {
-							return self.synthetic_status_result(
-								task_id,
-								"direct-route:filesystem-sequence",
-								"direct-route",
-								message,
-								0.70,
-								ResultStatus::Error,
-							);
-						}
-					};
-					if payload.get("kind").and_then(Value::as_str) != Some("directory") {
-						return self.synthetic_status_result(
-							task_id,
-							"direct-route:filesystem-sequence",
-							"direct-route",
-							format!("`{path}` is not a directory."),
-							0.70,
-							ResultStatus::Error,
-						);
-					}
-					if let Some(resolved) = payload.get("path").and_then(Value::as_str) {
-						cwd = PathBuf::from(resolved);
-					}
-					rendered_steps.push(format!("$ cd {path}\n{}", cwd.display()));
-				}
-				FsCommandStep::ListDir { path } => {
-					let target = path
-						.as_ref()
-						.map(|path| resolve_sequence_path(&cwd, path))
-						.unwrap_or_else(|| cwd.clone());
-					let result = self.invoke_sequence_tool(
-						task_id,
-						request,
-						"fs.list_dir",
-						json!({ "path": target.display().to_string() }),
-					);
-					match result {
-						Ok(payload) => rendered_steps.push(format!(
-							"$ ls {}\n{}",
-							path.as_deref().unwrap_or("."),
-							payload
-								.get("message")
-								.and_then(Value::as_str)
-								.unwrap_or_default()
-						)),
-						Err(message) => {
-							return self.synthetic_status_result(
-								task_id,
-								"direct-route:filesystem-sequence",
-								"direct-route",
-								message,
-								0.70,
-								ResultStatus::Error,
-							);
-						}
-					}
-				}
-				FsCommandStep::ReadText { path } => {
-					let target = resolve_sequence_path(&cwd, path);
-					let result = self.invoke_sequence_tool(
-						task_id,
-						request,
-						"fs.read_text",
-						json!({ "path": target.display().to_string(), "max_bytes": 4_096_u64 }),
-					);
-					match result {
-						Ok(payload) => rendered_steps.push(format!(
-							"$ cat {path}\n{}",
-							payload
-								.get("message")
-								.and_then(Value::as_str)
-								.unwrap_or_default()
-						)),
-						Err(message) => {
-							return self.synthetic_status_result(
-								task_id,
-								"direct-route:filesystem-sequence",
-								"direct-route",
-								message,
-								0.70,
-								ResultStatus::Error,
-							);
-						}
-					}
-				}
-				FsCommandStep::PrintWorkingDir => {
-					rendered_steps.push(format!("$ pwd\n{}", cwd.display()));
-				}
-				FsCommandStep::Inspect { path } => {
-					let target = resolve_sequence_path(&cwd, path);
-					let result = self.invoke_sequence_tool(
-						task_id,
-						request,
-						"fs.inspect",
-						json!({ "path": target.display().to_string() }),
-					);
-					match result {
-						Ok(payload) => rendered_steps.push(format!(
-							"$ stat {path}\n{}",
-							payload
-								.get("message")
-								.and_then(Value::as_str)
-								.unwrap_or_default()
-						)),
-						Err(message) => {
-							return self.synthetic_status_result(
-								task_id,
-								"direct-route:filesystem-sequence",
-								"direct-route",
-								message,
-								0.70,
-								ResultStatus::Error,
-							);
-						}
-					}
-				}
-				FsCommandStep::Exists { path } => {
-					let target = resolve_sequence_path(&cwd, path);
-					let result = self.invoke_sequence_tool(
-						task_id,
-						request,
-						"fs.exists",
-						json!({ "path": target.display().to_string() }),
-					);
-					match result {
-						Ok(payload) => rendered_steps.push(format!(
-							"$ test -e {path}\n{}",
-							payload
-								.get("message")
-								.and_then(Value::as_str)
-								.unwrap_or_default()
-						)),
-						Err(message) => {
-							return self.synthetic_status_result(
-								task_id,
-								"direct-route:filesystem-sequence",
-								"direct-route",
-								message,
-								0.70,
-								ResultStatus::Error,
-							);
-						}
-					}
-				}
-			}
-		}
-
-		self.synthetic_status_result(
-			task_id,
-			"direct-route:filesystem-sequence",
-			"direct-route",
-			rendered_steps.join("\n\n"),
-			0.90,
-			ResultStatus::Ok,
-		)
-	}
-
-	fn invoke_sequence_tool(
-		&self,
-		task_id: &TaskId,
-		request: &RequestEnvelope,
-		tool_name: &str,
-		arguments: Value,
-	) -> Result<Value, String> {
-		let selector = self
-			.resource_catalog
-			.entries()
-			.iter()
-			.find(|entry| {
-				entry.kind == roku_plugin_catalog::ResourceKind::Tool && entry.name == tool_name
-			})
-			.map(|entry| entry.selector.clone())
-			.ok_or_else(|| {
-				format!("tool `{tool_name}` is not enabled in the current runtime inventory")
-			})?;
-		let execution =
-			self.execute_direct_tool_invocation(task_id, request, &selector, &arguments, &[]);
-		if execution.result.status != ResultStatus::Ok {
-			return Err(execution.message);
-		}
-		let payload = serde_json::from_str::<Value>(&execution.result.payload)
-			.map_err(|error| format!("failed to parse `{tool_name}` payload: {error}"))?;
-		Ok(payload.get("output").cloned().unwrap_or(payload))
-	}
-
-	fn execute_direct_tool_invocation(
+	fn execute_tool_invocation_with_resources(
 		&self,
 		task_id: &TaskId,
 		request: &RequestEnvelope,
 		selector: &ResourceSelector,
-		arguments: &Value,
+		arguments: Value,
 		attachments: &[PathBuf],
+		bound_resources: &[ResourceSelector],
 	) -> DirectRouteExecutionResult {
-		let resources = vec![selector.clone()];
+		let mut resources = vec![selector.clone()];
+		for resource in bound_resources {
+			if !resources.iter().any(|existing| existing == resource) {
+				resources.push(resource.clone());
+			}
+		}
 		let capabilities = route_capabilities(&self.resource_catalog, &resources);
 		let node = TaskNode {
 			node_id: NodeId("direct-route".to_string()),
@@ -1334,7 +1070,7 @@ impl GenericAgentRuntime {
 			"budget_tokens": spec.policy_bindings.budget_tokens,
 			"time_budget_ms": spec.policy_bindings.time_budget_ms,
 		});
-		merge_json_object(&mut input, arguments.clone());
+		merge_json_object(&mut input, arguments);
 		let invocation = ToolInvocation {
 			tool_name: selector.name().to_string(),
 			input,
@@ -1383,6 +1119,7 @@ impl GenericAgentRuntime {
 		&self,
 		task_id: &TaskId,
 		request: &RequestEnvelope,
+		loop_state: &LoopState,
 		tool_name: &str,
 		arguments: Value,
 		attachments: &[PathBuf],
@@ -1397,7 +1134,14 @@ impl GenericAgentRuntime {
 				ResultStatus::Error,
 			);
 		};
-		self.execute_direct_tool_invocation(task_id, request, &selector, &arguments, attachments)
+		self.execute_tool_invocation_with_resources(
+			task_id,
+			request,
+			&selector,
+			arguments,
+			attachments,
+			&loop_state.bound_resources,
+		)
 	}
 
 	fn loop_observation_from_execution(
@@ -1510,6 +1254,81 @@ fn merge_json_object(target: &mut Value, overlay: Value) {
 	}
 }
 
+fn sequence_command_invocation(
+	loop_state: &LoopState,
+	command: &FsCommandStep,
+) -> (&'static str, Value, String) {
+	let cwd = PathBuf::from(&loop_state.working_directory);
+	match command {
+		FsCommandStep::ChangeDir { path } => {
+			let target = resolve_sequence_path(&cwd, path);
+			(
+				"fs.inspect",
+				json!({ "path": target.display().to_string() }),
+				format!("cd {path}"),
+			)
+		}
+		FsCommandStep::ListDir { path } => {
+			let target = path
+				.as_ref()
+				.map(|path| resolve_sequence_path(&cwd, path))
+				.unwrap_or_else(|| cwd.clone());
+			(
+				"fs.list_dir",
+				json!({ "path": target.display().to_string() }),
+				format!("ls {}", path.as_deref().unwrap_or(".")),
+			)
+		}
+		FsCommandStep::ReadText { path } => {
+			let target = resolve_sequence_path(&cwd, path);
+			(
+				"fs.read_text",
+				json!({ "path": target.display().to_string(), "max_bytes": 4_096_u64 }),
+				format!("cat {path}"),
+			)
+		}
+		FsCommandStep::PrintWorkingDir => (
+			"fs.inspect",
+			json!({ "path": cwd.display().to_string() }),
+			"pwd".to_string(),
+		),
+		FsCommandStep::Inspect { path } => {
+			let target = resolve_sequence_path(&cwd, path);
+			(
+				"fs.inspect",
+				json!({ "path": target.display().to_string() }),
+				format!("stat {path}"),
+			)
+		}
+		FsCommandStep::Exists { path } => {
+			let target = resolve_sequence_path(&cwd, path);
+			(
+				"fs.exists",
+				json!({ "path": target.display().to_string() }),
+				format!("test -e {path}"),
+			)
+		}
+	}
+}
+
+fn render_sequence_output(
+	rendered_command: &str,
+	observation: &ToolObservation,
+	working_directory: &str,
+) -> String {
+	let body = if rendered_command == "pwd" {
+		observation
+			.data
+			.get("path")
+			.and_then(Value::as_str)
+			.unwrap_or(working_directory)
+			.to_string()
+	} else {
+		observation.message.clone()
+	};
+	format!("$ {rendered_command}\n{body}")
+}
+
 fn resolve_sequence_path(cwd: &std::path::Path, raw: &str) -> PathBuf {
 	let path = PathBuf::from(raw);
 	if path.is_absolute() {
@@ -1563,68 +1382,6 @@ fn execution_elapsed_ms(result: &ResultEnvelope) -> Option<u64> {
 		.and_then(|payload| payload.get("elapsed_ms").and_then(Value::as_u64))
 }
 
-fn render_inventory_message(catalog: &ResourceCatalog, goal: &str) -> String {
-	let skill_names = catalog
-		.entries()
-		.iter()
-		.filter(|entry| entry.kind == roku_plugin_catalog::ResourceKind::Skill)
-		.map(|entry| entry.name.clone())
-		.collect::<Vec<_>>();
-	let tool_names = catalog
-		.entries()
-		.iter()
-		.filter(|entry| entry.kind == roku_plugin_catalog::ResourceKind::Tool && entry.discoverable)
-		.map(|entry| entry.name.clone())
-		.collect::<Vec<_>>();
-	let capability_families = catalog
-		.entries()
-		.iter()
-		.flat_map(|entry| entry.required_capabilities.iter())
-		.filter_map(|capability| capability.split('.').next())
-		.collect::<Vec<_>>();
-	let capability_families = {
-		let mut deduped = Vec::new();
-		for family in capability_families {
-			if !deduped.contains(&family) {
-				deduped.push(family);
-			}
-		}
-		deduped
-	};
-	if !goal.is_ascii() {
-		format!(
-			"当前可用的 skills: {}。可发现 tools: {}。能力类别: {}。",
-			joined_or_none(&skill_names),
-			joined_or_none(&tool_names),
-			if capability_families.is_empty() {
-				"(none)".to_string()
-			} else {
-				capability_families.join(", ")
-			},
-		)
-	} else {
-		format!(
-			"Available skills: {}. Discoverable tools: {}. Capability families: {}.",
-			joined_or_none(&skill_names),
-			joined_or_none(&tool_names),
-			if capability_families.is_empty() {
-				"(none)".to_string()
-			} else {
-				capability_families.join(", ")
-			},
-		)
-	}
-}
-
-fn deterministic_chat_message(goal: &str) -> String {
-	if !goal.is_ascii() {
-		"我是 Roku。当前我会优先走 direct route；复杂请求会返回兼容降级答复，而不是进入 planning-heavy 工作流。"
-			.to_string()
-	} else {
-		"I'm Roku. I prefer direct routes for simple requests and return compatibility fallback answers for planning-heavy work.".to_string()
-	}
-}
-
 fn ask_for_more_info_message(goal: &str, missing_arguments: &[String]) -> String {
 	if !goal.is_ascii() {
 		format!(
@@ -1662,14 +1419,6 @@ fn limited_planning_compatibility_message(goal: &str, reason: &str) -> String {
 		format!(
 			"This runtime does not enable planning-heavy workflows for new requests, so the request will not enter the legacy planner. {reason} Please narrow it to a single executable step or specify the exact file, table, web query, or Python code you want."
 		)
-	}
-}
-
-fn joined_or_none(values: &[String]) -> String {
-	if values.is_empty() {
-		"(none)".to_string()
-	} else {
-		values.join(", ")
 	}
 }
 
@@ -2047,7 +1796,8 @@ So, I'll output: "星期日""#
 			"filesystem request",
 		);
 
-		let loop_state = runtime.initialize_runtime_loop(&request, &request.session_id, &decision);
+		let loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
 
 		assert_eq!(loop_state.run_id, "loop-req-loop");
 		assert_eq!(loop_state.visible_tools, vec!["fs.read_text".to_string()]);
@@ -2075,7 +1825,7 @@ So, I'll output: "星期日""#
 			"chat request",
 		);
 		let mut loop_state =
-			runtime.initialize_runtime_loop(&request, &request.session_id, &decision);
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
 
 		let step = runtime.record_terminal_step(
 			&mut loop_state,
