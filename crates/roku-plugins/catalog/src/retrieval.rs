@@ -44,6 +44,18 @@ pub struct ResourceCost {
 	pub estimated_latency_ms: u64,
 }
 
+/// Metadata for one catalog entry (tool or skill) used for discovery and routing.
+///
+/// Built from builtin modules (e.g. `fs::catalog_descriptors()`, `table::catalog_descriptors()`)
+/// and skill registry; merged into a [`ResourceCatalog`] so the router/classifier can:
+/// - **Retrieve** by user goal (BM25 + embedding over [`searchable_text`](CatalogDescriptor::searchable_text));
+/// - **Prompt** the route LLM with name, description, summary, examples as "Current inventory";
+/// - **Resolve** a chosen tool name to a [`ResourceSelector`] and use risk/cost for routing.
+///
+/// Field groups:
+/// - **Identity:** `selector`, `kind`, `name`, `role`
+/// - **Discovery text:** `description`, `summary`, `tags`, `examples`, `key_commands`, `use_cases`, `input_schema` (all contribute to retrieval and LLM inventory)
+/// - **Routing:** `risk`, `cost`, `discoverable`, `required_capabilities`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogDescriptor {
 	pub selector: ResourceSelector,
@@ -75,6 +87,12 @@ pub struct CatalogDescriptor {
 }
 
 impl CatalogDescriptor {
+	/// Single blob of text used for lexical (BM25) and embedding retrieval.
+	///
+	/// [`ResourceCatalog::new`] tokenizes this for each entry and builds term stats and embeddings;
+	/// [`ResourceCatalog::retrieve`] matches the user goal against these. Concatenating all
+	/// discovery-related fields ensures queries like "list files" or "read xlsx" can match
+	/// the right tool even when the match is in tags/examples/key_commands rather than description.
 	pub fn searchable_text(&self) -> String {
 		[
 			self.name.as_str(),
