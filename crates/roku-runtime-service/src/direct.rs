@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_agent_runtime::{DirectRoutePlan, RouteEscalationPlan};
+use roku_agent_runtime::{DirectRoutePlan, LoopState, RouteEscalationPlan};
 use roku_common_types::{
 	ErrorClass, EvidenceItem, RequestEnvelope, ResponseEnvelope, ResponseStatus, ResultEnvelope,
 	ResultStatus, RuntimeError, Task, TaskEventKind, TaskNode, TaskState,
@@ -27,11 +27,15 @@ impl RuntimeService {
 		task: &mut Task,
 		request: &RequestEnvelope,
 		plan: &DirectRoutePlan,
+		loop_state: &mut LoopState,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let execution = self
 			.runtime
 			.execute_direct_route(&task.task_id, request, plan);
-		self.finalize_direct_path(task, execution.node, execution.result, execution.message)
+		let response =
+			self.finalize_direct_path(task, execution.node, execution.result, execution.message)?;
+		self.record_runtime_loop_terminal_step(loop_state, response.status, &response.message);
+		Ok(response)
 	}
 
 	pub(super) fn process_direct_escalation(
@@ -39,11 +43,20 @@ impl RuntimeService {
 		task: &mut Task,
 		request: &RequestEnvelope,
 		plan: &RouteEscalationPlan,
+		loop_state: &mut LoopState,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let execution = self
 			.runtime
 			.execute_escalation_action(&task.task_id, request, plan);
-		self.finalize_direct_path(task, execution.node, execution.result, execution.message)
+		let response =
+			self.finalize_direct_path(task, execution.node, execution.result, execution.message)?;
+		self.record_runtime_loop_escalation_step(
+			loop_state,
+			plan.action,
+			response.status,
+			&response.message,
+		);
+		Ok(response)
 	}
 
 	fn finalize_direct_path(
