@@ -34,6 +34,7 @@ pub struct LoopState {
 	pub run_id: String,
 	pub request_id: String,
 	pub session_id: String,
+	pub goal: String,
 	pub route_decision: RouteDecision,
 	pub status: LoopStatus,
 	pub step_index: u32,
@@ -51,6 +52,7 @@ impl LoopState {
 			run_id: run_id.into(),
 			request_id: context.request_id.clone(),
 			session_id: context.session_id.clone(),
+			goal: context.goal.clone(),
 			route_decision: context.route_decision.clone(),
 			status: LoopStatus::LoopRunning,
 			step_index: 0,
@@ -68,6 +70,20 @@ impl LoopState {
 		self.remaining_step_budget = step.remaining_step_budget_after;
 		self.remaining_recovery_budget = step.remaining_recovery_budget_after;
 		self.working_directory = step.working_directory_after.clone();
+		match &step.observation {
+			Some(crate::runtime_loop::StepObservation::Tool(observation)) => {
+				self.last_observation = Some(observation.clone());
+			}
+			Some(crate::runtime_loop::StepObservation::AskUser { .. })
+			| Some(crate::runtime_loop::StepObservation::FinalMessage { .. })
+			| None => {}
+		}
+		self.status = match step.action {
+			crate::runtime_loop::StepAction::CallTool => LoopStatus::LoopRunning,
+			crate::runtime_loop::StepAction::AskUser => LoopStatus::AwaitingUser,
+			crate::runtime_loop::StepAction::FinalAnswer => LoopStatus::Succeeded,
+			crate::runtime_loop::StepAction::Fail => LoopStatus::Failed,
+		};
 		self.history.push(step);
 	}
 }

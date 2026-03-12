@@ -240,11 +240,6 @@ fn classify_grounded_direct_route(
 	let path = single_explicit_path(&explicit_paths)?;
 	let resolved_path = resolve_grounded_path_candidate(path).unwrap_or_else(|| path.to_string());
 	let tool_name = grounded_fs_tool_name(&resolved_path)?;
-	let selector = tool_selector(context.catalog, tool_name)?;
-	let mut arguments = json!({ "path": resolved_path });
-	if tool_name == "fs.read_text" {
-		arguments["max_bytes"] = Value::from(4_096_u64);
-	}
 	let decision = RouteDecision::new(
 		IntentFamily::FilesystemRead,
 		0.91,
@@ -255,14 +250,12 @@ fn classify_grounded_direct_route(
 		Vec::new(),
 		format!("grounded filesystem target resolved to direct `{tool_name}`"),
 	);
-	Some(RouteDecisionResult::Direct(DirectRoutePlan {
+	Some(build_filesystem_loop_route(
+		context,
+		request,
 		decision,
-		kind: DirectRouteKind::ToolInvocation {
-			selector,
-			arguments,
-			attachments: Vec::new(),
-		},
-	}))
+		Some(tool_name),
+	))
 }
 
 fn classify_shell_like_fs_command(
@@ -270,7 +263,7 @@ fn classify_shell_like_fs_command(
 	request: &RequestEnvelope,
 ) -> Option<RouteDecisionResult> {
 	let command = parse_shell_like_fs_command(&request.goal)?;
-	let selector = tool_selector(context.catalog, command.tool_name)?;
+	tool_selector(context.catalog, command.tool_name)?;
 	let decision = RouteDecision::new(
 		IntentFamily::FilesystemRead,
 		0.94,
@@ -280,18 +273,16 @@ fn classify_shell_like_fs_command(
 		candidate_plugins_for_tool(context.plugin_snapshot, command.tool_name),
 		Vec::new(),
 		format!(
-			"structured shell-style filesystem command resolved to direct `{}`",
+			"structured shell-style filesystem command resolved to a filesystem loop shortlist led by `{}`",
 			command.tool_name
 		),
 	);
-	Some(RouteDecisionResult::Direct(DirectRoutePlan {
+	Some(build_filesystem_loop_route(
+		context,
+		request,
 		decision,
-		kind: DirectRouteKind::ToolInvocation {
-			selector,
-			arguments: command.arguments,
-			attachments: Vec::new(),
-		},
-	}))
+		Some(command.tool_name),
+	))
 }
 
 fn classify_shell_like_fs_sequence(
@@ -332,41 +323,31 @@ fn classify_shell_like_fs_sequence(
 
 struct ShellLikeFsCommand {
 	tool_name: &'static str,
-	arguments: Value,
 }
 
 fn parse_shell_like_fs_command(goal: &str) -> Option<ShellLikeFsCommand> {
 	let tokens = goal.split_whitespace().map(clean_token).collect::<Vec<_>>();
 	let first = tokens.first()?.as_str();
 	match first {
-		"ls" | "dir" => {
-			let path = command_path_argument(goal, &tokens).unwrap_or_else(|| ".".to_string());
-			Some(ShellLikeFsCommand {
-				tool_name: "fs.list_dir",
-				arguments: json!({ "path": path }),
-			})
-		}
-		"cat" | "more" => command_path_argument(goal, &tokens).map(|path| ShellLikeFsCommand {
+		"ls" | "dir" => Some(ShellLikeFsCommand {
+			tool_name: "fs.list_dir",
+		}),
+		"cat" | "more" => command_path_argument(goal, &tokens).map(|_| ShellLikeFsCommand {
 			tool_name: "fs.read_text",
-			arguments: json!({ "path": path, "max_bytes": 4_096_u64 }),
 		}),
 		"pwd" => Some(ShellLikeFsCommand {
 			tool_name: "fs.inspect",
-			arguments: json!({ "path": "." }),
 		}),
-		"stat" => command_path_argument(goal, &tokens).map(|path| ShellLikeFsCommand {
+		"stat" => command_path_argument(goal, &tokens).map(|_| ShellLikeFsCommand {
 			tool_name: "fs.inspect",
-			arguments: json!({ "path": path }),
 		}),
-		"exists" => command_path_argument(goal, &tokens).map(|path| ShellLikeFsCommand {
+		"exists" => command_path_argument(goal, &tokens).map(|_| ShellLikeFsCommand {
 			tool_name: "fs.exists",
-			arguments: json!({ "path": path }),
 		}),
 		"test" => {
 			if tokens.get(1).is_some_and(|flag| flag == "-e") {
-				command_path_argument(goal, &tokens[1..]).map(|path| ShellLikeFsCommand {
+				command_path_argument(goal, &tokens[1..]).map(|_| ShellLikeFsCommand {
 					tool_name: "fs.exists",
-					arguments: json!({ "path": path }),
 				})
 			} else {
 				None
@@ -634,6 +615,16 @@ fn classify_with_llm(
 			kind: DirectRouteKind::Conversation,
 		});
 	}
+	if decision.intent_family == IntentFamily::FilesystemRead
+		&& has_enabled_tool_with_prefix(context.catalog, "fs.")
+	{
+		let preferred_tool = decision
+			.candidate_tools
+			.iter()
+			.find(|tool_name| tool_name.starts_with("fs."))
+			.cloned();
+		return build_filesystem_loop_route(context, request, decision, preferred_tool.as_deref());
+	}
 	if let Some(selector) = select_tool_from_candidates(context.catalog, &decision.candidate_tools)
 	{
 		return build_direct_tool_plan(context, request, decision, selector);
@@ -764,7 +755,13 @@ fn classify_catalog_selected_route(
 	tool_matches: &[CatalogMatch],
 ) -> Option<RouteDecisionResult> {
 	let primary = preferred_catalog_tool_match(tool_matches)?;
+	let primary = prefer_pathless_directory_fs_match(request, tool_matches, primary);
 	let descriptor = context.catalog.descriptor(&primary.descriptor.selector)?;
+	if descriptor.name.starts_with("fs.")
+		&& !allow_catalog_filesystem_route(request, &descriptor.name, primary.score)
+	{
+		return None;
+	}
 	if context.route_router.is_some()
 		&& matches!(
 			descriptor.name.as_str(),
@@ -801,6 +798,46 @@ fn classify_catalog_selected_route(
 			descriptor.selector.clone(),
 		)),
 	}
+}
+
+fn prefer_pathless_directory_fs_match<'a>(
+	request: &RequestEnvelope,
+	matches: &'a [CatalogMatch],
+	primary: &'a CatalogMatch,
+) -> &'a CatalogMatch {
+	if has_grounded_filesystem_input(&request.goal) {
+		return primary;
+	}
+
+	let directory_semantic_match = matches.iter().find(|candidate| {
+		matches!(
+			candidate.descriptor.name.as_str(),
+			"fs.list_dir" | "fs.inspect"
+		) && candidate.score >= 0.46
+			&& candidate.score >= primary.score * 0.55
+	});
+
+	match primary.descriptor.name.as_str() {
+		"inventory.describe" | "general.execute" => directory_semantic_match.unwrap_or(primary),
+		"fs.find" | "fs.read_text" | "fs.exists" => directory_semantic_match
+			.filter(|candidate| candidate.score >= MIN_TOOL_SCORE)
+			.unwrap_or(primary),
+		_ => primary,
+	}
+}
+
+fn allow_catalog_filesystem_route(request: &RequestEnvelope, tool_name: &str, score: f32) -> bool {
+	if has_grounded_filesystem_input(&request.goal) {
+		return true;
+	}
+
+	matches!(tool_name, "fs.list_dir" | "fs.inspect") && score >= 0.72
+}
+
+fn has_grounded_filesystem_input(goal: &str) -> bool {
+	parse_shell_like_fs_command(goal).is_some()
+		|| extract_glob_pattern(goal).is_some()
+		|| !extract_path_candidates(goal).is_empty()
 }
 
 fn classify_skill_route_from_decision(
@@ -952,6 +989,9 @@ fn build_direct_tool_plan(
 	selector: ResourceSelector,
 ) -> RouteDecisionResult {
 	let tool_name = selector.name().to_string();
+	if tool_name.starts_with("fs.") && tool_name != "fs.glob" {
+		return build_filesystem_loop_route(context, request, decision, Some(&tool_name));
+	}
 	if let Some(result) = build_grounded_tool_plan(context, request, &decision, &tool_name) {
 		return result;
 	}
@@ -1132,6 +1172,59 @@ fn build_direct_tool_plan(
 			Vec::new(),
 		),
 	}
+}
+
+fn build_filesystem_loop_route(
+	context: &RouteClassifierContext<'_>,
+	request: &RequestEnvelope,
+	mut decision: RouteDecision,
+	preferred_tool: Option<&str>,
+) -> RouteDecisionResult {
+	decision.intent_family = IntentFamily::FilesystemRead;
+	decision.candidate_tools =
+		filesystem_loop_candidate_tools(context.catalog, request, preferred_tool);
+	decision.candidate_plugins = if context.plugin_snapshot.is_plugin_enabled("core-fs") {
+		vec!["core-fs".to_string()]
+	} else {
+		Vec::new()
+	};
+	RouteDecisionResult::Direct(DirectRoutePlan {
+		decision,
+		kind: DirectRouteKind::FilesystemLoop,
+	})
+}
+
+fn filesystem_loop_candidate_tools(
+	catalog: &ResourceCatalog,
+	request: &RequestEnvelope,
+	preferred_tool: Option<&str>,
+) -> Vec<String> {
+	let basename_only = single_explicit_path(&extract_path_candidates(&request.goal))
+		.is_some_and(is_basename_reference);
+	let preferred_order = match preferred_tool {
+		Some("fs.list_dir") => ["fs.list_dir", "fs.inspect", "fs.exists", "fs.read_text"],
+		Some("fs.inspect") => ["fs.inspect", "fs.list_dir", "fs.exists", "fs.read_text"],
+		Some("fs.exists") => ["fs.exists", "fs.inspect", "fs.read_text", "fs.list_dir"],
+		Some("fs.read_text") => ["fs.read_text", "fs.inspect", "fs.exists", "fs.list_dir"],
+		_ => ["fs.read_text", "fs.list_dir", "fs.inspect", "fs.exists"],
+	};
+	let mut tools = Vec::new();
+	if basename_only && tool_selector(catalog, "fs.find").is_some() {
+		tools.push("fs.find".to_string());
+	}
+	for tool_name in preferred_order {
+		if tool_selector(catalog, tool_name).is_some()
+			&& !tools.iter().any(|existing| existing == tool_name)
+		{
+			tools.push(tool_name.to_string());
+		}
+	}
+	if tool_selector(catalog, "fs.glob").is_some()
+		&& !tools.iter().any(|existing| existing == "fs.glob")
+	{
+		tools.push("fs.glob".to_string());
+	}
+	tools
 }
 
 fn build_grounded_tool_plan(
@@ -1796,6 +1889,15 @@ fn clean_token(token: &str) -> String {
 		.trim_end_matches(':')
 		.trim_end_matches('.')
 		.to_string()
+}
+
+fn is_basename_reference(path: &str) -> bool {
+	!path.is_empty()
+		&& path != "."
+		&& path != ".."
+		&& !PathBuf::from(path).is_absolute()
+		&& !path.contains('/')
+		&& !path.contains('\\')
 }
 
 fn looks_like_path_candidate(token: &str) -> bool {

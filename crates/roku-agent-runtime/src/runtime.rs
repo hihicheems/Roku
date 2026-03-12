@@ -24,7 +24,9 @@ use crate::router::{
 };
 use crate::runtime_loop::{
 	LoopContext, LoopState, StepAction, StepObservation, StepRecord, ToolObservation,
-	build_loop_context, intake_request,
+	build_loop_context, decide_filesystem_next_step, intake_request, interpret_observation,
+	next_working_directory_from_observation,
+	summarize_observation as summarize_filesystem_observation,
 };
 use crate::tool_config::ToolCatalogConfig;
 use crate::tools::{
@@ -365,6 +367,116 @@ impl GenericAgentRuntime {
 		ToolObservation::from_runtime_error(tool_name, error)
 	}
 
+	pub fn execute_filesystem_loop(
+		&self,
+		task_id: &TaskId,
+		request: &RequestEnvelope,
+		loop_state: &mut LoopState,
+	) -> DirectRouteExecutionResult {
+		loop {
+			let next_step = decide_filesystem_next_step(loop_state, self.route_router.as_deref());
+			match next_step.action {
+				crate::runtime_loop::NextStepAction::CallTool => {
+					let Some(tool_name) = next_step.tool_name.as_deref() else {
+						return self.synthetic_loop_terminal_result(
+							task_id,
+							next_step.reason,
+							StepAction::Fail,
+							ResultStatus::Error,
+						);
+					};
+					let execution = self.execute_loop_tool_invocation(
+						task_id,
+						request,
+						tool_name,
+						next_step.arguments.clone().unwrap_or_else(|| json!({})),
+					);
+					let observation =
+						self.loop_observation_from_execution(tool_name, &execution.result);
+					let interpreted = interpret_observation(
+						loop_state,
+						observation.clone(),
+						next_working_directory_from_observation(
+							&observation,
+							&loop_state.working_directory,
+						),
+					);
+					let step = StepRecord::tool_call(
+						loop_state.step_index + 1,
+						tool_name,
+						next_step.reason,
+						StepObservation::Tool(observation),
+						execution_elapsed_ms(&execution.result),
+						interpreted.remaining_step_budget,
+						interpreted.remaining_recovery_budget,
+						interpreted
+							.new_working_directory
+							.clone()
+							.unwrap_or_else(|| loop_state.working_directory.clone()),
+					);
+					loop_state.record_step(step);
+					if !interpreted.continue_allowed {
+						let terminal_message = loop_state
+							.last_observation
+							.as_ref()
+							.map(|observation| {
+								summarize_filesystem_observation(&loop_state.goal, observation)
+									.final_message
+							})
+							.unwrap_or_else(|| {
+								"Filesystem loop stopped before producing an observation."
+									.to_string()
+							});
+						return self.synthetic_loop_terminal_result(
+							task_id,
+							terminal_message,
+							StepAction::FinalAnswer,
+							ResultStatus::Ok,
+						);
+					}
+				}
+				crate::runtime_loop::NextStepAction::AskUser => {
+					let message = next_step.final_message.unwrap_or_else(|| {
+						"I need more information before I can continue.".to_string()
+					});
+					return self.synthetic_loop_terminal_result(
+						task_id,
+						message,
+						StepAction::AskUser,
+						ResultStatus::Ok,
+					);
+				}
+				crate::runtime_loop::NextStepAction::FinalAnswer => {
+					let message = next_step.final_message.unwrap_or_else(|| {
+						loop_state
+							.last_observation
+							.as_ref()
+							.map(|observation| {
+								summarize_filesystem_observation(&loop_state.goal, observation)
+									.final_message
+							})
+							.unwrap_or_else(|| "Filesystem loop completed.".to_string())
+					});
+					return self.synthetic_loop_terminal_result(
+						task_id,
+						message,
+						StepAction::FinalAnswer,
+						ResultStatus::Ok,
+					);
+				}
+				crate::runtime_loop::NextStepAction::Fail => {
+					let message = next_step.final_message.unwrap_or(next_step.reason);
+					return self.synthetic_loop_terminal_result(
+						task_id,
+						message,
+						StepAction::Fail,
+						ResultStatus::Error,
+					);
+				}
+			}
+		}
+	}
+
 	pub fn execute_direct_route(
 		&self,
 		task_id: &TaskId,
@@ -437,6 +549,15 @@ impl GenericAgentRuntime {
 				selector,
 				arguments,
 				attachments,
+			),
+			DirectRouteKind::FilesystemLoop => self.synthetic_status_result(
+				task_id,
+				"direct-route:filesystem-loop",
+				"direct-route",
+				"filesystem loop routes must be executed through the runtime loop bridge"
+					.to_string(),
+				0.0,
+				ResultStatus::Error,
 			),
 			DirectRouteKind::FilesystemSequence { commands } => {
 				self.execute_filesystem_sequence(task_id, request, commands)
@@ -593,7 +714,6 @@ impl GenericAgentRuntime {
 			.filter(|tool_name| enabled_tools.contains(*tool_name))
 			.cloned()
 			.collect::<Vec<_>>();
-		visible_tools.sort();
 		visible_tools.dedup();
 		visible_tools
 	}
@@ -611,6 +731,7 @@ impl GenericAgentRuntime {
 				DirectRouteKind::Inventory
 				| DirectRouteKind::Conversation
 				| DirectRouteKind::SkillInstall { .. }
+				| DirectRouteKind::FilesystemLoop
 				| DirectRouteKind::FilesystemSequence { .. } => None,
 			},
 			RouteDecisionResult::Escalate(_) => None,
@@ -687,6 +808,7 @@ impl GenericAgentRuntime {
 			node,
 			result,
 			message,
+			terminal_step_action: None,
 		}
 	}
 
@@ -739,6 +861,7 @@ impl GenericAgentRuntime {
 			node,
 			result,
 			message,
+			terminal_step_action: None,
 		}
 	}
 
@@ -792,6 +915,7 @@ impl GenericAgentRuntime {
 			node,
 			result,
 			message,
+			terminal_step_action: None,
 		}
 	}
 
@@ -1097,6 +1221,7 @@ impl GenericAgentRuntime {
 					node,
 					result,
 					message,
+					terminal_step_action: None,
 				}
 			}
 			Err(error) => {
@@ -1107,8 +1232,99 @@ impl GenericAgentRuntime {
 					node,
 					result,
 					message,
+					terminal_step_action: None,
 				}
 			}
+		}
+	}
+
+	fn execute_loop_tool_invocation(
+		&self,
+		task_id: &TaskId,
+		request: &RequestEnvelope,
+		tool_name: &str,
+		arguments: Value,
+	) -> DirectRouteExecutionResult {
+		let Some(selector) = tool_selector_by_name(&self.resource_catalog, tool_name) else {
+			return self.synthetic_status_result(
+				task_id,
+				"runtime-loop:filesystem",
+				"runtime-loop",
+				format!("tool `{tool_name}` is not enabled in the current runtime inventory"),
+				0.0,
+				ResultStatus::Error,
+			);
+		};
+		self.execute_direct_tool_invocation(task_id, request, &selector, &arguments, &[])
+	}
+
+	fn loop_observation_from_execution(
+		&self,
+		tool_name: &str,
+		result: &ResultEnvelope,
+	) -> ToolObservation {
+		let payload = serde_json::from_str::<Value>(&result.payload)
+			.unwrap_or_else(|_| json!({ "message": result.payload.clone() }));
+		if result.status == ResultStatus::Ok {
+			return ToolObservation::from_result_payload(tool_name, &payload);
+		}
+		ToolObservation::from_error_payload(tool_name, &payload)
+	}
+
+	fn synthetic_loop_terminal_result(
+		&self,
+		task_id: &TaskId,
+		message: String,
+		terminal_step_action: StepAction,
+		status: ResultStatus,
+	) -> DirectRouteExecutionResult {
+		let node = TaskNode {
+			node_id: NodeId("runtime-loop:filesystem".to_string()),
+			kind: TaskNodeKind::Execution,
+			description: message.clone(),
+			resources: Vec::new(),
+			capabilities: Vec::new(),
+			dispatch_policy: TaskNodeDispatchPolicy::Automatic,
+			join_policy: JoinPolicy::AllParents,
+			aggregation_mode: AggregationMode::CollectAll,
+			recovery_anchor: Default::default(),
+			budget_snapshot: NodeBudgetSnapshot {
+				token_budget: 0,
+				time_budget_ms: 0,
+			},
+			deadline_ms: 0,
+			capability_requirements_snapshot: Vec::new(),
+			retry_policy: RetryPolicy::default(),
+			rerun_policy: RerunPolicy::SafeToRerun,
+		};
+		let result = ResultEnvelope {
+			task_id: task_id.clone(),
+			node_id: node.node_id.clone(),
+			producer: "runtime-loop".to_string(),
+			schema_version: "result.v1".to_string(),
+			status,
+			payload: json!({
+				"message": message,
+				"direct_route": true,
+				"runtime_loop": "filesystem",
+			})
+			.to_string(),
+			evidence: vec![EvidenceItem {
+				kind: "runtime".to_string(),
+				value: "runtime-loop".to_string(),
+			}],
+			confidence: if status == ResultStatus::Ok {
+				0.88
+			} else {
+				0.0
+			},
+		};
+		let message = extract_result_message(&result);
+		DirectRouteExecutionResult {
+			node,
+			result,
+			message,
+			terminal_step_action: Some(terminal_step_action),
 		}
 	}
 }
@@ -1187,6 +1403,20 @@ fn route_capabilities(catalog: &ResourceCatalog, resources: &[ResourceSelector])
 		}
 	}
 	capabilities
+}
+
+fn tool_selector_by_name(catalog: &ResourceCatalog, tool_name: &str) -> Option<ResourceSelector> {
+	catalog
+		.entries()
+		.iter()
+		.find(|entry| entry.kind == ResourceKind::Tool && entry.name == tool_name)
+		.map(|entry| entry.selector.clone())
+}
+
+fn execution_elapsed_ms(result: &ResultEnvelope) -> Option<u64> {
+	serde_json::from_str::<Value>(&result.payload)
+		.ok()
+		.and_then(|payload| payload.get("elapsed_ms").and_then(Value::as_u64))
 }
 
 fn render_inventory_message(catalog: &ResourceCatalog, goal: &str) -> String {

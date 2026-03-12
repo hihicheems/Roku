@@ -14,6 +14,7 @@
 
 mod ask_user;
 mod context_assembly;
+mod filesystem;
 mod loop_state;
 mod next_step;
 mod observation;
@@ -26,6 +27,7 @@ mod summarizer;
 pub use ask_user::AskUserPayload;
 pub use context_assembly::LoopContext;
 pub(crate) use context_assembly::build_loop_context;
+pub(crate) use filesystem::{decide_filesystem_next_step, next_working_directory_from_observation};
 pub use loop_state::{LoopState, LoopStatus};
 pub use next_step::{NextStepAction, NextStepDecision, NextStepDecisionSchemaError};
 pub use observation::{StepObservation, ToolObservation};
@@ -35,3 +37,4 @@ pub(crate) use route_classifier::classify_existing_route;
 pub use state_update::{InterpretedObservation, interpret_observation};
 pub use step_record::{StepAction, StepRecord};
 pub use summarizer::FinalSummary;
+pub(crate) use summarizer::summarize_observation;

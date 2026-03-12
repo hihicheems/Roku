@@ -31,10 +31,16 @@ pub fn interpret_observation(
 	raw_observation: ToolObservation,
 	new_working_directory: Option<String>,
 ) -> InterpretedObservation {
+	let remaining_step_budget = state.remaining_step_budget.saturating_sub(1);
+	let remaining_recovery_budget = if raw_observation.ok || raw_observation.terminal {
+		state.remaining_recovery_budget
+	} else {
+		state.remaining_recovery_budget.saturating_sub(1)
+	};
 	InterpretedObservation {
-		continue_allowed: !raw_observation.terminal && state.remaining_step_budget > 0,
-		remaining_step_budget: state.remaining_step_budget.saturating_sub(1),
-		remaining_recovery_budget: state.remaining_recovery_budget,
+		continue_allowed: !raw_observation.terminal && remaining_step_budget > 0,
+		remaining_step_budget,
+		remaining_recovery_budget,
 		new_working_directory,
 		visible_tools: state.visible_tools.clone(),
 		raw_observation,

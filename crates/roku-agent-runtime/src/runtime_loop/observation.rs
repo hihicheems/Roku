@@ -35,35 +35,101 @@ pub enum StepObservation {
 }
 
 impl ToolObservation {
-	pub fn from_execution_result(execution: &ToolExecutionResult) -> Self {
-		let message = execution
-			.output
+	pub fn from_output_value(tool_name: &str, output: &Value) -> Self {
+		if let Some(ok) = output.get("ok").and_then(Value::as_bool) {
+			let error_type = output
+				.get("error_type")
+				.and_then(Value::as_str)
+				.map(str::to_string);
+			let terminal = output
+				.get("terminal")
+				.and_then(Value::as_bool)
+				.unwrap_or(false);
+			let data = output
+				.get("data")
+				.cloned()
+				.unwrap_or_else(|| output.clone());
+			let message = output
+				.get("message")
+				.and_then(Value::as_str)
+				.unwrap_or("tool invocation completed")
+				.to_string();
+			return Self {
+				ok,
+				tool_name: tool_name.to_string(),
+				error_type,
+				terminal,
+				data,
+				message,
+			};
+		}
+
+		let message = output
 			.get("message")
 			.and_then(Value::as_str)
 			.unwrap_or("tool invocation completed")
 			.to_string();
-
 		Self {
 			ok: true,
-			tool_name: execution.tool_name.clone(),
+			tool_name: tool_name.to_string(),
 			error_type: None,
 			terminal: false,
-			data: execution.output.clone(),
+			data: output.clone(),
 			message,
 		}
 	}
 
-	pub fn from_runtime_error(tool_name: &str, error: &ToolRuntimeError) -> Self {
+	pub fn from_result_payload(tool_name: &str, payload: &Value) -> Self {
+		payload
+			.get("output")
+			.map(|output| Self::from_output_value(tool_name, output))
+			.unwrap_or_else(|| Self::from_output_value(tool_name, payload))
+	}
+
+	pub fn from_error_payload(tool_name: &str, payload: &Value) -> Self {
+		let message = payload
+			.get("message")
+			.and_then(Value::as_str)
+			.unwrap_or("tool invocation failed")
+			.to_string();
+		let error_code = payload
+			.get("error_code")
+			.and_then(Value::as_str)
+			.unwrap_or("execution_failed");
+		let (error_type, terminal) = classify_tool_error(tool_name, error_code, &message);
 		Self {
 			ok: false,
 			tool_name: tool_name.to_string(),
-			error_type: Some(tool_error_code(error).to_string()),
-			terminal: false,
+			error_type: Some(error_type),
+			terminal,
 			data: json!({
 				"tool_name": tool_name,
-				"error": error.to_string(),
+				"error_code": error_code,
+				"message": message,
 			}),
-			message: error.to_string(),
+			message,
+		}
+	}
+
+	pub fn from_execution_result(execution: &ToolExecutionResult) -> Self {
+		Self::from_output_value(&execution.tool_name, &execution.output)
+	}
+
+	pub fn from_runtime_error(tool_name: &str, error: &ToolRuntimeError) -> Self {
+		let message = error.to_string();
+		let error_code = tool_error_code(error);
+		let (error_type, terminal) = classify_tool_error(tool_name, error_code, &message);
+		Self {
+			ok: false,
+			tool_name: tool_name.to_string(),
+			error_type: Some(error_type),
+			terminal,
+			data: json!({
+				"tool_name": tool_name,
+				"error_code": error_code,
+				"error": message,
+			}),
+			message,
 		}
 	}
 }
@@ -83,5 +149,36 @@ fn tool_error_code(error: &ToolRuntimeError) -> &'static str {
 				"execution_failed"
 			}
 		}
+	}
+}
+
+fn classify_tool_error(tool_name: &str, error_code: &str, message: &str) -> (String, bool) {
+	if tool_name.starts_with("fs.") {
+		let lower = message.to_ascii_lowercase();
+		if lower.contains("outside the allowed read roots") {
+			return ("workspace_violation".to_string(), true);
+		}
+		if lower.contains("ambiguous under the allowed read roots") {
+			return ("multiple_candidates".to_string(), false);
+		}
+		if lower.contains("is not a directory") {
+			return ("not_directory".to_string(), false);
+		}
+		if lower.contains("is a directory") {
+			return ("not_file".to_string(), false);
+		}
+		if lower.contains("not found") || lower.contains("failed to resolve") {
+			return ("path_not_found".to_string(), false);
+		}
+		if lower.contains("permission denied") {
+			return ("permission_denied".to_string(), true);
+		}
+	}
+	match error_code {
+		"timeout" => ("tool_timeout".to_string(), true),
+		"capability_denied" => ("permission_denied".to_string(), true),
+		"input_schema_violation" => ("invalid_argument".to_string(), true),
+		"tool_not_found" => ("tool_not_found".to_string(), true),
+		other => (other.to_string(), false),
 	}
 }
