@@ -24,7 +24,8 @@ use crate::router::{
 };
 use crate::runtime_loop::{
 	LoopContext, LoopState, StepAction, StepObservation, StepRecord, ToolObservation,
-	build_loop_context, decide_filesystem_next_step, intake_request, interpret_observation,
+	attachments_for_tool, build_loop_context, decide_filesystem_next_step,
+	decide_tool_loop_next_step, effective_ask_user_message, intake_request, interpret_observation,
 	next_working_directory_from_observation,
 	summarize_observation as summarize_filesystem_observation,
 };
@@ -333,8 +334,15 @@ impl GenericAgentRuntime {
 		reason: impl Into<String>,
 		final_message: Option<String>,
 	) -> StepRecord {
-		let observation = final_message.map(|message| StepObservation::FinalMessage {
-			final_message: message,
+		let observation = final_message.map(|message| match action {
+			StepAction::AskUser => StepObservation::AskUser {
+				final_message: message,
+			},
+			StepAction::FinalAnswer | StepAction::Fail | StepAction::CallTool => {
+				StepObservation::FinalMessage {
+					final_message: message,
+				}
+			}
 		});
 		let step = StepRecord::terminal(
 			loop_state.step_index + 1,
@@ -372,14 +380,17 @@ impl GenericAgentRuntime {
 		task_id: &TaskId,
 		request: &RequestEnvelope,
 		loop_state: &mut LoopState,
+		user_reply: Option<&str>,
 	) -> DirectRouteExecutionResult {
 		loop {
-			let next_step = decide_filesystem_next_step(loop_state, self.route_router.as_deref());
+			let next_step =
+				decide_filesystem_next_step(loop_state, self.route_router.as_deref(), user_reply);
 			match next_step.action {
 				crate::runtime_loop::NextStepAction::CallTool => {
 					let Some(tool_name) = next_step.tool_name.as_deref() else {
 						return self.synthetic_loop_terminal_result(
 							task_id,
+							"filesystem",
 							next_step.reason,
 							StepAction::Fail,
 							ResultStatus::Error,
@@ -390,6 +401,7 @@ impl GenericAgentRuntime {
 						request,
 						tool_name,
 						next_step.arguments.clone().unwrap_or_else(|| json!({})),
+						&[],
 					);
 					let observation =
 						self.loop_observation_from_execution(tool_name, &execution.result);
@@ -429,6 +441,7 @@ impl GenericAgentRuntime {
 							});
 						return self.synthetic_loop_terminal_result(
 							task_id,
+							"filesystem",
 							terminal_message,
 							StepAction::FinalAnswer,
 							ResultStatus::Ok,
@@ -436,11 +449,14 @@ impl GenericAgentRuntime {
 					}
 				}
 				crate::runtime_loop::NextStepAction::AskUser => {
-					let message = next_step.final_message.unwrap_or_else(|| {
-						"I need more information before I can continue.".to_string()
-					});
+					let message = effective_ask_user_message(
+						&loop_state.goal,
+						loop_state.last_observation.as_ref(),
+						next_step.final_message,
+					);
 					return self.synthetic_loop_terminal_result(
 						task_id,
+						"filesystem",
 						message,
 						StepAction::AskUser,
 						ResultStatus::Ok,
@@ -459,6 +475,7 @@ impl GenericAgentRuntime {
 					});
 					return self.synthetic_loop_terminal_result(
 						task_id,
+						"filesystem",
 						message,
 						StepAction::FinalAnswer,
 						ResultStatus::Ok,
@@ -468,6 +485,121 @@ impl GenericAgentRuntime {
 					let message = next_step.final_message.unwrap_or(next_step.reason);
 					return self.synthetic_loop_terminal_result(
 						task_id,
+						"filesystem",
+						message,
+						StepAction::Fail,
+						ResultStatus::Error,
+					);
+				}
+			}
+		}
+	}
+
+	pub fn execute_tool_loop(
+		&self,
+		task_id: &TaskId,
+		request: &RequestEnvelope,
+		loop_state: &mut LoopState,
+		user_reply: Option<&str>,
+	) -> DirectRouteExecutionResult {
+		loop {
+			let next_step =
+				decide_tool_loop_next_step(loop_state, self.route_router.as_deref(), user_reply);
+			match next_step.action {
+				crate::runtime_loop::NextStepAction::CallTool => {
+					let Some(tool_name) = next_step.tool_name.as_deref() else {
+						return self.synthetic_loop_terminal_result(
+							task_id,
+							"tool",
+							next_step.reason,
+							StepAction::Fail,
+							ResultStatus::Error,
+						);
+					};
+					let attachments =
+						attachments_for_tool(tool_name, user_reply.unwrap_or(&loop_state.goal));
+					let execution = self.execute_loop_tool_invocation(
+						task_id,
+						request,
+						tool_name,
+						next_step.arguments.clone().unwrap_or_else(|| json!({})),
+						&attachments,
+					);
+					let observation =
+						self.loop_observation_from_execution(tool_name, &execution.result);
+					let interpreted = interpret_observation(loop_state, observation.clone(), None);
+					let step = StepRecord::tool_call(
+						loop_state.step_index + 1,
+						tool_name,
+						next_step.reason,
+						StepObservation::Tool(observation),
+						execution_elapsed_ms(&execution.result),
+						interpreted.remaining_step_budget,
+						interpreted.remaining_recovery_budget,
+						interpreted
+							.new_working_directory
+							.clone()
+							.unwrap_or_else(|| loop_state.working_directory.clone()),
+					);
+					loop_state.record_step(step);
+					if !interpreted.continue_allowed {
+						let terminal_message = loop_state
+							.last_observation
+							.as_ref()
+							.map(|observation| {
+								summarize_filesystem_observation(&loop_state.goal, observation)
+									.final_message
+							})
+							.unwrap_or_else(|| {
+								"Runtime loop stopped before producing an observation.".to_string()
+							});
+						return self.synthetic_loop_terminal_result(
+							task_id,
+							"tool",
+							terminal_message,
+							StepAction::FinalAnswer,
+							ResultStatus::Ok,
+						);
+					}
+				}
+				crate::runtime_loop::NextStepAction::AskUser => {
+					let message = effective_ask_user_message(
+						&loop_state.goal,
+						loop_state.last_observation.as_ref(),
+						next_step.final_message,
+					);
+					return self.synthetic_loop_terminal_result(
+						task_id,
+						"tool",
+						message,
+						StepAction::AskUser,
+						ResultStatus::Ok,
+					);
+				}
+				crate::runtime_loop::NextStepAction::FinalAnswer => {
+					let message = next_step.final_message.unwrap_or_else(|| {
+						loop_state
+							.last_observation
+							.as_ref()
+							.map(|observation| {
+								summarize_filesystem_observation(&loop_state.goal, observation)
+									.final_message
+							})
+							.unwrap_or_else(|| "Runtime loop completed.".to_string())
+					});
+					return self.synthetic_loop_terminal_result(
+						task_id,
+						"tool",
+						message,
+						StepAction::FinalAnswer,
+						ResultStatus::Ok,
+					);
+				}
+				crate::runtime_loop::NextStepAction::Fail => {
+					let message = next_step.final_message.unwrap_or(next_step.reason);
+					return self.synthetic_loop_terminal_result(
+						task_id,
+						"tool",
 						message,
 						StepAction::Fail,
 						ResultStatus::Error,
@@ -556,6 +688,14 @@ impl GenericAgentRuntime {
 				"direct-route",
 				"filesystem loop routes must be executed through the runtime loop bridge"
 					.to_string(),
+				0.0,
+				ResultStatus::Error,
+			),
+			DirectRouteKind::ToolLoop => self.synthetic_status_result(
+				task_id,
+				"direct-route:tool-loop",
+				"direct-route",
+				"tool loop routes must be executed through the runtime loop bridge".to_string(),
 				0.0,
 				ResultStatus::Error,
 			),
@@ -732,6 +872,7 @@ impl GenericAgentRuntime {
 				| DirectRouteKind::Conversation
 				| DirectRouteKind::SkillInstall { .. }
 				| DirectRouteKind::FilesystemLoop
+				| DirectRouteKind::ToolLoop
 				| DirectRouteKind::FilesystemSequence { .. } => None,
 			},
 			RouteDecisionResult::Escalate(_) => None,
@@ -1244,6 +1385,7 @@ impl GenericAgentRuntime {
 		request: &RequestEnvelope,
 		tool_name: &str,
 		arguments: Value,
+		attachments: &[PathBuf],
 	) -> DirectRouteExecutionResult {
 		let Some(selector) = tool_selector_by_name(&self.resource_catalog, tool_name) else {
 			return self.synthetic_status_result(
@@ -1255,7 +1397,7 @@ impl GenericAgentRuntime {
 				ResultStatus::Error,
 			);
 		};
-		self.execute_direct_tool_invocation(task_id, request, &selector, &arguments, &[])
+		self.execute_direct_tool_invocation(task_id, request, &selector, &arguments, attachments)
 	}
 
 	fn loop_observation_from_execution(
@@ -1274,12 +1416,14 @@ impl GenericAgentRuntime {
 	fn synthetic_loop_terminal_result(
 		&self,
 		task_id: &TaskId,
+		loop_name: &str,
 		message: String,
 		terminal_step_action: StepAction,
 		status: ResultStatus,
 	) -> DirectRouteExecutionResult {
+		let node_id = format!("runtime-loop:{loop_name}");
 		let node = TaskNode {
-			node_id: NodeId("runtime-loop:filesystem".to_string()),
+			node_id: NodeId(node_id),
 			kind: TaskNodeKind::Execution,
 			description: message.clone(),
 			resources: Vec::new(),
@@ -1306,7 +1450,7 @@ impl GenericAgentRuntime {
 			payload: json!({
 				"message": message,
 				"direct_route": true,
-				"runtime_loop": "filesystem",
+				"runtime_loop": loop_name,
 			})
 			.to_string(),
 			evidence: vec![EvidenceItem {

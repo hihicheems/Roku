@@ -20,14 +20,16 @@ mod execution;
 mod helpers;
 mod legacy_graph;
 mod runtime_loop_bridge;
+mod runtime_loop_recovery;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use roku_agent_runtime::{
-	EscalationAction, EscalationReason, GenericAgentRuntime, IntentFamily, RouteDecision,
-	RouteDecisionResult, RouteEscalationPlan, RouteRisk,
+	EscalationAction, EscalationReason, GenericAgentRuntime, IntentFamily, LoopState,
+	RouteDecision, RouteDecisionResult, RouteEscalationPlan, RouteRisk,
 };
 use roku_artifact_store::ArtifactStore;
 use roku_capability_auth::CapabilityAuthority;
@@ -89,6 +91,7 @@ pub struct RuntimeService {
 	metrics: Arc<Metrics>,
 	audit_sink: Arc<dyn AuditSink>,
 	state: Mutex<RuntimeState>,
+	pending_loops: Mutex<HashMap<String, LoopState>>,
 }
 
 impl RuntimeService {
@@ -227,6 +230,7 @@ impl RuntimeService {
 				artifact_store,
 				experiment_registry,
 			}),
+			pending_loops: Mutex::new(HashMap::new()),
 		}
 	}
 
@@ -297,6 +301,7 @@ impl RuntimeService {
 		self.record_transition(&mut task, TaskState::Planning, "classify direct route")?;
 
 		if let Some(planning_mode_hint) = normalized_request.planning_mode_hint {
+			self.clear_pending_loop(&normalized_request.session_id)?;
 			self.metrics.inc_route_escalations();
 			self.metrics.inc_route_limited_planning();
 			log_runtime(
@@ -321,6 +326,11 @@ impl RuntimeService {
 				&compatibility_plan,
 				&mut loop_state,
 			);
+		}
+
+		if let Some(mut loop_state) = self.take_resumable_pending_loop(&normalized_request)? {
+			self.start_experiment_run(&task, &normalized_request.goal, "runtime_loop_resume")?;
+			return self.resume_pending_loop(&mut task, &normalized_request, &mut loop_state);
 		}
 
 		let route = self

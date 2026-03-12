@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier};
 use serde_json::{Value, json};
 
+use crate::runtime_loop::grounding::{extract_path_candidates, reply_selects_candidate};
 use crate::runtime_loop::{
 	NextStepAction, NextStepDecision, ToolObservation, ask_user::ask_user_from_observation,
 	summarizer::summarize_observation,
@@ -27,13 +27,22 @@ use crate::runtime_loop::{
 pub(crate) fn decide_filesystem_next_step(
 	loop_state: &crate::runtime_loop::LoopState,
 	router: Option<&LlmRouter>,
+	user_reply: Option<&str>,
 ) -> NextStepDecision {
+	if loop_state.last_observation.is_some() {
+		return deterministic_next_step(loop_state, user_reply);
+	}
+	let grounding_input = user_reply.unwrap_or(&loop_state.goal);
+	let hints = GoalHints::from_goal(grounding_input);
+	if hints.basename_only.is_some() && tool_visible(loop_state, "fs.find") {
+		return initial_next_step(loop_state, &hints);
+	}
 	if let Some(router) = router
-		&& let Some(decision) = decide_with_router(loop_state, router)
+		&& let Some(decision) = decide_with_router(loop_state, router, user_reply)
 	{
 		return decision;
 	}
-	deterministic_next_step(loop_state)
+	deterministic_next_step(loop_state, user_reply)
 }
 
 pub(crate) fn next_working_directory_from_observation(
@@ -61,6 +70,7 @@ pub(crate) fn next_working_directory_from_observation(
 fn decide_with_router(
 	loop_state: &crate::runtime_loop::LoopState,
 	router: &LlmRouter,
+	user_reply: Option<&str>,
 ) -> Option<NextStepDecision> {
 	let response = router
 		.generate_json_value(&GenerationRequest {
@@ -68,7 +78,7 @@ fn decide_with_router(
 				"You are Roku's filesystem loop next-step decision model. Return only valid JSON."
 					.to_string(),
 			),
-			prompt: filesystem_next_step_prompt(loop_state),
+			prompt: filesystem_next_step_prompt(loop_state, user_reply),
 			expected_output_tokens: 220,
 			risk_tier: RiskTier::Low,
 			preferred_provider: None,
@@ -106,7 +116,10 @@ fn validate_router_decision(
 	}
 }
 
-fn filesystem_next_step_prompt(loop_state: &crate::runtime_loop::LoopState) -> String {
+fn filesystem_next_step_prompt(
+	loop_state: &crate::runtime_loop::LoopState,
+	user_reply: Option<&str>,
+) -> String {
 	format!(
 		r#"Return only JSON with exactly these keys:
 {{
@@ -143,7 +156,10 @@ Route decision:
 {route_decision}
 
 Last observation:
-{last_observation}"#,
+{last_observation}
+
+Current user follow-up:
+{user_reply}"#,
 		visible_tools = serde_json::to_string_pretty(&loop_state.visible_tools)
 			.unwrap_or_else(|_| "[]".to_string()),
 		tool_requirements =
@@ -158,13 +174,18 @@ Last observation:
 			.as_ref()
 			.map(|observation| serde_json::to_string_pretty(observation).unwrap_or_default())
 			.unwrap_or_else(|| "null".to_string()),
+		user_reply = user_reply.unwrap_or("null"),
 	)
 }
 
-fn deterministic_next_step(loop_state: &crate::runtime_loop::LoopState) -> NextStepDecision {
-	let hints = GoalHints::from_goal(&loop_state.goal);
+fn deterministic_next_step(
+	loop_state: &crate::runtime_loop::LoopState,
+	user_reply: Option<&str>,
+) -> NextStepDecision {
+	let grounding_input = user_reply.unwrap_or(&loop_state.goal);
+	let hints = GoalHints::from_goal(grounding_input);
 	if let Some(observation) = loop_state.last_observation.as_ref() {
-		return next_step_from_observation(loop_state, &hints, observation);
+		return next_step_from_observation(loop_state, &hints, observation, user_reply);
 	}
 	initial_next_step(loop_state, &hints)
 }
@@ -255,6 +276,7 @@ fn next_step_from_observation(
 	loop_state: &crate::runtime_loop::LoopState,
 	hints: &GoalHints,
 	observation: &ToolObservation,
+	user_reply: Option<&str>,
 ) -> NextStepDecision {
 	if observation.ok {
 		match observation.tool_name.as_str() {
@@ -264,7 +286,8 @@ fn next_step_from_observation(
 					.get("resolved_path")
 					.and_then(Value::as_str)
 				{
-					let follow_up_tool = follow_up_tool(loop_state);
+					let follow_up_tool =
+						follow_up_tool_for_resolved_path(loop_state, resolved_path);
 					match follow_up_tool {
 						Some("fs.read_text") => {
 							return call_tool(
@@ -321,6 +344,45 @@ fn next_step_from_observation(
 
 	match observation.error_type.as_deref() {
 		Some("multiple_candidates") => {
+			if let Some(user_reply) = user_reply
+				&& let Some(matches) = observation
+					.data
+					.get("matches")
+					.and_then(Value::as_array)
+					.map(|values| {
+						values
+							.iter()
+							.filter_map(Value::as_str)
+							.map(str::to_string)
+							.collect::<Vec<_>>()
+					}) && let Some(selected_path) = reply_selects_candidate(user_reply, &matches)
+			{
+				return match follow_up_tool_for_resolved_path(loop_state, &selected_path) {
+					Some("fs.read_text") => call_tool(
+						"fs.read_text",
+						json!({ "path": selected_path, "max_bytes": 4_096_u64 }),
+						"The user selected one candidate path; read that file.",
+					),
+					Some("fs.exists") => call_tool(
+						"fs.exists",
+						json!({ "path": selected_path }),
+						"The user selected one candidate path; confirm its existence.",
+					),
+					Some("fs.list_dir") => call_tool(
+						"fs.list_dir",
+						json!({ "path": selected_path }),
+						"The user selected one candidate path; list that directory.",
+					),
+					Some("fs.inspect") | None => call_tool(
+						"fs.inspect",
+						json!({ "path": selected_path }),
+						"The user selected one candidate path; inspect it directly.",
+					),
+					Some(other) => fail(format!(
+						"filesystem loop cannot continue with unsupported follow-up tool `{other}`"
+					)),
+				};
+			}
 			return ask_user(
 				ask_user_from_observation(&loop_state.goal, observation).final_message,
 			);
@@ -379,6 +441,21 @@ fn follow_up_tool(loop_state: &crate::runtime_loop::LoopState) -> Option<&str> {
 		.iter()
 		.map(String::as_str)
 		.find(|tool| *tool != "fs.find")
+}
+
+fn follow_up_tool_for_resolved_path<'a>(
+	loop_state: &'a crate::runtime_loop::LoopState,
+	resolved_path: &str,
+) -> Option<&'a str> {
+	if let Ok(metadata) = fs::symlink_metadata(resolved_path) {
+		if metadata.is_file() && tool_visible(loop_state, "fs.read_text") {
+			return Some("fs.read_text");
+		}
+		if metadata.is_dir() && tool_visible(loop_state, "fs.list_dir") {
+			return Some("fs.list_dir");
+		}
+	}
+	follow_up_tool(loop_state)
 }
 
 fn tool_visible(loop_state: &crate::runtime_loop::LoopState, tool_name: &str) -> bool {
@@ -479,114 +556,6 @@ impl GoalHints {
 	}
 }
 
-fn extract_path_candidates(goal: &str) -> Vec<String> {
-	let workspace_entries = visible_workspace_entries(64);
-	let mut paths = Vec::new();
-	for token in goal.split_whitespace().map(clean_token) {
-		if token.is_empty() || token.starts_with("http://") || token.starts_with("https://") {
-			continue;
-		}
-		if looks_like_path_candidate(&token) || workspace_entries.contains(&token) {
-			paths.push(token.clone());
-		}
-		for fragment in embedded_path_fragments(&token, &workspace_entries) {
-			if !paths.iter().any(|existing| existing == &fragment) {
-				paths.push(fragment);
-			}
-		}
-	}
-	paths.dedup();
-	paths
-}
-
-fn visible_workspace_entries(limit: usize) -> Vec<String> {
-	let Ok(cwd) = std::env::current_dir() else {
-		return Vec::new();
-	};
-	let Ok(entries) = fs::read_dir(cwd) else {
-		return Vec::new();
-	};
-	let mut names = entries
-		.filter_map(Result::ok)
-		.filter_map(|entry| entry.file_name().to_str().map(str::to_string))
-		.collect::<BTreeSet<_>>()
-		.into_iter()
-		.collect::<Vec<_>>();
-	names.truncate(limit);
-	names
-}
-
-fn clean_token(token: &str) -> String {
-	if matches!(token, "." | "..") {
-		return token.to_string();
-	}
-	token
-		.trim_matches(|character: char| {
-			matches!(
-				character,
-				'"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';' | '!' | '?'
-			)
-		})
-		.trim_end_matches(':')
-		.trim_end_matches('.')
-		.to_string()
-}
-
-fn looks_like_path_candidate(token: &str) -> bool {
-	if token.is_empty() {
-		return false;
-	}
-	if token == "." || token == ".." {
-		return true;
-	}
-	token.contains('/')
-		|| token.contains('\\')
-		|| token.rsplit_once('.').is_some_and(|(_, ext)| {
-			!ext.is_empty()
-				&& ext
-					.chars()
-					.all(|character| character.is_ascii_alphanumeric())
-		})
-}
-
-fn embedded_path_fragments(token: &str, workspace_entries: &[String]) -> Vec<String> {
-	let mut fragments = Vec::new();
-	let mut current = String::new();
-	for character in token.chars() {
-		if is_path_fragment_char(character) {
-			current.push(character);
-			continue;
-		}
-		push_path_fragment(&mut fragments, &mut current, workspace_entries);
-	}
-	push_path_fragment(&mut fragments, &mut current, workspace_entries);
-	fragments
-}
-
-fn push_path_fragment(
-	fragments: &mut Vec<String>,
-	current: &mut String,
-	workspace_entries: &[String],
-) {
-	if current.is_empty() {
-		return;
-	}
-	let fragment = current.clone();
-	current.clear();
-	if fragment.starts_with("http://") || fragment.starts_with("https://") {
-		return;
-	}
-	if (looks_like_path_candidate(&fragment) || workspace_entries.contains(&fragment))
-		&& !fragments.iter().any(|existing| existing == &fragment)
-	{
-		fragments.push(fragment);
-	}
-}
-
-fn is_path_fragment_char(character: char) -> bool {
-	character.is_ascii_alphanumeric() || matches!(character, '.' | '/' | '\\' | '_' | '-')
-}
-
 fn is_basename_candidate(path: &str) -> bool {
 	!path.is_empty()
 		&& path != "."
@@ -602,4 +571,46 @@ fn file_name_from_path(path: &str) -> Option<String> {
 		.and_then(|name| name.to_str())
 		.filter(|name| !name.is_empty())
 		.map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+	use std::fs;
+
+	use crate::GenericAgentRuntime;
+	use crate::router::{IntentFamily, RouteDecision, RouteRisk};
+	use roku_common_types::{RequestEnvelope, RequestId};
+
+	use super::follow_up_tool_for_resolved_path;
+
+	#[test]
+	fn follow_up_prefers_read_text_for_resolved_files() {
+		let tempdir = tempfile::tempdir().expect("tempdir");
+		let file_path = tempdir.path().join("example.rs");
+		fs::write(&file_path, "fn main() {}\n").expect("write file");
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: RequestId("req-fs-follow-up".to_string()),
+			session_id: "session-fs-follow-up".to_string(),
+			goal: "show example.rs".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+		let decision = RouteDecision::new(
+			IntentFamily::FilesystemRead,
+			0.9,
+			false,
+			RouteRisk::Low,
+			vec!["fs.inspect".to_string(), "fs.read_text".to_string()],
+			vec!["core-fs".to_string()],
+			Vec::new(),
+			"filesystem read",
+		);
+		let loop_state = runtime.initialize_runtime_loop(&request, &request.session_id, &decision);
+
+		assert_eq!(
+			follow_up_tool_for_resolved_path(&loop_state, &file_path.display().to_string()),
+			Some("fs.read_text")
+		);
+	}
 }
