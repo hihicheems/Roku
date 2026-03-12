@@ -22,6 +22,32 @@ use crate::RuntimeService;
 use crate::{log_runtime, truncate_for_log};
 
 impl RuntimeService {
+	pub(super) fn record_runtime_loop_history(&self, loop_state: &LoopState, start_index: usize) {
+		for step in loop_state.history.iter().skip(start_index) {
+			log_runtime(
+				LogLevel::Debug,
+				"runtime loop step recorded",
+				[
+					("run_id", loop_state.run_id.clone()),
+					("step_index", step.step_index.to_string()),
+					("action", format!("{:?}", step.action)),
+					(
+						"tool_name",
+						step.tool_name.clone().unwrap_or_else(|| "none".to_string()),
+					),
+					(
+						"remaining_step_budget_after",
+						step.remaining_step_budget_after.to_string(),
+					),
+					(
+						"remaining_recovery_budget_after",
+						step.remaining_recovery_budget_after.to_string(),
+					),
+				],
+			);
+		}
+	}
+
 	pub(super) fn initialize_runtime_loop_for_route(
 		&self,
 		request: &RequestEnvelope,
@@ -65,6 +91,21 @@ impl RuntimeService {
 			ResponseStatus::Succeeded | ResponseStatus::PendingApproval => StepAction::FinalAnswer,
 			ResponseStatus::Failed => StepAction::Fail,
 		};
+		self.record_runtime_loop_terminal_step_with_action(
+			loop_state,
+			action,
+			response_status,
+			message,
+		)
+	}
+
+	pub(super) fn record_runtime_loop_terminal_step_with_action(
+		&self,
+		loop_state: &mut LoopState,
+		action: StepAction,
+		response_status: ResponseStatus,
+		message: &str,
+	) -> StepRecord {
 		self.record_runtime_loop_step_with_action(loop_state, action, response_status, message)
 	}
 
@@ -109,27 +150,7 @@ impl RuntimeService {
 			reason,
 			Some(message.to_string()),
 		);
-		log_runtime(
-			LogLevel::Debug,
-			"runtime loop step recorded",
-			[
-				("run_id", loop_state.run_id.clone()),
-				("step_index", step.step_index.to_string()),
-				("action", format!("{:?}", step.action)),
-				(
-					"tool_name",
-					step.tool_name.clone().unwrap_or_else(|| "none".to_string()),
-				),
-				(
-					"remaining_step_budget_after",
-					step.remaining_step_budget_after.to_string(),
-				),
-				(
-					"remaining_recovery_budget_after",
-					step.remaining_recovery_budget_after.to_string(),
-				),
-			],
-		);
+		self.record_runtime_loop_history(loop_state, loop_state.history.len().saturating_sub(1));
 		log_runtime(
 			LogLevel::Info,
 			"runtime loop terminated",
