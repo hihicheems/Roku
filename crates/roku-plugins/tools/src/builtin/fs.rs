@@ -25,9 +25,13 @@ use roku_plugin_host::{
 };
 use serde_json::{Value, json};
 
+// Cap directory listings to keep direct-route responses bounded and readable.
 const MAX_DIR_ENTRIES: usize = 200;
+// Default upper bound for text reads when the caller does not provide `max_bytes`.
 const DEFAULT_MAX_BYTES: usize = 4_096;
+// Cap glob expansion results to avoid oversized payloads from broad patterns.
 const MAX_GLOB_MATCHES: usize = 200;
+// Stop recursive basename search after scanning a bounded number of entries.
 const MAX_DESCENDANT_SCAN_ENTRIES: usize = 8_000;
 
 /// Returns catalog metadata for all fs builtin tools (`fs.find`, `fs.inspect`, `fs.list_dir`,
