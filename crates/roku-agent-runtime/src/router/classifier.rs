@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fs;
-use std::path::PathBuf;
-
 use roku_common_types::{RequestEnvelope, ResourceSelector};
 use roku_plugin_catalog::{CatalogDescriptor, CatalogMatch, ResourceCatalog, ResourceKind};
 use roku_plugin_core::PluginRegistrySnapshot;
@@ -30,7 +27,6 @@ use crate::runtime_loop::{
 };
 use crate::tool_config::{BuiltinToolRole, ToolCatalogConfig};
 
-const MIN_TOOL_SCORE: f32 = 0.60;
 const MIN_SKILL_SCORE: f32 = 0.72;
 const ROUTE_CONFIDENCE_FLOOR: f32 = 0.65;
 
@@ -64,16 +60,19 @@ fn deterministic_pre_classify(
 		return Some(result);
 	}
 
+	if let Some(result) = classify_contract_level_grounded_hint(context, request) {
+		return Some(result);
+	}
+
 	if extract_skill_source_url(&request.goal).is_some() {
+		let install_tool_name =
+			tool_name_for_role(context.tool_config, BuiltinToolRole::SkillInstall);
 		let decision = RouteDecision::new(
 			IntentFamily::TextTransform,
 			0.98,
 			false,
 			RouteRisk::Medium,
-			vec![tool_name_for_role(
-				context.tool_config,
-				BuiltinToolRole::SkillInstall,
-			)],
+			vec![install_tool_name.clone()],
 			vec![
 				"builtin-tools".to_string(),
 				"skill-source-local".to_string(),
@@ -81,19 +80,14 @@ fn deterministic_pre_classify(
 			Vec::new(),
 			"explicit skill install url detected in user request",
 		);
-		return Some(RouteDecisionResult::Direct(DirectRoutePlan {
+		return Some(build_tool_loop_route(
+			context,
 			decision,
-			bound_resources: Vec::new(),
-		}));
+			Some(&install_tool_name),
+			Vec::new(),
+		));
 	}
 
-	if let Some(result) = classify_grounded_direct_route(context, request) {
-		return Some(result);
-	}
-
-	let query = request.goal.trim();
-	let tool_matches =
-		discoverable_tool_matches(context.catalog.retrieve(query, Some(ResourceKind::Tool), 8));
 	if let Some(selector) = explicit_skill_selector(context.catalog, &request.goal) {
 		if context.route_router.is_none() {
 			let descriptor = context.catalog.descriptor(&selector)?;
@@ -106,32 +100,6 @@ fn deterministic_pre_classify(
 			));
 		}
 		return None;
-	}
-
-	if let Some(result) = classify_catalog_selected_route(context, request, &tool_matches) {
-		return Some(result);
-	}
-
-	let selected_tools = best_tool_selectors(&tool_matches);
-	if selected_tools.len() > 1 {
-		if context.route_router.is_some() {
-			return None;
-		}
-		let decision = RouteDecision::new(
-			IntentFamily::MultiStep,
-			0.72,
-			true,
-			RouteRisk::Medium,
-			selected_tools
-				.iter()
-				.filter_map(|selector| context.catalog.descriptor(selector))
-				.map(|descriptor| descriptor.name.clone())
-				.collect(),
-			vec!["builtin-tools".to_string()],
-			Vec::new(),
-			"request likely needs multi-step coordination beyond a direct single-tool route",
-		);
-		return Some(build_loop_hint_route(context, decision));
 	}
 
 	if let Some(result) = classify_structural_fallback(context, request) {
@@ -189,12 +157,31 @@ fn has_shell_command_chain(goal: &str) -> bool {
 	goal.contains("&&") || goal.contains("||") || goal.contains(';')
 }
 
-fn classify_grounded_direct_route(
+fn classify_contract_level_grounded_hint(
 	context: &RouteClassifierContext<'_>,
 	request: &RequestEnvelope,
 ) -> Option<RouteDecisionResult> {
-	if let Some(result) = classify_shell_like_fs_command(context, request) {
-		return Some(result);
+	if let Some(selector) = explicit_tool_selector(context.catalog, &request.goal) {
+		let descriptor = context.catalog.descriptor(&selector)?;
+		let tool_name = descriptor.name.clone();
+		let decision = RouteDecision::new(
+			coarse_intent_hint_for_tool(&tool_name),
+			0.9,
+			false,
+			resource_risk(descriptor),
+			vec![tool_name.clone()],
+			candidate_plugins_for_tool(context.plugin_snapshot, &tool_name),
+			Vec::new(),
+			format!(
+				"explicit installed tool reference provides a non-authoritative `{tool_name}` hint"
+			),
+		);
+		return Some(build_tool_loop_route(
+			context,
+			decision,
+			Some(&tool_name),
+			Vec::new(),
+		));
 	}
 
 	if let Some(code) = extract_explicit_python_code(&request.goal)
@@ -208,7 +195,7 @@ fn classify_grounded_direct_route(
 			vec!["python.run".to_string()],
 			candidate_plugins_for_tool(context.plugin_snapshot, "python.run"),
 			Vec::new(),
-			"grounded explicit Python code allows a direct `python.run` route",
+			"contract-level grounded Python code provides a non-authoritative `python.run` hint",
 		);
 		let _ = selector;
 		let _ = code;
@@ -231,191 +218,78 @@ fn classify_grounded_direct_route(
 			vec!["fs.glob".to_string()],
 			candidate_plugins_for_tool(context.plugin_snapshot, "fs.glob"),
 			Vec::new(),
-			"grounded filesystem glob allows a direct `fs.glob` route",
+			"contract-level grounded glob pattern provides a non-authoritative `fs.glob` hint",
 		);
-		return Some(build_filesystem_tool_loop_route(
+		return Some(build_tool_loop_route(
 			context,
-			request,
 			decision,
 			Some("fs.glob"),
+			Vec::new(),
 		));
 	}
 
 	if extract_table_path(&request.goal).is_some()
 		&& has_enabled_tool_with_prefix(context.catalog, "table.")
 	{
-		return None;
+		let decision = RouteDecision::new(
+			IntentFamily::TableRead,
+			0.86,
+			false,
+			RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			"contract-level grounded table input provides a non-authoritative table-family hint",
+		);
+		return Some(build_loop_hint_route(context, decision));
 	}
 
-	let explicit_paths = extract_path_candidates(&request.goal);
-	let path = single_explicit_path(&explicit_paths)?;
-	let resolved_path = resolve_grounded_path_candidate(path).unwrap_or_else(|| path.to_string());
-	let tool_name = grounded_fs_tool_name(&resolved_path)?;
-	let decision = RouteDecision::new(
-		IntentFamily::FilesystemRead,
-		0.91,
-		false,
-		RouteRisk::Low,
-		vec![tool_name.to_string()],
-		candidate_plugins_for_tool(context.plugin_snapshot, tool_name),
-		Vec::new(),
-		format!("grounded filesystem target resolved to direct `{tool_name}`"),
-	);
-	Some(build_filesystem_tool_loop_route(
-		context,
-		request,
-		decision,
-		Some(tool_name),
-	))
-}
-
-fn classify_shell_like_fs_command(
-	context: &RouteClassifierContext<'_>,
-	request: &RequestEnvelope,
-) -> Option<RouteDecisionResult> {
-	let command = parse_shell_like_fs_command(&request.goal)?;
-	tool_selector(context.catalog, command.tool_name)?;
-	let decision = RouteDecision::new(
-		IntentFamily::FilesystemRead,
-		0.94,
-		false,
-		RouteRisk::Low,
-		vec![command.tool_name.to_string()],
-		candidate_plugins_for_tool(context.plugin_snapshot, command.tool_name),
-		Vec::new(),
-		format!(
-			"structured shell-style filesystem command resolved to a generic tool-loop shortlist led by `{}`",
-			command.tool_name
-		),
-	);
-	Some(build_filesystem_tool_loop_route(
-		context,
-		request,
-		decision,
-		Some(command.tool_name),
-	))
-}
-
-struct ShellLikeFsCommand {
-	tool_name: &'static str,
-}
-
-fn parse_shell_like_fs_command(goal: &str) -> Option<ShellLikeFsCommand> {
-	let tokens = goal.split_whitespace().map(clean_token).collect::<Vec<_>>();
-	let first = tokens.first()?.as_str();
-	match first {
-		"ls" | "dir" => Some(ShellLikeFsCommand {
-			tool_name: "fs.list_dir",
-		}),
-		"cat" | "more" => command_path_argument(goal, &tokens).map(|_| ShellLikeFsCommand {
-			tool_name: "fs.read_text",
-		}),
-		"pwd" => Some(ShellLikeFsCommand {
-			tool_name: "fs.inspect",
-		}),
-		"stat" => command_path_argument(goal, &tokens).map(|_| ShellLikeFsCommand {
-			tool_name: "fs.inspect",
-		}),
-		"exists" => command_path_argument(goal, &tokens).map(|_| ShellLikeFsCommand {
-			tool_name: "fs.exists",
-		}),
-		"test" => {
-			if tokens.get(1).is_some_and(|flag| flag == "-e") {
-				command_path_argument(goal, &tokens[1..]).map(|_| ShellLikeFsCommand {
-					tool_name: "fs.exists",
-				})
-			} else {
-				None
-			}
-		}
-		_ => None,
+	if !extract_path_candidates(&request.goal).is_empty()
+		&& has_enabled_tool_with_prefix(context.catalog, "fs.")
+	{
+		let decision = RouteDecision::new(
+			IntentFamily::FilesystemRead,
+			0.84,
+			false,
+			RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			"contract-level grounded filesystem input provides a non-authoritative filesystem-family hint",
+		);
+		return Some(build_loop_hint_route(context, decision));
 	}
+
+	None
 }
 
-fn command_path_argument(goal: &str, tokens: &[String]) -> Option<String> {
-	let explicit_paths = extract_path_candidates(goal);
-	if let Some(path) = explicit_paths.first() {
-		return Some(resolve_grounded_path_candidate(path).unwrap_or_else(|| path.clone()));
-	}
-	tokens
+fn explicit_tool_selector(catalog: &ResourceCatalog, goal: &str) -> Option<ResourceSelector> {
+	let explicit_tokens = explicit_skill_tokens(goal);
+	let mut entries = catalog
+		.entries()
 		.iter()
-		.skip(1)
-		.filter(|token| !token.is_empty() && !token.starts_with('-'))
-		.find(|token| looks_like_path_candidate(token))
-		.map(|token| resolve_grounded_path_candidate(token).unwrap_or_else(|| token.clone()))
+		.filter(|entry| entry.kind == ResourceKind::Tool)
+		.collect::<Vec<_>>();
+	entries.sort_by(|left, right| right.name.len().cmp(&left.name.len()));
+	entries.into_iter().find_map(|entry| {
+		let normalized_name = normalize(&entry.name);
+		(normalized_name.len() > 2
+			&& explicit_tokens
+				.iter()
+				.any(|token| token == &normalized_name))
+		.then(|| entry.selector.clone())
+	})
 }
 
-fn grounded_fs_tool_name(path: &str) -> Option<&'static str> {
-	if path == "." || path == ".." || path.ends_with('/') || path.ends_with('\\') {
-		return Some("fs.list_dir");
+fn coarse_intent_hint_for_tool(tool_name: &str) -> IntentFamily {
+	match tool_name {
+		"inventory.describe" | "general.execute" => IntentFamily::Chat,
+		name if name.starts_with("fs.") => IntentFamily::FilesystemRead,
+		name if name.starts_with("table.") => IntentFamily::TableRead,
+		name if name.starts_with("web.") => IntentFamily::WebLookup,
+		name if name.starts_with("python.") => IntentFamily::CodeExec,
+		_ => IntentFamily::TextTransform,
 	}
-	let candidate = std::env::current_dir().ok()?.join(path);
-	if let Ok(metadata) = std::fs::metadata(&candidate) {
-		if metadata.is_dir() {
-			return Some("fs.list_dir");
-		}
-		if metadata.is_file() {
-			return Some("fs.read_text");
-		}
-	}
-	Some("fs.inspect")
-}
-
-fn resolve_grounded_path_candidate(raw: &str) -> Option<String> {
-	let path = PathBuf::from(raw);
-	if path.is_absolute() {
-		return path
-			.exists()
-			.then(|| path.canonicalize().ok())
-			.flatten()
-			.map(|resolved| resolved.display().to_string());
-	}
-	let cwd = std::env::current_dir().ok()?;
-	let candidate = cwd.join(&path);
-	if candidate.exists() {
-		return candidate
-			.canonicalize()
-			.ok()
-			.map(|resolved| resolved.display().to_string());
-	}
-	if raw.contains('/') || raw.contains('\\') || raw == "." || raw == ".." {
-		return Some(candidate.display().to_string());
-	}
-	find_unique_workspace_match(&cwd, raw).map(|resolved| resolved.display().to_string())
-}
-
-fn find_unique_workspace_match(root: &std::path::Path, target_name: &str) -> Option<PathBuf> {
-	let mut stack = vec![root.to_path_buf()];
-	let mut visited = 0_usize;
-	let mut matches = Vec::new();
-	while let Some(directory) = stack.pop() {
-		let entries = fs::read_dir(&directory).ok()?;
-		for entry in entries.filter_map(Result::ok) {
-			visited += 1;
-			if visited > 8_000 {
-				return None;
-			}
-			let path = entry.path();
-			let name = entry.file_name().to_string_lossy().to_string();
-			if name == target_name {
-				matches.push(path.clone());
-				if matches.len() > 1 {
-					return None;
-				}
-			}
-			if path.is_dir() && !should_skip_workspace_search_dir(&name) {
-				stack.push(path);
-			}
-		}
-	}
-	matches.into_iter().next()
-}
-
-fn should_skip_workspace_search_dir(name: &str) -> bool {
-	matches!(
-		name,
-		".git" | ".roku" | "target" | "node_modules" | "dist" | "build"
-	)
 }
 
 fn classify_with_llm(
@@ -468,15 +342,6 @@ fn classify_with_llm(
 			);
 		}
 	};
-	if !decision.missing_arguments.is_empty() {
-		return build_loop_hint_route(context, decision);
-	}
-	if decision.confidence_score() < ROUTE_CONFIDENCE_FLOOR {
-		return build_loop_hint_route(context, decision);
-	}
-	if decision.requires_multi_step || decision.intent_family == IntentFamily::MultiStep {
-		return build_loop_hint_route(context, decision);
-	}
 	if let Some(result) = classify_skill_route_from_decision(
 		context,
 		request,
@@ -486,47 +351,16 @@ fn classify_with_llm(
 	) {
 		return result;
 	}
-	if decision.intent_family == IntentFamily::Chat {
-		return build_tool_loop_route(context, decision, Some("general.execute"), Vec::new());
-	}
-	if decision.intent_family == IntentFamily::FilesystemRead
-		&& has_enabled_tool_with_prefix(context.catalog, "fs.")
-	{
-		let preferred_tool = decision
-			.candidate_tools
-			.iter()
-			.find(|tool_name| tool_name.starts_with("fs."))
-			.cloned();
-		return build_filesystem_tool_loop_route(
-			context,
-			request,
-			decision,
-			preferred_tool.as_deref(),
-		);
-	}
-	if matches!(
-		decision.intent_family,
-		IntentFamily::TableRead | IntentFamily::WebLookup | IntentFamily::CodeExec
-	) {
-		let preferred_tool = decision.candidate_tools.first().cloned();
-		return build_tool_loop_route(context, decision, preferred_tool.as_deref(), Vec::new());
-	}
-	if matches!(
-		decision.intent_family,
-		IntentFamily::MultiStep | IntentFamily::Unknown
-	) {
+	if !decision.missing_arguments.is_empty() {
 		return build_loop_hint_route(context, decision);
 	}
-	if let Some(selector) = select_tool_from_candidates(context.catalog, &decision.candidate_tools)
-	{
-		return build_direct_tool_plan(context, request, decision, selector);
+	if decision.confidence_score() < ROUTE_CONFIDENCE_FLOOR {
+		return build_loop_hint_route(context, decision);
 	}
-
-	RouteDecisionResult::Escalate(RouteEscalationPlan {
-		decision,
-		reason: EscalationReason::NoEnabledRouteTarget,
-		action: EscalationAction::FallbackAnswer,
-	})
+	if decision.requires_multi_step || decision.intent_family == IntentFamily::MultiStep {
+		return build_loop_hint_route(context, decision);
+	}
+	build_tool_loop_route(context, decision, None, Vec::new())
 }
 
 fn unresolved_without_route_model() -> RouteDecisionResult {
@@ -538,7 +372,7 @@ fn unresolved_without_route_model() -> RouteDecisionResult {
 		Vec::new(),
 		Vec::new(),
 		Vec::new(),
-		"deterministic pre-classifier did not find a stable direct route and no route model is available",
+		"deterministic pre-classifier did not find a stable contract-level hint and no route model is available",
 	);
 	RouteDecisionResult::Escalate(RouteEscalationPlan {
 		decision,
@@ -631,112 +465,6 @@ Current inventory:
 	)
 }
 
-fn select_tool_from_candidates(
-	catalog: &ResourceCatalog,
-	candidate_tools: &[String],
-) -> Option<ResourceSelector> {
-	candidate_tools.iter().find_map(|tool_name| {
-		catalog
-			.entries()
-			.iter()
-			.find(|entry| entry.kind == ResourceKind::Tool && entry.name == *tool_name)
-			.map(|entry| entry.selector.clone())
-	})
-}
-
-fn classify_catalog_selected_route(
-	context: &RouteClassifierContext<'_>,
-	request: &RequestEnvelope,
-	tool_matches: &[CatalogMatch],
-) -> Option<RouteDecisionResult> {
-	let primary = preferred_catalog_tool_match(tool_matches)?;
-	let primary = prefer_pathless_directory_fs_match(request, tool_matches, primary);
-	let descriptor = context.catalog.descriptor(&primary.descriptor.selector)?;
-	if descriptor.name.starts_with("fs.")
-		&& !allow_catalog_filesystem_route(request, &descriptor.name, primary.score)
-	{
-		return None;
-	}
-	if context.route_router.is_some()
-		&& matches!(
-			descriptor.name.as_str(),
-			"inventory.describe" | "general.execute"
-		) {
-		return None;
-	}
-	let decision = RouteDecision::new(
-		intent_family_for_tool(&descriptor.name),
-		stable_tool_confidence(primary.score),
-		false,
-		resource_risk(descriptor),
-		vec![descriptor.name.clone()],
-		candidate_plugins_for_tool(context.plugin_snapshot, &descriptor.name),
-		Vec::new(),
-		format!(
-			"catalog retrieval selected stable direct route `{}`",
-			descriptor.name
-		),
-	);
-	match descriptor.name.as_str() {
-		"inventory.describe" => Some(RouteDecisionResult::Direct(DirectRoutePlan {
-			decision,
-			bound_resources: Vec::new(),
-		})),
-		"general.execute" => Some(build_tool_loop_route(
-			context,
-			decision,
-			Some("general.execute"),
-			Vec::new(),
-		)),
-		_ => Some(build_direct_tool_plan(
-			context,
-			request,
-			decision,
-			descriptor.selector.clone(),
-		)),
-	}
-}
-
-fn prefer_pathless_directory_fs_match<'a>(
-	request: &RequestEnvelope,
-	matches: &'a [CatalogMatch],
-	primary: &'a CatalogMatch,
-) -> &'a CatalogMatch {
-	if has_grounded_filesystem_input(&request.goal) {
-		return primary;
-	}
-
-	let directory_semantic_match = matches.iter().find(|candidate| {
-		matches!(
-			candidate.descriptor.name.as_str(),
-			"fs.list_dir" | "fs.inspect"
-		) && candidate.score >= 0.46
-			&& candidate.score >= primary.score * 0.55
-	});
-
-	match primary.descriptor.name.as_str() {
-		"inventory.describe" | "general.execute" => directory_semantic_match.unwrap_or(primary),
-		"fs.find" | "fs.read_text" | "fs.exists" => directory_semantic_match
-			.filter(|candidate| candidate.score >= MIN_TOOL_SCORE)
-			.unwrap_or(primary),
-		_ => primary,
-	}
-}
-
-fn allow_catalog_filesystem_route(request: &RequestEnvelope, tool_name: &str, score: f32) -> bool {
-	if has_grounded_filesystem_input(&request.goal) {
-		return true;
-	}
-
-	matches!(tool_name, "fs.list_dir" | "fs.inspect") && score >= 0.72
-}
-
-fn has_grounded_filesystem_input(goal: &str) -> bool {
-	parse_shell_like_fs_command(goal).is_some()
-		|| extract_glob_pattern(goal).is_some()
-		|| !extract_path_candidates(goal).is_empty()
-}
-
 fn classify_skill_route_from_decision(
 	context: &RouteClassifierContext<'_>,
 	request: &RequestEnvelope,
@@ -763,62 +491,6 @@ fn classify_skill_route_from_decision(
 			descriptor.name
 		),
 	))
-}
-
-fn preferred_catalog_tool_match(matches: &[CatalogMatch]) -> Option<&CatalogMatch> {
-	let primary = stable_primary_tool_match(matches)?;
-	if !matches!(
-		primary.descriptor.name.as_str(),
-		"inventory.describe" | "general.execute"
-	) {
-		return Some(primary);
-	}
-	let secondary = matches.get(1)?;
-	let secondary_threshold = direct_route_threshold(&secondary.descriptor.name);
-	let secondary_is_specific_tool =
-		intent_family_for_tool(&secondary.descriptor.name) != IntentFamily::Chat;
-	(secondary_is_specific_tool
-		&& secondary.score >= secondary_threshold
-		&& secondary.score >= primary.score * 0.85)
-		.then_some(secondary)
-		.or(Some(primary))
-}
-
-fn stable_primary_tool_match(matches: &[CatalogMatch]) -> Option<&CatalogMatch> {
-	let first = matches.first()?;
-	if first.score < direct_route_threshold(&first.descriptor.name) {
-		return None;
-	}
-	if let Some(second) = matches.get(1) {
-		let second_threshold = direct_route_threshold(&second.descriptor.name);
-		if second.score >= second_threshold && first.score < second.score * 1.08 {
-			return None;
-		}
-	}
-	Some(first)
-}
-
-fn direct_route_threshold(tool_name: &str) -> f32 {
-	match tool_name {
-		"inventory.describe" => 0.42,
-		"general.execute" => 0.28,
-		_ => MIN_TOOL_SCORE,
-	}
-}
-
-fn stable_tool_confidence(score: f32) -> f32 {
-	(score + 0.20).clamp(0.72, 0.96)
-}
-
-fn intent_family_for_tool(tool_name: &str) -> IntentFamily {
-	match tool_name {
-		"inventory.describe" | "general.execute" => IntentFamily::Chat,
-		name if name.starts_with("fs.") => IntentFamily::FilesystemRead,
-		name if name.starts_with("table.") => IntentFamily::TableRead,
-		name if name.starts_with("web.") => IntentFamily::WebLookup,
-		name if name.starts_with("python.") => IntentFamily::CodeExec,
-		_ => IntentFamily::TextTransform,
-	}
 }
 
 fn classify_structural_fallback(
@@ -880,31 +552,6 @@ fn has_enabled_tool_with_prefix(catalog: &ResourceCatalog, prefix: &str) -> bool
 		.any(|entry| entry.kind == ResourceKind::Tool && entry.name.starts_with(prefix))
 }
 
-fn build_direct_tool_plan(
-	context: &RouteClassifierContext<'_>,
-	request: &RequestEnvelope,
-	decision: RouteDecision,
-	selector: ResourceSelector,
-) -> RouteDecisionResult {
-	let tool_name = selector.name().to_string();
-	if tool_name.starts_with("fs.") {
-		return build_filesystem_tool_loop_route(context, request, decision, Some(&tool_name));
-	}
-	build_tool_loop_route(context, decision, Some(&tool_name), Vec::new())
-}
-
-fn build_filesystem_tool_loop_route(
-	context: &RouteClassifierContext<'_>,
-	request: &RequestEnvelope,
-	mut decision: RouteDecision,
-	preferred_tool: Option<&str>,
-) -> RouteDecisionResult {
-	decision.intent_family = IntentFamily::FilesystemRead;
-	decision.candidate_tools =
-		filesystem_loop_candidate_tools(context.catalog, request, preferred_tool);
-	build_tool_loop_route(context, decision, preferred_tool, Vec::new())
-}
-
 fn build_tool_loop_route(
 	context: &RouteClassifierContext<'_>,
 	mut decision: RouteDecision,
@@ -912,19 +559,8 @@ fn build_tool_loop_route(
 	bound_resources: Vec<ResourceSelector>,
 ) -> RouteDecisionResult {
 	let seeded_tools = decision.candidate_tools.clone();
-	decision.candidate_tools = tool_loop_candidate_tools(
-		context.catalog,
-		decision.intent_family,
-		preferred_tool,
-		&seeded_tools,
-	);
-	if decision.candidate_tools.is_empty() {
-		return RouteDecisionResult::Escalate(RouteEscalationPlan {
-			decision,
-			reason: EscalationReason::NoEnabledRouteTarget,
-			action: EscalationAction::FallbackAnswer,
-		});
-	}
+	decision.candidate_tools =
+		filter_enabled_candidate_tools(context.catalog, preferred_tool, &seeded_tools);
 	if decision.candidate_plugins.is_empty() {
 		decision.candidate_plugins = decision
 			.candidate_tools
@@ -945,74 +581,16 @@ fn build_loop_hint_route(
 	build_tool_loop_route(context, decision, None, Vec::new())
 }
 
-fn filesystem_loop_candidate_tools(
+fn filter_enabled_candidate_tools(
 	catalog: &ResourceCatalog,
-	request: &RequestEnvelope,
-	preferred_tool: Option<&str>,
-) -> Vec<String> {
-	let basename_only = single_explicit_path(&extract_path_candidates(&request.goal))
-		.is_some_and(is_basename_reference);
-	let preferred_order = match preferred_tool {
-		Some("fs.list_dir") => ["fs.list_dir", "fs.inspect", "fs.exists", "fs.read_text"],
-		Some("fs.inspect") => ["fs.inspect", "fs.list_dir", "fs.exists", "fs.read_text"],
-		Some("fs.exists") => ["fs.exists", "fs.inspect", "fs.read_text", "fs.list_dir"],
-		Some("fs.read_text") => ["fs.read_text", "fs.inspect", "fs.exists", "fs.list_dir"],
-		_ => ["fs.read_text", "fs.list_dir", "fs.inspect", "fs.exists"],
-	};
-	let mut tools = Vec::new();
-	if basename_only && tool_selector(catalog, "fs.find").is_some() {
-		tools.push("fs.find".to_string());
-	}
-	for tool_name in preferred_order {
-		if tool_selector(catalog, tool_name).is_some()
-			&& !tools.iter().any(|existing| existing == tool_name)
-		{
-			tools.push(tool_name.to_string());
-		}
-	}
-	if tool_selector(catalog, "fs.glob").is_some()
-		&& !tools.iter().any(|existing| existing == "fs.glob")
-	{
-		tools.push("fs.glob".to_string());
-	}
-	tools
-}
-
-fn tool_loop_candidate_tools(
-	catalog: &ResourceCatalog,
-	intent_family: IntentFamily,
 	preferred_tool: Option<&str>,
 	seed_tools: &[String],
 ) -> Vec<String> {
-	let family_tools = match intent_family {
-		IntentFamily::Chat => vec!["general.execute"],
-		IntentFamily::TableRead => {
-			vec![
-				"table.preview",
-				"table.inspect",
-				"table.list_sheets",
-				"table.schema",
-			]
-		}
-		IntentFamily::WebLookup => vec!["web.search"],
-		IntentFamily::CodeExec => vec!["python.run"],
-		IntentFamily::TextTransform | IntentFamily::MultiStep | IntentFamily::Unknown => {
-			vec!["general.execute"]
-		}
-		IntentFamily::FilesystemRead => Vec::new(),
-	};
 	let mut tools = Vec::new();
 	if let Some(preferred_tool) = preferred_tool
 		&& tool_selector(catalog, preferred_tool).is_some()
 	{
 		tools.push(preferred_tool.to_string());
-	}
-	for tool_name in family_tools {
-		if tool_selector(catalog, tool_name).is_some()
-			&& !tools.iter().any(|existing| existing == tool_name)
-		{
-			tools.push(tool_name.to_string());
-		}
 	}
 	for tool_name in seed_tools {
 		if tool_selector(catalog, tool_name).is_some()
@@ -1185,15 +763,6 @@ fn clean_token(token: &str) -> String {
 		.to_string()
 }
 
-fn is_basename_reference(path: &str) -> bool {
-	!path.is_empty()
-		&& path != "."
-		&& path != ".."
-		&& !PathBuf::from(path).is_absolute()
-		&& !path.contains('/')
-		&& !path.contains('\\')
-}
-
 fn looks_like_path_candidate(token: &str) -> bool {
 	if token.is_empty() {
 		return false;
@@ -1209,21 +778,6 @@ fn looks_like_path_candidate(token: &str) -> bool {
 					.chars()
 					.all(|character| character.is_ascii_alphanumeric())
 		})
-}
-
-fn single_explicit_path(paths: &[String]) -> Option<&str> {
-	(paths.len() == 1).then(|| paths[0].as_str())
-}
-
-fn best_tool_selectors(matches: &[CatalogMatch]) -> Vec<ResourceSelector> {
-	let mut selectors = matches
-		.iter()
-		.filter(|entry| entry.score >= MIN_TOOL_SCORE)
-		.take(2)
-		.map(|entry| entry.descriptor.selector.clone())
-		.collect::<Vec<_>>();
-	selectors.dedup();
-	selectors
 }
 
 fn skill_descriptor_is_executable(descriptor: &CatalogDescriptor) -> bool {
