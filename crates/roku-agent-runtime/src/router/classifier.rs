@@ -22,8 +22,8 @@ use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier, StructuredGenerati
 use serde_json::json;
 
 use crate::router::{
-	DirectRouteKind, DirectRoutePlan, EscalationAction, EscalationReason, FsCommandStep,
-	IntentFamily, RouteDecision, RouteDecisionResult, RouteEscalationPlan, RouteRisk,
+	DirectRoutePlan, EscalationAction, EscalationReason, IntentFamily, RouteDecision,
+	RouteDecisionResult, RouteEscalationPlan, RouteRisk,
 };
 use crate::runtime_loop::{
 	extract_path_candidates as shared_extract_path_candidates, extract_skill_source_url,
@@ -60,10 +60,6 @@ fn deterministic_pre_classify(
 	context: &RouteClassifierContext<'_>,
 	request: &RequestEnvelope,
 ) -> Option<RouteDecisionResult> {
-	if let Some(result) = classify_shell_like_fs_sequence(context, request) {
-		return Some(result);
-	}
-
 	if let Some(result) = classify_structured_multi_step_request(context, request) {
 		return Some(result);
 	}
@@ -87,7 +83,6 @@ fn deterministic_pre_classify(
 		);
 		return Some(RouteDecisionResult::Direct(DirectRoutePlan {
 			decision,
-			kind: DirectRouteKind::ToolLoop,
 			bound_resources: Vec::new(),
 		}));
 	}
@@ -289,7 +284,7 @@ fn classify_shell_like_fs_command(
 		candidate_plugins_for_tool(context.plugin_snapshot, command.tool_name),
 		Vec::new(),
 		format!(
-			"structured shell-style filesystem command resolved to a filesystem loop shortlist led by `{}`",
+			"structured shell-style filesystem command resolved to a generic tool-loop shortlist led by `{}`",
 			command.tool_name
 		),
 	);
@@ -298,45 +293,6 @@ fn classify_shell_like_fs_command(
 		request,
 		decision,
 		Some(command.tool_name),
-	))
-}
-
-fn classify_shell_like_fs_sequence(
-	context: &RouteClassifierContext<'_>,
-	request: &RequestEnvelope,
-) -> Option<RouteDecisionResult> {
-	let commands = parse_shell_like_fs_sequence(&request.goal)?;
-	if commands.len() < 2 && !matches!(commands.as_slice(), [FsCommandStep::PrintWorkingDir]) {
-		return None;
-	}
-	let mut candidate_tools = Vec::new();
-	for command in &commands {
-		let tool_name = match command {
-			FsCommandStep::ChangeDir { .. } | FsCommandStep::ListDir { .. } => "fs.list_dir",
-			FsCommandStep::ReadText { .. } => "fs.read_text",
-			FsCommandStep::PrintWorkingDir | FsCommandStep::Inspect { .. } => "fs.inspect",
-			FsCommandStep::Exists { .. } => "fs.exists",
-		};
-		if !candidate_tools.iter().any(|existing| existing == tool_name) {
-			candidate_tools.push(tool_name.to_string());
-		}
-	}
-	let decision = RouteDecision::new(
-		IntentFamily::FilesystemRead,
-		0.95,
-		false,
-		RouteRisk::Low,
-		candidate_tools,
-		candidate_plugins_for_tool(context.plugin_snapshot, "fs.list_dir"),
-		Vec::new(),
-		"structured shell-style filesystem command sequence resolved to a bounded direct route",
-	);
-	Some(build_filesystem_loop_route(
-		context,
-		request,
-		decision,
-		Some("fs.list_dir"),
-		Some(commands),
 	))
 }
 
@@ -372,91 +328,6 @@ fn parse_shell_like_fs_command(goal: &str) -> Option<ShellLikeFsCommand> {
 				None
 			}
 		}
-		_ => None,
-	}
-}
-
-fn parse_shell_like_fs_sequence(goal: &str) -> Option<Vec<FsCommandStep>> {
-	let segments = split_shell_like_segments(goal);
-	if segments.is_empty() {
-		return None;
-	}
-	let mut commands = Vec::new();
-	for segment in segments {
-		commands.push(parse_shell_like_fs_step(&segment)?);
-	}
-	Some(commands)
-}
-
-fn split_shell_like_segments(goal: &str) -> Vec<String> {
-	goal.replace("\r\n", "\n")
-		.replace("&&", "\n")
-		.replace("||", "\n")
-		.replace(';', "\n")
-		.replace("；", "\n")
-		.replace("，然后", "\n")
-		.replace(",然后", "\n")
-		.replace("然后", "\n")
-		.replace("，", "\n")
-		.lines()
-		.filter_map(normalize_shell_segment)
-		.collect()
-}
-
-fn normalize_shell_segment(segment: &str) -> Option<String> {
-	let trimmed = segment.trim();
-	if trimmed.is_empty() {
-		return None;
-	}
-	let mut candidates = vec![trimmed.to_string()];
-	if let Some((_, suffix)) = trimmed.rsplit_once(':') {
-		candidates.push(suffix.trim().to_string());
-	}
-	if let Some((_, suffix)) = trimmed.rsplit_once('：') {
-		candidates.push(suffix.trim().to_string());
-	}
-	candidates.into_iter().find(|candidate| {
-		shell_command_name(candidate.split_whitespace().next().unwrap_or_default()).is_some()
-	})
-}
-
-fn parse_shell_like_fs_step(segment: &str) -> Option<FsCommandStep> {
-	let tokens = segment
-		.split_whitespace()
-		.map(clean_token)
-		.filter(|token| !token.is_empty())
-		.collect::<Vec<_>>();
-	let first = tokens.first()?.as_str();
-	match shell_command_name(first)? {
-		"cd" => {
-			command_path_argument(segment, &tokens).map(|path| FsCommandStep::ChangeDir { path })
-		}
-		"ls" => Some(FsCommandStep::ListDir {
-			path: command_path_argument(segment, &tokens),
-		}),
-		"cat" => {
-			command_path_argument(segment, &tokens).map(|path| FsCommandStep::ReadText { path })
-		}
-		"pwd" => Some(FsCommandStep::PrintWorkingDir),
-		"stat" => {
-			command_path_argument(segment, &tokens).map(|path| FsCommandStep::Inspect { path })
-		}
-		"exists" => {
-			command_path_argument(segment, &tokens).map(|path| FsCommandStep::Exists { path })
-		}
-		_ => None,
-	}
-}
-
-fn shell_command_name(token: &str) -> Option<&'static str> {
-	match token {
-		"cd" => Some("cd"),
-		"ls" | "ll" | "dir" => Some("ls"),
-		"cat" | "more" => Some("cat"),
-		"pwd" => Some("pwd"),
-		"stat" => Some("stat"),
-		"exists" => Some("exists"),
-		"test" => Some("exists"),
 		_ => None,
 	}
 }
@@ -809,7 +680,6 @@ fn classify_catalog_selected_route(
 	match descriptor.name.as_str() {
 		"inventory.describe" => Some(RouteDecisionResult::Direct(DirectRoutePlan {
 			decision,
-			kind: DirectRouteKind::ToolLoop,
 			bound_resources: Vec::new(),
 		})),
 		"general.execute" => Some(build_tool_loop_route(
@@ -1023,28 +893,6 @@ fn build_direct_tool_plan(
 	build_tool_loop_route(context, decision, Some(&tool_name), Vec::new())
 }
 
-fn build_filesystem_loop_route(
-	context: &RouteClassifierContext<'_>,
-	request: &RequestEnvelope,
-	mut decision: RouteDecision,
-	preferred_tool: Option<&str>,
-	commands: Option<Vec<FsCommandStep>>,
-) -> RouteDecisionResult {
-	decision.intent_family = IntentFamily::FilesystemRead;
-	decision.candidate_tools =
-		filesystem_loop_candidate_tools(context.catalog, request, preferred_tool);
-	decision.candidate_plugins = if context.plugin_snapshot.is_plugin_enabled("core-fs") {
-		vec!["core-fs".to_string()]
-	} else {
-		Vec::new()
-	};
-	RouteDecisionResult::Direct(DirectRoutePlan {
-		decision,
-		kind: DirectRouteKind::FilesystemLoop { commands },
-		bound_resources: Vec::new(),
-	})
-}
-
 fn build_filesystem_tool_loop_route(
 	context: &RouteClassifierContext<'_>,
 	request: &RequestEnvelope,
@@ -1086,7 +934,6 @@ fn build_tool_loop_route(
 	}
 	RouteDecisionResult::Direct(DirectRoutePlan {
 		decision,
-		kind: DirectRouteKind::ToolLoop,
 		bound_resources,
 	})
 }
@@ -1229,7 +1076,6 @@ fn build_skill_route_result(
 	);
 	RouteDecisionResult::Direct(DirectRoutePlan {
 		decision,
-		kind: DirectRouteKind::ToolLoop,
 		bound_resources: vec![selector],
 	})
 }

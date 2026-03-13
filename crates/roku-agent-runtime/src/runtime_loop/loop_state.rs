@@ -30,27 +30,6 @@ pub enum LoopStatus {
 	Stopped,
 }
 
-/// Execution driver that owns the current loop run.
-///
-/// ## Why this exists
-/// `LoopState` may outlive a single process through ask-user / resume flows. The runtime must
-/// therefore persist which loop driver originally owned the run instead of inferring it later
-/// from `intent_family`.
-///
-/// ## Invariants
-/// - `ToolLoop` means the pending run must resume through the generic ReAct tool loop.
-/// - `FilesystemLoop` is only for the temporary structured filesystem bridge.
-///
-/// ## Non-Goals
-/// - This enum does not introduce new domain-specific loop types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum LoopDriverKind {
-	#[default]
-	ToolLoop,
-	FilesystemLoop,
-}
-
 /// Source-of-truth runtime state for a single ReAct loop run.
 ///
 /// ## Why this exists
@@ -64,7 +43,6 @@ pub enum LoopDriverKind {
 /// - `session_id`: Session identifier used for ask-user resume semantics.
 /// - `goal`: User-visible goal for the current run.
 /// - `route_decision`: Initial route seed that constrains the loop.
-/// - `driver_kind`: Concrete loop driver that must handle execution and resume for this run.
 /// - `status`: Current lifecycle state of the loop.
 /// - `step_index`: Index of the latest recorded step.
 /// - `remaining_step_budget`: Remaining loop steps before forced termination.
@@ -80,8 +58,6 @@ pub enum LoopDriverKind {
 /// - `last_observation` must reflect the most recent tool observation recorded in `history`.
 /// - `visible_tools` may be recomputed between rounds, but the current round must treat this
 ///   field as the active visibility truth.
-/// - `driver_kind` must remain stable for the life of the run so resume can re-enter the same
-///   loop driver.
 ///
 /// ## Non-Goals
 /// - `LoopState` is not the prompt projection passed directly to the model.
@@ -93,8 +69,6 @@ pub struct LoopState {
 	pub session_id: String,
 	pub goal: String,
 	pub route_decision: RouteDecision,
-	#[serde(default)]
-	pub driver_kind: LoopDriverKind,
 	pub status: LoopStatus,
 	pub step_index: u32,
 	pub remaining_step_budget: u32,
@@ -107,18 +81,13 @@ pub struct LoopState {
 }
 
 impl LoopState {
-	pub fn new(
-		run_id: impl Into<String>,
-		context: &LoopContext,
-		driver_kind: LoopDriverKind,
-	) -> Self {
+	pub fn new(run_id: impl Into<String>, context: &LoopContext) -> Self {
 		Self {
 			run_id: run_id.into(),
 			request_id: context.request_id.clone(),
 			session_id: context.session_id.clone(),
 			goal: context.goal.clone(),
 			route_decision: context.route_decision.clone(),
-			driver_kind,
 			status: LoopStatus::LoopRunning,
 			step_index: 0,
 			remaining_step_budget: 4,

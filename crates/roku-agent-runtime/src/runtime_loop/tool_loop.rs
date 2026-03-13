@@ -768,6 +768,28 @@ fn extract_glob_pattern(value: &str) -> Option<String> {
 		.find(|candidate| candidate.contains('*') || candidate.contains('?'))
 }
 
+pub(crate) fn next_working_directory_from_observation(
+	observation: &ToolObservation,
+	current_working_directory: &str,
+) -> Option<String> {
+	if observation.ok && observation.tool_name == "fs.inspect" {
+		let is_directory = observation
+			.data
+			.get("kind")
+			.and_then(Value::as_str)
+			.is_some_and(|kind| kind == "directory");
+		if is_directory {
+			return observation
+				.data
+				.get("path")
+				.and_then(Value::as_str)
+				.filter(|path| !path.is_empty() && *path != current_working_directory)
+				.map(str::to_string);
+		}
+	}
+	None
+}
+
 pub(crate) fn attachments_for_tool(
 	tool_name: &str,
 	grounding_input: &str,
@@ -797,8 +819,8 @@ mod tests {
 	use super::{decide_tool_loop_next_step, tool_loop_prompt};
 	use crate::router::{IntentFamily, RouteDecision, RouteRisk};
 	use crate::runtime_loop::{
-		ContextProjection, LoopContext, LoopDriverKind, LoopState, StepObservation,
-		ToolObservation, build_context_projection, step_record::StepRecord,
+		ContextProjection, LoopContext, LoopState, StepObservation, ToolObservation,
+		build_context_projection, step_record::StepRecord,
 	};
 
 	struct PromptRecordingProvider {
@@ -857,7 +879,7 @@ mod tests {
 			),
 			last_observation: None,
 		};
-		LoopState::new("loop-req-1", &context, LoopDriverKind::ToolLoop)
+		LoopState::new("loop-req-1", &context)
 	}
 
 	fn sample_filesystem_loop_state() -> LoopState {
@@ -890,7 +912,7 @@ mod tests {
 			),
 			last_observation: None,
 		};
-		LoopState::new("loop-fs-1", &context, LoopDriverKind::ToolLoop)
+		LoopState::new("loop-fs-1", &context)
 	}
 
 	fn router_with_responses(

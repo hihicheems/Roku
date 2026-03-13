@@ -17,28 +17,9 @@ use roku_common_types::{ResourceSelector, ResultEnvelope, TaskNode};
 use crate::router::RouteDecision;
 use crate::runtime_loop::StepAction;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DirectRouteKind {
-	FilesystemLoop {
-		commands: Option<Vec<FsCommandStep>>,
-	},
-	ToolLoop,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FsCommandStep {
-	ChangeDir { path: String },
-	ListDir { path: Option<String> },
-	ReadText { path: String },
-	PrintWorkingDir,
-	Inspect { path: String },
-	Exists { path: String },
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct DirectRoutePlan {
 	pub decision: RouteDecision,
-	pub kind: DirectRouteKind,
 	pub bound_resources: Vec<ResourceSelector>,
 }
 

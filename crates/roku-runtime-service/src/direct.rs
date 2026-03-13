@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_agent_runtime::{DirectRouteKind, DirectRoutePlan, LoopState, RouteEscalationPlan};
+use roku_agent_runtime::{DirectRoutePlan, LoopState, RouteEscalationPlan};
 use roku_common_types::{
 	ErrorClass, EvidenceItem, RequestEnvelope, ResponseEnvelope, ResponseStatus, ResultEnvelope,
 	ResultStatus, RuntimeError, Task, TaskEventKind, TaskNode, TaskState,
@@ -26,23 +26,13 @@ impl RuntimeService {
 		&self,
 		task: &mut Task,
 		request: &RequestEnvelope,
-		plan: &DirectRoutePlan,
+		_plan: &DirectRoutePlan,
 		loop_state: &mut LoopState,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let initial_history_len = loop_state.history.len();
-		let execution = match &plan.kind {
-			DirectRouteKind::FilesystemLoop { commands } => self.runtime.execute_filesystem_loop(
-				&task.task_id,
-				request,
-				loop_state,
-				None,
-				commands.as_deref(),
-			),
-			DirectRouteKind::ToolLoop => {
-				self.runtime
-					.execute_tool_loop(&task.task_id, request, loop_state, None)
-			}
-		};
+		let execution = self
+			.runtime
+			.execute_tool_loop(&task.task_id, request, loop_state, None);
 		self.record_runtime_loop_history(loop_state, initial_history_len);
 		let response =
 			self.finalize_direct_path(task, execution.node, execution.result, execution.message)?;

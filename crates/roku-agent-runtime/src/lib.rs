@@ -24,13 +24,12 @@ mod workers;
 
 pub use roku_plugin_core::PluginRegistrySnapshot;
 pub use router::{
-	DirectRouteExecutionResult, DirectRouteKind, DirectRoutePlan, EscalationAction,
-	EscalationReason, IntentFamily, RouteDecision, RouteDecisionResult, RouteEscalationPlan,
-	RouteRisk,
+	DirectRouteExecutionResult, DirectRoutePlan, EscalationAction, EscalationReason, IntentFamily,
+	RouteDecision, RouteDecisionResult, RouteEscalationPlan, RouteRisk,
 };
 pub use runtime::{AgentWorker, GenericAgentRuntime, RuntimeWorker};
 pub use runtime_loop::{
-	AskUserPayload, FinalSummary, InterpretedObservation, LoopContext, LoopDriverKind, LoopRequest,
+	AskUserPayload, FinalAnswerPayload, InterpretedObservation, LoopContext, LoopRequest,
 	LoopState, LoopStatus, NextStepAction, NextStepDecision, NextStepDecisionSchemaError,
 	StepAction, StepObservation, StepRecord, ToolObservation, interpret_observation,
 	should_resume_awaiting_user,
