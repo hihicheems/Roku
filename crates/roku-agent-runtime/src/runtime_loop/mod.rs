@@ -27,8 +27,8 @@ mod step_record;
 mod summarizer;
 mod tool_loop;
 
-pub use ask_user::AskUserPayload;
-pub(crate) use ask_user::effective_ask_user_message;
+pub(crate) use ask_user::effective_ask_user_payload;
+pub use ask_user::{AskUserPayload, AskUserResumeContract, AskUserResumeDirective};
 pub use context_assembly::LoopContext;
 pub(crate) use context_assembly::build_loop_context;
 pub use context_projection::ContextProjection;
