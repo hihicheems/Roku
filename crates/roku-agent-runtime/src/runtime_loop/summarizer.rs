@@ -16,12 +16,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::runtime_loop::ToolObservation;
 
-/// Temporary final-answer carrier produced from a grounded observation.
+/// User-visible final-answer payload derived from grounded runtime observation.
 ///
 /// ## Why this exists
-/// The current runtime still uses `FinalSummary` as the summarized final-answer payload derived
-/// from a `ToolObservation`. This remains a temporary compatibility name until the contract is
-/// renamed to `FinalAnswerPayload` in a later phase.
+/// The ReAct runtime ends each successful loop through a normalized completion contract. This
+/// payload carries only the user-facing answer text produced from the latest grounded
+/// observation.
 ///
 /// ## Fields
 /// - `final_message`: User-visible message derived from the latest grounded observation.
@@ -31,14 +31,16 @@ use crate::runtime_loop::ToolObservation;
 /// - This payload is derived from grounded observation data, not from hidden planner state.
 ///
 /// ## Non-Goals
-/// - This payload is not the long-term final contract name.
 /// - This payload does not carry history, audit, or replay metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FinalSummary {
+pub struct FinalAnswerPayload {
 	pub final_message: String,
 }
 
-pub(crate) fn summarize_observation(goal: &str, observation: &ToolObservation) -> FinalSummary {
+pub(crate) fn summarize_observation(
+	goal: &str,
+	observation: &ToolObservation,
+) -> FinalAnswerPayload {
 	let failure_message = summarize_failure(goal, observation);
 	let final_message = if !observation.ok {
 		failure_message.unwrap_or_else(|| observation.message.clone())
@@ -70,7 +72,7 @@ pub(crate) fn summarize_observation(goal: &str, observation: &ToolObservation) -
 			}
 		}
 	};
-	FinalSummary { final_message }
+	FinalAnswerPayload { final_message }
 }
 
 fn summarize_failure(goal: &str, observation: &ToolObservation) -> Option<String> {

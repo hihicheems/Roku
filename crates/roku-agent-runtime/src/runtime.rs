@@ -18,14 +18,13 @@ use std::sync::Arc;
 
 use crate::result::{policy_rejection_result, tool_failure_result, tool_success_result};
 use crate::router::{
-	DirectRouteExecutionResult, EscalationAction, FsCommandStep, IntentFamily,
-	RouteClassifierContext, RouteDecisionResult,
+	DirectRouteExecutionResult, EscalationAction, IntentFamily, RouteClassifierContext,
+	RouteDecisionResult,
 };
 use crate::runtime_loop::{
-	ContextProjection, LoopContext, LoopDriverKind, LoopState, StepAction, StepObservation,
-	StepRecord, ToolObservation, attachments_for_tool, build_context_projection,
-	build_loop_context, decide_filesystem_next_step, decide_tool_loop_next_step,
-	effective_ask_user_message, intake_request, interpret_observation,
+	ContextProjection, LoopContext, LoopState, StepAction, StepObservation, StepRecord,
+	ToolObservation, attachments_for_tool, build_context_projection, build_loop_context,
+	decide_tool_loop_next_step, effective_ask_user_message, intake_request, interpret_observation,
 	next_working_directory_from_observation, summarize_observation,
 };
 use crate::tool_config::ToolCatalogConfig;
@@ -320,14 +319,9 @@ impl GenericAgentRuntime {
 		session_id: &str,
 		route_decision: &crate::router::RouteDecision,
 		bound_resources: Vec<ResourceSelector>,
-		driver_kind: LoopDriverKind,
 	) -> LoopState {
 		let context = self.build_loop_context(request, session_id, route_decision, bound_resources);
-		LoopState::new(
-			format!("loop-{}", request.request_id.0),
-			&context,
-			driver_kind,
-		)
+		LoopState::new(format!("loop-{}", request.request_id.0), &context)
 	}
 
 	pub fn record_terminal_step(
@@ -383,130 +377,6 @@ impl GenericAgentRuntime {
 		ToolObservation::from_runtime_error(tool_name, error)
 	}
 
-	pub fn execute_filesystem_loop(
-		&self,
-		task_id: &TaskId,
-		request: &RequestEnvelope,
-		loop_state: &mut LoopState,
-		user_reply: Option<&str>,
-		sequence_commands: Option<&[FsCommandStep]>,
-	) -> DirectRouteExecutionResult {
-		if let Some(commands) = sequence_commands {
-			return self.execute_filesystem_sequence_loop(task_id, request, loop_state, commands);
-		}
-		loop {
-			let next_step =
-				decide_filesystem_next_step(loop_state, self.route_router.as_deref(), user_reply);
-			match next_step.action {
-				crate::runtime_loop::NextStepAction::CallTool => {
-					let Some(tool_name) = next_step.tool_name.as_deref() else {
-						return self.synthetic_loop_terminal_result(
-							task_id,
-							"filesystem",
-							next_step.reason,
-							StepAction::Fail,
-							ResultStatus::Error,
-						);
-					};
-					let execution = self.execute_loop_tool_invocation(
-						task_id,
-						request,
-						loop_state,
-						&build_context_projection(loop_state),
-						tool_name,
-						next_step.arguments.clone().unwrap_or_else(|| json!({})),
-						&[],
-					);
-					let observation =
-						self.loop_observation_from_execution(tool_name, &execution.result);
-					let interpreted = interpret_observation(
-						loop_state,
-						observation.clone(),
-						next_working_directory_from_observation(
-							&observation,
-							&loop_state.working_directory,
-						),
-					);
-					let step = StepRecord::tool_call(
-						loop_state.step_index + 1,
-						tool_name,
-						next_step.reason,
-						StepObservation::Tool(observation.clone()),
-						execution_elapsed_ms(&execution.result),
-						interpreted.remaining_step_budget,
-						interpreted.remaining_recovery_budget,
-						interpreted
-							.new_working_directory
-							.clone()
-							.unwrap_or_else(|| loop_state.working_directory.clone()),
-					);
-					loop_state.record_step(step);
-					if !interpreted.continue_allowed {
-						let terminal_message = loop_state
-							.last_observation
-							.as_ref()
-							.map(|observation| {
-								summarize_observation(&loop_state.goal, observation).final_message
-							})
-							.unwrap_or_else(|| {
-								"Filesystem loop stopped before producing an observation."
-									.to_string()
-							});
-						return self.synthetic_loop_terminal_result(
-							task_id,
-							"filesystem",
-							terminal_message,
-							StepAction::FinalAnswer,
-							ResultStatus::Ok,
-						);
-					}
-				}
-				crate::runtime_loop::NextStepAction::AskUser => {
-					let message = effective_ask_user_message(
-						&loop_state.goal,
-						loop_state.last_observation.as_ref(),
-						next_step.final_message,
-					);
-					return self.synthetic_loop_terminal_result(
-						task_id,
-						"filesystem",
-						message,
-						StepAction::AskUser,
-						ResultStatus::Ok,
-					);
-				}
-				crate::runtime_loop::NextStepAction::FinalAnswer => {
-					let message = next_step.final_message.unwrap_or_else(|| {
-						loop_state
-							.last_observation
-							.as_ref()
-							.map(|observation| {
-								summarize_observation(&loop_state.goal, observation).final_message
-							})
-							.unwrap_or_else(|| "Filesystem loop completed.".to_string())
-					});
-					return self.synthetic_loop_terminal_result(
-						task_id,
-						"filesystem",
-						message,
-						StepAction::FinalAnswer,
-						ResultStatus::Ok,
-					);
-				}
-				crate::runtime_loop::NextStepAction::Fail => {
-					let message = next_step.final_message.unwrap_or(next_step.reason);
-					return self.synthetic_loop_terminal_result(
-						task_id,
-						"filesystem",
-						message,
-						StepAction::Fail,
-						ResultStatus::Error,
-					);
-				}
-			}
-		}
-	}
-
 	pub fn execute_tool_loop(
 		&self,
 		task_id: &TaskId,
@@ -546,7 +416,14 @@ impl GenericAgentRuntime {
 					);
 					let observation =
 						self.loop_observation_from_execution(tool_name, &execution.result);
-					let interpreted = interpret_observation(loop_state, observation.clone(), None);
+					let interpreted = interpret_observation(
+						loop_state,
+						observation.clone(),
+						next_working_directory_from_observation(
+							&observation,
+							&loop_state.working_directory,
+						),
+					);
 					let step = StepRecord::tool_call(
 						loop_state.step_index + 1,
 						tool_name,
@@ -677,73 +554,6 @@ impl GenericAgentRuntime {
 				}
 			}
 		}
-	}
-
-	fn execute_filesystem_sequence_loop(
-		&self,
-		task_id: &TaskId,
-		request: &RequestEnvelope,
-		loop_state: &mut LoopState,
-		commands: &[FsCommandStep],
-	) -> DirectRouteExecutionResult {
-		let mut rendered_steps = Vec::new();
-		for command in commands {
-			let (tool_name, arguments, rendered_command) =
-				sequence_command_invocation(loop_state, command);
-			let execution = self.execute_loop_tool_invocation(
-				task_id,
-				request,
-				loop_state,
-				&build_context_projection(loop_state),
-				tool_name,
-				arguments,
-				&[],
-			);
-			let observation = self.loop_observation_from_execution(tool_name, &execution.result);
-			let interpreted = interpret_observation(
-				loop_state,
-				observation.clone(),
-				next_working_directory_from_observation(
-					&observation,
-					&loop_state.working_directory,
-				),
-			);
-			let step = StepRecord::tool_call(
-				loop_state.step_index + 1,
-				tool_name,
-				format!("Execute structured filesystem sequence step `{rendered_command}`"),
-				StepObservation::Tool(observation.clone()),
-				execution_elapsed_ms(&execution.result),
-				interpreted.remaining_step_budget,
-				interpreted.remaining_recovery_budget,
-				interpreted
-					.new_working_directory
-					.clone()
-					.unwrap_or_else(|| loop_state.working_directory.clone()),
-			);
-			loop_state.record_step(step);
-			if execution.result.status != ResultStatus::Ok {
-				return self.synthetic_loop_terminal_result(
-					task_id,
-					"filesystem",
-					summarize_observation(&loop_state.goal, &observation).final_message,
-					StepAction::Fail,
-					ResultStatus::Error,
-				);
-			}
-			rendered_steps.push(render_sequence_output(
-				&rendered_command,
-				&observation,
-				&loop_state.working_directory,
-			));
-		}
-		self.synthetic_loop_terminal_result(
-			task_id,
-			"filesystem",
-			rendered_steps.join("\n\n"),
-			StepAction::FinalAnswer,
-			ResultStatus::Ok,
-		)
 	}
 
 	pub fn execute_escalation_action(
@@ -1200,7 +1010,7 @@ impl GenericAgentRuntime {
 		let Some(selector) = tool_selector_by_name(&self.resource_catalog, tool_name) else {
 			return self.synthetic_status_result(
 				task_id,
-				"runtime-loop:filesystem",
+				"runtime-loop:tool",
 				"runtime-loop",
 				format!("tool `{tool_name}` is not enabled in the current runtime inventory"),
 				0.0,
@@ -1325,90 +1135,6 @@ fn merge_json_object(target: &mut Value, overlay: Value) {
 	};
 	for (key, value) in overlay_object {
 		target_object.insert(key.clone(), value.clone());
-	}
-}
-
-fn sequence_command_invocation(
-	loop_state: &LoopState,
-	command: &FsCommandStep,
-) -> (&'static str, Value, String) {
-	let cwd = PathBuf::from(&loop_state.working_directory);
-	match command {
-		FsCommandStep::ChangeDir { path } => {
-			let target = resolve_sequence_path(&cwd, path);
-			(
-				"fs.inspect",
-				json!({ "path": target.display().to_string() }),
-				format!("cd {path}"),
-			)
-		}
-		FsCommandStep::ListDir { path } => {
-			let target = path
-				.as_ref()
-				.map(|path| resolve_sequence_path(&cwd, path))
-				.unwrap_or_else(|| cwd.clone());
-			(
-				"fs.list_dir",
-				json!({ "path": target.display().to_string() }),
-				format!("ls {}", path.as_deref().unwrap_or(".")),
-			)
-		}
-		FsCommandStep::ReadText { path } => {
-			let target = resolve_sequence_path(&cwd, path);
-			(
-				"fs.read_text",
-				json!({ "path": target.display().to_string(), "max_bytes": 4_096_u64 }),
-				format!("cat {path}"),
-			)
-		}
-		FsCommandStep::PrintWorkingDir => (
-			"fs.inspect",
-			json!({ "path": cwd.display().to_string() }),
-			"pwd".to_string(),
-		),
-		FsCommandStep::Inspect { path } => {
-			let target = resolve_sequence_path(&cwd, path);
-			(
-				"fs.inspect",
-				json!({ "path": target.display().to_string() }),
-				format!("stat {path}"),
-			)
-		}
-		FsCommandStep::Exists { path } => {
-			let target = resolve_sequence_path(&cwd, path);
-			(
-				"fs.exists",
-				json!({ "path": target.display().to_string() }),
-				format!("test -e {path}"),
-			)
-		}
-	}
-}
-
-fn render_sequence_output(
-	rendered_command: &str,
-	observation: &ToolObservation,
-	working_directory: &str,
-) -> String {
-	let body = if rendered_command == "pwd" {
-		observation
-			.data
-			.get("path")
-			.and_then(Value::as_str)
-			.unwrap_or(working_directory)
-			.to_string()
-	} else {
-		observation.message.clone()
-	};
-	format!("$ {rendered_command}\n{body}")
-}
-
-fn resolve_sequence_path(cwd: &std::path::Path, raw: &str) -> PathBuf {
-	let path = PathBuf::from(raw);
-	if path.is_absolute() {
-		path
-	} else {
-		cwd.join(path)
 	}
 }
 
@@ -2185,13 +1911,8 @@ So, I'll output: "星期日""#
 			Vec::new(),
 			"inventory request",
 		);
-		let mut loop_state = runtime.initialize_runtime_loop(
-			&request,
-			&request.session_id,
-			&decision,
-			Vec::new(),
-			LoopDriverKind::ToolLoop,
-		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
 		loop_state.visible_tools = vec!["general.execute".to_string()];
 
 		let execution = runtime.execute_tool_loop(
@@ -2285,13 +2006,8 @@ So, I'll output: "星期日""#
 			Vec::new(),
 			"chat request",
 		);
-		let mut loop_state = runtime.initialize_runtime_loop(
-			&request,
-			&request.session_id,
-			&decision,
-			Vec::new(),
-			LoopDriverKind::ToolLoop,
-		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
 
 		let execution = runtime.execute_tool_loop(
 			&TaskId("task-ask-user".to_string()),
@@ -2344,7 +2060,6 @@ So, I'll output: "星期日""#
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
-				assert_eq!(plan.kind, crate::router::DirectRouteKind::ToolLoop);
 				assert_eq!(plan.decision.intent_family, IntentFamily::Unknown);
 				assert_eq!(
 					plan.decision.candidate_tools,
@@ -2389,7 +2104,6 @@ So, I'll output: "星期日""#
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
-				assert_eq!(plan.kind, crate::router::DirectRouteKind::ToolLoop);
 				assert_eq!(plan.decision.intent_family, IntentFamily::TableRead);
 				assert!(
 					plan.decision
@@ -2427,13 +2141,8 @@ So, I'll output: "星期日""#
 			"filesystem request",
 		);
 
-		let loop_state = runtime.initialize_runtime_loop(
-			&request,
-			&request.session_id,
-			&decision,
-			Vec::new(),
-			LoopDriverKind::ToolLoop,
-		);
+		let loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
 
 		assert_eq!(loop_state.run_id, "loop-req-loop");
 		assert_eq!(
@@ -2474,7 +2183,6 @@ So, I'll output: "星期日""#
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
-				assert_eq!(plan.kind, crate::router::DirectRouteKind::ToolLoop);
 				assert_eq!(plan.decision.intent_family, IntentFamily::FilesystemRead);
 				assert_eq!(
 					plan.decision.candidate_tools.first().map(String::as_str),
@@ -2505,13 +2213,8 @@ So, I'll output: "星期日""#
 			Vec::new(),
 			"filesystem request",
 		);
-		let mut loop_state = runtime.initialize_runtime_loop(
-			&request,
-			&request.session_id,
-			&decision,
-			Vec::new(),
-			LoopDriverKind::ToolLoop,
-		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
 		loop_state.record_step(StepRecord::tool_call(
 			1,
 			"fs.read_text",
@@ -2564,13 +2267,8 @@ So, I'll output: "星期日""#
 			Vec::new(),
 			"chat request",
 		);
-		let mut loop_state = runtime.initialize_runtime_loop(
-			&request,
-			&request.session_id,
-			&decision,
-			Vec::new(),
-			LoopDriverKind::ToolLoop,
-		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
 
 		let step = runtime.record_terminal_step(
 			&mut loop_state,

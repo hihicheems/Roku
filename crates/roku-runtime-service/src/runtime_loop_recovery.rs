@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::MutexGuard;
 
-use roku_agent_runtime::{LoopDriverKind, LoopState, should_resume_awaiting_user};
+use roku_agent_runtime::{LoopState, should_resume_awaiting_user};
 use roku_common_types::{RequestEnvelope, ResponseEnvelope, RuntimeError, Task};
 use roku_observability::LogLevel;
 
@@ -99,21 +99,9 @@ impl RuntimeService {
 		loop_state: &mut LoopState,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let initial_history_len = loop_state.history.len();
-		let execution = match loop_state.driver_kind {
-			LoopDriverKind::FilesystemLoop => self.runtime.execute_filesystem_loop(
-				&task.task_id,
-				request,
-				loop_state,
-				Some(&request.goal),
-				None,
-			),
-			LoopDriverKind::ToolLoop => self.runtime.execute_tool_loop(
-				&task.task_id,
-				request,
-				loop_state,
-				Some(&request.goal),
-			),
-		};
+		let execution =
+			self.runtime
+				.execute_tool_loop(&task.task_id, request, loop_state, Some(&request.goal));
 		self.record_runtime_loop_history(loop_state, initial_history_len);
 		let response =
 			self.finalize_direct_path(task, execution.node, execution.result, execution.message)?;
