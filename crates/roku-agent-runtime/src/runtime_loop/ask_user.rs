@@ -16,6 +16,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::runtime_loop::ToolObservation;
 
+/// User-facing payload emitted when the loop must pause for clarification.
+///
+/// ## Why this exists
+/// The runtime needs a small, explicit contract for pausing execution and asking the user for
+/// missing information while preserving the existing `LoopState` for resume.
+///
+/// ## Fields
+/// - `final_message`: The exact clarification message that should be surfaced to the user.
+///
+/// ## Invariants
+/// - This payload does not mutate route classification.
+/// - Resume must continue the existing loop state instead of starting a fresh route decision.
+///
+/// ## Non-Goals
+/// - This payload does not encode a future plan.
+/// - This payload is not a replay log entry by itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AskUserPayload {
 	pub final_message: String,

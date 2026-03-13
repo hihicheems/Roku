@@ -27,6 +27,32 @@ pub enum StepAction {
 	Fail,
 }
 
+/// Immutable fact record for one loop step.
+///
+/// ## Why this exists
+/// The runtime needs a replay-safe record of what already happened without mixing it with prompt
+/// shaping or future planning. `StepRecord` is that factual event record.
+///
+/// ## Fields
+/// - `step_index`: 1-based step number inside the loop.
+/// - `action`: Action emitted by the loop for this step.
+/// - `tool_name`: Selected tool name for tool calls, otherwise `None`.
+/// - `decision_reason`: Runtime or model reason attached to the chosen action.
+/// - `started_at` / `finished_at`: RFC3339 timestamps for replay and audit.
+/// - `tool_latency_ms`: Tool latency when a tool call occurred.
+/// - `observation`: Observed result recorded for the step.
+/// - `remaining_step_budget_after`: Remaining step budget after this step committed.
+/// - `remaining_recovery_budget_after`: Remaining recovery budget after this step committed.
+/// - `working_directory_after`: Working directory to carry into the next round.
+///
+/// ## Invariants
+/// - `StepRecord` only records facts that already happened.
+/// - `tool_name` is populated only for `StepAction::CallTool`.
+/// - `observation` reflects the step outcome, not a future instruction.
+///
+/// ## Non-Goals
+/// - `StepRecord` is not injected verbatim into the model prompt.
+/// - `StepRecord` does not decide the next step.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StepRecord {
 	pub step_index: u32,

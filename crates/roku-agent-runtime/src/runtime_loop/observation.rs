@@ -16,6 +16,26 @@ use roku_plugin_host::{ToolExecutionResult, ToolRuntimeError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+/// Grounded fact returned from a tool invocation or translated tool runtime error.
+///
+/// ## Why this exists
+/// The runtime must preserve a strict boundary between tool truth and runtime interpretation.
+/// `ToolObservation` stores the tool-facing facts that later loop logic may interpret.
+///
+/// ## Fields
+/// - `ok`: Whether the tool invocation succeeded according to the tool contract.
+/// - `tool_name`: Name of the tool that produced this observation.
+/// - `error_type`: Runtime-normalized error type for failed observations, if any.
+/// - `terminal`: Whether the tool contract explicitly says the loop should stop on this result.
+/// - `data`: Structured tool payload retained for downstream interpretation and replay.
+/// - `message`: User-facing or diagnostic summary supplied by the tool contract.
+///
+/// ## Invariants
+/// - `terminal` is tool-contract truth, not a runtime-generated final answer.
+/// - `data` remains structured; it is not replaced by a summarized prompt digest.
+///
+/// ## Non-Goals
+/// - `ToolObservation` does not choose `final_answer`, `ask_user`, or `fail`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolObservation {
 	pub ok: bool,
@@ -26,6 +46,11 @@ pub struct ToolObservation {
 	pub message: String,
 }
 
+/// Step-level observation snapshot stored inside `StepRecord`.
+///
+/// ## Why this exists
+/// A loop step may record a tool observation or a synthetic terminal message. `StepObservation`
+/// keeps those cases explicit without collapsing them into one lossy string.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StepObservation {

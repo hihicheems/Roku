@@ -30,6 +30,38 @@ pub enum LoopStatus {
 	Stopped,
 }
 
+/// Source-of-truth runtime state for a single ReAct loop run.
+///
+/// ## Why this exists
+/// `LoopState` is the mutable state machine for runtime loop execution. It captures the current
+/// goal, routing seed, budgets, visible tools, replay history, and the latest grounded
+/// observation so each next-step decision can be derived from one canonical state object.
+///
+/// ## Fields
+/// - `run_id`: Stable identifier for this loop instance.
+/// - `request_id`: Original request identifier.
+/// - `session_id`: Session identifier used for ask-user resume semantics.
+/// - `goal`: User-visible goal for the current run.
+/// - `route_decision`: Initial route seed that constrains the loop.
+/// - `status`: Current lifecycle state of the loop.
+/// - `step_index`: Index of the latest recorded step.
+/// - `remaining_step_budget`: Remaining loop steps before forced termination.
+/// - `remaining_recovery_budget`: Remaining recovery opportunities after non-terminal errors.
+/// - `working_directory`: Current working directory after prior steps.
+/// - `visible_tools`: Tools visible for the next decision round.
+/// - `bound_resources`: Resources already bound to the loop.
+/// - `history`: Recorded step facts for replay and context projection.
+/// - `last_observation`: Latest grounded tool observation, if any.
+///
+/// ## Invariants
+/// - `history` is append-only within a run.
+/// - `last_observation` must reflect the most recent tool observation recorded in `history`.
+/// - `visible_tools` may be recomputed between rounds, but the current round must treat this
+///   field as the active visibility truth.
+///
+/// ## Non-Goals
+/// - `LoopState` is not the prompt projection passed directly to the model.
+/// - `LoopState` does not encode a multi-step plan.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LoopState {
 	pub run_id: String,
