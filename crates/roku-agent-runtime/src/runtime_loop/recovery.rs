@@ -31,8 +31,10 @@ pub fn should_resume_awaiting_user(loop_state: &LoopState, user_input: &str) -> 
 		IntentFamily::TableRead => extract_table_path(user_input).is_some(),
 		IntentFamily::CodeExec => extract_explicit_python_code(user_input).is_some(),
 		IntentFamily::WebLookup => extract_web_query(user_input).is_some(),
-		IntentFamily::Chat => true,
-		IntentFamily::TextTransform | IntentFamily::MultiStep | IntentFamily::Unknown => false,
+		IntentFamily::Chat
+		| IntentFamily::TextTransform
+		| IntentFamily::MultiStep
+		| IntentFamily::Unknown => true,
 	}
 }
 
