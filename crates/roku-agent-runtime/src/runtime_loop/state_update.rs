@@ -101,7 +101,7 @@ mod tests {
 
 	use super::interpret_observation;
 	use crate::router::{IntentFamily, RouteDecision, RouteRisk};
-	use crate::runtime_loop::{LoopContext, LoopDriverKind, LoopState, ToolObservation};
+	use crate::runtime_loop::{LoopContext, LoopState, ToolObservation};
 
 	fn loop_state() -> LoopState {
 		let context = LoopContext {
@@ -124,7 +124,7 @@ mod tests {
 			),
 			last_observation: None,
 		};
-		LoopState::new("loop-req-1", &context, LoopDriverKind::ToolLoop)
+		LoopState::new("loop-req-1", &context)
 	}
 
 	#[test]

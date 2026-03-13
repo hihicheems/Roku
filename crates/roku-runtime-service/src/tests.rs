@@ -15,8 +15,8 @@
 use std::env;
 
 use roku_agent_runtime::{
-	IntentFamily, LoopContext, LoopDriverKind, LoopState, RouteDecision, RouteRisk, StepAction,
-	StepObservation, StepRecord, ToolObservation,
+	IntentFamily, LoopContext, LoopState, RouteDecision, RouteRisk, StepAction, StepObservation,
+	StepRecord, ToolObservation,
 };
 use roku_common_types::ResourceSelector;
 use roku_common_types::{
@@ -227,8 +227,7 @@ fn pending_filesystem_tool_loops_resume_through_the_generic_loop_driver() {
 		),
 		last_observation: None,
 	};
-	let mut loop_state =
-		LoopState::new("loop-pending-tool-loop", &context, LoopDriverKind::ToolLoop);
+	let mut loop_state = LoopState::new("loop-pending-tool-loop", &context);
 	loop_state.record_step(StepRecord::tool_call(
 		1,
 		"fs.find",
