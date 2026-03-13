@@ -34,4 +34,11 @@ pub use runtime_loop::{
 	NextStepDecision, NextStepDecisionSchemaError, StepAction, StepObservation, StepRecord,
 	ToolObservation, interpret_observation, should_resume_awaiting_user,
 };
-pub use tool_config::{BuiltinToolRole, ConfiguredTool, ToolCatalogConfig, ToolCatalogConfigError};
+pub use tool_config::{
+	BuiltinToolRole, ConfiguredTool, FsToolRuntimeConfig, FsToolRuntimeConfigPatch,
+	PythonToolRuntimeConfig, PythonToolRuntimeConfigPatch, TableToolRuntimeConfig,
+	TableToolRuntimeConfigPatch, ToolCatalogConfig, ToolCatalogConfigError,
+	ToolWorkerRuntimeConfig, ToolWorkerRuntimeConfigPatch, ToolsRuntimeConfig,
+	ToolsRuntimeConfigError, ToolsRuntimeConfigPatch, WebToolRuntimeConfig,
+	WebToolRuntimeConfigPatch,
+};

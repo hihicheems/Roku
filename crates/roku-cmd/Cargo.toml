@@ -22,7 +22,9 @@ roku-plugin-skills = { path = "../roku-plugins/skills" }
 roku-plugin-telegram = { path = "../roku-plugins/telegram" }
 roku-runtime-service = { path = "../roku-runtime-service" }
 roku-state-store = { path = "../roku-state-store" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.9"
 thiserror = "2"
 
 [dev-dependencies]

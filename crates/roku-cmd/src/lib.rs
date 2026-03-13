@@ -17,6 +17,7 @@
 mod api;
 mod bot;
 mod runtime;
+mod runtime_config;
 mod storage;
 mod telegram_loop_bridge;
 
@@ -57,6 +58,8 @@ pub enum CommandError {
 	ApiGatewayBootstrap(String),
 	#[error("failed to bootstrap state store: {0}")]
 	StateStoreBootstrap(String),
+	#[error("failed to load runtime config: {0}")]
+	RuntimeConfigBootstrap(String),
 	#[error("failed to load tool catalog config: {0}")]
 	ToolCatalogBootstrap(String),
 	#[error("failed to encode command output: {0}")]
