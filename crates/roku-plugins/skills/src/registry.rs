@@ -31,9 +31,29 @@ use crate::{
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const INSTALLER_USER_AGENT: &str = "RokuSkillInstaller/0.1";
-const MAX_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024;
-const MAX_PROMPT_DOCUMENT_BYTES: usize = 24 * 1024;
-const MAX_PROMPT_DOCUMENTS: usize = 24;
+const HARD_MAX_HTTP_TIMEOUT_SECONDS: u64 = 300;
+const HARD_MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
+const HARD_MAX_PROMPT_DOCUMENT_BYTES: usize = 128 * 1024;
+const HARD_MAX_PROMPT_DOCUMENTS: usize = 128;
+
+/// Effective non-secret runtime configuration for the skill registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillsRuntimeConfig {
+	pub http_timeout_seconds: u64,
+	pub max_archive_bytes: u64,
+	pub max_prompt_document_bytes: usize,
+	pub max_prompt_documents: usize,
+}
+
+/// Partial overrides for [`SkillsRuntimeConfig`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillsRuntimeConfigPatch {
+	pub http_timeout_seconds: Option<u64>,
+	pub max_archive_bytes: Option<u64>,
+	pub max_prompt_document_bytes: Option<usize>,
+	pub max_prompt_documents: Option<usize>,
+}
 
 #[derive(Debug, Default, Deserialize)]
 struct ParsedSkillFrontMatter {
@@ -65,6 +85,7 @@ enum SkillRegistryBackend {
 pub struct SkillRegistry {
 	backend: SkillRegistryBackend,
 	fetcher: Arc<dyn SkillArchiveFetcher>,
+	config: SkillsRuntimeConfig,
 }
 
 pub trait SkillArchiveFetcher: Send + Sync {
@@ -90,16 +111,126 @@ pub struct DownloadedArchive {
 #[derive(Clone)]
 pub struct HttpSkillArchiveFetcher {
 	client: Client,
+	max_archive_bytes: u64,
 }
 
 impl Default for HttpSkillArchiveFetcher {
 	fn default() -> Self {
+		Self::from_runtime_config(&SkillsRuntimeConfig::default())
+	}
+}
+
+impl Default for SkillsRuntimeConfig {
+	fn default() -> Self {
+		Self {
+			http_timeout_seconds: 30,
+			max_archive_bytes: 32 * 1024 * 1024,
+			max_prompt_document_bytes: 24 * 1024,
+			max_prompt_documents: 24,
+		}
+	}
+}
+
+impl SkillsRuntimeConfig {
+	pub fn apply_patch(&mut self, patch: SkillsRuntimeConfigPatch) {
+		if let Some(value) = patch.http_timeout_seconds {
+			self.http_timeout_seconds = value;
+		}
+		if let Some(value) = patch.max_archive_bytes {
+			self.max_archive_bytes = value;
+		}
+		if let Some(value) = patch.max_prompt_document_bytes {
+			self.max_prompt_document_bytes = value;
+		}
+		if let Some(value) = patch.max_prompt_documents {
+			self.max_prompt_documents = value;
+		}
+	}
+
+	pub fn apply_env_overrides(&mut self) -> Result<(), SkillRegistryError> {
+		if let Some(value) = env_override_u64("ROKU_RUNTIME__SKILLS__HTTP_TIMEOUT_SECONDS")? {
+			self.http_timeout_seconds = value;
+		}
+		if let Some(value) = env_override_u64("ROKU_RUNTIME__SKILLS__MAX_ARCHIVE_BYTES")? {
+			self.max_archive_bytes = value;
+		}
+		if let Some(value) = env_override_usize("ROKU_RUNTIME__SKILLS__MAX_PROMPT_DOCUMENT_BYTES")?
+		{
+			self.max_prompt_document_bytes = value;
+		}
+		if let Some(value) = env_override_usize("ROKU_RUNTIME__SKILLS__MAX_PROMPT_DOCUMENTS")? {
+			self.max_prompt_documents = value;
+		}
+		Ok(())
+	}
+
+	pub fn validate_and_clamp(&mut self) -> Result<(), SkillRegistryError> {
+		if self.http_timeout_seconds == 0 {
+			return Err(SkillRegistryError::RuntimeConfig(
+				"runtime.skills.http_timeout_seconds must be greater than zero".to_string(),
+			));
+		}
+		if self.max_archive_bytes == 0 {
+			return Err(SkillRegistryError::RuntimeConfig(
+				"runtime.skills.max_archive_bytes must be greater than zero".to_string(),
+			));
+		}
+		if self.max_prompt_document_bytes == 0 {
+			return Err(SkillRegistryError::RuntimeConfig(
+				"runtime.skills.max_prompt_document_bytes must be greater than zero".to_string(),
+			));
+		}
+		if self.max_prompt_documents == 0 {
+			return Err(SkillRegistryError::RuntimeConfig(
+				"runtime.skills.max_prompt_documents must be greater than zero".to_string(),
+			));
+		}
+		self.http_timeout_seconds = self.http_timeout_seconds.min(HARD_MAX_HTTP_TIMEOUT_SECONDS);
+		self.max_archive_bytes = self.max_archive_bytes.min(HARD_MAX_ARCHIVE_BYTES);
+		self.max_prompt_document_bytes = self
+			.max_prompt_document_bytes
+			.min(HARD_MAX_PROMPT_DOCUMENT_BYTES);
+		self.max_prompt_documents = self.max_prompt_documents.min(HARD_MAX_PROMPT_DOCUMENTS);
+		Ok(())
+	}
+}
+
+impl HttpSkillArchiveFetcher {
+	pub fn from_runtime_config(config: &SkillsRuntimeConfig) -> Self {
 		let client = Client::builder()
 			.user_agent(INSTALLER_USER_AGENT)
-			.timeout(Duration::from_secs(30))
+			.timeout(Duration::from_secs(config.http_timeout_seconds))
 			.build()
 			.expect("skill installer client should build");
-		Self { client }
+		Self {
+			client,
+			max_archive_bytes: config.max_archive_bytes,
+		}
+	}
+}
+
+fn env_override_string(key: &str) -> Option<String> {
+	env::var(key)
+		.ok()
+		.map(|value| value.trim().to_string())
+		.filter(|value| !value.is_empty())
+}
+
+fn env_override_u64(key: &'static str) -> Result<Option<u64>, SkillRegistryError> {
+	match env_override_string(key) {
+		Some(value) => value.parse::<u64>().map(Some).map_err(|error| {
+			SkillRegistryError::RuntimeConfig(format!("{key} is invalid: {error}"))
+		}),
+		None => Ok(None),
+	}
+}
+
+fn env_override_usize(key: &'static str) -> Result<Option<usize>, SkillRegistryError> {
+	match env_override_string(key) {
+		Some(value) => value.parse::<usize>().map(Some).map_err(|error| {
+			SkillRegistryError::RuntimeConfig(format!("{key} is invalid: {error}"))
+		}),
+		None => Ok(None),
 	}
 }
 
@@ -108,13 +239,19 @@ impl SkillRegistry {
 		Self {
 			backend: SkillRegistryBackend::Disabled,
 			fetcher: Arc::new(DisabledSkillArchiveFetcher),
+			config: SkillsRuntimeConfig::default(),
 		}
 	}
 
 	pub fn file_backed(root: impl Into<PathBuf>) -> Self {
+		Self::file_backed_with_config(root, SkillsRuntimeConfig::default())
+	}
+
+	pub fn file_backed_with_config(root: impl Into<PathBuf>, config: SkillsRuntimeConfig) -> Self {
 		Self {
 			backend: SkillRegistryBackend::FileBacked { root: root.into() },
-			fetcher: Arc::new(HttpSkillArchiveFetcher::default()),
+			fetcher: Arc::new(HttpSkillArchiveFetcher::from_runtime_config(&config)),
+			config,
 		}
 	}
 
@@ -384,7 +521,7 @@ impl SkillRegistry {
 		}
 
 		let record = self.get_skill(skill_name)?;
-		render_skill_context(root, &record, max_chars)
+		render_skill_context(root, &record, max_chars, &self.config)
 	}
 
 	pub fn render_prompt_context_for_query(
@@ -414,7 +551,8 @@ impl SkillRegistry {
 			if remaining == 0 {
 				break;
 			}
-			let context = render_skill_context_for_query(root, &record, query, remaining)?;
+			let context =
+				render_skill_context_for_query(root, &record, query, remaining, &self.config)?;
 			if context.is_empty() {
 				continue;
 			}
@@ -590,7 +728,7 @@ impl HttpSkillArchiveFetcher {
 			});
 		}
 		if let Some(length) = response.content_length()
-			&& length > MAX_ARCHIVE_BYTES
+			&& length > self.max_archive_bytes
 		{
 			return Err(SkillRegistryError::ArchiveTooLarge {
 				url: archive_url.to_string(),
@@ -606,7 +744,7 @@ impl HttpSkillArchiveFetcher {
 				message: error.to_string(),
 			})?;
 		let size_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-		if size_bytes > MAX_ARCHIVE_BYTES {
+		if size_bytes > self.max_archive_bytes {
 			return Err(SkillRegistryError::ArchiveTooLarge {
 				url: archive_url.to_string(),
 				size_bytes,
@@ -1106,8 +1244,9 @@ fn render_skill_context(
 	root: &Path,
 	record: &InstalledSkillRecord,
 	max_chars: usize,
+	config: &SkillsRuntimeConfig,
 ) -> Result<String, SkillRegistryError> {
-	render_skill_context_with_keywords(root, record, max_chars, &[])
+	render_skill_context_with_keywords(root, record, max_chars, &[], config)
 }
 
 fn render_skill_context_for_query(
@@ -1115,13 +1254,14 @@ fn render_skill_context_for_query(
 	record: &InstalledSkillRecord,
 	query: &str,
 	max_chars: usize,
+	config: &SkillsRuntimeConfig,
 ) -> Result<String, SkillRegistryError> {
 	let keywords = if should_focus_query_context(query) {
 		query_keywords(query)
 	} else {
 		Vec::new()
 	};
-	render_skill_context_with_keywords(root, record, max_chars, &keywords)
+	render_skill_context_with_keywords(root, record, max_chars, &keywords, config)
 }
 
 fn render_skill_context_with_keywords(
@@ -1129,6 +1269,7 @@ fn render_skill_context_with_keywords(
 	record: &InstalledSkillRecord,
 	max_chars: usize,
 	keywords: &[String],
+	config: &SkillsRuntimeConfig,
 ) -> Result<String, SkillRegistryError> {
 	let skill_dir = resolve_record_install_dir(root, record);
 	if !skill_dir.exists() {
@@ -1167,7 +1308,8 @@ fn render_skill_context_with_keywords(
 		.saturating_sub(header_budget)
 		.saturating_sub(supporting_budget)
 		.max(512);
-	let entry_excerpt = document_excerpt(&entry_markdown, entry_budget, &entry_path, keywords)?;
+	let entry_excerpt =
+		document_excerpt(&entry_markdown, entry_budget, &entry_path, keywords, config)?;
 	let mut covered_keywords = excerpt_keywords(&entry_excerpt, keywords);
 	let mut rendered = format!(
 		"### skill: {}\nDescription: {}\nVersion: {}\nSource: {}\n\nEntrypoint (`{}`):\n{}",
@@ -1180,7 +1322,7 @@ fn render_skill_context_with_keywords(
 	);
 	let mut documents = 0usize;
 	for path in supporting_paths {
-		if documents >= MAX_PROMPT_DOCUMENTS || rendered.chars().count() >= max_chars {
+		if documents >= config.max_prompt_documents || rendered.chars().count() >= max_chars {
 			break;
 		}
 		let content = fs::read_to_string(&path)?;
@@ -1192,7 +1334,13 @@ fn render_skill_context_with_keywords(
 		if remaining < 128 {
 			break;
 		}
-		let excerpt = document_excerpt(&content, remaining.saturating_sub(64), &path, keywords)?;
+		let excerpt = document_excerpt(
+			&content,
+			remaining.saturating_sub(64),
+			&path,
+			keywords,
+			config,
+		)?;
 		if keywords.len() >= 4 {
 			let excerpt_keywords = excerpt_keywords(&excerpt, keywords);
 			if !excerpt_keywords.is_empty()
@@ -1236,6 +1384,7 @@ fn document_excerpt(
 	max_chars: usize,
 	_path: &Path,
 	keywords: &[String],
+	config: &SkillsRuntimeConfig,
 ) -> Result<String, SkillRegistryError> {
 	if max_chars == 0 {
 		return Ok(String::new());
@@ -1243,7 +1392,7 @@ fn document_excerpt(
 	if content.is_empty() {
 		return Ok(String::new());
 	}
-	let limit = max_chars.min(MAX_PROMPT_DOCUMENT_BYTES);
+	let limit = max_chars.min(config.max_prompt_document_bytes);
 	if limit == 0 {
 		return Ok(String::new());
 	}

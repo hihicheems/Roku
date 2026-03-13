@@ -15,6 +15,7 @@
 use std::env;
 use std::time::Duration;
 
+use crate::runtime_config::{HARD_MAX_WEB_TOP_K, WebToolRuntimeConfig};
 use reqwest::blocking::Client;
 use roku_plugin_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
 use roku_plugin_host::{
@@ -23,9 +24,14 @@ use roku_plugin_host::{
 };
 use serde_json::{Value, json};
 
-const DEFAULT_TOP_K: usize = 5;
-
+#[allow(dead_code)]
 pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
+	catalog_descriptors_with_config(&WebToolRuntimeConfig::default())
+}
+
+pub(crate) fn catalog_descriptors_with_config(
+	_runtime_config: &WebToolRuntimeConfig,
+) -> Vec<CatalogDescriptor> {
 	vec![CatalogDescriptor {
 		selector: roku_common_types::ResourceSelector::tool("web.search"),
 		kind: ResourceKind::Tool,
@@ -50,12 +56,25 @@ pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
 	}]
 }
 
+#[allow(dead_code)]
 pub(crate) fn register_tools(runtime: &mut ToolRuntime) -> Result<(), ToolRuntimeError> {
-	runtime.register_tool(WebSearchTool)?;
+	register_tools_with_config(runtime, &WebToolRuntimeConfig::default())
+}
+
+pub(crate) fn register_tools_with_config(
+	runtime: &mut ToolRuntime,
+	config: &WebToolRuntimeConfig,
+) -> Result<(), ToolRuntimeError> {
+	runtime.register_tool(WebSearchTool {
+		config: config.clone(),
+	})?;
 	Ok(())
 }
 
-struct WebSearchTool;
+#[derive(Clone)]
+struct WebSearchTool {
+	config: WebToolRuntimeConfig,
+}
 
 impl Tool for WebSearchTool {
 	fn descriptor(&self) -> ToolDescriptor {
@@ -100,12 +119,13 @@ impl Tool for WebSearchTool {
 			.get("top_k")
 			.and_then(Value::as_u64)
 			.and_then(|value| usize::try_from(value).ok())
-			.unwrap_or(DEFAULT_TOP_K)
-			.clamp(1, 10);
-		let endpoint = env::var("ROKU_WEB_SEARCH_URL")
-			.ok()
-			.filter(|value| !value.trim().is_empty())
-			.ok_or_else(|| ToolFailure::terminal("ROKU_WEB_SEARCH_URL is not configured"))?;
+			.unwrap_or(self.config.default_top_k)
+			.clamp(1, HARD_MAX_WEB_TOP_K);
+		let endpoint = self
+			.config
+			.endpoint
+			.clone()
+			.ok_or_else(|| ToolFailure::terminal("web search endpoint is not configured"))?;
 		let client = Client::builder()
 			.timeout(Duration::from_millis(8_000))
 			.build()

@@ -16,6 +16,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::runtime_config::{HARD_MAX_PREVIEW_ROWS, TableToolRuntimeConfig};
 use calamine::{Reader, open_workbook_auto};
 use csv::ReaderBuilder;
 use roku_plugin_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
@@ -25,8 +26,6 @@ use roku_plugin_host::{
 };
 use serde_json::{Value, json};
 
-const DEFAULT_PREVIEW_ROWS: usize = 5;
-
 /// Returns catalog metadata for all table builtin tools (table.inspect, table.list_sheets, table.preview, table.schema).
 ///
 /// Used when the core-table plugin is enabled: [`build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities`]
@@ -35,7 +34,14 @@ const DEFAULT_PREVIEW_ROWS: usize = 5;
 /// "Current inventory" in the route classifier prompt, resolving a chosen tool name to a [`ResourceSelector`],
 /// and risk/cost for routing decisions. Tool names here must match the tools registered for execution via
 /// [`register_tools`] in this module.
+#[allow(dead_code)]
 pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
+	catalog_descriptors_with_config(&TableToolRuntimeConfig::default())
+}
+
+pub(crate) fn catalog_descriptors_with_config(
+	_runtime_config: &TableToolRuntimeConfig,
+) -> Vec<CatalogDescriptor> {
 	vec![
 		descriptor_catalog(
 			"table.inspect",
@@ -72,18 +78,49 @@ pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
 	]
 }
 
+#[allow(dead_code)]
 pub(crate) fn register_tools(runtime: &mut ToolRuntime) -> Result<(), ToolRuntimeError> {
-	runtime.register_tool(TableInspectTool)?;
-	runtime.register_tool(TableListSheetsTool)?;
-	runtime.register_tool(TablePreviewTool)?;
-	runtime.register_tool(TableSchemaTool)?;
+	register_tools_with_config(runtime, &TableToolRuntimeConfig::default())
+}
+
+pub(crate) fn register_tools_with_config(
+	runtime: &mut ToolRuntime,
+	config: &TableToolRuntimeConfig,
+) -> Result<(), ToolRuntimeError> {
+	runtime.register_tool(TableInspectTool {
+		config: config.clone(),
+	})?;
+	runtime.register_tool(TableListSheetsTool {
+		config: config.clone(),
+	})?;
+	runtime.register_tool(TablePreviewTool {
+		config: config.clone(),
+	})?;
+	runtime.register_tool(TableSchemaTool {
+		config: config.clone(),
+	})?;
 	Ok(())
 }
 
-struct TableInspectTool;
-struct TableListSheetsTool;
-struct TablePreviewTool;
-struct TableSchemaTool;
+#[derive(Clone)]
+struct TableInspectTool {
+	config: TableToolRuntimeConfig,
+}
+
+#[derive(Clone)]
+struct TableListSheetsTool {
+	config: TableToolRuntimeConfig,
+}
+
+#[derive(Clone)]
+struct TablePreviewTool {
+	config: TableToolRuntimeConfig,
+}
+
+#[derive(Clone)]
+struct TableSchemaTool {
+	config: TableToolRuntimeConfig,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TableKind {
@@ -108,6 +145,7 @@ impl Tool for TableInspectTool {
 	}
 
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
+		let _ = &self.config;
 		let path = required_string(&request.input, "path")?;
 		let roots = allowed_read_roots(&request)?;
 		let resolved = resolve_existing_path(path, &roots)?;
@@ -118,7 +156,7 @@ impl Tool for TableInspectTool {
 				resolved.display()
 			))
 		})?;
-		let detail = inspect_table(&resolved, kind)?;
+		let detail = inspect_table(&resolved, kind, self.config.default_preview_rows)?;
 		let message = if detail.sheet_names.is_empty() {
 			format!(
 				"`{}` is a {} table with {} column(s).",
@@ -153,12 +191,15 @@ impl Tool for TableListSheetsTool {
 	}
 
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
+		let _ = &self.config;
 		let path = required_string(&request.input, "path")?;
 		let roots = allowed_read_roots(&request)?;
 		let resolved = resolve_existing_path(path, &roots)?;
 		let kind = table_kind(&resolved)?;
 		let sheets = match kind {
-			TableKind::Xlsx => inspect_table(&resolved, kind)?.sheet_names,
+			TableKind::Xlsx => {
+				inspect_table(&resolved, kind, self.config.default_preview_rows)?.sheet_names
+			}
 			TableKind::Csv | TableKind::Tsv => Vec::new(),
 		};
 		let message = if sheets.is_empty() {
@@ -193,8 +234,8 @@ impl Tool for TablePreviewTool {
 			.get("rows")
 			.and_then(Value::as_u64)
 			.and_then(|value| usize::try_from(value).ok())
-			.unwrap_or(DEFAULT_PREVIEW_ROWS)
-			.clamp(1, 50);
+			.unwrap_or(self.config.default_preview_rows)
+			.clamp(1, HARD_MAX_PREVIEW_ROWS);
 		let sheet = request
 			.input
 			.get("sheet")
@@ -223,6 +264,7 @@ impl Tool for TableSchemaTool {
 	}
 
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
+		let _ = &self.config;
 		let path = required_string(&request.input, "path")?;
 		let sheet = request
 			.input
@@ -424,10 +466,14 @@ fn table_kind(path: &Path) -> Result<TableKind, ToolFailure> {
 	}
 }
 
-fn inspect_table(path: &Path, kind: TableKind) -> Result<TableInspectSummary, ToolFailure> {
+fn inspect_table(
+	path: &Path,
+	kind: TableKind,
+	default_preview_rows: usize,
+) -> Result<TableInspectSummary, ToolFailure> {
 	match kind {
 		TableKind::Csv | TableKind::Tsv => {
-			let preview = preview_delimited(path, kind, DEFAULT_PREVIEW_ROWS)?;
+			let preview = preview_delimited(path, kind, default_preview_rows)?;
 			Ok(TableInspectSummary {
 				sheet_names: Vec::new(),
 				columns: preview.headers.len(),

@@ -19,8 +19,8 @@ mod router;
 mod types;
 
 pub use providers::openrouter::{
-	OpenRouterBootstrapError, OpenRouterConfig, OpenRouterProvider, build_openrouter_router,
-	build_openrouter_router_with_metrics,
+	OpenRouterBootstrapError, OpenRouterConfig, OpenRouterProvider, OpenRouterRuntimeConfig,
+	OpenRouterRuntimeConfigPatch, build_openrouter_router, build_openrouter_router_with_metrics,
 };
 pub use router::{LlmProvider, LlmRouter};
 pub use types::{

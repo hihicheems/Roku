@@ -22,6 +22,34 @@ use crate::outbound::TelegramRenderOptions;
 use crate::{TelegramOutboundMessage, TelegramParseMode, TelegramReplyMarkup, TelegramUpdate};
 
 const DEFAULT_TELEGRAM_BASE_URL: &str = "https://api.telegram.org";
+const HARD_MAX_POLL_TIMEOUT_SECONDS: u16 = 300;
+const HARD_MAX_IDLE_BACKOFF_MS: u64 = 60_000;
+const HARD_MAX_POLL_ERROR_LOG_THRESHOLD: u32 = 1_000;
+
+/// Effective non-secret Telegram transport/runtime configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramRuntimeConfig {
+	pub api_base_url: String,
+	pub poll_timeout_seconds: u16,
+	pub idle_backoff_ms: u64,
+	pub poll_error_log_threshold: u32,
+	pub progress_notices_enabled: bool,
+	pub include_request_metadata: bool,
+	pub show_attachments: bool,
+}
+
+/// Partial overrides for [`TelegramRuntimeConfig`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelegramRuntimeConfigPatch {
+	pub api_base_url: Option<String>,
+	pub poll_timeout_seconds: Option<u16>,
+	pub idle_backoff_ms: Option<u64>,
+	pub poll_error_log_threshold: Option<u32>,
+	pub progress_notices_enabled: Option<bool>,
+	pub include_request_metadata: Option<bool>,
+	pub show_attachments: Option<bool>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TelegramBotConfig {
@@ -46,34 +74,141 @@ impl TelegramBotConfig {
 					.filter(|value| !value.trim().is_empty())
 			})
 			.ok_or(TelegramTransportError::MissingBotToken)?;
-
-		let api_base_url = env::var("TELEGRAM_API_BASE_URL")
-			.ok()
-			.filter(|value| !value.trim().is_empty())
-			.unwrap_or_else(|| DEFAULT_TELEGRAM_BASE_URL.to_string());
-		let poll_timeout_seconds = env_var_u16("TELEGRAM_POLL_TIMEOUT_SECONDS")?.unwrap_or(30);
-		let idle_backoff_ms = env_var_u64("TELEGRAM_IDLE_BACKOFF_MS")?.unwrap_or(500);
-		let poll_error_log_threshold =
-			env_var_u32("TELEGRAM_POLL_ERROR_LOG_THRESHOLD")?.unwrap_or(5);
-		let progress_notices_enabled = env_var_bool("TELEGRAM_PROGRESS_NOTICES")?.unwrap_or(false);
-		let include_request_metadata =
-			env_var_bool("TELEGRAM_INCLUDE_REQUEST_METADATA")?.unwrap_or(false);
-		let show_attachments = env_var_bool("TELEGRAM_SHOW_ATTACHMENTS")?.unwrap_or(false);
-
-		Ok(Self {
-			token,
-			api_base_url,
-			poll_timeout_seconds,
-			idle_backoff_ms,
-			poll_error_log_threshold,
-			progress_notices_enabled,
-			include_request_metadata,
-			show_attachments,
-		})
+		let mut runtime_config = TelegramRuntimeConfig::default();
+		runtime_config.apply_env_overrides()?;
+		runtime_config.validate_and_clamp()?;
+		Ok(runtime_config.with_token(token))
 	}
 
 	pub(crate) fn render_options(&self) -> TelegramRenderOptions {
 		TelegramRenderOptions {
+			include_request_metadata: self.include_request_metadata,
+			show_attachments: self.show_attachments,
+		}
+	}
+}
+
+impl Default for TelegramRuntimeConfig {
+	fn default() -> Self {
+		Self {
+			api_base_url: DEFAULT_TELEGRAM_BASE_URL.to_string(),
+			poll_timeout_seconds: 30,
+			idle_backoff_ms: 500,
+			poll_error_log_threshold: 5,
+			progress_notices_enabled: false,
+			include_request_metadata: false,
+			show_attachments: false,
+		}
+	}
+}
+
+impl TelegramRuntimeConfig {
+	pub fn apply_patch(&mut self, patch: TelegramRuntimeConfigPatch) {
+		if let Some(value) = patch.api_base_url {
+			self.api_base_url = value;
+		}
+		if let Some(value) = patch.poll_timeout_seconds {
+			self.poll_timeout_seconds = value;
+		}
+		if let Some(value) = patch.idle_backoff_ms {
+			self.idle_backoff_ms = value;
+		}
+		if let Some(value) = patch.poll_error_log_threshold {
+			self.poll_error_log_threshold = value;
+		}
+		if let Some(value) = patch.progress_notices_enabled {
+			self.progress_notices_enabled = value;
+		}
+		if let Some(value) = patch.include_request_metadata {
+			self.include_request_metadata = value;
+		}
+		if let Some(value) = patch.show_attachments {
+			self.show_attachments = value;
+		}
+	}
+
+	pub fn apply_env_overrides(&mut self) -> Result<(), TelegramTransportError> {
+		if let Some(value) = env_override_string("TELEGRAM_API_BASE_URL") {
+			self.api_base_url = value;
+		}
+		if let Some(value) = env_var_u16("TELEGRAM_POLL_TIMEOUT_SECONDS")? {
+			self.poll_timeout_seconds = value;
+		}
+		if let Some(value) = env_var_u64("TELEGRAM_IDLE_BACKOFF_MS")? {
+			self.idle_backoff_ms = value;
+		}
+		if let Some(value) = env_var_u32("TELEGRAM_POLL_ERROR_LOG_THRESHOLD")? {
+			self.poll_error_log_threshold = value;
+		}
+		if let Some(value) = env_var_bool("TELEGRAM_PROGRESS_NOTICES")? {
+			self.progress_notices_enabled = value;
+		}
+		if let Some(value) = env_var_bool("TELEGRAM_INCLUDE_REQUEST_METADATA")? {
+			self.include_request_metadata = value;
+		}
+		if let Some(value) = env_var_bool("TELEGRAM_SHOW_ATTACHMENTS")? {
+			self.show_attachments = value;
+		}
+		if let Some(value) = env_override_string("ROKU_RUNTIME__TELEGRAM__API_BASE_URL") {
+			self.api_base_url = value;
+		}
+		if let Some(value) = env_var_u16("ROKU_RUNTIME__TELEGRAM__POLL_TIMEOUT_SECONDS")? {
+			self.poll_timeout_seconds = value;
+		}
+		if let Some(value) = env_var_u64("ROKU_RUNTIME__TELEGRAM__IDLE_BACKOFF_MS")? {
+			self.idle_backoff_ms = value;
+		}
+		if let Some(value) = env_var_u32("ROKU_RUNTIME__TELEGRAM__POLL_ERROR_LOG_THRESHOLD")? {
+			self.poll_error_log_threshold = value;
+		}
+		if let Some(value) = env_var_bool("ROKU_RUNTIME__TELEGRAM__PROGRESS_NOTICES_ENABLED")? {
+			self.progress_notices_enabled = value;
+		}
+		if let Some(value) = env_var_bool("ROKU_RUNTIME__TELEGRAM__INCLUDE_REQUEST_METADATA")? {
+			self.include_request_metadata = value;
+		}
+		if let Some(value) = env_var_bool("ROKU_RUNTIME__TELEGRAM__SHOW_ATTACHMENTS")? {
+			self.show_attachments = value;
+		}
+		Ok(())
+	}
+
+	pub fn validate_and_clamp(&mut self) -> Result<(), TelegramTransportError> {
+		self.api_base_url = self.api_base_url.trim().to_string();
+		if self.api_base_url.is_empty() {
+			return Err(TelegramTransportError::InvalidEnv {
+				key: "TELEGRAM_API_BASE_URL",
+				message: "value cannot be empty".to_string(),
+			});
+		}
+		if self.poll_timeout_seconds == 0 {
+			return Err(TelegramTransportError::InvalidEnv {
+				key: "TELEGRAM_POLL_TIMEOUT_SECONDS",
+				message: "value must be greater than zero".to_string(),
+			});
+		}
+		if self.idle_backoff_ms == 0 {
+			return Err(TelegramTransportError::InvalidEnv {
+				key: "TELEGRAM_IDLE_BACKOFF_MS",
+				message: "value must be greater than zero".to_string(),
+			});
+		}
+		self.poll_timeout_seconds = self.poll_timeout_seconds.min(HARD_MAX_POLL_TIMEOUT_SECONDS);
+		self.idle_backoff_ms = self.idle_backoff_ms.min(HARD_MAX_IDLE_BACKOFF_MS);
+		self.poll_error_log_threshold = self
+			.poll_error_log_threshold
+			.min(HARD_MAX_POLL_ERROR_LOG_THRESHOLD);
+		Ok(())
+	}
+
+	pub fn with_token(self, token: String) -> TelegramBotConfig {
+		TelegramBotConfig {
+			token,
+			api_base_url: self.api_base_url,
+			poll_timeout_seconds: self.poll_timeout_seconds,
+			idle_backoff_ms: self.idle_backoff_ms,
+			poll_error_log_threshold: self.poll_error_log_threshold,
+			progress_notices_enabled: self.progress_notices_enabled,
 			include_request_metadata: self.include_request_metadata,
 			show_attachments: self.show_attachments,
 		}
@@ -239,6 +374,13 @@ fn parse_mode_label(mode: TelegramParseMode) -> Option<&'static str> {
 		TelegramParseMode::PlainText => None,
 		TelegramParseMode::MarkdownV2 => Some("MarkdownV2"),
 	}
+}
+
+fn env_override_string(key: &str) -> Option<String> {
+	env::var(key)
+		.ok()
+		.map(|value| value.trim().to_string())
+		.filter(|value| !value.is_empty())
 }
 
 fn env_var_u16(key: &'static str) -> Result<Option<u16>, TelegramTransportError> {

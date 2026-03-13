@@ -20,6 +20,7 @@ mod types;
 pub use error::SkillRegistryError;
 pub use registry::{
 	DownloadedArchive, HttpSkillArchiveFetcher, SkillArchiveFetcher, SkillRegistry,
+	SkillsRuntimeConfig, SkillsRuntimeConfigPatch,
 };
 pub use source::SkillSource;
 pub use types::{InstalledSkillRecord, SkillDescriptor, SkillInstallReport};

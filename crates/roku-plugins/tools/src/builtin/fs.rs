@@ -17,6 +17,9 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use crate::runtime_config::{
+	FsToolRuntimeConfig, HARD_MAX_DESCENDANT_SCAN_ENTRIES, HARD_MAX_READ_BYTES,
+};
 use glob::glob;
 use roku_plugin_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
 use roku_plugin_host::{
@@ -24,15 +27,6 @@ use roku_plugin_host::{
 	ToolRuntime, ToolRuntimeError, ToolSchema,
 };
 use serde_json::{Value, json};
-
-// Cap directory listings to keep direct-route responses bounded and readable.
-const MAX_DIR_ENTRIES: usize = 200;
-// Default upper bound for text reads when the caller does not provide `max_bytes`.
-const DEFAULT_MAX_BYTES: usize = 4_096;
-// Cap glob expansion results to avoid oversized payloads from broad patterns.
-const MAX_GLOB_MATCHES: usize = 200;
-// Stop recursive basename search after scanning a bounded number of entries.
-const MAX_DESCENDANT_SCAN_ENTRIES: usize = 8_000;
 
 /// Returns catalog metadata for all fs builtin tools (`fs.find`, `fs.inspect`, `fs.list_dir`,
 /// `fs.read_text`, `fs.glob`, `fs.exists`).
@@ -43,7 +37,14 @@ const MAX_DESCENDANT_SCAN_ENTRIES: usize = 8_000;
 /// "Current inventory" in the route classifier prompt, resolving a chosen tool name to a [`ResourceSelector`],
 /// and risk/cost for routing decisions. Tool names here must match the tools registered for execution via
 /// [`register_tools`] in this module.
+#[allow(dead_code)]
 pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
+	catalog_descriptors_with_config(&FsToolRuntimeConfig::default())
+}
+
+pub(crate) fn catalog_descriptors_with_config(
+	_runtime_config: &FsToolRuntimeConfig,
+) -> Vec<CatalogDescriptor> {
 	vec![
 		descriptor_catalog(
 			"fs.find",
@@ -163,22 +164,65 @@ pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
 	]
 }
 
+#[allow(dead_code)]
 pub(crate) fn register_tools(runtime: &mut ToolRuntime) -> Result<(), ToolRuntimeError> {
-	runtime.register_tool(FsFindTool)?;
-	runtime.register_tool(FsInspectTool)?;
-	runtime.register_tool(FsListDirTool)?;
-	runtime.register_tool(FsReadTextTool)?;
-	runtime.register_tool(FsGlobTool)?;
-	runtime.register_tool(FsExistsTool)?;
+	register_tools_with_config(runtime, &FsToolRuntimeConfig::default())
+}
+
+pub(crate) fn register_tools_with_config(
+	runtime: &mut ToolRuntime,
+	config: &FsToolRuntimeConfig,
+) -> Result<(), ToolRuntimeError> {
+	runtime.register_tool(FsFindTool {
+		config: config.clone(),
+	})?;
+	runtime.register_tool(FsInspectTool {
+		config: config.clone(),
+	})?;
+	runtime.register_tool(FsListDirTool {
+		config: config.clone(),
+	})?;
+	runtime.register_tool(FsReadTextTool {
+		config: config.clone(),
+	})?;
+	runtime.register_tool(FsGlobTool {
+		config: config.clone(),
+	})?;
+	runtime.register_tool(FsExistsTool {
+		config: config.clone(),
+	})?;
 	Ok(())
 }
 
-struct FsFindTool;
-struct FsInspectTool;
-struct FsListDirTool;
-struct FsReadTextTool;
-struct FsGlobTool;
-struct FsExistsTool;
+#[derive(Clone)]
+struct FsFindTool {
+	config: FsToolRuntimeConfig,
+}
+
+#[derive(Clone)]
+struct FsInspectTool {
+	config: FsToolRuntimeConfig,
+}
+
+#[derive(Clone)]
+struct FsListDirTool {
+	config: FsToolRuntimeConfig,
+}
+
+#[derive(Clone)]
+struct FsReadTextTool {
+	config: FsToolRuntimeConfig,
+}
+
+#[derive(Clone)]
+struct FsGlobTool {
+	config: FsToolRuntimeConfig,
+}
+
+#[derive(Clone)]
+struct FsExistsTool {
+	config: FsToolRuntimeConfig,
+}
 
 impl Tool for FsFindTool {
 	fn descriptor(&self) -> ToolDescriptor {
@@ -193,7 +237,8 @@ impl Tool for FsFindTool {
 			.and_then(Value::as_str)
 			.unwrap_or("any");
 		let roots = allowed_read_roots(&request)?;
-		let matches = find_descendant_matches(name, kind, &roots)?;
+		let matches =
+			find_descendant_matches(name, kind, &roots, self.config.max_descendant_scan_entries)?;
 		let (ok, error_type, message) = match matches.len() {
 			0 => (
 				false,
@@ -231,9 +276,11 @@ impl Tool for FsInspectTool {
 	}
 
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
+		let _ = &self.config;
 		let path = required_string(&request.input, "path")?;
 		let roots = allowed_read_roots(&request)?;
-		let resolved = resolve_existing_path(path, &roots)?;
+		let resolved =
+			resolve_existing_path(path, &roots, self.config.max_descendant_scan_entries)?;
 		let metadata = fs::symlink_metadata(&resolved).map_err(|error| {
 			ToolFailure::terminal(format!("failed to inspect path `{path}`: {error}"))
 		})?;
@@ -258,7 +305,8 @@ impl Tool for FsListDirTool {
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
 		let path = required_string(&request.input, "path")?;
 		let roots = allowed_read_roots(&request)?;
-		let resolved = resolve_existing_path(path, &roots)?;
+		let resolved =
+			resolve_existing_path(path, &roots, self.config.max_descendant_scan_entries)?;
 		if !resolved.is_dir() {
 			return Err(ToolFailure::terminal(format!(
 				"`{}` is not a directory",
@@ -272,10 +320,10 @@ impl Tool for FsListDirTool {
 			.filter_map(Result::ok)
 			.collect::<Vec<_>>();
 		entries.sort_by_key(|entry| entry.file_name());
-		let truncated = entries.len() > MAX_DIR_ENTRIES;
+		let truncated = entries.len() > self.config.max_dir_entries;
 		let items = entries
 			.into_iter()
-			.take(MAX_DIR_ENTRIES)
+			.take(self.config.max_dir_entries)
 			.map(|entry| {
 				let entry_path = entry.path();
 				let metadata = fs::symlink_metadata(&entry_path).ok();
@@ -309,9 +357,11 @@ impl Tool for FsReadTextTool {
 			.get("max_bytes")
 			.and_then(Value::as_u64)
 			.and_then(|value| usize::try_from(value).ok())
-			.unwrap_or(DEFAULT_MAX_BYTES);
+			.unwrap_or(self.config.default_max_bytes)
+			.min(HARD_MAX_READ_BYTES);
 		let roots = allowed_read_roots(&request)?;
-		let resolved = resolve_existing_path(path, &roots)?;
+		let resolved =
+			resolve_existing_path(path, &roots, self.config.max_descendant_scan_entries)?;
 		let mut file = File::open(&resolved).map_err(|error| {
 			ToolFailure::terminal(format!("failed to open `{}`: {error}", resolved.display()))
 		})?;
@@ -363,11 +413,11 @@ impl Tool for FsGlobTool {
 			})?;
 			ensure_allowed(&canonical, &roots)?;
 			matches.push(canonical.display().to_string());
-			if matches.len() >= MAX_GLOB_MATCHES {
+			if matches.len() >= self.config.max_glob_matches {
 				break;
 			}
 		}
-		let truncated = matches.len() >= MAX_GLOB_MATCHES;
+		let truncated = matches.len() >= self.config.max_glob_matches;
 		let message = if matches.is_empty() {
 			format!("No files matched `{pattern}`.")
 		} else if truncated {
@@ -390,9 +440,11 @@ impl Tool for FsExistsTool {
 	}
 
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
+		let _ = &self.config;
 		let path = required_string(&request.input, "path")?;
 		let roots = allowed_read_roots(&request)?;
-		let candidate = resolve_candidate_path(path, &roots)?;
+		let candidate =
+			resolve_candidate_path(path, &roots, self.config.max_descendant_scan_entries)?;
 		let exists = candidate.exists();
 		let (kind, size) = if exists {
 			let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
@@ -575,8 +627,12 @@ fn allowed_read_roots(request: &ToolInvocationRequest) -> Result<Vec<PathBuf>, T
 	Ok(roots)
 }
 
-fn resolve_existing_path(raw: &str, roots: &[PathBuf]) -> Result<PathBuf, ToolFailure> {
-	let candidate = resolve_candidate_path(raw, roots)?;
+fn resolve_existing_path(
+	raw: &str,
+	roots: &[PathBuf],
+	descendant_scan_limit: usize,
+) -> Result<PathBuf, ToolFailure> {
+	let candidate = resolve_candidate_path(raw, roots, descendant_scan_limit)?;
 	let canonical = candidate
 		.canonicalize()
 		.map_err(|error| ToolFailure::terminal(format!("failed to resolve `{raw}`: {error}")))?;
@@ -584,7 +640,11 @@ fn resolve_existing_path(raw: &str, roots: &[PathBuf]) -> Result<PathBuf, ToolFa
 	Ok(canonical)
 }
 
-fn resolve_candidate_path(raw: &str, roots: &[PathBuf]) -> Result<PathBuf, ToolFailure> {
+fn resolve_candidate_path(
+	raw: &str,
+	roots: &[PathBuf],
+	descendant_scan_limit: usize,
+) -> Result<PathBuf, ToolFailure> {
 	let path = PathBuf::from(raw);
 	let candidate = if path.is_absolute() {
 		path.clone()
@@ -605,7 +665,7 @@ fn resolve_candidate_path(raw: &str, roots: &[PathBuf]) -> Result<PathBuf, ToolF
 	if !path.is_absolute()
 		&& !raw.contains('/')
 		&& !raw.contains('\\')
-		&& let Some(resolved) = find_unique_descendant_match(raw, roots)?
+		&& let Some(resolved) = find_unique_descendant_match(raw, roots, descendant_scan_limit)?
 	{
 		ensure_allowed(&resolved, roots)?;
 		return Ok(resolved);
@@ -624,8 +684,9 @@ fn resolve_candidate_path(raw: &str, roots: &[PathBuf]) -> Result<PathBuf, ToolF
 fn find_unique_descendant_match(
 	target_name: &str,
 	roots: &[PathBuf],
+	descendant_scan_limit: usize,
 ) -> Result<Option<PathBuf>, ToolFailure> {
-	let matches = find_descendant_matches(target_name, "any", roots)?;
+	let matches = find_descendant_matches(target_name, "any", roots, descendant_scan_limit)?;
 	if matches.len() > 1 {
 		return Err(ToolFailure::terminal(format!(
 			"`{target_name}` is ambiguous under the allowed read roots; please provide a more specific path"
@@ -645,6 +706,7 @@ fn find_descendant_matches(
 	target_name: &str,
 	kind: &str,
 	roots: &[PathBuf],
+	descendant_scan_limit: usize,
 ) -> Result<Vec<String>, ToolFailure> {
 	let mut exact_matches = Vec::new();
 	let mut fuzzy_matches = Vec::new();
@@ -660,7 +722,7 @@ fn find_descendant_matches(
 			})?;
 			for entry in entries.filter_map(Result::ok) {
 				visited += 1;
-				if visited > MAX_DESCENDANT_SCAN_ENTRIES {
+				if visited > descendant_scan_limit.min(HARD_MAX_DESCENDANT_SCAN_ENTRIES) {
 					return Ok(select_best_descendant_matches(exact_matches, fuzzy_matches));
 				}
 				let path = entry.path();
