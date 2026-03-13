@@ -14,6 +14,17 @@
 
 use crate::router::{DirectRoutePlan, RouteDecision};
 
+/// Terminal escalation actions that still bypass direct loop execution.
+///
+/// ## Why this exists
+/// Some requests cannot immediately continue through the generic loop because they are missing
+/// mandatory user input or the runtime has hit a hard block. `EscalationAction` encodes those
+/// exceptional cases.
+///
+/// ## Invariants
+/// - Escalations are exceptional paths, not the default handling mode for new requests.
+/// - `EnterLimitedPlanning` is reserved for deprecated compatibility paths such as explicit
+///   planning-mode hints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EscalationAction {
 	AskForMoreInfo,
@@ -21,6 +32,7 @@ pub enum EscalationAction {
 	EnterLimitedPlanning,
 }
 
+/// Reasons attached to a terminal route escalation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EscalationReason {
 	MissingArguments,
@@ -32,6 +44,7 @@ pub enum EscalationReason {
 	LowConfidence,
 }
 
+/// Route-layer terminal plan used only when the request cannot continue into the generic loop.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouteEscalationPlan {
 	pub decision: RouteDecision,
@@ -39,6 +52,10 @@ pub struct RouteEscalationPlan {
 	pub action: EscalationAction,
 }
 
+/// Final route outcome produced by the classifier.
+///
+/// `Direct` means "initialize one runtime loop with this hint." `Escalate` means the runtime hit
+/// an explicit hard stop or compatibility-only path.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RouteDecisionResult {
 	Direct(DirectRoutePlan),

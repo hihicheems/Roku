@@ -64,7 +64,7 @@ fn deterministic_pre_classify(
 		return Some(result);
 	}
 
-	if let Some(result) = classify_structured_multi_step_request(request) {
+	if let Some(result) = classify_structured_multi_step_request(context, request) {
 		return Some(result);
 	}
 
@@ -136,11 +136,7 @@ fn deterministic_pre_classify(
 			Vec::new(),
 			"request likely needs multi-step coordination beyond a direct single-tool route",
 		);
-		return Some(RouteDecisionResult::Escalate(RouteEscalationPlan {
-			decision,
-			reason: EscalationReason::RequiresMultiStep,
-			action: EscalationAction::EnterLimitedPlanning,
-		}));
+		return Some(build_loop_hint_route(context, decision));
 	}
 
 	if let Some(result) = classify_structural_fallback(context, request) {
@@ -171,6 +167,7 @@ fn deterministic_pre_classify(
 }
 
 fn classify_structured_multi_step_request(
+	context: &RouteClassifierContext<'_>,
 	request: &RequestEnvelope,
 ) -> Option<RouteDecisionResult> {
 	let explicit_paths = extract_path_candidates(&request.goal);
@@ -190,11 +187,7 @@ fn classify_structured_multi_step_request(
 		Vec::new(),
 		"structured request contains multiple grounded targets or chained commands that cannot be satisfied by a single direct tool invocation",
 	);
-	Some(RouteDecisionResult::Escalate(RouteEscalationPlan {
-		decision,
-		reason: EscalationReason::RequiresMultiStep,
-		action: EscalationAction::EnterLimitedPlanning,
-	}))
+	Some(build_loop_hint_route(context, decision))
 }
 
 fn has_shell_command_chain(goal: &str) -> bool {
@@ -586,14 +579,15 @@ fn classify_with_llm(
 	let value = match response {
 		Ok(response) => response.value,
 		Err(error) => {
-			return llm_classifier_failure_decision(error);
+			return llm_classifier_failure_route(context, error);
 		}
 	};
 	let decision = match RouteDecision::from_json_value(&value) {
 		Ok(decision) => decision,
 		Err(error) => {
-			return RouteDecisionResult::Escalate(RouteEscalationPlan {
-				decision: RouteDecision::new(
+			return build_loop_hint_route(
+				context,
+				RouteDecision::new(
 					IntentFamily::Unknown,
 					0.0,
 					false,
@@ -603,31 +597,17 @@ fn classify_with_llm(
 					Vec::new(),
 					format!("route classifier returned invalid schema: {error}"),
 				),
-				reason: EscalationReason::RouteClassifierFailure,
-				action: EscalationAction::EnterLimitedPlanning,
-			});
+			);
 		}
 	};
-	if decision.confidence_score() < ROUTE_CONFIDENCE_FLOOR {
-		return RouteDecisionResult::Escalate(RouteEscalationPlan {
-			decision,
-			reason: EscalationReason::LowConfidence,
-			action: EscalationAction::EnterLimitedPlanning,
-		});
-	}
 	if !decision.missing_arguments.is_empty() {
-		return RouteDecisionResult::Escalate(RouteEscalationPlan {
-			decision,
-			reason: EscalationReason::MissingArguments,
-			action: EscalationAction::AskForMoreInfo,
-		});
+		return build_loop_hint_route(context, decision);
+	}
+	if decision.confidence_score() < ROUTE_CONFIDENCE_FLOOR {
+		return build_loop_hint_route(context, decision);
 	}
 	if decision.requires_multi_step || decision.intent_family == IntentFamily::MultiStep {
-		return RouteDecisionResult::Escalate(RouteEscalationPlan {
-			decision,
-			reason: EscalationReason::RequiresMultiStep,
-			action: EscalationAction::EnterLimitedPlanning,
-		});
+		return build_loop_hint_route(context, decision);
 	}
 	if let Some(result) = classify_skill_route_from_decision(
 		context,
@@ -664,6 +644,12 @@ fn classify_with_llm(
 		let preferred_tool = decision.candidate_tools.first().cloned();
 		return build_tool_loop_route(context, decision, preferred_tool.as_deref(), Vec::new());
 	}
+	if matches!(
+		decision.intent_family,
+		IntentFamily::MultiStep | IntentFamily::Unknown
+	) {
+		return build_loop_hint_route(context, decision);
+	}
 	if let Some(selector) = select_tool_from_candidates(context.catalog, &decision.candidate_tools)
 	{
 		return build_direct_tool_plan(context, request, decision, selector);
@@ -694,7 +680,10 @@ fn unresolved_without_route_model() -> RouteDecisionResult {
 	})
 }
 
-fn llm_classifier_failure_decision(error: StructuredGenerationError) -> RouteDecisionResult {
+fn llm_classifier_failure_route(
+	context: &RouteClassifierContext<'_>,
+	error: StructuredGenerationError,
+) -> RouteDecisionResult {
 	let (reason, escalation_reason) = match error {
 		StructuredGenerationError::ParseGuard(error) => (
 			format!("route classifier parse guard rejected provider output: {error}"),
@@ -705,20 +694,20 @@ fn llm_classifier_failure_decision(error: StructuredGenerationError) -> RouteDec
 			EscalationReason::RouteClassifierFailure,
 		),
 	};
-	RouteDecisionResult::Escalate(RouteEscalationPlan {
-		decision: RouteDecision::new(
-			IntentFamily::Unknown,
-			0.0,
-			false,
-			RouteRisk::Low,
-			Vec::new(),
-			Vec::new(),
-			Vec::new(),
-			reason,
-		),
-		reason: escalation_reason,
-		action: EscalationAction::EnterLimitedPlanning,
-	})
+	let mut decision = RouteDecision::new(
+		IntentFamily::Unknown,
+		0.0,
+		false,
+		RouteRisk::Low,
+		Vec::new(),
+		Vec::new(),
+		Vec::new(),
+		reason,
+	);
+	if matches!(escalation_reason, EscalationReason::RouteParseGuardFailure) {
+		decision.requires_multi_step = false;
+	}
+	build_loop_hint_route(context, decision)
 }
 
 fn llm_candidates(catalog: &ResourceCatalog) -> Vec<serde_json::Value> {
@@ -1066,8 +1055,13 @@ fn build_tool_loop_route(
 	preferred_tool: Option<&str>,
 	bound_resources: Vec<ResourceSelector>,
 ) -> RouteDecisionResult {
-	decision.candidate_tools =
-		tool_loop_candidate_tools(context.catalog, decision.intent_family, preferred_tool);
+	let seeded_tools = decision.candidate_tools.clone();
+	decision.candidate_tools = tool_loop_candidate_tools(
+		context.catalog,
+		decision.intent_family,
+		preferred_tool,
+		&seeded_tools,
+	);
 	if decision.candidate_tools.is_empty() {
 		return RouteDecisionResult::Escalate(RouteEscalationPlan {
 			decision,
@@ -1087,6 +1081,13 @@ fn build_tool_loop_route(
 		kind: DirectRouteKind::ToolLoop,
 		bound_resources,
 	})
+}
+
+fn build_loop_hint_route(
+	context: &RouteClassifierContext<'_>,
+	decision: RouteDecision,
+) -> RouteDecisionResult {
+	build_tool_loop_route(context, decision, None, Vec::new())
 }
 
 fn filesystem_loop_candidate_tools(
@@ -1126,6 +1127,7 @@ fn tool_loop_candidate_tools(
 	catalog: &ResourceCatalog,
 	intent_family: IntentFamily,
 	preferred_tool: Option<&str>,
+	seed_tools: &[String],
 ) -> Vec<String> {
 	let family_tools = match intent_family {
 		IntentFamily::Chat => vec!["general.execute"],
@@ -1139,7 +1141,10 @@ fn tool_loop_candidate_tools(
 		}
 		IntentFamily::WebLookup => vec!["web.search"],
 		IntentFamily::CodeExec => vec!["python.run"],
-		_ => Vec::new(),
+		IntentFamily::TextTransform | IntentFamily::MultiStep | IntentFamily::Unknown => {
+			vec!["general.execute"]
+		}
+		IntentFamily::FilesystemRead => Vec::new(),
 	};
 	let mut tools = Vec::new();
 	if let Some(preferred_tool) = preferred_tool
@@ -1152,6 +1157,13 @@ fn tool_loop_candidate_tools(
 			&& !tools.iter().any(|existing| existing == tool_name)
 		{
 			tools.push(tool_name.to_string());
+		}
+	}
+	for tool_name in seed_tools {
+		if tool_selector(catalog, tool_name).is_some()
+			&& !tools.iter().any(|existing| existing == tool_name)
+		{
+			tools.push(tool_name.clone());
 		}
 	}
 	tools

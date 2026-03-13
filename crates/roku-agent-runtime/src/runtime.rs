@@ -2110,6 +2110,102 @@ So, I'll output: "星期日""#
 	}
 
 	#[test]
+	fn classify_route_routes_unknown_requests_into_generic_loop() {
+		let (route_router, _prompts) = router_with_json_responses(vec![serde_json::json!({
+			"intent_family": "unknown",
+			"confidence": 0.91,
+			"requires_multi_step": false,
+			"risk": "low",
+			"candidate_tools": [],
+			"candidate_plugins": [],
+			"missing_arguments": [],
+			"reason": "The request is too underspecified to classify more narrowly."
+		})]);
+		let execution_router = router_with_text_output("unused-execution-provider", "unused");
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+			);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-unknown".to_string()),
+			session_id: "session-unknown".to_string(),
+			goal: "帮我做这个事情".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+
+		match route {
+			crate::router::RouteDecisionResult::Direct(plan) => {
+				assert_eq!(plan.kind, crate::router::DirectRouteKind::ToolLoop);
+				assert_eq!(plan.decision.intent_family, IntentFamily::Unknown);
+				assert_eq!(
+					plan.decision.candidate_tools,
+					vec!["general.execute".to_string()]
+				);
+			}
+			other => panic!("expected direct loop route, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn classify_route_demotes_low_confidence_to_tool_loop() {
+		let (route_router, _prompts) = router_with_json_responses(vec![serde_json::json!({
+			"intent_family": "table_read",
+			"confidence": 0.21,
+			"requires_multi_step": false,
+			"risk": "low",
+			"candidate_tools": ["table.schema"],
+			"candidate_plugins": [],
+			"missing_arguments": [],
+			"reason": "Weak signal that the user may want a table operation."
+		})]);
+		let execution_router = router_with_text_output("unused-execution-provider", "unused");
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+			);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-low-confidence".to_string()),
+			session_id: "session-low-confidence".to_string(),
+			goal: "Maybe inspect a table for me".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+
+		match route {
+			crate::router::RouteDecisionResult::Direct(plan) => {
+				assert_eq!(plan.kind, crate::router::DirectRouteKind::ToolLoop);
+				assert_eq!(plan.decision.intent_family, IntentFamily::TableRead);
+				assert!(
+					plan.decision
+						.candidate_tools
+						.contains(&"table.preview".to_string())
+				);
+				assert!(
+					plan.decision
+						.candidate_tools
+						.contains(&"table.schema".to_string())
+				);
+			}
+			other => panic!("expected low-confidence request to enter tool loop, got {other:?}"),
+		}
+	}
+
+	#[test]
 	fn initialize_runtime_loop_uses_shortlisted_visible_tools() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
