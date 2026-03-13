@@ -110,6 +110,10 @@ impl RuntimeService {
 		response_status: ResponseStatus,
 		message: &str,
 	) -> StepRecord {
+		if let Some(existing) = self.existing_terminal_step(loop_state, action) {
+			self.log_runtime_loop_terminated(loop_state);
+			return existing;
+		}
 		self.record_runtime_loop_step_with_action(loop_state, action, response_status, message)
 	}
 
@@ -155,6 +159,34 @@ impl RuntimeService {
 			Some(message.to_string()),
 		);
 		self.record_runtime_loop_history(loop_state, loop_state.history.len().saturating_sub(1));
+		self.log_runtime_loop_terminated(loop_state);
+		step
+	}
+
+	fn existing_terminal_step(
+		&self,
+		loop_state: &LoopState,
+		action: StepAction,
+	) -> Option<StepRecord> {
+		let terminal_status_matches = match action {
+			StepAction::AskUser => {
+				loop_state.status == roku_agent_runtime::LoopStatus::AwaitingUser
+			}
+			StepAction::FinalAnswer => {
+				loop_state.status == roku_agent_runtime::LoopStatus::Succeeded
+			}
+			StepAction::Fail => loop_state.status == roku_agent_runtime::LoopStatus::Failed,
+			StepAction::CallTool => {
+				loop_state.status == roku_agent_runtime::LoopStatus::LoopRunning
+			}
+		};
+		terminal_status_matches
+			.then(|| loop_state.history.last().cloned())
+			.flatten()
+			.filter(|step| step.action == action)
+	}
+
+	fn log_runtime_loop_terminated(&self, loop_state: &LoopState) {
 		log_runtime(
 			LogLevel::Info,
 			"runtime loop terminated",
@@ -164,7 +196,6 @@ impl RuntimeService {
 				("step_count", loop_state.history.len().to_string()),
 			],
 		);
-		step
 	}
 }
 

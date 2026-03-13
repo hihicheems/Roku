@@ -22,11 +22,11 @@ use crate::router::{
 	RouteClassifierContext, RouteDecisionResult,
 };
 use crate::runtime_loop::{
-	LoopContext, LoopState, StepAction, StepObservation, StepRecord, ToolObservation,
-	attachments_for_tool, build_loop_context, decide_filesystem_next_step,
-	decide_tool_loop_next_step, effective_ask_user_message, intake_request, interpret_observation,
-	next_working_directory_from_observation,
-	summarize_observation as summarize_filesystem_observation,
+	ContextProjection, LoopContext, LoopState, StepAction, StepObservation, StepRecord,
+	ToolObservation, attachments_for_tool, build_context_projection, build_loop_context,
+	decide_filesystem_next_step, decide_tool_loop_next_step, effective_ask_user_message,
+	intake_request, interpret_observation, next_working_directory_from_observation,
+	summarize_observation,
 };
 use crate::tool_config::ToolCatalogConfig;
 use crate::tools::{
@@ -420,7 +420,7 @@ impl GenericAgentRuntime {
 						loop_state.step_index + 1,
 						tool_name,
 						next_step.reason,
-						StepObservation::Tool(observation),
+						StepObservation::Tool(observation.clone()),
 						execution_elapsed_ms(&execution.result),
 						interpreted.remaining_step_budget,
 						interpreted.remaining_recovery_budget,
@@ -435,8 +435,7 @@ impl GenericAgentRuntime {
 							.last_observation
 							.as_ref()
 							.map(|observation| {
-								summarize_filesystem_observation(&loop_state.goal, observation)
-									.final_message
+								summarize_observation(&loop_state.goal, observation).final_message
 							})
 							.unwrap_or_else(|| {
 								"Filesystem loop stopped before producing an observation."
@@ -471,8 +470,7 @@ impl GenericAgentRuntime {
 							.last_observation
 							.as_ref()
 							.map(|observation| {
-								summarize_filesystem_observation(&loop_state.goal, observation)
-									.final_message
+								summarize_observation(&loop_state.goal, observation).final_message
 							})
 							.unwrap_or_else(|| "Filesystem loop completed.".to_string())
 					});
@@ -506,8 +504,13 @@ impl GenericAgentRuntime {
 		user_reply: Option<&str>,
 	) -> DirectRouteExecutionResult {
 		loop {
-			let next_step =
-				decide_tool_loop_next_step(loop_state, self.route_router.as_deref(), user_reply);
+			let context_projection = self.refresh_tool_loop_projection(loop_state);
+			let next_step = decide_tool_loop_next_step(
+				loop_state,
+				&context_projection,
+				self.route_router.as_deref(),
+				user_reply,
+			);
 			match next_step.action {
 				crate::runtime_loop::NextStepAction::CallTool => {
 					let Some(tool_name) = next_step.tool_name.as_deref() else {
@@ -536,7 +539,7 @@ impl GenericAgentRuntime {
 						loop_state.step_index + 1,
 						tool_name,
 						next_step.reason,
-						StepObservation::Tool(observation),
+						StepObservation::Tool(observation.clone()),
 						execution_elapsed_ms(&execution.result),
 						interpreted.remaining_step_budget,
 						interpreted.remaining_recovery_budget,
@@ -546,23 +549,56 @@ impl GenericAgentRuntime {
 							.unwrap_or_else(|| loop_state.working_directory.clone()),
 					);
 					loop_state.record_step(step);
-					if !interpreted.continue_allowed {
-						let terminal_message = loop_state
-							.last_observation
-							.as_ref()
-							.map(|observation| {
-								summarize_filesystem_observation(&loop_state.goal, observation)
-									.final_message
-							})
-							.unwrap_or_else(|| {
-								"Runtime loop stopped before producing an observation.".to_string()
-							});
+					if interpreted.should_ask_user {
+						let message = effective_ask_user_message(
+							&loop_state.goal,
+							loop_state.last_observation.as_ref(),
+							None,
+						);
+						self.record_terminal_step(
+							loop_state,
+							StepAction::AskUser,
+							"Runtime paused for user clarification after the latest tool observation.",
+							Some(message.clone()),
+						);
 						return self.synthetic_loop_terminal_result(
 							task_id,
 							"tool",
-							terminal_message,
+							message,
+							StepAction::AskUser,
+							ResultStatus::Ok,
+						);
+					}
+					if interpreted.should_emit_final_answer {
+						let message = summarized_tool_loop_message(&loop_state.goal, &observation);
+						self.record_terminal_step(
+							loop_state,
+							StepAction::FinalAnswer,
+							"Runtime completed after a terminal tool observation.",
+							Some(message.clone()),
+						);
+						return self.synthetic_loop_terminal_result(
+							task_id,
+							"tool",
+							message,
 							StepAction::FinalAnswer,
 							ResultStatus::Ok,
+						);
+					}
+					if interpreted.should_fail || !interpreted.continue_allowed {
+						let message = tool_loop_failure_message(&loop_state.goal, &interpreted);
+						self.record_terminal_step(
+							loop_state,
+							StepAction::Fail,
+							"Runtime could not continue after the latest tool observation.",
+							Some(message.clone()),
+						);
+						return self.synthetic_loop_terminal_result(
+							task_id,
+							"tool",
+							message,
+							StepAction::Fail,
+							ResultStatus::Error,
 						);
 					}
 				}
@@ -571,6 +607,12 @@ impl GenericAgentRuntime {
 						&loop_state.goal,
 						loop_state.last_observation.as_ref(),
 						next_step.final_message,
+					);
+					self.record_terminal_step(
+						loop_state,
+						StepAction::AskUser,
+						next_step.reason,
+						Some(message.clone()),
 					);
 					return self.synthetic_loop_terminal_result(
 						task_id,
@@ -586,11 +628,16 @@ impl GenericAgentRuntime {
 							.last_observation
 							.as_ref()
 							.map(|observation| {
-								summarize_filesystem_observation(&loop_state.goal, observation)
-									.final_message
+								summarized_tool_loop_message(&loop_state.goal, observation)
 							})
 							.unwrap_or_else(|| "Runtime loop completed.".to_string())
 					});
+					self.record_terminal_step(
+						loop_state,
+						StepAction::FinalAnswer,
+						next_step.reason,
+						Some(message.clone()),
+					);
 					return self.synthetic_loop_terminal_result(
 						task_id,
 						"tool",
@@ -600,7 +647,14 @@ impl GenericAgentRuntime {
 					);
 				}
 				crate::runtime_loop::NextStepAction::Fail => {
-					let message = next_step.final_message.unwrap_or(next_step.reason);
+					let reason = next_step.reason;
+					let message = next_step.final_message.unwrap_or_else(|| reason.clone());
+					self.record_terminal_step(
+						loop_state,
+						StepAction::Fail,
+						reason,
+						Some(message.clone()),
+					);
 					return self.synthetic_loop_terminal_result(
 						task_id,
 						"tool",
@@ -659,7 +713,7 @@ impl GenericAgentRuntime {
 				return self.synthetic_loop_terminal_result(
 					task_id,
 					"filesystem",
-					summarize_filesystem_observation(&loop_state.goal, &observation).final_message,
+					summarize_observation(&loop_state.goal, &observation).final_message,
 					StepAction::Fail,
 					ResultStatus::Error,
 				);
@@ -806,6 +860,15 @@ impl GenericAgentRuntime {
 			.collect::<Vec<_>>();
 		visible_tools.dedup();
 		visible_tools
+	}
+
+	fn visible_tools_for_loop_state(&self, loop_state: &LoopState) -> Vec<String> {
+		self.visible_tools_for_decision(&loop_state.route_decision)
+	}
+
+	fn refresh_tool_loop_projection(&self, loop_state: &mut LoopState) -> ContextProjection {
+		loop_state.visible_tools = self.visible_tools_for_loop_state(loop_state);
+		build_context_projection(loop_state)
 	}
 
 	fn execute_tool_like_route(
@@ -1395,6 +1458,35 @@ fn limited_planning_compatibility_message(goal: &str, reason: &str) -> String {
 	}
 }
 
+fn summarized_tool_loop_message(goal: &str, observation: &ToolObservation) -> String {
+	summarize_observation(goal, observation).final_message
+}
+
+fn tool_loop_failure_message(
+	goal: &str,
+	interpreted: &crate::runtime_loop::InterpretedObservation,
+) -> String {
+	if interpreted.budget_exhausted {
+		return if !goal.is_ascii() {
+			"运行时循环在产出最终答案前已经耗尽 step budget。".to_string()
+		} else {
+			"The runtime loop exhausted its step budget before it produced a final answer."
+				.to_string()
+		};
+	}
+
+	if interpreted.recovery_exhausted {
+		return if !goal.is_ascii() {
+			"运行时循环在恢复失败后已经耗尽 recovery budget。".to_string()
+		} else {
+			"The runtime loop exhausted its recovery budget after repeated tool failures."
+				.to_string()
+		};
+	}
+
+	summarized_tool_loop_message(goal, &interpreted.raw_observation)
+}
+
 fn extract_result_message(result: &ResultEnvelope) -> String {
 	serde_json::from_str::<serde_json::Value>(&result.payload)
 		.ok()
@@ -1430,8 +1522,9 @@ mod tests {
 	use roku_plugin_skills::{
 		DownloadedArchive, SkillArchiveFetcher, SkillRegistry, SkillRegistryError, SkillSource,
 	};
+	use std::collections::VecDeque;
 	use std::io::{Cursor, Write};
-	use std::sync::Arc;
+	use std::sync::{Arc, Mutex};
 
 	use super::*;
 
@@ -1751,6 +1844,269 @@ So, I'll output: "星期日""#
 			.as_str()
 			.expect("message should be a string");
 		assert_eq!(message, "星期日");
+	}
+
+	struct SequenceJsonProvider {
+		prompts: Arc<Mutex<Vec<String>>>,
+		responses: Arc<Mutex<VecDeque<String>>>,
+	}
+
+	impl LlmProvider for SequenceJsonProvider {
+		fn provider_name(&self) -> &'static str {
+			"sequence-json-provider"
+		}
+
+		fn complete(
+			&self,
+			_model: &ModelProfile,
+			request: &GenerationRequest,
+		) -> Result<ProviderResponse, ProviderCallError> {
+			self.prompts
+				.lock()
+				.expect("prompt lock should succeed")
+				.push(request.prompt.clone());
+			let output = self
+				.responses
+				.lock()
+				.expect("response lock should succeed")
+				.pop_front()
+				.expect("a canned response should be available");
+			Ok(ProviderResponse {
+				output,
+				finish_reason: None,
+				prompt_tokens: 24,
+				output_tokens: 18,
+				latency_ms: 10,
+			})
+		}
+	}
+
+	fn router_with_json_responses(
+		responses: Vec<serde_json::Value>,
+	) -> (LlmRouter, Arc<Mutex<Vec<String>>>) {
+		let prompts = Arc::new(Mutex::new(Vec::new()));
+		let mut router = LlmRouter::new(RoutingPolicy {
+			max_request_cost_usd: 1.0,
+			max_latency_ms: 5_000,
+		});
+		router.register_provider(SequenceJsonProvider {
+			prompts: Arc::clone(&prompts),
+			responses: Arc::new(Mutex::new(
+				responses
+					.into_iter()
+					.map(|value| value.to_string())
+					.collect::<VecDeque<_>>(),
+			)),
+		});
+		router.register_model(ModelProfile {
+			model_id: "sequence-json-model".to_string(),
+			provider: "sequence-json-provider".to_string(),
+			max_context_tokens: 16_000,
+			cost_per_1k_tokens_usd: 0.0,
+			max_risk_tier: RiskTier::Low,
+			route_priority: 100,
+		});
+		(router, prompts)
+	}
+
+	struct StaticTextProvider {
+		name: &'static str,
+		output: &'static str,
+	}
+
+	impl LlmProvider for StaticTextProvider {
+		fn provider_name(&self) -> &'static str {
+			self.name
+		}
+
+		fn complete(
+			&self,
+			_model: &ModelProfile,
+			_request: &GenerationRequest,
+		) -> Result<ProviderResponse, ProviderCallError> {
+			Ok(ProviderResponse {
+				output: self.output.to_string(),
+				finish_reason: None,
+				prompt_tokens: 20,
+				output_tokens: 16,
+				latency_ms: 10,
+			})
+		}
+	}
+
+	fn router_with_text_output(name: &'static str, output: &'static str) -> LlmRouter {
+		let mut router = LlmRouter::new(RoutingPolicy {
+			max_request_cost_usd: 1.0,
+			max_latency_ms: 5_000,
+		});
+		router.register_provider(StaticTextProvider { name, output });
+		router.register_model(ModelProfile {
+			model_id: format!("{name}-model"),
+			provider: name.to_string(),
+			max_context_tokens: 16_000,
+			cost_per_1k_tokens_usd: 0.0,
+			max_risk_tier: RiskTier::Medium,
+			route_priority: 100,
+		});
+		router
+	}
+
+	#[test]
+	fn execute_tool_loop_can_continue_after_non_terminal_success() {
+		let (route_router, prompts) = router_with_json_responses(vec![
+			serde_json::json!({
+				"action": "call_tool",
+				"tool_name": "inventory.describe",
+				"arguments": {},
+				"reason": "Collect the first inventory observation.",
+				"final_message": null
+			}),
+			serde_json::json!({
+				"action": "call_tool",
+				"tool_name": "inventory.describe",
+				"arguments": {},
+				"reason": "Collect one more inventory observation before answering.",
+				"final_message": null
+			}),
+			serde_json::json!({
+				"action": "final_answer",
+				"tool_name": null,
+				"arguments": null,
+				"reason": "The observations are sufficient now.",
+				"final_message": "Loop concluded after two tool observations."
+			}),
+		]);
+		let execution_router =
+			router_with_text_output("tool-execution-provider", "live inventory response");
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+			);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-loop".to_string()),
+			session_id: "session-loop".to_string(),
+			goal: "Summarize the runtime inventory".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::Chat,
+			0.95,
+			false,
+			crate::router::RouteRisk::Low,
+			vec!["inventory.describe".to_string()],
+			Vec::new(),
+			Vec::new(),
+			"inventory request",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+		loop_state.visible_tools = vec!["general.execute".to_string()];
+
+		let execution = runtime.execute_tool_loop(
+			&TaskId("task-loop".to_string()),
+			&request,
+			&mut loop_state,
+			None,
+		);
+
+		assert_eq!(execution.result.status, ResultStatus::Ok);
+		assert_eq!(
+			execution.terminal_step_action,
+			Some(StepAction::FinalAnswer)
+		);
+		assert_eq!(
+			execution.message,
+			"Loop concluded after two tool observations."
+		);
+		assert_eq!(loop_state.history.len(), 3);
+		assert_eq!(
+			loop_state.history[0].tool_name.as_deref(),
+			Some("inventory.describe")
+		);
+		assert_eq!(
+			loop_state.history[1].tool_name.as_deref(),
+			Some("inventory.describe")
+		);
+		assert_eq!(loop_state.history[2].action, StepAction::FinalAnswer);
+		assert_eq!(
+			loop_state.status,
+			crate::runtime_loop::LoopStatus::Succeeded
+		);
+		assert_eq!(
+			loop_state.visible_tools,
+			vec!["inventory.describe".to_string()]
+		);
+
+		let prompts = prompts.lock().expect("prompt lock should succeed");
+		assert_eq!(prompts.len(), 3);
+		assert!(prompts[0].contains("\"visible_tools\": ["));
+		assert!(prompts[0].contains("\"inventory.describe\""));
+		assert!(prompts[1].contains("History digest:"));
+		assert!(prompts[1].contains("step 1"));
+		assert!(prompts[1].contains("inventory.describe"));
+		assert!(!prompts[1].contains("\"started_at\""));
+	}
+
+	#[test]
+	fn execute_tool_loop_records_ask_user_terminal_state() {
+		let (route_router, _prompts) = router_with_json_responses(vec![serde_json::json!({
+			"action": "ask_user",
+			"tool_name": null,
+			"arguments": null,
+			"reason": "Need a concrete file path before continuing.",
+			"final_message": "Which file should I inspect?"
+		})]);
+		let execution_router = router_with_text_output("unused-execution-provider", "unused");
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+			);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-ask-user".to_string()),
+			session_id: "session-ask-user".to_string(),
+			goal: "Inspect a file for me".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::Chat,
+			0.91,
+			false,
+			crate::router::RouteRisk::Low,
+			vec!["general.execute".to_string()],
+			Vec::new(),
+			Vec::new(),
+			"chat request",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+
+		let execution = runtime.execute_tool_loop(
+			&TaskId("task-ask-user".to_string()),
+			&request,
+			&mut loop_state,
+			None,
+		);
+
+		assert_eq!(execution.result.status, ResultStatus::Ok);
+		assert_eq!(execution.terminal_step_action, Some(StepAction::AskUser));
+		assert_eq!(loop_state.history.len(), 1);
+		assert_eq!(loop_state.history[0].action, StepAction::AskUser);
+		assert_eq!(
+			loop_state.status,
+			crate::runtime_loop::LoopStatus::AwaitingUser
+		);
 	}
 
 	#[test]
