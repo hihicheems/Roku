@@ -15,10 +15,7 @@
 use std::collections::HashMap;
 use std::sync::MutexGuard;
 
-use roku_agent_runtime::{
-	EscalationAction, EscalationReason, IntentFamily, LoopState, RouteDecision,
-	RouteEscalationPlan, RouteRisk, should_resume_awaiting_user,
-};
+use roku_agent_runtime::{IntentFamily, LoopState, should_resume_awaiting_user};
 use roku_common_types::{RequestEnvelope, ResponseEnvelope, RuntimeError, Task};
 use roku_observability::LogLevel;
 
@@ -114,30 +111,14 @@ impl RuntimeService {
 			| IntentFamily::WebLookup
 			| IntentFamily::CodeExec
 			| IntentFamily::Chat
-			| IntentFamily::TextTransform => self.runtime.execute_tool_loop(
+			| IntentFamily::TextTransform
+			| IntentFamily::MultiStep
+			| IntentFamily::Unknown => self.runtime.execute_tool_loop(
 				&task.task_id,
 				request,
 				loop_state,
 				Some(&request.goal),
 			),
-			_ => {
-				let fallback = RouteEscalationPlan {
-					decision: RouteDecision::new(
-						loop_state.route_decision.intent_family,
-						0.0,
-						false,
-						RouteRisk::Low,
-						Vec::new(),
-						Vec::new(),
-						Vec::new(),
-						"pending runtime loop cannot be resumed by the current runtime",
-					),
-					reason: EscalationReason::NoEnabledRouteTarget,
-					action: EscalationAction::FallbackAnswer,
-				};
-				self.runtime
-					.execute_escalation_action(&task.task_id, request, &fallback)
-			}
 		};
 		self.record_runtime_loop_history(loop_state, initial_history_len);
 		let response =

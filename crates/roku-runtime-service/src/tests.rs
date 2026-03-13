@@ -157,22 +157,29 @@ fn planning_mode_hint_returns_compatibility_fallback_without_graph() {
 }
 
 #[test]
-fn multistep_requests_return_compatibility_fallback_for_new_requests() {
+fn multistep_requests_enter_the_generic_loop_for_new_requests() {
 	let service = RuntimeService::default();
 	let response = service
 		.execute(request(
 			"Compare two migration strategies and then execute the better one.",
 		))
-		.expect("compatibility fallback should succeed");
+		.expect("multistep request should still execute through the direct runtime");
 
 	assert_eq!(response.status, ResponseStatus::Succeeded);
-	assert!(response.message.contains("planning-heavy"));
+	assert!(!response.message.contains("planning-heavy"));
 
 	let task = service
 		.get_task(&TaskId("task-req-1".to_string()))
 		.expect("task lookup should succeed")
 		.expect("task should be persisted");
 	assert!(task.graph.is_none());
+	let last_result = task
+		.last_result
+		.as_ref()
+		.expect("direct loop execution should persist a terminal result");
+	let payload: serde_json::Value =
+		serde_json::from_str(&last_result.payload).expect("payload should be valid json");
+	assert_eq!(payload["runtime_loop"], "tool");
 }
 
 #[test]
