@@ -16,7 +16,7 @@ use roku_common_types::ResourceSelector;
 use serde::{Deserialize, Serialize};
 
 use crate::router::RouteDecision;
-use crate::runtime_loop::{LoopContext, StepRecord, ToolObservation};
+use crate::runtime_loop::{AskUserPayload, LoopContext, StepRecord, ToolObservation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -52,12 +52,15 @@ pub enum LoopStatus {
 /// - `bound_resources`: Resources already bound to the loop.
 /// - `history`: Recorded step facts for replay and context projection.
 /// - `last_observation`: Latest grounded tool observation, if any.
+/// - `awaiting_user`: Explicit resume contract for a paused `ask_user` step, if the loop is
+///   currently waiting on the user.
 ///
 /// ## Invariants
 /// - `history` is append-only within a run.
 /// - `last_observation` must reflect the most recent tool observation recorded in `history`.
 /// - `visible_tools` may be recomputed between rounds, but the current round must treat this
 ///   field as the active visibility truth.
+/// - `awaiting_user` must only be populated while the loop is paused in `AwaitingUser`.
 ///
 /// ## Non-Goals
 /// - `LoopState` is not the prompt projection passed directly to the model.
@@ -78,6 +81,8 @@ pub struct LoopState {
 	pub bound_resources: Vec<ResourceSelector>,
 	pub history: Vec<StepRecord>,
 	pub last_observation: Option<ToolObservation>,
+	#[serde(default)]
+	pub awaiting_user: Option<AskUserPayload>,
 }
 
 impl LoopState {
@@ -97,6 +102,7 @@ impl LoopState {
 			bound_resources: context.bound_resources.clone(),
 			history: Vec::new(),
 			last_observation: context.last_observation.clone(),
+			awaiting_user: None,
 		}
 	}
 
@@ -108,10 +114,14 @@ impl LoopState {
 		match &step.observation {
 			Some(crate::runtime_loop::StepObservation::Tool(observation)) => {
 				self.last_observation = Some(observation.clone());
+				self.awaiting_user = None;
 			}
-			Some(crate::runtime_loop::StepObservation::AskUser { .. })
-			| Some(crate::runtime_loop::StepObservation::FinalMessage { .. })
-			| None => {}
+			Some(crate::runtime_loop::StepObservation::AskUser { final_message }) => {
+				self.awaiting_user = Some(AskUserPayload::freeform(final_message.clone()));
+			}
+			Some(crate::runtime_loop::StepObservation::FinalMessage { .. }) | None => {
+				self.awaiting_user = None;
+			}
 		}
 		self.status = match step.action {
 			crate::runtime_loop::StepAction::CallTool => LoopStatus::LoopRunning,

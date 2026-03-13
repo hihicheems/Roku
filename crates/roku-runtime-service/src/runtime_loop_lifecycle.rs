@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use roku_agent_runtime::{
-	EscalationAction, LoopState, RouteDecisionResult, StepAction, StepRecord,
+	AskUserPayload, EscalationAction, LoopState, RouteDecisionResult, StepAction, StepRecord,
 };
 use roku_common_types::{RequestEnvelope, ResponseStatus};
 use roku_observability::LogLevel;
@@ -152,12 +152,16 @@ impl RuntimeService {
 			}
 			ResponseStatus::Failed => "runtime loop captured direct route failure",
 		};
-		let step = self.runtime.record_terminal_step(
-			loop_state,
-			action,
-			reason,
-			Some(message.to_string()),
-		);
+		let step = if action == StepAction::AskUser {
+			self.runtime.record_ask_user_step(
+				loop_state,
+				reason,
+				AskUserPayload::freeform(message.to_string()),
+			)
+		} else {
+			self.runtime
+				.record_terminal_step(loop_state, action, reason, Some(message.to_string()))
+		};
 		self.record_runtime_loop_history(loop_state, loop_state.history.len().saturating_sub(1));
 		self.log_runtime_loop_terminated(loop_state);
 		step

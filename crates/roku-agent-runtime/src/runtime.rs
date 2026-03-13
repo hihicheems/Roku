@@ -22,10 +22,10 @@ use crate::router::{
 	RouteDecisionResult,
 };
 use crate::runtime_loop::{
-	ContextProjection, LoopContext, LoopState, StepAction, StepObservation, StepRecord,
-	ToolObservation, attachments_for_tool, build_context_projection, build_loop_context,
-	decide_tool_loop_next_step, effective_ask_user_message, intake_request, interpret_observation,
-	next_working_directory_from_observation, summarize_observation,
+	AskUserPayload, ContextProjection, LoopContext, LoopState, StepAction, StepObservation,
+	StepRecord, ToolObservation, attachments_for_tool, build_context_projection,
+	build_loop_context, decide_tool_loop_next_step, effective_ask_user_payload, intake_request,
+	interpret_observation, next_working_directory_from_observation, summarize_observation,
 };
 use crate::tool_config::ToolCatalogConfig;
 use crate::tools::{
@@ -331,6 +331,11 @@ impl GenericAgentRuntime {
 		reason: impl Into<String>,
 		final_message: Option<String>,
 	) -> StepRecord {
+		let awaiting_user = if action == StepAction::AskUser {
+			final_message.clone().map(AskUserPayload::freeform)
+		} else {
+			None
+		};
 		let observation = final_message.map(|message| match action {
 			StepAction::AskUser => StepObservation::AskUser {
 				final_message: message,
@@ -356,12 +361,36 @@ impl GenericAgentRuntime {
 			loop_state.working_directory.clone(),
 		);
 		loop_state.record_step(step.clone());
+		loop_state.awaiting_user = awaiting_user;
 		loop_state.status = match action {
 			StepAction::FinalAnswer => crate::runtime_loop::LoopStatus::Succeeded,
 			StepAction::Fail => crate::runtime_loop::LoopStatus::Failed,
 			StepAction::AskUser => crate::runtime_loop::LoopStatus::AwaitingUser,
 			StepAction::CallTool => crate::runtime_loop::LoopStatus::LoopRunning,
 		};
+		step
+	}
+
+	pub fn record_ask_user_step(
+		&self,
+		loop_state: &mut LoopState,
+		reason: impl Into<String>,
+		payload: AskUserPayload,
+	) -> StepRecord {
+		let step = StepRecord::terminal(
+			loop_state.step_index + 1,
+			StepAction::AskUser,
+			reason,
+			Some(StepObservation::AskUser {
+				final_message: payload.final_message.clone(),
+			}),
+			loop_state.remaining_step_budget,
+			loop_state.remaining_recovery_budget,
+			loop_state.working_directory.clone(),
+		);
+		loop_state.record_step(step.clone());
+		loop_state.awaiting_user = Some(payload);
+		loop_state.status = crate::runtime_loop::LoopStatus::AwaitingUser;
 		step
 	}
 
@@ -439,16 +468,16 @@ impl GenericAgentRuntime {
 					);
 					loop_state.record_step(step);
 					if interpreted.should_ask_user {
-						let message = effective_ask_user_message(
+						let payload = effective_ask_user_payload(
 							&loop_state.goal,
 							loop_state.last_observation.as_ref(),
 							None,
 						);
-						self.record_terminal_step(
+						let message = payload.final_message.clone();
+						self.record_ask_user_step(
 							loop_state,
-							StepAction::AskUser,
 							"Runtime paused for user clarification after the latest tool observation.",
-							Some(message.clone()),
+							payload,
 						);
 						return self.synthetic_loop_terminal_result(
 							task_id,
@@ -492,17 +521,13 @@ impl GenericAgentRuntime {
 					}
 				}
 				crate::runtime_loop::NextStepAction::AskUser => {
-					let message = effective_ask_user_message(
+					let payload = effective_ask_user_payload(
 						&loop_state.goal,
 						loop_state.last_observation.as_ref(),
-						next_step.final_message,
+						next_step.final_message.map(AskUserPayload::freeform),
 					);
-					self.record_terminal_step(
-						loop_state,
-						StepAction::AskUser,
-						next_step.reason,
-						Some(message.clone()),
-					);
+					let message = payload.final_message.clone();
+					self.record_ask_user_step(loop_state, next_step.reason, payload);
 					return self.synthetic_loop_terminal_result(
 						task_id,
 						"tool",
@@ -678,7 +703,7 @@ impl GenericAgentRuntime {
 	fn compose_visible_tools(
 		&self,
 		route_decision: &crate::router::RouteDecision,
-		loop_state: Option<&LoopState>,
+		_loop_state: Option<&LoopState>,
 	) -> Vec<String> {
 		let enabled_tools = self
 			.resource_catalog
@@ -692,20 +717,6 @@ impl GenericAgentRuntime {
 			&enabled_tools,
 			route_decision.candidate_tools.iter().map(String::as_str),
 		);
-		append_enabled_tool_names(
-			&mut visible_tools,
-			&enabled_tools,
-			intent_soft_preference_tools(route_decision.intent_family)
-				.iter()
-				.copied(),
-		);
-		if let Some(loop_state) = loop_state {
-			append_enabled_tool_names(
-				&mut visible_tools,
-				&enabled_tools,
-				loop_state_followup_tools(loop_state),
-			);
-		}
 		append_enabled_tool_names(
 			&mut visible_tools,
 			&enabled_tools,
@@ -1265,33 +1276,6 @@ fn append_enabled_tool_names<'a>(
 	}
 }
 
-fn intent_soft_preference_tools(intent_family: IntentFamily) -> &'static [&'static str] {
-	match intent_family {
-		IntentFamily::Chat => &["general.execute", "inventory.describe"],
-		IntentFamily::FilesystemRead => &[
-			"fs.read_text",
-			"fs.list_dir",
-			"fs.inspect",
-			"fs.find",
-			"fs.exists",
-			"fs.glob",
-			"general.execute",
-		],
-		IntentFamily::TableRead => &[
-			"table.preview",
-			"table.inspect",
-			"table.list_sheets",
-			"table.schema",
-			"general.execute",
-		],
-		IntentFamily::WebLookup => &["web.search", "general.execute"],
-		IntentFamily::CodeExec => &["python.run", "general.execute"],
-		IntentFamily::TextTransform | IntentFamily::MultiStep | IntentFamily::Unknown => {
-			&["general.execute"]
-		}
-	}
-}
-
 fn safe_baseline_tool_pool() -> &'static [&'static str] {
 	&[
 		"general.execute",
@@ -1309,81 +1293,6 @@ fn safe_baseline_tool_pool() -> &'static [&'static str] {
 		"web.search",
 		"python.run",
 	]
-}
-
-fn loop_state_followup_tools(loop_state: &LoopState) -> Vec<&'static str> {
-	let mut followups = Vec::new();
-	let has_filesystem_history = loop_state.history.iter().any(|step| {
-		step.tool_name
-			.as_deref()
-			.is_some_and(|tool| tool.starts_with("fs."))
-	});
-	let has_table_history = loop_state.history.iter().any(|step| {
-		step.tool_name
-			.as_deref()
-			.is_some_and(|tool| tool.starts_with("table."))
-	});
-	let has_web_history = loop_state.history.iter().any(|step| {
-		step.tool_name
-			.as_deref()
-			.is_some_and(|tool| tool.starts_with("web."))
-	});
-	let has_python_history = loop_state.history.iter().any(|step| {
-		step.tool_name
-			.as_deref()
-			.is_some_and(|tool| tool.starts_with("python."))
-	});
-
-	if has_filesystem_history {
-		followups.extend([
-			"general.execute",
-			"table.preview",
-			"table.inspect",
-			"python.run",
-			"web.search",
-		]);
-	}
-	if has_table_history {
-		followups.extend(["general.execute", "python.run", "fs.read_text"]);
-	}
-	if has_web_history || has_python_history {
-		followups.push("general.execute");
-	}
-	if loop_state.status == crate::runtime_loop::LoopStatus::AwaitingUser {
-		followups.push("general.execute");
-	}
-	if loop_state.remaining_step_budget <= 1 || loop_state.remaining_recovery_budget <= 1 {
-		followups.extend(["general.execute", "inventory.describe"]);
-	}
-	if !loop_state.bound_resources.is_empty() {
-		followups.push("general.execute");
-	}
-	if !loop_state.working_directory.is_empty() {
-		followups.extend(["fs.inspect", "fs.list_dir"]);
-	}
-
-	let last_tool = loop_state
-		.last_observation
-		.as_ref()
-		.map(|observation| observation.tool_name.as_str());
-	match last_tool {
-		Some(tool_name) if tool_name.starts_with("fs.") => {
-			followups.extend([
-				"general.execute",
-				"table.preview",
-				"python.run",
-				"web.search",
-			]);
-		}
-		Some(tool_name) if tool_name.starts_with("table.") => {
-			followups.extend(["general.execute", "python.run"]);
-		}
-		Some(tool_name) if tool_name.starts_with("web.") || tool_name.starts_with("python.") => {
-			followups.push("general.execute");
-		}
-		_ => {}
-	}
-	followups
 }
 
 fn tool_loop_step_summary(context_projection: &ContextProjection, tool_name: &str) -> String {
@@ -2194,7 +2103,7 @@ So, I'll output: "星期日""#
 	}
 
 	#[test]
-	fn visible_tools_recompute_exposes_cross_tool_followups_after_filesystem_steps() {
+	fn visible_tools_recompute_keeps_shortlist_and_safe_baseline_after_tool_steps() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-followup".to_string()),

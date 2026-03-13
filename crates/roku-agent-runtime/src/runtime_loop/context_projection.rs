@@ -207,6 +207,12 @@ fn unresolved_blockers(loop_state: &LoopState) -> Vec<String> {
 			"The loop is awaiting a user reply and should continue from the existing state."
 				.to_string(),
 		);
+		if let Some(payload) = loop_state.awaiting_user.as_ref() {
+			blockers.push(format!(
+				"Awaiting-user resume contract: {}",
+				payload.resume_contract_summary()
+			));
+		}
 	}
 	blockers
 }

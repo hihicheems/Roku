@@ -15,8 +15,8 @@
 use std::env;
 
 use roku_agent_runtime::{
-	IntentFamily, LoopContext, LoopState, RouteDecision, RouteRisk, StepAction, StepObservation,
-	StepRecord, ToolObservation,
+	AskUserPayload, AskUserResumeContract, AskUserResumeDirective, IntentFamily, LoopContext,
+	LoopState, RouteDecision, RouteRisk, StepAction, StepObservation, StepRecord, ToolObservation,
 };
 use roku_common_types::ResourceSelector;
 use roku_common_types::{
@@ -230,15 +230,15 @@ fn pending_filesystem_tool_loops_resume_through_the_generic_loop_driver() {
 	let mut loop_state = LoopState::new("loop-pending-tool-loop", &context);
 	loop_state.record_step(StepRecord::tool_call(
 		1,
-		"fs.find",
-		"Resolve the basename into a concrete filesystem target before attempting another read step.",
+		"fs.read_text",
+		"Read the grounded workspace manifest first.",
 		StepObservation::Tool(ToolObservation {
 			ok: false,
-			tool_name: "fs.find".to_string(),
+			tool_name: "fs.read_text".to_string(),
 			error_type: Some("multiple_candidates".to_string()),
 			terminal: false,
 			data: serde_json::json!({
-				"name": "Cargo.toml",
+				"path": "Cargo.toml",
 				"matches": [root_manifest, nested_manifest],
 			}),
 			message: "Found 2 matching candidates for `Cargo.toml`.".to_string(),
@@ -259,6 +259,21 @@ fn pending_filesystem_tool_loops_resume_through_the_generic_loop_driver() {
 		2,
 		cwd.display().to_string(),
 	));
+	loop_state.awaiting_user = Some(AskUserPayload {
+		final_message: "你想看哪一个 Cargo.toml？".to_string(),
+		resume_contract: AskUserResumeContract::CandidateSelection {
+			candidates: vec![
+				cwd.join("Cargo.toml").display().to_string(),
+				cwd.join("crates/roku-agent-runtime/Cargo.toml")
+					.display()
+					.to_string(),
+			],
+		},
+		resume_directive: Some(AskUserResumeDirective::RepeatToolWithSelectedCandidate {
+			tool_name: "fs.read_text".to_string(),
+			argument_key: "path".to_string(),
+		}),
+	});
 	service
 		.restore_pending_loop(loop_state)
 		.expect("pending loop should restore");
