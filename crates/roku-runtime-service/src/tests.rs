@@ -19,7 +19,7 @@ use roku_common_types::{
 	TaskState,
 };
 
-use crate::{RuntimeService, compact_approval_id};
+use crate::{RuntimeExecutionMode, RuntimeModeReport, RuntimeService, compact_approval_id};
 
 fn request(goal: &str) -> RequestEnvelope {
 	RequestEnvelope {
@@ -107,6 +107,33 @@ fn new_requests_execute_without_graph_compilation() {
 		.expect("task should be persisted");
 	assert!(task.graph.is_none());
 	assert_eq!(task.state, TaskState::Succeeded);
+}
+
+#[test]
+fn runtime_service_defaults_to_deterministic_runtime_mode() {
+	let service = RuntimeService::default();
+	let report = service.runtime_mode_report();
+
+	assert_eq!(report.requested, RuntimeExecutionMode::Deterministic);
+	assert_eq!(report.effective, RuntimeExecutionMode::Deterministic);
+	assert_eq!(report.fallback_reason, None);
+}
+
+#[test]
+fn runtime_service_can_expose_live_fallback_mode_report() {
+	let service = RuntimeService::default().with_runtime_mode_report(
+		RuntimeModeReport::live_react_fallback_to_deterministic(
+			"openrouter plugin disabled by startup policy",
+		),
+	);
+	let report = service.runtime_mode_report();
+
+	assert_eq!(report.requested, RuntimeExecutionMode::LiveReact);
+	assert_eq!(report.effective, RuntimeExecutionMode::Deterministic);
+	assert_eq!(
+		report.fallback_reason.as_deref(),
+		Some("openrouter plugin disabled by startup policy")
+	);
 }
 
 #[test]

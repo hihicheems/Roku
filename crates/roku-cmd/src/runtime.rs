@@ -33,7 +33,7 @@ use roku_plugin_host::{
 use roku_plugin_llm::{OpenRouterConfig, build_openrouter_router_with_metrics};
 use roku_plugin_skills::SkillRegistry;
 pub use roku_runtime_service::RunMode;
-use roku_runtime_service::RuntimeService;
+use roku_runtime_service::{RuntimeModeReport, RuntimeService};
 use roku_state_store::{
 	SqliteApprovalRepository, SqliteDispatchQueue, SqliteEventRepository, SqliteResultRepository,
 	SqliteStoreConfig, SqliteTaskRepository,
@@ -84,8 +84,7 @@ pub(crate) fn run_with_mode_and_options(
 	let service = build_deterministic_runtime_service_from_env()
 		.map_err(|error| RuntimeError::new(error.to_string()))?;
 	let request = build_request(&gateway, options, 1);
-
-	service.execute_with_mode(request, mode)
+	execute_with_service_and_mode(service, request, mode)
 }
 
 pub fn run_live_once_from_env(goal: &str) -> Result<ResponseEnvelope, CommandError> {
@@ -104,7 +103,7 @@ pub(crate) fn run_live_once_with_options_from_env(
 	let gateway = Gateway;
 	let service = build_live_runtime_service_from_env()?;
 	let request = build_request(&gateway, options, 1);
-	service.execute(request).map_err(CommandError::Runtime)
+	execute_with_service_and_mode(service, request, RunMode::Normal).map_err(CommandError::Runtime)
 }
 
 pub(crate) fn build_live_runtime_service_from_env() -> Result<RuntimeService, CommandError> {
@@ -477,7 +476,9 @@ fn build_deterministic_runtime_service_from_env() -> Result<RuntimeService, Comm
 		bootstrap.tool_config,
 		bootstrap.plugin_snapshot,
 	);
-	Ok(RuntimeService::in_memory_with_agent_runtime(runtime))
+	log_runtime_bootstrap_mode(&RuntimeModeReport::deterministic());
+	Ok(RuntimeService::in_memory_with_agent_runtime(runtime)
+		.with_runtime_mode_report(RuntimeModeReport::deterministic()))
 }
 
 pub(crate) fn build_live_runtime_service_from_layout_and_bootstrap(
@@ -485,7 +486,7 @@ pub(crate) fn build_live_runtime_service_from_layout_and_bootstrap(
 	bootstrap: PluginBootstrap,
 ) -> Result<RuntimeService, CommandError> {
 	let metrics = Arc::new(Metrics::default());
-	let runtime = build_live_runtime(bootstrap.clone(), metrics.clone())?;
+	let (runtime, runtime_mode) = build_live_runtime(bootstrap.clone(), metrics.clone())?;
 	let store_config = sqlite_store_config(layout);
 	let (artifact_store, experiment_registry) = build_runtime_data_plane(layout);
 
@@ -502,64 +503,120 @@ pub(crate) fn build_live_runtime_service_from_layout_and_bootstrap(
 		Arc::new(InMemoryAuditSink::default()),
 		runtime,
 		metrics,
-	))
+	)
+	.with_runtime_mode_report(runtime_mode))
 }
 
 fn build_live_runtime(
 	mut bootstrap: PluginBootstrap,
 	metrics: Arc<Metrics>,
-) -> Result<GenericAgentRuntime, CommandError> {
+) -> Result<(GenericAgentRuntime, RuntimeModeReport), CommandError> {
 	if !bootstrap.plugin_snapshot.is_plugin_enabled("openrouter") {
-		log_optional_plugin_fallback("openrouter", "plugin disabled by startup policy");
-		return Ok(
+		let runtime_mode = RuntimeModeReport::live_react_fallback_to_deterministic(
+			"openrouter plugin disabled by startup policy",
+		);
+		log_runtime_bootstrap_mode(&runtime_mode);
+		return Ok((
 			GenericAgentRuntime::with_skill_registry_tool_config_and_plugin_snapshot(
 				bootstrap.skill_registry,
 				bootstrap.tool_config,
 				bootstrap.plugin_snapshot,
 			),
-		);
+			runtime_mode,
+		));
 	}
 
 	let config = match OpenRouterConfig::from_env() {
 		Ok(config) => config,
 		Err(error) => {
-			log_optional_plugin_fallback("openrouter", &error.to_string());
+			let fallback_reason = format!("openrouter bootstrap failed: {error}");
 			bootstrap.plugin_snapshot = bootstrap.plugin_snapshot.with_runtime_disable(
 				"openrouter",
 				PluginDisableReason::AdmissionRejected {
-					detail: format!("provider bootstrap failed: {error}"),
+					detail: fallback_reason.clone(),
 				},
 			);
-			return Ok(
+			let runtime_mode =
+				RuntimeModeReport::live_react_fallback_to_deterministic(fallback_reason);
+			log_runtime_bootstrap_mode(&runtime_mode);
+			return Ok((
 				GenericAgentRuntime::with_skill_registry_tool_config_and_plugin_snapshot(
 					bootstrap.skill_registry,
 					bootstrap.tool_config,
 					bootstrap.plugin_snapshot,
 				),
-			);
+				runtime_mode,
+			));
 		}
 	};
 	let route_router = build_openrouter_router_with_metrics(config.clone(), metrics.clone())?;
 	let execution_router = build_openrouter_router_with_metrics(config, metrics)?;
-	Ok(GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
-		route_router,
-		execution_router,
-		bootstrap.skill_registry,
-		bootstrap.tool_config,
-		bootstrap.plugin_snapshot,
+	let runtime_mode = RuntimeModeReport::live_react();
+	log_runtime_bootstrap_mode(&runtime_mode);
+	Ok((
+		GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+			route_router,
+			execution_router,
+			bootstrap.skill_registry,
+			bootstrap.tool_config,
+			bootstrap.plugin_snapshot,
+		),
+		runtime_mode,
 	))
 }
 
-fn log_optional_plugin_fallback(plugin_id: &str, reason: &str) {
-	let _ = emit_global_log(
-		LogRecord::new(
-			"roku-cmd",
-			LogLevel::Warn,
-			"optional plugin is unavailable; falling back to deterministic runtime path",
-		)
-		.with_field("plugin_id", plugin_id.to_string())
-		.with_field("reason", reason.to_string()),
+fn log_runtime_bootstrap_mode(runtime_mode: &RuntimeModeReport) {
+	let mut record = LogRecord::new(
+		"roku-cmd",
+		if runtime_mode.fallback_reason.is_some() {
+			LogLevel::Warn
+		} else {
+			LogLevel::Info
+		},
+		"runtime bootstrap resolved execution mode",
+	)
+	.with_field(
+		"requested_runtime_mode",
+		runtime_mode.requested.as_str().to_string(),
+	)
+	.with_field(
+		"effective_runtime_mode",
+		runtime_mode.effective.as_str().to_string(),
 	);
+	if let Some(reason) = runtime_mode.fallback_reason.as_deref() {
+		record = record.with_field("fallback_reason", reason.to_string());
+	}
+	let _ = emit_global_log(record);
+}
+
+fn execute_with_service_and_mode(
+	service: RuntimeService,
+	request: roku_common_types::RequestEnvelope,
+	mode: RunMode,
+) -> Result<ResponseEnvelope, RuntimeError> {
+	let runtime_mode = service.runtime_mode_report();
+	let response = service.execute_with_mode(request, mode)?;
+	Ok(annotate_cli_response_with_runtime_mode(
+		response,
+		&runtime_mode,
+	))
+}
+
+fn annotate_cli_response_with_runtime_mode(
+	mut response: ResponseEnvelope,
+	runtime_mode: &RuntimeModeReport,
+) -> ResponseEnvelope {
+	let mut banner = format!(
+		"[runtime requested={} effective={}]",
+		runtime_mode.requested.as_str(),
+		runtime_mode.effective.as_str()
+	);
+	if let Some(reason) = runtime_mode.fallback_reason.as_deref() {
+		let sanitized_reason = reason.replace('\n', " ");
+		banner.push_str(&format!(" fallback_reason={sanitized_reason}"));
+	}
+	response.message = format!("{banner}\n{}", response.message);
+	response
 }
 
 fn plugin_root_override_from_env() -> Option<std::path::PathBuf> {
@@ -626,6 +683,7 @@ mod tests {
 	use std::io::{Cursor, Write};
 	use std::sync::Arc;
 
+	use roku_common_types::{RequestId, ResponseEnvelope, ResponseStatus};
 	use roku_plugin_skills::{
 		DownloadedArchive, SkillArchiveFetcher, SkillRegistryError, SkillSource,
 	};
@@ -688,6 +746,34 @@ mod tests {
 				.as_str()
 				.expect("message should be string")
 				.contains("Reference `claude-api`")
+		);
+	}
+
+	#[test]
+	fn annotate_cli_response_marks_live_fallback_as_effective_deterministic() {
+		let response = ResponseEnvelope {
+			request_id: RequestId("req-fallback".to_string()),
+			status: ResponseStatus::Succeeded,
+			message: "placeholder response body".to_string(),
+			artifacts: Vec::new(),
+		};
+
+		let annotated = annotate_cli_response_with_runtime_mode(
+			response,
+			&RuntimeModeReport::live_react_fallback_to_deterministic(
+				"openrouter plugin disabled by startup policy",
+			),
+		);
+
+		assert!(
+			annotated
+				.message
+				.contains("[runtime requested=live-react effective=deterministic]")
+		);
+		assert!(
+			annotated
+				.message
+				.contains("fallback_reason=openrouter plugin disabled by startup policy")
 		);
 	}
 
