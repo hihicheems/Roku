@@ -12,6 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::env;
+
+use roku_agent_runtime::{
+	IntentFamily, LoopContext, LoopDriverKind, LoopState, RouteDecision, RouteRisk, StepAction,
+	StepObservation, StepRecord, ToolObservation,
+};
+use roku_common_types::ResourceSelector;
 use roku_common_types::{
 	AggregationMode, ApprovalDecision, ApprovalId, ApprovalStatus, ApprovalTicket, JoinPolicy,
 	NodeId, PlanningModeHint, RecoveryEligibility, RequestEnvelope, RequestId, ResponseStatus,
@@ -99,7 +106,11 @@ fn new_requests_execute_without_graph_compilation() {
 		.execute(request("Read the first part of Cargo.toml."))
 		.expect("direct request should succeed");
 
-	assert_eq!(response.status, ResponseStatus::Succeeded);
+	assert_eq!(
+		response.status,
+		ResponseStatus::Succeeded,
+		"unexpected resume response: {response:?}"
+	);
 
 	let task = service
 		.get_task(&TaskId("task-req-1".to_string()))
@@ -177,6 +188,102 @@ fn multistep_requests_enter_the_generic_loop_for_new_requests() {
 		.last_result
 		.as_ref()
 		.expect("direct loop execution should persist a terminal result");
+	let payload: serde_json::Value =
+		serde_json::from_str(&last_result.payload).expect("payload should be valid json");
+	assert_eq!(payload["runtime_loop"], "tool");
+}
+
+#[test]
+fn pending_filesystem_tool_loops_resume_through_the_generic_loop_driver() {
+	let service = RuntimeService::default();
+	let cwd = env::current_dir().expect("cwd should resolve");
+	let root_manifest = cwd.join("Cargo.toml").display().to_string();
+	let nested_manifest = cwd
+		.join("crates/roku-agent-runtime/Cargo.toml")
+		.display()
+		.to_string();
+	let context = LoopContext {
+		request_id: "req-pending-tool-loop".to_string(),
+		session_id: "session-1".to_string(),
+		goal: "帮我定位 Cargo.toml，然后告诉我这个 workspace 的 crate 组织".to_string(),
+		workspace_root: cwd.display().to_string(),
+		working_directory: cwd.display().to_string(),
+		visible_tools: vec![
+			"fs.read_text".to_string(),
+			"fs.find".to_string(),
+			"fs.inspect".to_string(),
+			"general.execute".to_string(),
+		],
+		bound_resources: vec![ResourceSelector::tool("fs.read_text".to_string())],
+		route_decision: RouteDecision::new(
+			IntentFamily::FilesystemRead,
+			0.94,
+			false,
+			RouteRisk::Low,
+			vec!["fs.read_text".to_string(), "fs.find".to_string()],
+			Vec::new(),
+			Vec::new(),
+			"filesystem request",
+		),
+		last_observation: None,
+	};
+	let mut loop_state =
+		LoopState::new("loop-pending-tool-loop", &context, LoopDriverKind::ToolLoop);
+	loop_state.record_step(StepRecord::tool_call(
+		1,
+		"fs.find",
+		"Resolve the basename into a concrete filesystem target before attempting another read step.",
+		StepObservation::Tool(ToolObservation {
+			ok: false,
+			tool_name: "fs.find".to_string(),
+			error_type: Some("multiple_candidates".to_string()),
+			terminal: false,
+			data: serde_json::json!({
+				"name": "Cargo.toml",
+				"matches": [root_manifest, nested_manifest],
+			}),
+			message: "Found 2 matching candidates for `Cargo.toml`.".to_string(),
+		}),
+		Some(12),
+		3,
+		2,
+		cwd.display().to_string(),
+	));
+	loop_state.record_step(StepRecord::terminal(
+		2,
+		StepAction::AskUser,
+		"Runtime paused for user clarification after the latest tool observation.",
+		Some(StepObservation::AskUser {
+			final_message: "你想看哪一个 Cargo.toml？".to_string(),
+		}),
+		3,
+		2,
+		cwd.display().to_string(),
+	));
+	service
+		.restore_pending_loop(loop_state)
+		.expect("pending loop should restore");
+
+	let response = service
+		.execute(request("Cargo.toml"))
+		.expect("pending loop should resume");
+
+	assert_eq!(response.status, ResponseStatus::Succeeded);
+	assert!(
+		service
+			.pending_loop("session-1")
+			.expect("pending loop lookup should succeed")
+			.is_none()
+	);
+
+	let task = service
+		.get_task(&TaskId("task-req-1".to_string()))
+		.expect("task lookup should succeed")
+		.expect("task should be persisted");
+	let last_result = task
+		.last_result
+		.as_ref()
+		.expect("resumed direct loop execution should persist a terminal result");
 	let payload: serde_json::Value =
 		serde_json::from_str(&last_result.payload).expect("payload should be valid json");
 	assert_eq!(payload["runtime_loop"], "tool");
