@@ -21,20 +21,19 @@ use crate::runtime_loop::grounding::{
 	extract_skill_source_url, extract_table_path, extract_web_query,
 };
 use crate::runtime_loop::{
-	LoopState, NextStepAction, NextStepDecision, ToolObservation,
+	ContextProjection, LoopState, NextStepAction, NextStepDecision, ToolObservation,
 	ask_user::ask_user_from_observation, summarize_observation,
 };
 
 pub(crate) fn decide_tool_loop_next_step(
 	loop_state: &LoopState,
+	context_projection: &ContextProjection,
 	router: Option<&LlmRouter>,
 	user_reply: Option<&str>,
 ) -> NextStepDecision {
-	if loop_state.last_observation.is_some() {
-		return deterministic_next_step(loop_state, user_reply, router.is_some());
-	}
 	if let Some(router) = router
-		&& let Some(decision) = decide_with_router(loop_state, router, user_reply)
+		&& let Some(decision) =
+			decide_with_router(loop_state, context_projection, router, user_reply)
 	{
 		return decision;
 	}
@@ -43,6 +42,7 @@ pub(crate) fn decide_tool_loop_next_step(
 
 fn decide_with_router(
 	loop_state: &LoopState,
+	context_projection: &ContextProjection,
 	router: &LlmRouter,
 	user_reply: Option<&str>,
 ) -> Option<NextStepDecision> {
@@ -52,7 +52,7 @@ fn decide_with_router(
 				"You are Roku's runtime loop next-step decision model. Return only valid JSON."
 					.to_string(),
 			),
-			prompt: tool_loop_prompt(loop_state, user_reply),
+			prompt: tool_loop_prompt(context_projection, user_reply),
 			expected_output_tokens: 240,
 			risk_tier: RiskTier::Low,
 			preferred_provider: None,
@@ -86,7 +86,9 @@ fn validate_router_decision(
 	}
 }
 
-fn tool_loop_prompt(loop_state: &LoopState, user_reply: Option<&str>) -> String {
+fn tool_loop_prompt(context_projection: &ContextProjection, user_reply: Option<&str>) -> String {
+	let projection_json =
+		serde_json::to_string_pretty(context_projection).unwrap_or_else(|_| "{}".to_string());
 	format!(
 		r#"Return only JSON with exactly these keys:
 {{
@@ -102,49 +104,32 @@ Rules:
 - `call_tool` is the only action that may set `tool_name`.
 - `call_tool` should not use `final_message`; if you include it anyway, the runtime will ignore it.
 - Every `call_tool` decision must include all required argument keys for the selected tool.
-- Use the current user follow-up if it is present; do not inherit concrete code, paths, or queries from prior conversation turns unless they already exist in the last observation.
+- Use the current user follow-up if it is present; do not inherit concrete code, paths, or queries from prior conversation turns unless they already exist in the current context projection.
 - For `chat`, prefer `general.execute` when it is visible.
 - For `code_exec`, only call `python.run` when explicit code is present in the grounding context.
 - For `table_read`, prefer the first shortlisted `table.*` tool that matches the grounded table path.
 - For `web_lookup`, use `web.search` when a concrete query is available.
 - Use `ask_user` when the current information is still insufficient.
-- Use `final_answer` after a successful observation that already satisfies the user request.
+- Use `final_answer` only when the current context projection already proves the user request is satisfied.
 
-Visible tools:
-{visible_tools}
+Context projection:
+{projection_json}
+
+History digest:
+{history_digest}
 
 Tool requirements:
 {tool_requirements}
 
-Intent family:
-{intent_family}
-
-Current working directory:
-{cwd}
-
-Original goal:
-{goal}
-
 Current user follow-up:
 {user_reply}
-
-Last observation:
-{last_observation}"#,
-		visible_tools = serde_json::to_string_pretty(&loop_state.visible_tools)
-			.unwrap_or_else(|_| "[]".to_string()),
+"#,
+		projection_json = projection_json,
+		history_digest = context_projection.history_digest,
 		tool_requirements =
-			serde_json::to_string_pretty(&tool_requirements(&loop_state.visible_tools))
+			serde_json::to_string_pretty(&tool_requirements(&context_projection.visible_tools))
 				.unwrap_or_else(|_| "{}".to_string()),
-		intent_family = serde_json::to_string(&loop_state.route_decision.intent_family)
-			.unwrap_or_else(|_| "\"unknown\"".to_string()),
-		cwd = loop_state.working_directory,
-		goal = loop_state.goal,
 		user_reply = user_reply.unwrap_or("null"),
-		last_observation = loop_state
-			.last_observation
-			.as_ref()
-			.map(|observation| serde_json::to_string_pretty(observation).unwrap_or_default())
-			.unwrap_or_else(|| "null".to_string()),
 	)
 }
 
@@ -431,5 +416,174 @@ pub(crate) fn attachments_for_tool(
 			.map(std::path::PathBuf::from)
 			.collect(),
 		_ => Vec::new(),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::collections::VecDeque;
+	use std::sync::{Arc, Mutex};
+
+	use roku_common_types::ResourceSelector;
+	use roku_plugin_llm::{
+		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderCallError,
+		ProviderResponse, RiskTier, RoutingPolicy,
+	};
+	use serde_json::json;
+
+	use super::{decide_tool_loop_next_step, tool_loop_prompt};
+	use crate::router::{IntentFamily, RouteDecision, RouteRisk};
+	use crate::runtime_loop::{
+		ContextProjection, LoopContext, LoopState, StepObservation, ToolObservation,
+		build_context_projection, step_record::StepRecord,
+	};
+
+	struct PromptRecordingProvider {
+		prompts: Arc<Mutex<Vec<String>>>,
+		responses: Arc<Mutex<VecDeque<String>>>,
+	}
+
+	impl LlmProvider for PromptRecordingProvider {
+		fn provider_name(&self) -> &'static str {
+			"tool-loop-test-provider"
+		}
+
+		fn complete(
+			&self,
+			_model: &ModelProfile,
+			request: &GenerationRequest,
+		) -> Result<ProviderResponse, ProviderCallError> {
+			self.prompts
+				.lock()
+				.expect("prompt lock should succeed")
+				.push(request.prompt.clone());
+			let output = self
+				.responses
+				.lock()
+				.expect("response lock should succeed")
+				.pop_front()
+				.expect("a canned response should be available");
+			Ok(ProviderResponse {
+				output,
+				finish_reason: None,
+				prompt_tokens: 24,
+				output_tokens: 18,
+				latency_ms: 10,
+			})
+		}
+	}
+
+	fn sample_loop_state() -> LoopState {
+		let context = LoopContext {
+			request_id: "req-1".to_string(),
+			session_id: "session-1".to_string(),
+			goal: "Summarize the runtime inventory".to_string(),
+			workspace_root: "/workspace".to_string(),
+			working_directory: "/workspace".to_string(),
+			visible_tools: vec!["inventory.describe".to_string()],
+			bound_resources: vec![ResourceSelector::tool("inventory.describe".to_string())],
+			route_decision: RouteDecision::new(
+				IntentFamily::Chat,
+				0.91,
+				false,
+				RouteRisk::Low,
+				vec!["inventory.describe".to_string()],
+				Vec::new(),
+				Vec::new(),
+				"inventory request",
+			),
+			last_observation: None,
+		};
+		LoopState::new("loop-req-1", &context)
+	}
+
+	fn router_with_responses(
+		responses: Vec<serde_json::Value>,
+	) -> (LlmRouter, Arc<Mutex<Vec<String>>>) {
+		let prompts = Arc::new(Mutex::new(Vec::new()));
+		let mut router = LlmRouter::new(RoutingPolicy {
+			max_request_cost_usd: 1.0,
+			max_latency_ms: 5_000,
+		});
+		router.register_provider(PromptRecordingProvider {
+			prompts: Arc::clone(&prompts),
+			responses: Arc::new(Mutex::new(
+				responses
+					.into_iter()
+					.map(|value| value.to_string())
+					.collect::<VecDeque<_>>(),
+			)),
+		});
+		router.register_model(ModelProfile {
+			model_id: "tool-loop-test-model".to_string(),
+			provider: "tool-loop-test-provider".to_string(),
+			max_context_tokens: 16_000,
+			cost_per_1k_tokens_usd: 0.0,
+			max_risk_tier: RiskTier::Low,
+			route_priority: 100,
+		});
+		(router, prompts)
+	}
+
+	#[test]
+	fn prompt_uses_context_projection_history_digest_instead_of_raw_step_log() {
+		let mut loop_state = sample_loop_state();
+		loop_state.record_step(StepRecord::tool_call(
+			1,
+			"inventory.describe",
+			"Use the inventory tool first.",
+			StepObservation::Tool(ToolObservation {
+				ok: true,
+				tool_name: "inventory.describe".to_string(),
+				error_type: None,
+				terminal: false,
+				data: json!({ "runtime_mode": "deterministic" }),
+				message: "deterministic placeholder only: inventory summary was not generated by a live runtime".to_string(),
+			}),
+			Some(15),
+			3,
+			2,
+			"/workspace",
+		));
+		let projection = build_context_projection(&loop_state);
+		let prompt = tool_loop_prompt(&projection, None);
+
+		assert!(prompt.contains("History digest:"));
+		assert!(prompt.contains("step 1"));
+		assert!(prompt.contains("inventory.describe"));
+		assert!(!prompt.contains("\"started_at\""));
+		assert!(!prompt.contains("\"finished_at\""));
+	}
+
+	#[test]
+	fn router_can_continue_with_call_tool_after_successful_observation() {
+		let mut loop_state = sample_loop_state();
+		loop_state.last_observation = Some(ToolObservation {
+			ok: true,
+			tool_name: "inventory.describe".to_string(),
+			error_type: None,
+			terminal: false,
+			data: json!({ "runtime_mode": "deterministic" }),
+			message: "partial inventory summary".to_string(),
+		});
+		let projection: ContextProjection = build_context_projection(&loop_state);
+		let (router, prompts) = router_with_responses(vec![json!({
+			"action": "call_tool",
+			"tool_name": "inventory.describe",
+			"arguments": {},
+			"reason": "Collect one more grounded inventory observation.",
+			"final_message": null
+		})]);
+
+		let decision = decide_tool_loop_next_step(&loop_state, &projection, Some(&router), None);
+
+		assert_eq!(
+			decision.action,
+			crate::runtime_loop::NextStepAction::CallTool
+		);
+		assert_eq!(decision.tool_name.as_deref(), Some("inventory.describe"));
+		let prompts = prompts.lock().expect("prompt lock should succeed");
+		assert_eq!(prompts.len(), 1);
+		assert!(prompts[0].contains("partial inventory summary"));
 	}
 }
