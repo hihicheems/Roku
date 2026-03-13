@@ -238,12 +238,11 @@ fn classify_grounded_direct_route(
 			Vec::new(),
 			"grounded filesystem glob allows a direct `fs.glob` route",
 		);
-		return Some(build_filesystem_loop_route(
+		return Some(build_filesystem_tool_loop_route(
 			context,
 			request,
 			decision,
 			Some("fs.glob"),
-			None,
 		));
 	}
 
@@ -267,12 +266,11 @@ fn classify_grounded_direct_route(
 		Vec::new(),
 		format!("grounded filesystem target resolved to direct `{tool_name}`"),
 	);
-	Some(build_filesystem_loop_route(
+	Some(build_filesystem_tool_loop_route(
 		context,
 		request,
 		decision,
 		Some(tool_name),
-		None,
 	))
 }
 
@@ -295,12 +293,11 @@ fn classify_shell_like_fs_command(
 			command.tool_name
 		),
 	);
-	Some(build_filesystem_loop_route(
+	Some(build_filesystem_tool_loop_route(
 		context,
 		request,
 		decision,
 		Some(command.tool_name),
-		None,
 	))
 }
 
@@ -629,12 +626,11 @@ fn classify_with_llm(
 			.iter()
 			.find(|tool_name| tool_name.starts_with("fs."))
 			.cloned();
-		return build_filesystem_loop_route(
+		return build_filesystem_tool_loop_route(
 			context,
 			request,
 			decision,
 			preferred_tool.as_deref(),
-			None,
 		);
 	}
 	if matches!(
@@ -1022,7 +1018,7 @@ fn build_direct_tool_plan(
 ) -> RouteDecisionResult {
 	let tool_name = selector.name().to_string();
 	if tool_name.starts_with("fs.") {
-		return build_filesystem_loop_route(context, request, decision, Some(&tool_name), None);
+		return build_filesystem_tool_loop_route(context, request, decision, Some(&tool_name));
 	}
 	build_tool_loop_route(context, decision, Some(&tool_name), Vec::new())
 }
@@ -1047,6 +1043,18 @@ fn build_filesystem_loop_route(
 		kind: DirectRouteKind::FilesystemLoop { commands },
 		bound_resources: Vec::new(),
 	})
+}
+
+fn build_filesystem_tool_loop_route(
+	context: &RouteClassifierContext<'_>,
+	request: &RequestEnvelope,
+	mut decision: RouteDecision,
+	preferred_tool: Option<&str>,
+) -> RouteDecisionResult {
+	decision.intent_family = IntentFamily::FilesystemRead;
+	decision.candidate_tools =
+		filesystem_loop_candidate_tools(context.catalog, request, preferred_tool);
+	build_tool_loop_route(context, decision, preferred_tool, Vec::new())
 }
 
 fn build_tool_loop_route(

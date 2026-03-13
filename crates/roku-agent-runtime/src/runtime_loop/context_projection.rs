@@ -246,7 +246,8 @@ mod tests {
 	use super::build_context_projection;
 	use crate::router::{IntentFamily, RouteDecision, RouteRisk};
 	use crate::runtime_loop::{
-		LoopContext, LoopState, StepObservation, ToolObservation, step_record::StepRecord,
+		LoopContext, LoopDriverKind, LoopState, StepObservation, ToolObservation,
+		step_record::StepRecord,
 	};
 
 	fn sample_loop_state() -> LoopState {
@@ -270,7 +271,7 @@ mod tests {
 			),
 			last_observation: None,
 		};
-		let mut state = LoopState::new("loop-req-1", &context);
+		let mut state = LoopState::new("loop-req-1", &context, LoopDriverKind::ToolLoop);
 		state.record_step(StepRecord::tool_call(
 			1,
 			"inventory.describe",

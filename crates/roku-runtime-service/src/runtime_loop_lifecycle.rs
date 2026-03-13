@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use roku_agent_runtime::{
-	EscalationAction, LoopState, RouteDecisionResult, StepAction, StepRecord,
+	DirectRouteKind, EscalationAction, LoopDriverKind, LoopState, RouteDecisionResult, StepAction,
+	StepRecord,
 };
 use roku_common_types::{RequestEnvelope, ResponseStatus};
 use roku_observability::LogLevel;
@@ -60,6 +61,7 @@ impl RuntimeService {
 			&request.session_id,
 			decision,
 			bound_resources,
+			route_driver_kind(route),
 		);
 		log_runtime(
 			LogLevel::Info,
@@ -196,6 +198,16 @@ impl RuntimeService {
 				("step_count", loop_state.history.len().to_string()),
 			],
 		);
+	}
+}
+
+fn route_driver_kind(route: &RouteDecisionResult) -> LoopDriverKind {
+	match route {
+		RouteDecisionResult::Direct(plan) => match plan.kind {
+			DirectRouteKind::FilesystemLoop { .. } => LoopDriverKind::FilesystemLoop,
+			DirectRouteKind::ToolLoop => LoopDriverKind::ToolLoop,
+		},
+		RouteDecisionResult::Escalate(_) => LoopDriverKind::ToolLoop,
 	}
 }
 

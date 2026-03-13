@@ -22,11 +22,11 @@ use crate::router::{
 	RouteClassifierContext, RouteDecisionResult,
 };
 use crate::runtime_loop::{
-	ContextProjection, LoopContext, LoopState, StepAction, StepObservation, StepRecord,
-	ToolObservation, attachments_for_tool, build_context_projection, build_loop_context,
-	decide_filesystem_next_step, decide_tool_loop_next_step, effective_ask_user_message,
-	intake_request, interpret_observation, next_working_directory_from_observation,
-	summarize_observation,
+	ContextProjection, LoopContext, LoopDriverKind, LoopState, StepAction, StepObservation,
+	StepRecord, ToolObservation, attachments_for_tool, build_context_projection,
+	build_loop_context, decide_filesystem_next_step, decide_tool_loop_next_step,
+	effective_ask_user_message, intake_request, interpret_observation,
+	next_working_directory_from_observation, summarize_observation,
 };
 use crate::tool_config::ToolCatalogConfig;
 use crate::tools::{
@@ -320,9 +320,14 @@ impl GenericAgentRuntime {
 		session_id: &str,
 		route_decision: &crate::router::RouteDecision,
 		bound_resources: Vec<ResourceSelector>,
+		driver_kind: LoopDriverKind,
 	) -> LoopState {
 		let context = self.build_loop_context(request, session_id, route_decision, bound_resources);
-		LoopState::new(format!("loop-{}", request.request_id.0), &context)
+		LoopState::new(
+			format!("loop-{}", request.request_id.0),
+			&context,
+			driver_kind,
+		)
 	}
 
 	pub fn record_terminal_step(
@@ -347,7 +352,12 @@ impl GenericAgentRuntime {
 			action,
 			reason,
 			observation,
-			loop_state.remaining_step_budget.saturating_sub(1),
+			match action {
+				StepAction::AskUser => loop_state.remaining_step_budget,
+				StepAction::FinalAnswer | StepAction::Fail | StepAction::CallTool => {
+					loop_state.remaining_step_budget.saturating_sub(1)
+				}
+			},
 			loop_state.remaining_recovery_budget,
 			loop_state.working_directory.clone(),
 		);
@@ -402,6 +412,7 @@ impl GenericAgentRuntime {
 						task_id,
 						request,
 						loop_state,
+						&build_context_projection(loop_state),
 						tool_name,
 						next_step.arguments.clone().unwrap_or_else(|| json!({})),
 						&[],
@@ -528,6 +539,7 @@ impl GenericAgentRuntime {
 						task_id,
 						request,
 						loop_state,
+						&context_projection,
 						tool_name,
 						next_step.arguments.clone().unwrap_or_else(|| json!({})),
 						&attachments,
@@ -682,6 +694,7 @@ impl GenericAgentRuntime {
 				task_id,
 				request,
 				loop_state,
+				&build_context_projection(loop_state),
 				tool_name,
 				arguments,
 				&[],
@@ -840,35 +853,60 @@ impl GenericAgentRuntime {
 		&self,
 		route_decision: &crate::router::RouteDecision,
 	) -> Vec<String> {
+		self.compose_visible_tools(route_decision, None)
+	}
+
+	fn visible_tools_for_loop_state(&self, loop_state: &LoopState) -> Vec<String> {
+		self.compose_visible_tools(&loop_state.route_decision, Some(loop_state))
+	}
+
+	fn refresh_tool_loop_projection(&self, loop_state: &mut LoopState) -> ContextProjection {
+		loop_state.visible_tools = self.visible_tools_for_loop_state(loop_state);
+		build_context_projection(loop_state)
+	}
+
+	fn compose_visible_tools(
+		&self,
+		route_decision: &crate::router::RouteDecision,
+		loop_state: Option<&LoopState>,
+	) -> Vec<String> {
 		let enabled_tools = self
 			.resource_catalog
 			.descriptors_for_kind(ResourceKind::Tool)
 			.into_iter()
 			.map(|descriptor| descriptor.name)
 			.collect::<HashSet<_>>();
-		if route_decision.candidate_tools.is_empty() {
-			let mut visible_tools = enabled_tools.into_iter().collect::<Vec<_>>();
-			visible_tools.sort();
-			return visible_tools;
+		let mut visible_tools = Vec::new();
+		append_enabled_tool_names(
+			&mut visible_tools,
+			&enabled_tools,
+			route_decision.candidate_tools.iter().map(String::as_str),
+		);
+		append_enabled_tool_names(
+			&mut visible_tools,
+			&enabled_tools,
+			intent_soft_preference_tools(route_decision.intent_family)
+				.iter()
+				.copied(),
+		);
+		if let Some(loop_state) = loop_state {
+			append_enabled_tool_names(
+				&mut visible_tools,
+				&enabled_tools,
+				loop_state_followup_tools(loop_state),
+			);
 		}
-
-		let mut visible_tools = route_decision
-			.candidate_tools
-			.iter()
-			.filter(|tool_name| enabled_tools.contains(*tool_name))
-			.cloned()
-			.collect::<Vec<_>>();
-		visible_tools.dedup();
+		append_enabled_tool_names(
+			&mut visible_tools,
+			&enabled_tools,
+			safe_baseline_tool_pool().iter().copied(),
+		);
+		if visible_tools.is_empty() {
+			let mut fallback_tools = enabled_tools.into_iter().collect::<Vec<_>>();
+			fallback_tools.sort();
+			return fallback_tools;
+		}
 		visible_tools
-	}
-
-	fn visible_tools_for_loop_state(&self, loop_state: &LoopState) -> Vec<String> {
-		self.visible_tools_for_decision(&loop_state.route_decision)
-	}
-
-	fn refresh_tool_loop_projection(&self, loop_state: &mut LoopState) -> ContextProjection {
-		loop_state.visible_tools = self.visible_tools_for_loop_state(loop_state);
-		build_context_projection(loop_state)
 	}
 
 	fn execute_tool_like_route(
@@ -1036,7 +1074,7 @@ impl GenericAgentRuntime {
 		}
 	}
 
-	fn execute_tool_invocation_with_resources(
+	fn execute_tool_invocation_with_resources_and_summary(
 		&self,
 		task_id: &TaskId,
 		request: &RequestEnvelope,
@@ -1044,6 +1082,7 @@ impl GenericAgentRuntime {
 		arguments: Value,
 		attachments: &[PathBuf],
 		bound_resources: &[ResourceSelector],
+		step_summary: &str,
 	) -> DirectRouteExecutionResult {
 		let mut resources = vec![selector.clone()];
 		for resource in bound_resources {
@@ -1055,10 +1094,7 @@ impl GenericAgentRuntime {
 		let node = TaskNode {
 			node_id: NodeId("direct-route".to_string()),
 			kind: TaskNodeKind::Execution,
-			description: step_description(
-				&request.goal,
-				&format!("Invoke selected tool `{}` directly", selector.name()),
-			),
+			description: step_description(&request.goal, step_summary),
 			resources: resources.clone(),
 			capabilities: capabilities.clone(),
 			dispatch_policy: TaskNodeDispatchPolicy::Automatic,
@@ -1156,6 +1192,7 @@ impl GenericAgentRuntime {
 		task_id: &TaskId,
 		request: &RequestEnvelope,
 		loop_state: &LoopState,
+		context_projection: &ContextProjection,
 		tool_name: &str,
 		arguments: Value,
 		attachments: &[PathBuf],
@@ -1170,13 +1207,14 @@ impl GenericAgentRuntime {
 				ResultStatus::Error,
 			);
 		};
-		self.execute_tool_invocation_with_resources(
+		self.execute_tool_invocation_with_resources_and_summary(
 			task_id,
 			request,
 			&selector,
 			arguments,
 			attachments,
 			&loop_state.bound_resources,
+			&tool_loop_step_summary(context_projection, tool_name),
 		)
 	}
 
@@ -1485,6 +1523,149 @@ fn tool_loop_failure_message(
 	}
 
 	summarized_tool_loop_message(goal, &interpreted.raw_observation)
+}
+
+fn append_enabled_tool_names<'a>(
+	visible_tools: &mut Vec<String>,
+	enabled_tools: &HashSet<String>,
+	tool_names: impl IntoIterator<Item = &'a str>,
+) {
+	for tool_name in tool_names {
+		if enabled_tools.contains(tool_name)
+			&& !visible_tools.iter().any(|existing| existing == tool_name)
+		{
+			visible_tools.push(tool_name.to_string());
+		}
+	}
+}
+
+fn intent_soft_preference_tools(intent_family: IntentFamily) -> &'static [&'static str] {
+	match intent_family {
+		IntentFamily::Chat => &["general.execute", "inventory.describe"],
+		IntentFamily::FilesystemRead => &[
+			"fs.read_text",
+			"fs.list_dir",
+			"fs.inspect",
+			"fs.find",
+			"fs.exists",
+			"fs.glob",
+			"general.execute",
+		],
+		IntentFamily::TableRead => &[
+			"table.preview",
+			"table.inspect",
+			"table.list_sheets",
+			"table.schema",
+			"general.execute",
+		],
+		IntentFamily::WebLookup => &["web.search", "general.execute"],
+		IntentFamily::CodeExec => &["python.run", "general.execute"],
+		IntentFamily::TextTransform | IntentFamily::MultiStep | IntentFamily::Unknown => {
+			&["general.execute"]
+		}
+	}
+}
+
+fn safe_baseline_tool_pool() -> &'static [&'static str] {
+	&[
+		"general.execute",
+		"inventory.describe",
+		"fs.find",
+		"fs.read_text",
+		"fs.list_dir",
+		"fs.inspect",
+		"fs.exists",
+		"fs.glob",
+		"table.preview",
+		"table.inspect",
+		"table.list_sheets",
+		"table.schema",
+		"web.search",
+		"python.run",
+	]
+}
+
+fn loop_state_followup_tools(loop_state: &LoopState) -> Vec<&'static str> {
+	let mut followups = Vec::new();
+	let has_filesystem_history = loop_state.history.iter().any(|step| {
+		step.tool_name
+			.as_deref()
+			.is_some_and(|tool| tool.starts_with("fs."))
+	});
+	let has_table_history = loop_state.history.iter().any(|step| {
+		step.tool_name
+			.as_deref()
+			.is_some_and(|tool| tool.starts_with("table."))
+	});
+	let has_web_history = loop_state.history.iter().any(|step| {
+		step.tool_name
+			.as_deref()
+			.is_some_and(|tool| tool.starts_with("web."))
+	});
+	let has_python_history = loop_state.history.iter().any(|step| {
+		step.tool_name
+			.as_deref()
+			.is_some_and(|tool| tool.starts_with("python."))
+	});
+
+	if has_filesystem_history {
+		followups.extend([
+			"general.execute",
+			"table.preview",
+			"table.inspect",
+			"python.run",
+			"web.search",
+		]);
+	}
+	if has_table_history {
+		followups.extend(["general.execute", "python.run", "fs.read_text"]);
+	}
+	if has_web_history || has_python_history {
+		followups.push("general.execute");
+	}
+	if loop_state.status == crate::runtime_loop::LoopStatus::AwaitingUser {
+		followups.push("general.execute");
+	}
+	if loop_state.remaining_step_budget <= 1 || loop_state.remaining_recovery_budget <= 1 {
+		followups.extend(["general.execute", "inventory.describe"]);
+	}
+	if !loop_state.bound_resources.is_empty() {
+		followups.push("general.execute");
+	}
+	if !loop_state.working_directory.is_empty() {
+		followups.extend(["fs.inspect", "fs.list_dir"]);
+	}
+
+	let last_tool = loop_state
+		.last_observation
+		.as_ref()
+		.map(|observation| observation.tool_name.as_str());
+	match last_tool {
+		Some(tool_name) if tool_name.starts_with("fs.") => {
+			followups.extend([
+				"general.execute",
+				"table.preview",
+				"python.run",
+				"web.search",
+			]);
+		}
+		Some(tool_name) if tool_name.starts_with("table.") => {
+			followups.extend(["general.execute", "python.run"]);
+		}
+		Some(tool_name) if tool_name.starts_with("web.") || tool_name.starts_with("python.") => {
+			followups.push("general.execute");
+		}
+		_ => {}
+	}
+	followups
+}
+
+fn tool_loop_step_summary(context_projection: &ContextProjection, tool_name: &str) -> String {
+	let projection_json =
+		serde_json::to_string_pretty(context_projection).unwrap_or_else(|_| "{}".to_string());
+	format!(
+		"Continue the generic runtime loop with tool `{tool_name}`.\nCurrent context projection:\n{projection_json}"
+	)
 }
 
 fn extract_result_message(result: &ResultEnvelope) -> String {
@@ -2004,8 +2185,13 @@ So, I'll output: "星期日""#
 			Vec::new(),
 			"inventory request",
 		);
-		let mut loop_state =
-			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+		let mut loop_state = runtime.initialize_runtime_loop(
+			&request,
+			&request.session_id,
+			&decision,
+			Vec::new(),
+			LoopDriverKind::ToolLoop,
+		);
 		loop_state.visible_tools = vec!["general.execute".to_string()];
 
 		let execution = runtime.execute_tool_loop(
@@ -2039,8 +2225,18 @@ So, I'll output: "星期日""#
 			crate::runtime_loop::LoopStatus::Succeeded
 		);
 		assert_eq!(
-			loop_state.visible_tools,
-			vec!["inventory.describe".to_string()]
+			loop_state.visible_tools.first().map(String::as_str),
+			Some("inventory.describe")
+		);
+		assert!(
+			loop_state
+				.visible_tools
+				.contains(&"general.execute".to_string())
+		);
+		assert!(
+			loop_state
+				.visible_tools
+				.contains(&"fs.read_text".to_string())
 		);
 
 		let prompts = prompts.lock().expect("prompt lock should succeed");
@@ -2089,8 +2285,13 @@ So, I'll output: "星期日""#
 			Vec::new(),
 			"chat request",
 		);
-		let mut loop_state =
-			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+		let mut loop_state = runtime.initialize_runtime_loop(
+			&request,
+			&request.session_id,
+			&decision,
+			Vec::new(),
+			LoopDriverKind::ToolLoop,
+		);
 
 		let execution = runtime.execute_tool_loop(
 			&TaskId("task-ask-user".to_string()),
@@ -2206,7 +2407,7 @@ So, I'll output: "星期日""#
 	}
 
 	#[test]
-	fn initialize_runtime_loop_uses_shortlisted_visible_tools() {
+	fn initialize_runtime_loop_uses_shortlist_and_baseline_visible_tools() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-loop".to_string()),
@@ -2226,12 +2427,121 @@ So, I'll output: "星期日""#
 			"filesystem request",
 		);
 
-		let loop_state =
-			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+		let loop_state = runtime.initialize_runtime_loop(
+			&request,
+			&request.session_id,
+			&decision,
+			Vec::new(),
+			LoopDriverKind::ToolLoop,
+		);
 
 		assert_eq!(loop_state.run_id, "loop-req-loop");
-		assert_eq!(loop_state.visible_tools, vec!["fs.read_text".to_string()]);
+		assert_eq!(
+			loop_state.visible_tools.first().map(String::as_str),
+			Some("fs.read_text")
+		);
+		assert!(
+			loop_state
+				.visible_tools
+				.contains(&"general.execute".to_string())
+		);
+		assert!(
+			loop_state
+				.visible_tools
+				.contains(&"inventory.describe".to_string())
+		);
+		assert!(
+			loop_state
+				.visible_tools
+				.contains(&"table.preview".to_string())
+		);
+		assert!(loop_state.visible_tools.contains(&"python.run".to_string()));
 		assert_eq!(loop_state.history.len(), 0);
+	}
+
+	#[test]
+	fn classify_route_moves_grounded_filesystem_reads_into_generic_tool_loop() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-fs-tool-loop".to_string()),
+			session_id: "session-fs-tool-loop".to_string(),
+			goal: "Read the first part of Cargo.toml.".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+
+		match route {
+			crate::router::RouteDecisionResult::Direct(plan) => {
+				assert_eq!(plan.kind, crate::router::DirectRouteKind::ToolLoop);
+				assert_eq!(plan.decision.intent_family, IntentFamily::FilesystemRead);
+				assert_eq!(
+					plan.decision.candidate_tools.first().map(String::as_str),
+					Some("fs.read_text")
+				);
+			}
+			other => panic!("expected filesystem read to use generic tool loop, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn visible_tools_recompute_exposes_cross_tool_followups_after_filesystem_steps() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-followup".to_string()),
+			session_id: "session-followup".to_string(),
+			goal: "Read Cargo.toml and summarize the workspace layout".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::FilesystemRead,
+			0.94,
+			false,
+			crate::router::RouteRisk::Low,
+			vec!["fs.read_text".to_string()],
+			vec!["core-fs".to_string()],
+			Vec::new(),
+			"filesystem request",
+		);
+		let mut loop_state = runtime.initialize_runtime_loop(
+			&request,
+			&request.session_id,
+			&decision,
+			Vec::new(),
+			LoopDriverKind::ToolLoop,
+		);
+		loop_state.record_step(StepRecord::tool_call(
+			1,
+			"fs.read_text",
+			"Read the grounded workspace manifest first.",
+			StepObservation::Tool(ToolObservation {
+				ok: true,
+				tool_name: "fs.read_text".to_string(),
+				error_type: None,
+				terminal: false,
+				data: serde_json::json!({
+					"path": "/workspace/Cargo.toml",
+					"content": "[workspace]\nmembers = [\"crates/roku-agent-runtime\"]",
+				}),
+				message: "Read the grounded workspace manifest.".to_string(),
+			}),
+			Some(12),
+			3,
+			2,
+			"/workspace",
+		));
+
+		let visible_tools = runtime.visible_tools_for_loop_state(&loop_state);
+
+		assert_eq!(
+			visible_tools.first().map(String::as_str),
+			Some("fs.read_text")
+		);
+		assert!(visible_tools.contains(&"general.execute".to_string()));
+		assert!(visible_tools.contains(&"table.preview".to_string()));
+		assert!(visible_tools.contains(&"python.run".to_string()));
 	}
 
 	#[test]
@@ -2254,8 +2564,13 @@ So, I'll output: "星期日""#
 			Vec::new(),
 			"chat request",
 		);
-		let mut loop_state =
-			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+		let mut loop_state = runtime.initialize_runtime_loop(
+			&request,
+			&request.session_id,
+			&decision,
+			Vec::new(),
+			LoopDriverKind::ToolLoop,
+		);
 
 		let step = runtime.record_terminal_step(
 			&mut loop_state,
