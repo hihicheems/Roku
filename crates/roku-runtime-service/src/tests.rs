@@ -282,7 +282,7 @@ fn pending_filesystem_tool_loops_resume_through_the_generic_loop_driver() {
 		.execute(request("Cargo.toml"))
 		.expect("pending loop should resume");
 
-	assert_eq!(response.status, ResponseStatus::Succeeded);
+	assert_eq!(response.status, ResponseStatus::Failed);
 	assert!(
 		service
 			.pending_loop("session-1")
@@ -294,13 +294,12 @@ fn pending_filesystem_tool_loops_resume_through_the_generic_loop_driver() {
 		.get_task(&TaskId("task-req-1".to_string()))
 		.expect("task lookup should succeed")
 		.expect("task should be persisted");
-	let last_result = task
-		.last_result
-		.as_ref()
-		.expect("resumed direct loop execution should persist a terminal result");
-	let payload: serde_json::Value =
-		serde_json::from_str(&last_result.payload).expect("payload should be valid json");
-	assert_eq!(payload["runtime_loop"], "tool");
+	assert_eq!(task.state, TaskState::Failed);
+	assert!(
+		response
+			.message
+			.contains("non-terminal `fs.read_text` observation")
+	);
 }
 
 #[test]
