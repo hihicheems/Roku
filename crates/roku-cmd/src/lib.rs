@@ -534,6 +534,11 @@ mod tests {
 	fn run_once_returns_success() {
 		let response = run_once("analyze market").expect("pipeline should succeed");
 		assert!(matches!(response.status, ResponseStatus::Succeeded));
+		assert!(
+			response
+				.message
+				.contains("[runtime requested=deterministic effective=deterministic]")
+		);
 	}
 
 	#[test]

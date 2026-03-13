@@ -63,6 +63,78 @@ pub enum RunMode {
 	TimeoutRecovery,
 }
 
+/// Identifies which runtime pipeline a service instance is expected to use.
+///
+/// ## Variants
+/// - `Deterministic`: Uses the non-LLM fallback path with placeholder or rule-based behavior.
+/// - `LiveReact`: Uses the live LLM-backed ReAct runtime path.
+///
+/// ## Non-Goals
+/// - This enum does not describe task-level execution modes such as approval or retry recovery.
+/// - This enum does not imply that a given request succeeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeExecutionMode {
+	Deterministic,
+	LiveReact,
+}
+
+impl RuntimeExecutionMode {
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Deterministic => "deterministic",
+			Self::LiveReact => "live-react",
+		}
+	}
+}
+
+/// Records the requested runtime path and the path that is actually active.
+///
+/// ## Why this exists
+/// Phase 1 needs an explicit source of truth for whether a command is exercising the
+/// live ReAct runtime or a deterministic fallback. Without this report, logs and CLI
+/// output can silently make deterministic executions look like live runtime passes.
+///
+/// ## Invariants
+/// - `effective` is the runtime path that will actually execute the request.
+/// - `fallback_reason` is `Some` only when `requested != effective`.
+/// - `requested == effective` means the runtime path was honored as configured.
+///
+/// ## Non-Goals
+/// - This report is not user-facing business output.
+/// - This report does not replace task-level status such as succeeded or failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeModeReport {
+	pub requested: RuntimeExecutionMode,
+	pub effective: RuntimeExecutionMode,
+	pub fallback_reason: Option<String>,
+}
+
+impl RuntimeModeReport {
+	pub fn deterministic() -> Self {
+		Self {
+			requested: RuntimeExecutionMode::Deterministic,
+			effective: RuntimeExecutionMode::Deterministic,
+			fallback_reason: None,
+		}
+	}
+
+	pub fn live_react() -> Self {
+		Self {
+			requested: RuntimeExecutionMode::LiveReact,
+			effective: RuntimeExecutionMode::LiveReact,
+			fallback_reason: None,
+		}
+	}
+
+	pub fn live_react_fallback_to_deterministic(fallback_reason: impl Into<String>) -> Self {
+		Self {
+			requested: RuntimeExecutionMode::LiveReact,
+			effective: RuntimeExecutionMode::Deterministic,
+			fallback_reason: Some(fallback_reason.into()),
+		}
+	}
+}
+
 struct RuntimeState {
 	capability_auth: CapabilityAuthority,
 	task_repo: Box<dyn TaskRepository + Send>,
@@ -87,6 +159,7 @@ pub struct RuntimeDataPlane {
 pub struct RuntimeService {
 	orchestrator: Orchestrator,
 	runtime: GenericAgentRuntime,
+	runtime_mode: RuntimeModeReport,
 	validator: ValidationPipeline,
 	metrics: Arc<Metrics>,
 	audit_sink: Arc<dyn AuditSink>,
@@ -217,6 +290,7 @@ impl RuntimeService {
 		Self {
 			orchestrator: Orchestrator::default(),
 			runtime,
+			runtime_mode: RuntimeModeReport::deterministic(),
 			validator: ValidationPipeline::default(),
 			metrics,
 			audit_sink,
@@ -232,6 +306,21 @@ impl RuntimeService {
 			}),
 			pending_loops: Mutex::new(HashMap::new()),
 		}
+	}
+
+	/// Overrides the runtime mode report attached to this service instance.
+	///
+	/// ## Why this exists
+	/// CLI bootstrap code constructs deterministic and live service variants through
+	/// different builders. The service itself must still expose the requested/effective
+	/// runtime truth so logs and tests can verify which path is active.
+	pub fn with_runtime_mode_report(mut self, runtime_mode: RuntimeModeReport) -> Self {
+		self.runtime_mode = runtime_mode;
+		self
+	}
+
+	pub fn runtime_mode_report(&self) -> RuntimeModeReport {
+		self.runtime_mode.clone()
 	}
 
 	pub fn in_memory() -> Self {
@@ -286,16 +375,44 @@ impl RuntimeService {
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		self.metrics.inc_requests();
 		let normalized_request = normalize_request(&request);
+		let runtime_mode = self.runtime_mode_report();
 		log_runtime(
 			LogLevel::Info,
 			"received runtime request",
 			[
 				("request_id", normalized_request.request_id.0.clone()),
 				("session_id", normalized_request.session_id.clone()),
-				("mode", format!("{mode:?}")),
+				("run_mode", format!("{mode:?}")),
+				(
+					"requested_runtime_mode",
+					runtime_mode.requested.as_str().to_string(),
+				),
+				(
+					"effective_runtime_mode",
+					runtime_mode.effective.as_str().to_string(),
+				),
 				("goal", truncate_for_log(&normalized_request.goal, 200)),
 			],
 		);
+		if let Some(reason) = runtime_mode.fallback_reason.as_deref() {
+			log_runtime(
+				LogLevel::Warn,
+				"live runtime request is executing in effective deterministic mode",
+				[
+					("request_id", normalized_request.request_id.0.clone()),
+					("session_id", normalized_request.session_id.clone()),
+					(
+						"requested_runtime_mode",
+						runtime_mode.requested.as_str().to_string(),
+					),
+					(
+						"effective_runtime_mode",
+						runtime_mode.effective.as_str().to_string(),
+					),
+					("fallback_reason", reason.to_string()),
+				],
+			);
+		}
 		let mut task = self.orchestrator.create_task(&normalized_request);
 
 		self.record_transition(&mut task, TaskState::Planning, "classify direct route")?;

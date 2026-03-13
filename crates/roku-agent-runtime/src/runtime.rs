@@ -1487,7 +1487,12 @@ mod tests {
 		let payload = payload_value(&result);
 		assert_eq!(payload["worker_id"], "data-worker");
 		assert_eq!(payload["tool_name"], "data.execute");
-		assert_eq!(payload["message"], "data pipeline step executed");
+		assert_eq!(
+			payload["message"],
+			"deterministic placeholder only: data processing was not executed by a live runtime"
+		);
+		assert_eq!(payload["output"]["runtime_mode"], "deterministic");
+		assert_eq!(payload["output"]["placeholder"], true);
 	}
 
 	#[test]
