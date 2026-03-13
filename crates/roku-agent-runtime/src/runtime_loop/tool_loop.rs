@@ -108,6 +108,8 @@ Rules:
 - For `code_exec`, only call `python.run` when explicit code is present in the grounding context.
 - For `table_read`, prefer the first shortlisted `table.*` tool that matches the grounded table path.
 - For `web_lookup`, use `web.search` when a concrete query is available.
+- When the current request references concrete local files, directories, workspace paths, or shell-style inspection goals and `fs.*` tools are visible, gather grounded filesystem evidence before using `general.execute`.
+- Do not call `general.execute` only to speculate about which filesystem tools could be used. Prefer `fs.inspect`, `fs.list_dir`, `fs.read_text`, `fs.find`, or `fs.glob` when the current context already grounds one of them.
 - When a filesystem, table, web, or python observation provides raw evidence but the user still needs explanation, comparison, or synthesis, prefer `general.execute` before emitting `final_answer`.
 - Use `ask_user` when the current information is still insufficient.
 - Use `final_answer` only when the current context projection already proves the user request is satisfied.
@@ -153,7 +155,15 @@ fn next_step_from_observation(
 	user_reply: Option<&str>,
 ) -> NextStepDecision {
 	if observation.ok {
-		return final_answer(summarize_observation(&loop_state.goal, observation).final_message);
+		if observation.terminal {
+			return final_answer(
+				summarize_observation(&loop_state.goal, observation).final_message,
+			);
+		}
+		return fail(format!(
+			"The runtime loop needs an explicit next-step decision after the non-terminal `{}` observation.",
+			observation.tool_name
+		));
 	}
 	if observation.error_type.as_deref() == Some("multiple_candidates") {
 		if let Some(decision) = resume_from_awaiting_user_contract(loop_state, user_reply) {
@@ -161,7 +171,7 @@ fn next_step_from_observation(
 		}
 		return ask_user(ask_user_from_observation(&loop_state.goal, observation).final_message);
 	}
-	final_answer(summarize_observation(&loop_state.goal, observation).final_message)
+	fail(summarize_observation(&loop_state.goal, observation).final_message)
 }
 
 fn bootstrap_tool_name(loop_state: &LoopState) -> Option<&str> {
@@ -617,7 +627,7 @@ mod tests {
 	}
 
 	#[test]
-	fn resolved_filesystem_find_falls_back_to_a_conservative_final_answer() {
+	fn resolved_filesystem_find_requires_an_explicit_next_step_decision() {
 		let mut loop_state = sample_filesystem_loop_state();
 		let resolved_path = env::current_dir()
 			.expect("cwd should resolve for tests")
@@ -639,15 +649,12 @@ mod tests {
 
 		let decision = decide_tool_loop_next_step(&loop_state, &projection, None, None);
 
-		assert_eq!(
-			decision.action,
-			crate::runtime_loop::NextStepAction::FinalAnswer
-		);
+		assert_eq!(decision.action, crate::runtime_loop::NextStepAction::Fail);
 		assert!(
 			decision
 				.final_message
 				.as_deref()
-				.is_some_and(|message| message.contains("Cargo.toml"))
+				.is_some_and(|message| message.contains("non-terminal `fs.find` observation"))
 		);
 	}
 

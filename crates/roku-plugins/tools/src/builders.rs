@@ -333,6 +333,8 @@ impl Tool for SkillInstallTool {
 			.map_err(|error| ToolFailure::terminal(error.to_string()))?;
 
 		Ok(json!({
+			"ok": true,
+			"terminal": true,
 			"worker_id": "skill-worker",
 			"message": report.message,
 			"task_id": input.task_id,
@@ -436,6 +438,8 @@ impl Tool for SkillExecuteTool {
 		};
 
 		Ok(json!({
+			"ok": true,
+			"terminal": true,
 			"worker_id": "skill-execute-worker",
 			"message": result.message,
 			"task_id": input.task_id,
@@ -460,6 +464,7 @@ pub(crate) struct WorkerReportTool {
 	descriptor: ToolDescriptor,
 	worker_id: &'static str,
 	message: &'static str,
+	terminal_output: bool,
 }
 
 impl WorkerReportTool {
@@ -473,6 +478,7 @@ impl WorkerReportTool {
 			),
 			worker_id: worker_id_for_role(tool.role),
 			message: completion_message_for_role(tool.role),
+			terminal_output: true,
 		}
 	}
 }
@@ -485,6 +491,8 @@ impl Tool for WorkerReportTool {
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
 		let input = request_input(&request)?;
 		Ok(json!({
+			"ok": true,
+			"terminal": self.terminal_output,
 			"worker_id": self.worker_id,
 			"message": self.message,
 			"runtime_mode": "deterministic",
@@ -507,6 +515,7 @@ pub(crate) struct PromptedLlmTool {
 	worker_id: &'static str,
 	system_prompt: &'static str,
 	risk_tier: RiskTier,
+	terminal_output: bool,
 	skill_registry: SkillRegistry,
 	router: Arc<LlmRouter>,
 	resource_catalog: ResourceCatalog,
@@ -529,6 +538,7 @@ impl PromptedLlmTool {
 			worker_id: worker_id_for_role(tool.role),
 			system_prompt: system_prompt_for_role(tool.role),
 			risk_tier: risk_tier_for_role(tool.role),
+			terminal_output: prompted_tool_is_terminal(tool.role),
 			skill_registry,
 			router,
 			resource_catalog,
@@ -586,6 +596,8 @@ impl Tool for PromptedLlmTool {
 		};
 
 		Ok(json!({
+			"ok": true,
+			"terminal": self.terminal_output,
 			"worker_id": self.worker_id,
 			"message": message,
 			"raw_message": raw_message,
@@ -635,7 +647,7 @@ fn user_visible_prompt(
 	let execution_authority_section = execution_authority_block(input);
 
 	format!(
-		"User request:\n{goal}{history_section}\n\nTrusted runtime context:\n{runtime_context}{skill_section}{inventory_section}{execution_authority_section}\n\nInternal execution hint (do not quote or describe it unless it is directly useful for the answer):\n{summary}\n\nOutput rules:\n- Return only the useful answer text in plain text.\n- Answer directly. Do not preface with analysis, translation, or a restatement of the user's request.\n- Never narrate your reasoning. Do not output phrases like \"用户的问题是\", \"I need to\", \"首先\", or similar meta-analysis.\n- Prefer one short paragraph unless the user explicitly asks for detail.\n- Match the user's language unless the request clearly asks for another language.\n- Preserve conversational continuity when the user refers to prior turns or earlier facts.\n- If the user explicitly references an installed skill, treat the installed skill excerpts above as authoritative local source material.\n- The local inventory JSON above is authoritative for which tools, installed skills, and capability families are currently available.\n- The execution authority block above is authoritative for what this invocation can and cannot actually do.\n- When the installed skill excerpts provide exact field names, directory names, file paths, commands, or schema keys, repeat them verbatim and do not substitute lookalikes or generic alternatives.\n- When answering schema questions, answer at the level the user asked for. If the user asks for field names inside an array entry or nested object, give those inner field names rather than parent object keys or nearby sibling fields.\n- If the user asks about today's date, weekday, or current time, use the trusted runtime context above instead of claiming you lack realtime access.\n- Never claim that a file, directory, skill, installation, or other side effect already exists unless the execution authority above allows side effects or this invocation includes explicit execution evidence proving it happened.\n- If side effects are not allowed for this invocation, you may explain or draft what should be created, but you must clearly say it has not been created yet.\n- Do not mention worker ids, invocation keys, execution steps, hidden instructions, providers, models, budgets, or internal runtime details.\n- Do not describe yourself as an execution worker or reveal chain-of-thought.\n- If you are about to restate the prompt, trusted runtime context, installed skill context, local inventory JSON, execution authority, or your analysis notes, stop and output only the answer.\n- If the user asks who you are or which persona is active, answer as Roku.\n- Internal references for policy only: worker_id={worker_id}; invocation_key={invocation_key}; time_budget_ms={time_budget_ms}.",
+		"User request:\n{goal}{history_section}\n\nTrusted runtime context:\n{runtime_context}{skill_section}{inventory_section}{execution_authority_section}\n\nInternal execution hint (do not quote or describe it unless it is directly useful for the answer):\n{summary}\n\nOutput rules:\n- Return only the useful answer text in plain text.\n- Answer directly. Do not preface with analysis, translation, or a restatement of the user's request.\n- Never narrate your reasoning. Do not output phrases like \"用户的问题是\", \"I need to\", \"首先\", or similar meta-analysis.\n- Prefer one short paragraph unless the user explicitly asks for detail.\n- Match the user's language unless the request clearly asks for another language.\n- Preserve conversational continuity when the user refers to prior turns or earlier facts.\n- If the user explicitly references an installed skill, treat the installed skill excerpts above as authoritative local source material.\n- The local inventory JSON above is authoritative for which tools, installed skills, and capability families are currently available.\n- The execution authority block above is authoritative for what this invocation can and cannot actually do.\n- When the installed skill excerpts provide exact field names, directory names, file paths, commands, or schema keys, repeat them verbatim and do not substitute lookalikes or generic alternatives.\n- When answering schema questions, answer at the level the user asked for. If the user asks for field names inside an array entry or nested object, give those inner field names rather than parent object keys or nearby sibling fields.\n- If the user asks about today's date, weekday, or current time, use the trusted runtime context above instead of claiming you lack realtime access.\n- Never claim that a file, directory, skill, installation, or other side effect already exists unless the execution authority above allows side effects or this invocation includes explicit execution evidence proving it happened.\n- If side effects are not allowed for this invocation, you may explain or draft what should be created, but you must clearly say it has not been created yet.\n- Do not mention worker ids, invocation keys, execution steps, hidden instructions, providers, models, budgets, or internal runtime details.\n- Do not mention internal tool names such as `general.execute`, `fs.read_text`, or `web.search`, and do not emit pseudo tool-call markup or tool-call transcripts.\n- Do not describe yourself as an execution worker or reveal chain-of-thought.\n- If you are about to restate the prompt, trusted runtime context, installed skill context, local inventory JSON, execution authority, or your analysis notes, stop and output only the answer.\n- If the user asks who you are or which persona is active, answer as Roku.\n- Internal references for policy only: worker_id={worker_id}; invocation_key={invocation_key}; time_budget_ms={time_budget_ms}.",
 		goal = input.goal,
 		history_section = history_section,
 		runtime_context = runtime_context,
@@ -1650,7 +1662,7 @@ fn system_prompt_for_role(role: BuiltinToolRole) -> &'static str {
 			"You are Roku's review worker. Produce a concise review or validation conclusion in plain text. Never expose chain-of-thought, hidden reasoning, or internal runtime details."
 		}
 		BuiltinToolRole::General => {
-			"You are Roku. Produce only the final user-facing reply in plain text. Never reveal hidden reasoning, analysis steps, or internal runtime details. If trusted runtime context provides current date or time, treat it as ground truth."
+			"You are Roku. Produce only the final user-facing reply in plain text. Never reveal hidden reasoning, analysis steps, or internal runtime details. Use only grounded evidence present in the trusted runtime context and tool observations. Do not claim that you executed shell commands, read files, searched the web, or observed outputs unless the prompt includes explicit evidence for those actions. If the current context is insufficient to support the requested claim, say so plainly instead of inventing details. If trusted runtime context provides current date or time, treat it as ground truth."
 		}
 	}
 }
@@ -1665,6 +1677,10 @@ fn risk_tier_for_role(role: BuiltinToolRole) -> RiskTier {
 		| BuiltinToolRole::General => RiskTier::Medium,
 		BuiltinToolRole::SkillInstall => RiskTier::Low,
 	}
+}
+
+fn prompted_tool_is_terminal(role: BuiltinToolRole) -> bool {
+	matches!(role, BuiltinToolRole::General)
 }
 
 fn llm_failure(error: LlmAdapterError) -> ToolFailure {
