@@ -25,6 +25,27 @@ pub enum NextStepAction {
 	Fail,
 }
 
+/// One-round decision emitted by the generic ReAct loop.
+///
+/// ## Why this exists
+/// The runtime needs a small, explicit contract for "what should happen next" without embedding a
+/// hidden planner or long-horizon state machine into the decision itself.
+///
+/// ## Fields
+/// - `action`: The current round action to execute.
+/// - `tool_name`: Selected tool for `call_tool`, otherwise `None`.
+/// - `arguments`: Structured arguments for the selected tool when applicable.
+/// - `reason`: Short explanation for why this action was chosen.
+/// - `final_message`: Optional terminal message for `ask_user`, `final_answer`, or `fail`.
+///
+/// ## Invariants
+/// - `NextStepDecision` only describes the current round.
+/// - `call_tool` is the only action allowed to set `tool_name`.
+/// - `final_message` is terminal metadata, not a multi-step plan.
+///
+/// ## Non-Goals
+/// - This struct does not encode a plan for later rounds.
+/// - This struct does not replace `LoopState`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NextStepDecision {
 	pub action: NextStepAction,

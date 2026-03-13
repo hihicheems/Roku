@@ -16,6 +16,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::runtime_loop::ToolObservation;
 
+/// Temporary final-answer carrier produced from a grounded observation.
+///
+/// ## Why this exists
+/// The current runtime still uses `FinalSummary` as the summarized final-answer payload derived
+/// from a `ToolObservation`. This remains a temporary compatibility name until the contract is
+/// renamed to `FinalAnswerPayload` in a later phase.
+///
+/// ## Fields
+/// - `final_message`: User-visible message derived from the latest grounded observation.
+///
+/// ## Invariants
+/// - This payload only carries user-facing completion text.
+/// - This payload is derived from grounded observation data, not from hidden planner state.
+///
+/// ## Non-Goals
+/// - This payload is not the long-term final contract name.
+/// - This payload does not carry history, audit, or replay metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FinalSummary {
 	pub final_message: String,

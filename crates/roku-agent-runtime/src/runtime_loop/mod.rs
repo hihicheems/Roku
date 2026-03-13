@@ -14,6 +14,7 @@
 
 mod ask_user;
 mod context_assembly;
+mod context_projection;
 mod filesystem;
 mod grounding;
 mod loop_state;
@@ -31,6 +32,8 @@ pub use ask_user::AskUserPayload;
 pub(crate) use ask_user::effective_ask_user_message;
 pub use context_assembly::LoopContext;
 pub(crate) use context_assembly::build_loop_context;
+pub use context_projection::ContextProjection;
+pub(crate) use context_projection::build_context_projection;
 pub(crate) use filesystem::{decide_filesystem_next_step, next_working_directory_from_observation};
 pub(crate) use grounding::extract_path_candidates;
 pub(crate) use grounding::extract_skill_source_url;
