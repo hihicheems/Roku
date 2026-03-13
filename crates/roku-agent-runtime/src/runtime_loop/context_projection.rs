@@ -26,6 +26,9 @@ use crate::runtime_loop::{LoopState, StepAction, StepObservation, ToolObservatio
 /// ## Fields
 /// - `goal`: The original user objective for the current loop.
 /// - `intent_family`: The routed family that seeded the loop.
+/// - `route_reason`: Route-layer explanation for why this loop hint was chosen.
+/// - `route_risk`: Coarse route-layer risk hint for the current request.
+/// - `missing_arguments`: Route-layer missing-input hints that may justify `ask_user`.
 /// - `working_directory`: The current working directory after prior steps.
 /// - `remaining_step_budget`: Step budget still available before the next action.
 /// - `remaining_recovery_budget`: Recovery budget still available before the next action.
@@ -50,6 +53,9 @@ use crate::runtime_loop::{LoopState, StepAction, StepObservation, ToolObservatio
 pub struct ContextProjection {
 	pub goal: String,
 	pub intent_family: String,
+	pub route_reason: String,
+	pub route_risk: String,
+	pub missing_arguments: Vec<String>,
 	pub working_directory: String,
 	pub remaining_step_budget: u32,
 	pub remaining_recovery_budget: u32,
@@ -69,6 +75,12 @@ pub(crate) fn build_context_projection(loop_state: &LoopState) -> ContextProject
 			.unwrap_or_else(|_| "\"unknown\"".to_string())
 			.trim_matches('"')
 			.to_string(),
+		route_reason: loop_state.route_decision.reason.clone(),
+		route_risk: serde_json::to_string(&loop_state.route_decision.risk)
+			.unwrap_or_else(|_| "\"low\"".to_string())
+			.trim_matches('"')
+			.to_string(),
+		missing_arguments: loop_state.route_decision.missing_arguments.clone(),
 		working_directory: loop_state.working_directory.clone(),
 		remaining_step_budget: loop_state.remaining_step_budget,
 		remaining_recovery_budget: loop_state.remaining_recovery_budget,

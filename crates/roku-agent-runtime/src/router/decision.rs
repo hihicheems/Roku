@@ -16,6 +16,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+/// Coarse intent hint emitted by the route classifier.
+///
+/// ## Why this exists
+/// The route layer still needs a compact description of what kind of request the loop is about
+/// to seed tool visibility and prompt shaping. `IntentFamily` is that hint surface.
+///
+/// ## Invariants
+/// - This enum is a loop hint, not an execution plan.
+/// - `MultiStep` and `Unknown` requests must still be handled by the generic runtime loop.
+///
+/// ## Non-Goals
+/// - This enum does not bind the runtime to a fixed tool sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IntentFamily {
@@ -29,6 +41,14 @@ pub enum IntentFamily {
 	Unknown,
 }
 
+/// Coarse risk hint attached to a `RouteDecision`.
+///
+/// ## Why this exists
+/// Route classification needs to preserve a lightweight risk signal for downstream policy checks
+/// and logging without growing into a planner.
+///
+/// ## Non-Goals
+/// - `RouteRisk` does not decide execution eligibility by itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RouteRisk {
@@ -37,6 +57,31 @@ pub enum RouteRisk {
 	High,
 }
 
+/// Route-layer hint object that seeds the generic ReAct loop.
+///
+/// ## Why this exists
+/// `RouteDecision` captures the classifier's best-effort summary of the current request so the
+/// runtime can initialize one loop with intent, candidate tool hints, and missing-input signals.
+///
+/// ## Fields
+/// - `intent_family`: Coarse family hint for the current request.
+/// - `confidence`: Confidence score for the route hint.
+/// - `requires_multi_step`: Whether the classifier believes the request likely needs multiple
+///   loop turns.
+/// - `risk`: Coarse risk hint preserved for policy/logging.
+/// - `candidate_tools`: Optional initial tool shortlist hints.
+/// - `candidate_plugins`: Optional plugin hints associated with the route.
+/// - `missing_arguments`: Missing-input hints that may justify `ask_user`.
+/// - `reason`: Human-readable explanation of the route hint.
+///
+/// ## Invariants
+/// - This struct only describes the current request state.
+/// - `candidate_tools` is a hint list, not a fixed execution contract.
+/// - `reason` documents the hint; it does not replace runtime observations.
+///
+/// ## Non-Goals
+/// - `RouteDecision` is not a multi-step planner.
+/// - `RouteDecision` does not own loop termination or completion.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RouteDecision {
 	pub intent_family: IntentFamily,
