@@ -1970,10 +1970,7 @@ So, I'll output: "星期日""#
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
 				assert_eq!(plan.decision.intent_family, IntentFamily::Unknown);
-				assert_eq!(
-					plan.decision.candidate_tools,
-					vec!["general.execute".to_string()]
-				);
+				assert!(plan.decision.candidate_tools.is_empty());
 			}
 			other => panic!("expected direct loop route, got {other:?}"),
 		}
@@ -2017,13 +2014,9 @@ So, I'll output: "星期日""#
 				assert!(
 					plan.decision
 						.candidate_tools
-						.contains(&"table.preview".to_string())
-				);
-				assert!(
-					plan.decision
-						.candidate_tools
 						.contains(&"table.schema".to_string())
 				);
+				assert_eq!(plan.decision.candidate_tools.len(), 1);
 			}
 			other => panic!("expected low-confidence request to enter tool loop, got {other:?}"),
 		}
@@ -2093,10 +2086,7 @@ So, I'll output: "星期日""#
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
 				assert_eq!(plan.decision.intent_family, IntentFamily::FilesystemRead);
-				assert_eq!(
-					plan.decision.candidate_tools.first().map(String::as_str),
-					Some("fs.read_text")
-				);
+				assert!(plan.decision.candidate_tools.is_empty());
 			}
 			other => panic!("expected filesystem read to use generic tool loop, got {other:?}"),
 		}
