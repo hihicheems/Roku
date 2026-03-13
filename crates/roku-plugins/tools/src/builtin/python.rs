@@ -18,6 +18,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::runtime_config::{HARD_MAX_TIMEOUT_MS, PythonToolRuntimeConfig};
 use roku_plugin_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
 use roku_plugin_host::{
 	RuntimeConstraints, SandboxProfile, Tool, ToolDescriptor, ToolFailure, ToolInvocationRequest,
@@ -25,10 +26,14 @@ use roku_plugin_host::{
 };
 use serde_json::{Value, json};
 
-const DEFAULT_TIMEOUT_MS: u64 = 10_000;
-const MAX_OUTPUT_BYTES: usize = 8_192;
-
+#[allow(dead_code)]
 pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
+	catalog_descriptors_with_config(&PythonToolRuntimeConfig::default())
+}
+
+pub(crate) fn catalog_descriptors_with_config(
+	config: &PythonToolRuntimeConfig,
+) -> Vec<CatalogDescriptor> {
 	vec![CatalogDescriptor {
 		selector: roku_common_types::ResourceSelector::tool("python.run"),
 		kind: ResourceKind::Tool,
@@ -50,7 +55,7 @@ pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
 		risk: ResourceRisk::Medium,
 		cost: ResourceCost {
 			estimated_tokens: 0,
-			estimated_latency_ms: DEFAULT_TIMEOUT_MS,
+			estimated_latency_ms: config.default_timeout_ms,
 		},
 		required_capabilities: vec!["python.run".to_string()],
 		summary: "Execute explicit Python code in a bounded subprocess.".to_string(),
@@ -59,12 +64,25 @@ pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
 	}]
 }
 
+#[allow(dead_code)]
 pub(crate) fn register_tools(runtime: &mut ToolRuntime) -> Result<(), ToolRuntimeError> {
-	runtime.register_tool(PythonRunTool)?;
+	register_tools_with_config(runtime, &PythonToolRuntimeConfig::default())
+}
+
+pub(crate) fn register_tools_with_config(
+	runtime: &mut ToolRuntime,
+	config: &PythonToolRuntimeConfig,
+) -> Result<(), ToolRuntimeError> {
+	runtime.register_tool(PythonRunTool {
+		config: config.clone(),
+	})?;
 	Ok(())
 }
 
-struct PythonRunTool;
+#[derive(Clone)]
+struct PythonRunTool {
+	config: PythonToolRuntimeConfig,
+}
 
 impl Tool for PythonRunTool {
 	fn descriptor(&self) -> ToolDescriptor {
@@ -86,7 +104,7 @@ impl Tool for PythonRunTool {
 			output_schema: "result.v1".to_string(),
 			required_capabilities: vec!["python.run".to_string()],
 			runtime_constraints: RuntimeConstraints {
-				timeout_ms: DEFAULT_TIMEOUT_MS,
+				timeout_ms: self.config.default_timeout_ms,
 				max_retries: 0,
 				retry_backoff_ms: 0,
 				sandbox_profile: SandboxProfile::PythonResearch,
@@ -108,8 +126,9 @@ impl Tool for PythonRunTool {
 			.input
 			.get("timeout_ms")
 			.and_then(Value::as_u64)
-			.unwrap_or(DEFAULT_TIMEOUT_MS)
-			.min(DEFAULT_TIMEOUT_MS);
+			.unwrap_or(self.config.default_timeout_ms)
+			.min(self.config.default_timeout_ms)
+			.min(HARD_MAX_TIMEOUT_MS);
 		let mut command = Command::new("python3");
 		command
 			.arg("-c")
@@ -167,16 +186,16 @@ impl Tool for PythonRunTool {
 				let mut stderr = String::new();
 				if let Some(handle) = child.stdout.take() {
 					let _ = handle
-						.take(u64::try_from(MAX_OUTPUT_BYTES).unwrap_or(u64::MAX))
+						.take(u64::try_from(self.config.max_output_bytes).unwrap_or(u64::MAX))
 						.read_to_string(&mut stdout);
 				}
 				if let Some(handle) = child.stderr.take() {
 					let _ = handle
-						.take(u64::try_from(MAX_OUTPUT_BYTES).unwrap_or(u64::MAX))
+						.take(u64::try_from(self.config.max_output_bytes).unwrap_or(u64::MAX))
 						.read_to_string(&mut stderr);
 				}
-				let truncated =
-					stdout.len() >= MAX_OUTPUT_BYTES || stderr.len() >= MAX_OUTPUT_BYTES;
+				let truncated = stdout.len() >= self.config.max_output_bytes
+					|| stderr.len() >= self.config.max_output_bytes;
 				let message = if status.success() {
 					let visible = stdout.trim();
 					if visible.is_empty() {

@@ -46,6 +46,7 @@ impl BuiltinToolRole {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfiguredTool {
 	pub name: String,
 	pub role: BuiltinToolRole,
@@ -67,6 +68,7 @@ pub struct ConfiguredTool {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolCatalogConfig {
 	pub tools: Vec<ConfiguredTool>,
 }
@@ -76,7 +78,7 @@ pub enum ToolCatalogConfigError {
 	#[error("failed to read tool catalog config: {0}")]
 	Io(#[from] std::io::Error),
 	#[error("failed to parse tool catalog config: {0}")]
-	Parse(#[from] serde_json::Error),
+	Parse(#[from] toml::de::Error),
 	#[error("tool catalog config must define at least one tool")]
 	Empty,
 }
@@ -84,11 +86,11 @@ pub enum ToolCatalogConfigError {
 impl ToolCatalogConfig {
 	pub fn from_path(path: &Path) -> Result<Self, ToolCatalogConfigError> {
 		let content = fs::read_to_string(path)?;
-		Self::from_json(&content)
+		Self::from_toml(&content)
 	}
 
-	pub fn from_json(content: &str) -> Result<Self, ToolCatalogConfigError> {
-		let config = serde_json::from_str::<Self>(content)?;
+	pub fn from_toml(content: &str) -> Result<Self, ToolCatalogConfigError> {
+		let config = toml::from_str::<Self>(content)?;
 		if config.tools.is_empty() {
 			return Err(ToolCatalogConfigError::Empty);
 		}
@@ -102,7 +104,7 @@ impl ToolCatalogConfig {
 
 impl Default for ToolCatalogConfig {
 	fn default() -> Self {
-		Self::from_json(include_str!("../../../../config/tools.json"))
+		Self::from_toml(include_str!("../../../../config/tools.toml"))
 			.expect("embedded tool catalog config should be valid")
 	}
 }
@@ -132,5 +134,22 @@ mod tests {
 				.tool_for_role(BuiltinToolRole::SkillExecute)
 				.is_some()
 		);
+	}
+
+	#[test]
+	fn tool_catalog_rejects_unknown_fields() {
+		let error = ToolCatalogConfig::from_toml(
+			r#"
+[[tools]]
+name = "general.execute"
+role = "general"
+description = "Answer directly when the request does not require an external tool or skill."
+extra = "not-allowed"
+"#,
+		)
+		.expect_err("unknown fields should fail");
+
+		assert!(matches!(error, ToolCatalogConfigError::Parse(_)));
+		assert!(error.to_string().contains("unknown field `extra`"));
 	}
 }

@@ -19,6 +19,9 @@ use std::collections::{BTreeSet, HashMap};
 use roku_common_types::ResourceSelector;
 use serde::{Deserialize, Serialize};
 
+// Retrieval invariants: these shape the in-process embedding/BM25 scoring model and are not
+// operator-facing runtime knobs. They stay in code so catalog behaviour remains stable across
+// deployments unless retrieval itself is intentionally redesigned.
 const EMBEDDING_DIMENSIONS: usize = 64;
 const BM25_K1: f32 = 1.5;
 const BM25_B: f32 = 0.75;
@@ -368,6 +371,7 @@ fn is_cjk(character: char) -> bool {
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
+	// FNV hashing constants are protocol-level retrieval internals, not deploy-time config.
 	const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 	const PRIME: u64 = 0x100000001b3;
 

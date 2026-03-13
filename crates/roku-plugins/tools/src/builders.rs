@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use crate::builtin::{fs as core_fs, python as core_python, table as core_table, web as core_web};
 use crate::config::{BuiltinToolRole, ConfiguredTool, ToolCatalogConfig};
+use crate::runtime_config::{ToolWorkerRuntimeConfig, ToolsRuntimeConfig};
 use roku_common_types::{
 	ResourceSelector, SkillExecutionMode, SkillExecutionPlan, SkillExecutionRequest,
 	SkillExecutionResult,
@@ -40,18 +41,16 @@ use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 
 pub(crate) const LEGACY_SKILL_TOOL_NAME: &str = "skill.install";
-const LLM_TOOL_TIMEOUT_MS: u64 = 45_000;
-const MAX_SKILL_PROMPT_CONTEXT_CHARS: usize = 16_000;
-const MAX_SKILL_EXECUTION_OUTPUT_CHARS: usize = 4_000;
 
 pub fn build_resource_catalog(
 	skill_registry: &SkillRegistry,
 	tool_config: &ToolCatalogConfig,
 ) -> ResourceCatalog {
-	build_resource_catalog_with_plugin_snapshot(
+	build_resource_catalog_with_plugin_snapshot_and_runtime_config(
 		skill_registry,
 		tool_config,
 		&PluginRegistrySnapshot::permissive(),
+		&ToolsRuntimeConfig::default(),
 	)
 }
 
@@ -60,10 +59,25 @@ pub fn build_resource_catalog_with_plugin_snapshot(
 	tool_config: &ToolCatalogConfig,
 	plugin_snapshot: &PluginRegistrySnapshot,
 ) -> ResourceCatalog {
-	build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities(
+	build_resource_catalog_with_plugin_snapshot_and_runtime_config(
 		skill_registry,
 		tool_config,
 		plugin_snapshot,
+		&ToolsRuntimeConfig::default(),
+	)
+}
+
+pub fn build_resource_catalog_with_plugin_snapshot_and_runtime_config(
+	skill_registry: &SkillRegistry,
+	tool_config: &ToolCatalogConfig,
+	plugin_snapshot: &PluginRegistrySnapshot,
+	runtime_config: &ToolsRuntimeConfig,
+) -> ResourceCatalog {
+	build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config(
+		skill_registry,
+		tool_config,
+		plugin_snapshot,
+		runtime_config,
 		true,
 	)
 }
@@ -72,6 +86,22 @@ pub fn build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities(
 	skill_registry: &SkillRegistry,
 	tool_config: &ToolCatalogConfig,
 	plugin_snapshot: &PluginRegistrySnapshot,
+	skill_execution_enabled: bool,
+) -> ResourceCatalog {
+	build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config(
+		skill_registry,
+		tool_config,
+		plugin_snapshot,
+		&ToolsRuntimeConfig::default(),
+		skill_execution_enabled,
+	)
+}
+
+pub fn build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config(
+	skill_registry: &SkillRegistry,
+	tool_config: &ToolCatalogConfig,
+	plugin_snapshot: &PluginRegistrySnapshot,
+	runtime_config: &ToolsRuntimeConfig,
 	skill_execution_enabled: bool,
 ) -> ResourceCatalog {
 	let mut entries = tool_config
@@ -84,16 +114,22 @@ pub fn build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities(
 		.map(tool_catalog_descriptor)
 		.collect::<Vec<_>>();
 	if plugin_snapshot.is_plugin_enabled("core-fs") {
-		entries.extend(core_fs::catalog_descriptors());
+		entries.extend(core_fs::catalog_descriptors_with_config(&runtime_config.fs));
 	}
 	if plugin_snapshot.is_plugin_enabled("core-table") {
-		entries.extend(core_table::catalog_descriptors());
+		entries.extend(core_table::catalog_descriptors_with_config(
+			&runtime_config.table,
+		));
 	}
 	if plugin_snapshot.is_plugin_enabled("core-web") {
-		entries.extend(core_web::catalog_descriptors());
+		entries.extend(core_web::catalog_descriptors_with_config(
+			&runtime_config.web,
+		));
 	}
 	if plugin_snapshot.is_plugin_enabled("core-python") {
-		entries.extend(core_python::catalog_descriptors());
+		entries.extend(core_python::catalog_descriptors_with_config(
+			&runtime_config.python,
+		));
 	}
 	let skill_entries = if plugin_snapshot.is_plugin_enabled("skill-source-local") {
 		skill_registry.catalog_descriptors().unwrap_or_default()
@@ -107,10 +143,11 @@ pub fn build_builtin_tool_runtime(
 	skill_registry: SkillRegistry,
 	tool_config: &ToolCatalogConfig,
 ) -> ToolRuntime {
-	build_builtin_tool_runtime_with_plugin_snapshot(
+	build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_config(
 		skill_registry,
 		tool_config,
 		&PluginRegistrySnapshot::permissive(),
+		&ToolsRuntimeConfig::default(),
 	)
 }
 
@@ -119,10 +156,25 @@ pub fn build_builtin_tool_runtime_with_plugin_snapshot(
 	tool_config: &ToolCatalogConfig,
 	plugin_snapshot: &PluginRegistrySnapshot,
 ) -> ToolRuntime {
-	build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities(
+	build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_config(
 		skill_registry,
 		tool_config,
 		plugin_snapshot,
+		&ToolsRuntimeConfig::default(),
+	)
+}
+
+pub fn build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_config(
+	skill_registry: SkillRegistry,
+	tool_config: &ToolCatalogConfig,
+	plugin_snapshot: &PluginRegistrySnapshot,
+	runtime_config: &ToolsRuntimeConfig,
+) -> ToolRuntime {
+	build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config(
+		skill_registry,
+		tool_config,
+		plugin_snapshot,
+		runtime_config,
 		true,
 	)
 }
@@ -133,21 +185,38 @@ pub fn build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities(
 	plugin_snapshot: &PluginRegistrySnapshot,
 	skill_execution_enabled: bool,
 ) -> ToolRuntime {
+	build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config(
+		skill_registry,
+		tool_config,
+		plugin_snapshot,
+		&ToolsRuntimeConfig::default(),
+		skill_execution_enabled,
+	)
+}
+
+pub fn build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config(
+	skill_registry: SkillRegistry,
+	tool_config: &ToolCatalogConfig,
+	plugin_snapshot: &PluginRegistrySnapshot,
+	runtime_config: &ToolsRuntimeConfig,
+	skill_execution_enabled: bool,
+) -> ToolRuntime {
 	let mut runtime = ToolRuntime::default();
 	if !plugin_snapshot.is_plugin_enabled("builtin-tools") {
 		if plugin_snapshot.is_plugin_enabled("core-fs") {
-			core_fs::register_tools(&mut runtime)
+			core_fs::register_tools_with_config(&mut runtime, &runtime_config.fs)
 				.expect("filesystem tools must register successfully");
 		}
 		if plugin_snapshot.is_plugin_enabled("core-table") {
-			core_table::register_tools(&mut runtime)
+			core_table::register_tools_with_config(&mut runtime, &runtime_config.table)
 				.expect("table tools must register successfully");
 		}
 		if plugin_snapshot.is_plugin_enabled("core-web") {
-			core_web::register_tools(&mut runtime).expect("web tools must register successfully");
+			core_web::register_tools_with_config(&mut runtime, &runtime_config.web)
+				.expect("web tools must register successfully");
 		}
 		if plugin_snapshot.is_plugin_enabled("core-python") {
-			core_python::register_tools(&mut runtime)
+			core_python::register_tools_with_config(&mut runtime, &runtime_config.python)
 				.expect("python tools must register successfully");
 		}
 		return runtime;
@@ -164,10 +233,11 @@ pub fn build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities(
 				.register_tool(SkillInstallTool::new(tool, skill_registry.clone()))
 				.expect("default runtime tools must register successfully"),
 			BuiltinToolRole::SkillExecute => runtime
-				.register_tool(SkillExecuteTool::from_config(
+				.register_tool(SkillExecuteTool::from_config_with_runtime_config(
 					tool,
 					skill_registry.clone(),
 					None,
+					runtime_config.workers.clone(),
 				))
 				.expect("default runtime tools must register successfully"),
 			BuiltinToolRole::Inventory
@@ -180,16 +250,20 @@ pub fn build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities(
 		}
 	}
 	if plugin_snapshot.is_plugin_enabled("core-fs") {
-		core_fs::register_tools(&mut runtime).expect("filesystem tools must register successfully");
+		core_fs::register_tools_with_config(&mut runtime, &runtime_config.fs)
+			.expect("filesystem tools must register successfully");
 	}
 	if plugin_snapshot.is_plugin_enabled("core-table") {
-		core_table::register_tools(&mut runtime).expect("table tools must register successfully");
+		core_table::register_tools_with_config(&mut runtime, &runtime_config.table)
+			.expect("table tools must register successfully");
 	}
 	if plugin_snapshot.is_plugin_enabled("core-web") {
-		core_web::register_tools(&mut runtime).expect("web tools must register successfully");
+		core_web::register_tools_with_config(&mut runtime, &runtime_config.web)
+			.expect("web tools must register successfully");
 	}
 	if plugin_snapshot.is_plugin_enabled("core-python") {
-		core_python::register_tools(&mut runtime).expect("python tools must register successfully");
+		core_python::register_tools_with_config(&mut runtime, &runtime_config.python)
+			.expect("python tools must register successfully");
 	}
 	runtime
 }
@@ -200,12 +274,13 @@ pub fn build_llm_tool_runtime(
 	tool_config: &ToolCatalogConfig,
 	resource_catalog: &ResourceCatalog,
 ) -> ToolRuntime {
-	build_llm_tool_runtime_with_plugin_snapshot(
+	build_llm_tool_runtime_with_plugin_snapshot_and_runtime_config(
 		router,
 		skill_registry,
 		tool_config,
 		resource_catalog,
 		&PluginRegistrySnapshot::permissive(),
+		&ToolsRuntimeConfig::default(),
 	)
 }
 
@@ -216,21 +291,40 @@ pub fn build_llm_tool_runtime_with_plugin_snapshot(
 	resource_catalog: &ResourceCatalog,
 	plugin_snapshot: &PluginRegistrySnapshot,
 ) -> ToolRuntime {
+	build_llm_tool_runtime_with_plugin_snapshot_and_runtime_config(
+		router,
+		skill_registry,
+		tool_config,
+		resource_catalog,
+		plugin_snapshot,
+		&ToolsRuntimeConfig::default(),
+	)
+}
+
+pub fn build_llm_tool_runtime_with_plugin_snapshot_and_runtime_config(
+	router: Arc<LlmRouter>,
+	skill_registry: SkillRegistry,
+	tool_config: &ToolCatalogConfig,
+	resource_catalog: &ResourceCatalog,
+	plugin_snapshot: &PluginRegistrySnapshot,
+	runtime_config: &ToolsRuntimeConfig,
+) -> ToolRuntime {
 	let mut runtime = ToolRuntime::default();
 	if !plugin_snapshot.is_plugin_enabled("builtin-tools") {
 		if plugin_snapshot.is_plugin_enabled("core-fs") {
-			core_fs::register_tools(&mut runtime)
+			core_fs::register_tools_with_config(&mut runtime, &runtime_config.fs)
 				.expect("filesystem tools must register successfully");
 		}
 		if plugin_snapshot.is_plugin_enabled("core-table") {
-			core_table::register_tools(&mut runtime)
+			core_table::register_tools_with_config(&mut runtime, &runtime_config.table)
 				.expect("table tools must register successfully");
 		}
 		if plugin_snapshot.is_plugin_enabled("core-web") {
-			core_web::register_tools(&mut runtime).expect("web tools must register successfully");
+			core_web::register_tools_with_config(&mut runtime, &runtime_config.web)
+				.expect("web tools must register successfully");
 		}
 		if plugin_snapshot.is_plugin_enabled("core-python") {
-			core_python::register_tools(&mut runtime)
+			core_python::register_tools_with_config(&mut runtime, &runtime_config.python)
 				.expect("python tools must register successfully");
 		}
 		return runtime;
@@ -244,10 +338,11 @@ pub fn build_llm_tool_runtime_with_plugin_snapshot(
 				.register_tool(SkillInstallTool::new(tool, skill_registry.clone()))
 				.expect("llm runtime tools must register successfully"),
 			BuiltinToolRole::SkillExecute => runtime
-				.register_tool(SkillExecuteTool::from_config(
+				.register_tool(SkillExecuteTool::from_config_with_runtime_config(
 					tool,
 					skill_registry.clone(),
 					Some(Arc::clone(&router)),
+					runtime_config.workers.clone(),
 				))
 				.expect("llm runtime tools must register successfully"),
 			BuiltinToolRole::Inventory
@@ -255,26 +350,31 @@ pub fn build_llm_tool_runtime_with_plugin_snapshot(
 			| BuiltinToolRole::Data
 			| BuiltinToolRole::Review
 			| BuiltinToolRole::General => runtime
-				.register_tool(PromptedLlmTool::from_config(
+				.register_tool(PromptedLlmTool::from_config_with_runtime_config(
 					tool,
 					skill_registry.clone(),
 					Arc::clone(&router),
 					resource_catalog.clone(),
+					runtime_config.workers.clone(),
 				))
 				.expect("llm runtime tools must register successfully"),
 		}
 	}
 	if plugin_snapshot.is_plugin_enabled("core-fs") {
-		core_fs::register_tools(&mut runtime).expect("filesystem tools must register successfully");
+		core_fs::register_tools_with_config(&mut runtime, &runtime_config.fs)
+			.expect("filesystem tools must register successfully");
 	}
 	if plugin_snapshot.is_plugin_enabled("core-table") {
-		core_table::register_tools(&mut runtime).expect("table tools must register successfully");
+		core_table::register_tools_with_config(&mut runtime, &runtime_config.table)
+			.expect("table tools must register successfully");
 	}
 	if plugin_snapshot.is_plugin_enabled("core-web") {
-		core_web::register_tools(&mut runtime).expect("web tools must register successfully");
+		core_web::register_tools_with_config(&mut runtime, &runtime_config.web)
+			.expect("web tools must register successfully");
 	}
 	if plugin_snapshot.is_plugin_enabled("core-python") {
-		core_python::register_tools(&mut runtime).expect("python tools must register successfully");
+		core_python::register_tools_with_config(&mut runtime, &runtime_config.python)
+			.expect("python tools must register successfully");
 	}
 	runtime
 }
@@ -357,6 +457,7 @@ pub(crate) struct SkillExecuteTool {
 	descriptor: ToolDescriptor,
 	registry: SkillRegistry,
 	router: Option<Arc<LlmRouter>>,
+	worker_config: ToolWorkerRuntimeConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -373,10 +474,25 @@ struct SkillCreatorExecutionPlan {
 }
 
 impl SkillExecuteTool {
+	#[allow(dead_code)]
 	fn from_config(
 		tool: &ConfiguredTool,
 		registry: SkillRegistry,
 		router: Option<Arc<LlmRouter>>,
+	) -> Self {
+		Self::from_config_with_runtime_config(
+			tool,
+			registry,
+			router,
+			ToolWorkerRuntimeConfig::default(),
+		)
+	}
+
+	fn from_config_with_runtime_config(
+		tool: &ConfiguredTool,
+		registry: SkillRegistry,
+		router: Option<Arc<LlmRouter>>,
+		worker_config: ToolWorkerRuntimeConfig,
 	) -> Self {
 		Self {
 			descriptor: tool_descriptor(
@@ -387,6 +503,7 @@ impl SkillExecuteTool {
 			),
 			registry,
 			router,
+			worker_config,
 		}
 	}
 }
@@ -425,6 +542,7 @@ impl Tool for SkillExecuteTool {
 				&input,
 				&output_root,
 				&execution_request,
+				self.worker_config.max_skill_execution_output_chars,
 			)?
 		} else {
 			execute_script_backed_skill(
@@ -434,6 +552,7 @@ impl Tool for SkillExecuteTool {
 				&input,
 				&output_root,
 				&execution_request,
+				self.worker_config.max_skill_execution_output_chars,
 			)?
 		};
 
@@ -519,21 +638,39 @@ pub(crate) struct PromptedLlmTool {
 	skill_registry: SkillRegistry,
 	router: Arc<LlmRouter>,
 	resource_catalog: ResourceCatalog,
+	worker_config: ToolWorkerRuntimeConfig,
 }
 
 impl PromptedLlmTool {
+	#[allow(dead_code)]
 	fn from_config(
 		tool: &ConfiguredTool,
 		skill_registry: SkillRegistry,
 		router: Arc<LlmRouter>,
 		resource_catalog: ResourceCatalog,
 	) -> Self {
+		Self::from_config_with_runtime_config(
+			tool,
+			skill_registry,
+			router,
+			resource_catalog,
+			ToolWorkerRuntimeConfig::default(),
+		)
+	}
+
+	fn from_config_with_runtime_config(
+		tool: &ConfiguredTool,
+		skill_registry: SkillRegistry,
+		router: Arc<LlmRouter>,
+		resource_catalog: ResourceCatalog,
+		worker_config: ToolWorkerRuntimeConfig,
+	) -> Self {
 		Self {
 			descriptor: tool_descriptor(
 				&tool.name,
 				tool.required_capabilities.clone(),
 				sandbox_profile_for_role(tool.role),
-				LLM_TOOL_TIMEOUT_MS,
+				worker_config.llm_tool_timeout_ms,
 			),
 			worker_id: worker_id_for_role(tool.role),
 			system_prompt: system_prompt_for_role(tool.role),
@@ -542,6 +679,7 @@ impl PromptedLlmTool {
 			skill_registry,
 			router,
 			resource_catalog,
+			worker_config,
 		}
 	}
 }
@@ -556,7 +694,13 @@ impl Tool for PromptedLlmTool {
 		let skill_query = skill_context_query(&input);
 		let skill_context = self
 			.skill_registry
-			.render_prompt_context_for_query(&skill_query, skill_prompt_context_budget(&input))
+			.render_prompt_context_for_query(
+				&skill_query,
+				skill_prompt_context_budget(
+					&input,
+					self.worker_config.max_skill_prompt_context_chars,
+				),
+			)
 			.map_err(|error| ToolFailure::terminal(error.to_string()))?;
 		let prompt = user_visible_prompt(
 			&input,
@@ -661,7 +805,10 @@ fn user_visible_prompt(
 	)
 }
 
-fn skill_prompt_context_budget(input: &ToolInput<'_>) -> usize {
+fn skill_prompt_context_budget(
+	input: &ToolInput<'_>,
+	max_skill_prompt_context_chars: usize,
+) -> usize {
 	let reserved_output_tokens = input.budget_tokens.min(512);
 	let reserved_prompt_tokens = 300_u64;
 	let available_tokens = input
@@ -673,8 +820,8 @@ fn skill_prompt_context_budget(input: &ToolInput<'_>) -> usize {
 	}
 
 	usize::try_from(available_tokens.saturating_mul(3))
-		.unwrap_or(MAX_SKILL_PROMPT_CONTEXT_CHARS)
-		.min(MAX_SKILL_PROMPT_CONTEXT_CHARS)
+		.unwrap_or(max_skill_prompt_context_chars)
+		.min(max_skill_prompt_context_chars)
 }
 
 fn skill_context_query(input: &ToolInput<'_>) -> String {
@@ -815,6 +962,7 @@ fn execute_skill_creator(
 	input: &ToolInput<'_>,
 	output_root: &Path,
 	execution_request: &SkillExecutionRequest,
+	max_output_chars: usize,
 ) -> Result<SkillExecutionResult, ToolFailure> {
 	let plan = plan_skill_creator(router, record, input, execution_request)?;
 	let skill_name = normalize_skill_name(&plan.skill_name);
@@ -850,7 +998,12 @@ fn execute_skill_creator(
 	fs::write(&openai_yaml_path, openai_yaml(&skill_name, &plan)).map_err(io_tool_failure)?;
 	created_paths.push(display_path(&openai_yaml_path));
 
-	let validation = run_skill_creator_validation(registry, &record.descriptor.name, &skill_dir)?;
+	let validation = run_skill_creator_validation(
+		registry,
+		&record.descriptor.name,
+		&skill_dir,
+		max_output_chars,
+	)?;
 	registry
 		.register_local_skill(&skill_dir, "runtime")
 		.map_err(|error| ToolFailure::terminal(error.to_string()))?;
@@ -878,6 +1031,7 @@ fn execute_script_backed_skill(
 	input: &ToolInput<'_>,
 	output_root: &Path,
 	execution_request: &SkillExecutionRequest,
+	max_output_chars: usize,
 ) -> Result<SkillExecutionResult, ToolFailure> {
 	if !record.has_scripts() {
 		return Err(ToolFailure::terminal(format!(
@@ -910,6 +1064,7 @@ fn execute_script_backed_skill(
 			("ROKU_SKILL_ROOT", display_path(output_root)),
 			("ROKU_GENERATED_SKILL_ROOT", display_path(output_root)),
 		],
+		max_output_chars,
 	)?;
 	let created_paths = collect_existing_expected_paths(output_root, &plan.expected_artifacts);
 	Ok(SkillExecutionResult {
@@ -1086,6 +1241,7 @@ fn run_skill_creator_validation(
 	registry: &SkillRegistry,
 	skill_name: &str,
 	skill_dir: &Path,
+	max_output_chars: usize,
 ) -> Result<ValidationOutcome, ToolFailure> {
 	let creator_dir = registry
 		.skill_dir(skill_name)
@@ -1102,6 +1258,7 @@ fn run_skill_creator_validation(
 		&[display_path(skill_dir)],
 		&creator_dir,
 		std::iter::empty::<(&str, String)>(),
+		max_output_chars,
 	)?;
 	Ok(ValidationOutcome {
 		executed_scripts: vec![display_path(&validation_script)],
@@ -1114,6 +1271,7 @@ fn run_script_command(
 	args: &[String],
 	current_dir: &Path,
 	envs: impl IntoIterator<Item = (&'static str, String)>,
+	max_output_chars: usize,
 ) -> Result<String, ToolFailure> {
 	let script_path = normalize_runtime_path(script_path.to_path_buf());
 	let current_dir = normalize_runtime_path(current_dir.to_path_buf());
@@ -1131,11 +1289,11 @@ fn run_script_command(
 		return Err(ToolFailure::terminal(format!(
 			"script execution failed for {}: {}",
 			display_path(&script_path),
-			truncate_execution_text(&details)
+			truncate_execution_text(&details, max_output_chars)
 		)));
 	}
 	let combined = if stdout.is_empty() { stderr } else { stdout };
-	Ok(truncate_execution_text(&combined))
+	Ok(truncate_execution_text(&combined, max_output_chars))
 }
 
 fn normalize_runtime_path(path: PathBuf) -> PathBuf {
@@ -1208,15 +1366,12 @@ where
 	})
 }
 
-fn truncate_execution_text(value: &str) -> String {
+fn truncate_execution_text(value: &str, max_output_chars: usize) -> String {
 	let trimmed = value.trim();
-	if trimmed.chars().count() <= MAX_SKILL_EXECUTION_OUTPUT_CHARS {
+	if trimmed.chars().count() <= max_output_chars {
 		return trimmed.to_string();
 	}
-	let shortened = trimmed
-		.chars()
-		.take(MAX_SKILL_EXECUTION_OUTPUT_CHARS)
-		.collect::<String>();
+	let shortened = trimmed.chars().take(max_output_chars).collect::<String>();
 	format!("{shortened}\n[truncated]")
 }
 
@@ -1727,6 +1882,7 @@ mod tests {
 		runtime_context_block, sanitize_final_reply, user_visible_prompt,
 	};
 	use crate::config::{BuiltinToolRole, ToolCatalogConfig};
+	use crate::runtime_config::ToolWorkerRuntimeConfig;
 	use roku_plugin_host::{SandboxProfile, Tool, ToolInvocationRequest};
 	use roku_plugin_llm::{
 		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderCallError,
@@ -2251,6 +2407,7 @@ print("ok")
 			&input,
 			&generated_root,
 			&execution_request,
+			ToolWorkerRuntimeConfig::default().max_skill_execution_output_chars,
 		)
 		.expect("skill creator execution should succeed");
 

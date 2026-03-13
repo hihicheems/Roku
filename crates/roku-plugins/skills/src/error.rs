@@ -42,6 +42,8 @@ pub enum SkillRegistryError {
 	FrontMatter(String),
 	#[error("skill not found: {0}")]
 	SkillNotFound(String),
+	#[error("invalid skills runtime config: {0}")]
+	RuntimeConfig(String),
 	#[error("io error: {0}")]
 	Io(#[from] std::io::Error),
 	#[error("json error: {0}")]

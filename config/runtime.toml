@@ -1,0 +1,55 @@
+# Runtime-tunable, non-secret defaults for plugin crates.
+# Secrets stay in environment variables and are rejected if added here.
+#
+# Ownership:
+# - [runtime.tools.*]        -> crates/roku-plugins/tools
+# - [runtime.llm.openrouter] -> crates/roku-plugins/llm
+# - [runtime.telegram]       -> crates/roku-plugins/telegram
+# - [runtime.skills]         -> crates/roku-plugins/skills
+
+[runtime.tools.fs]
+default_max_bytes = 4096
+max_dir_entries = 200
+max_glob_matches = 200
+max_descendant_scan_entries = 8000
+
+[runtime.tools.python]
+default_timeout_ms = 10000
+max_output_bytes = 8192
+
+[runtime.tools.table]
+default_preview_rows = 5
+
+[runtime.tools.web]
+default_top_k = 5
+
+[runtime.tools.workers]
+llm_tool_timeout_ms = 45000
+max_skill_prompt_context_chars = 16000
+max_skill_execution_output_chars = 4000
+
+[runtime.llm.openrouter]
+primary_model = "deepseek-chat"
+fallback_models = ["gemini-2.0-flash"]
+base_url = "https://openrouter.ai/api/v1/chat/completions"
+# OPENROUTER_API_KEY remains env-only.
+max_context_tokens = 128000
+cost_per_1k_tokens_usd = 0.0
+max_request_cost_usd = 1.0
+max_latency_ms = 60000
+
+[runtime.telegram]
+api_base_url = "https://api.telegram.org"
+# TELOXIDE_TOKEN / TELEGRAM_BOT_TOKEN remain env-only.
+poll_timeout_seconds = 30
+idle_backoff_ms = 500
+poll_error_log_threshold = 5
+progress_notices_enabled = false
+include_request_metadata = false
+show_attachments = false
+
+[runtime.skills]
+http_timeout_seconds = 30
+max_archive_bytes = 33554432
+max_prompt_document_bytes = 24576
+max_prompt_documents = 24

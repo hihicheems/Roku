@@ -17,12 +17,25 @@
 mod builders;
 mod builtin;
 mod config;
+mod runtime_config;
 
 pub use builders::{
 	build_builtin_tool_runtime, build_builtin_tool_runtime_with_plugin_snapshot,
 	build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities,
-	build_llm_tool_runtime, build_llm_tool_runtime_with_plugin_snapshot, build_resource_catalog,
+	build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config,
+	build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_config, build_llm_tool_runtime,
+	build_llm_tool_runtime_with_plugin_snapshot,
+	build_llm_tool_runtime_with_plugin_snapshot_and_runtime_config, build_resource_catalog,
 	build_resource_catalog_with_plugin_snapshot,
 	build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities,
+	build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config,
+	build_resource_catalog_with_plugin_snapshot_and_runtime_config,
 };
 pub use config::{BuiltinToolRole, ConfiguredTool, ToolCatalogConfig, ToolCatalogConfigError};
+pub use runtime_config::{
+	FsToolRuntimeConfig, FsToolRuntimeConfigPatch, PythonToolRuntimeConfig,
+	PythonToolRuntimeConfigPatch, TableToolRuntimeConfig, TableToolRuntimeConfigPatch,
+	ToolWorkerRuntimeConfig, ToolWorkerRuntimeConfigPatch, ToolsRuntimeConfig,
+	ToolsRuntimeConfigError, ToolsRuntimeConfigPatch, WebToolRuntimeConfig,
+	WebToolRuntimeConfigPatch,
+};

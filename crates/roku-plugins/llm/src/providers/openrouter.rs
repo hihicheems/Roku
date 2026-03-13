@@ -19,7 +19,7 @@ use std::time::Instant;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use roku_observability::{LogLevel, LogRecord, Metrics, emit_global_log};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -33,6 +33,38 @@ const OPENROUTER_PROVIDER: &str = "openrouter";
 const DEFAULT_OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const DEFAULT_OPENROUTER_PRIMARY_MODEL: &str = "deepseek-chat";
 const DEFAULT_OPENROUTER_FALLBACK_MODELS: [&str; 1] = ["gemini-2.0-flash"];
+const HARD_MAX_CONTEXT_TOKENS: u64 = 1_000_000;
+const HARD_MAX_REQUEST_COST_USD: f64 = 100.0;
+const HARD_MAX_LATENCY_MS: u64 = 300_000;
+
+/// Effective non-secret OpenRouter runtime configuration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenRouterRuntimeConfig {
+	pub primary_model: String,
+	pub fallback_models: Vec<String>,
+	pub app_name: Option<String>,
+	pub site_url: Option<String>,
+	pub base_url: String,
+	pub max_context_tokens: u64,
+	pub cost_per_1k_tokens_usd: f64,
+	pub max_request_cost_usd: f64,
+	pub max_latency_ms: u64,
+}
+
+/// Partial overrides for [`OpenRouterRuntimeConfig`].
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenRouterRuntimeConfigPatch {
+	pub primary_model: Option<String>,
+	pub fallback_models: Option<Vec<String>>,
+	pub app_name: Option<String>,
+	pub site_url: Option<String>,
+	pub base_url: Option<String>,
+	pub max_context_tokens: Option<u64>,
+	pub cost_per_1k_tokens_usd: Option<f64>,
+	pub max_request_cost_usd: Option<f64>,
+	pub max_latency_ms: Option<u64>,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenRouterConfig {
@@ -51,51 +83,10 @@ pub struct OpenRouterConfig {
 impl OpenRouterConfig {
 	pub fn from_env() -> Result<Self, OpenRouterBootstrapError> {
 		let api_key = env_var_required("OPENROUTER_API_KEY")?;
-		let primary_model = env::var("OPENROUTER_PRIMARY_MODEL")
-			.ok()
-			.filter(|value| !value.trim().is_empty())
-			.or_else(|| {
-				env::var("OPENROUTER_MODEL")
-					.ok()
-					.filter(|value| !value.trim().is_empty())
-			})
-			.unwrap_or_else(|| DEFAULT_OPENROUTER_PRIMARY_MODEL.to_string());
-		let fallback_models = env::var("OPENROUTER_FALLBACK_MODELS")
-			.ok()
-			.map(|value| parse_model_list(&value))
-			.filter(|models| !models.is_empty())
-			.unwrap_or_else(default_fallback_models);
-		let app_name = env::var("OPENROUTER_APP_NAME")
-			.ok()
-			.filter(|value| !value.trim().is_empty());
-		let site_url = env::var("OPENROUTER_SITE_URL")
-			.ok()
-			.filter(|value| !value.trim().is_empty());
-		let base_url = env::var("OPENROUTER_BASE_URL")
-			.ok()
-			.filter(|value| !value.trim().is_empty())
-			.unwrap_or_else(|| DEFAULT_OPENROUTER_URL.to_string());
-		let max_context_tokens = env_var_u64("OPENROUTER_MAX_CONTEXT_TOKENS")?.unwrap_or(128_000);
-		let cost_per_1k_tokens_usd =
-			env_var_f64("OPENROUTER_COST_PER_1K_TOKENS_USD")?.unwrap_or(0.0);
-		let max_request_cost_usd = env_var_f64("OPENROUTER_MAX_REQUEST_COST_USD")?.unwrap_or(1.0);
-		let max_latency_ms = env_var_u64("OPENROUTER_MAX_LATENCY_MS")?.unwrap_or(60_000);
-
-		let primary_model = normalize_model_id(&primary_model);
-		let fallback_models = dedupe_model_chain(&primary_model, fallback_models);
-
-		Ok(Self {
-			api_key,
-			primary_model,
-			fallback_models,
-			app_name,
-			site_url,
-			base_url,
-			max_context_tokens,
-			cost_per_1k_tokens_usd,
-			max_request_cost_usd,
-			max_latency_ms,
-		})
+		let mut runtime_config = OpenRouterRuntimeConfig::default();
+		runtime_config.apply_env_overrides()?;
+		runtime_config.validate_and_clamp()?;
+		Ok(runtime_config.with_api_key(api_key))
 	}
 
 	fn request_fallback_chain(&self, selected_model: &str) -> Vec<String> {
@@ -113,6 +104,185 @@ impl OpenRouterConfig {
 			selected_model,
 			ordered_models.into_iter().skip(start_index).collect(),
 		)
+	}
+}
+
+impl Default for OpenRouterRuntimeConfig {
+	fn default() -> Self {
+		Self {
+			primary_model: normalize_model_id(DEFAULT_OPENROUTER_PRIMARY_MODEL),
+			fallback_models: default_fallback_models(),
+			app_name: None,
+			site_url: None,
+			base_url: DEFAULT_OPENROUTER_URL.to_string(),
+			max_context_tokens: 128_000,
+			cost_per_1k_tokens_usd: 0.0,
+			max_request_cost_usd: 1.0,
+			max_latency_ms: 60_000,
+		}
+	}
+}
+
+impl OpenRouterRuntimeConfig {
+	pub fn apply_patch(&mut self, patch: OpenRouterRuntimeConfigPatch) {
+		if let Some(value) = patch.primary_model {
+			self.primary_model = value;
+		}
+		if let Some(value) = patch.fallback_models {
+			self.fallback_models = value;
+		}
+		if let Some(value) = patch.app_name {
+			self.app_name = Some(value);
+		}
+		if let Some(value) = patch.site_url {
+			self.site_url = Some(value);
+		}
+		if let Some(value) = patch.base_url {
+			self.base_url = value;
+		}
+		if let Some(value) = patch.max_context_tokens {
+			self.max_context_tokens = value;
+		}
+		if let Some(value) = patch.cost_per_1k_tokens_usd {
+			self.cost_per_1k_tokens_usd = value;
+		}
+		if let Some(value) = patch.max_request_cost_usd {
+			self.max_request_cost_usd = value;
+		}
+		if let Some(value) = patch.max_latency_ms {
+			self.max_latency_ms = value;
+		}
+	}
+
+	pub fn apply_env_overrides(&mut self) -> Result<(), OpenRouterBootstrapError> {
+		if let Some(value) = env_override_string("OPENROUTER_PRIMARY_MODEL")
+			.or_else(|| env_override_string("OPENROUTER_MODEL"))
+		{
+			self.primary_model = value;
+		}
+		if let Some(value) = env_override_string("OPENROUTER_FALLBACK_MODELS") {
+			self.fallback_models = parse_model_list(&value);
+		}
+		if let Some(value) = env_override_string("OPENROUTER_APP_NAME") {
+			self.app_name = Some(value);
+		}
+		if let Some(value) = env_override_string("OPENROUTER_SITE_URL") {
+			self.site_url = Some(value);
+		}
+		if let Some(value) = env_override_string("OPENROUTER_BASE_URL") {
+			self.base_url = value;
+		}
+		if let Some(value) = env_var_u64("OPENROUTER_MAX_CONTEXT_TOKENS")? {
+			self.max_context_tokens = value;
+		}
+		if let Some(value) = env_var_f64("OPENROUTER_COST_PER_1K_TOKENS_USD")? {
+			self.cost_per_1k_tokens_usd = value;
+		}
+		if let Some(value) = env_var_f64("OPENROUTER_MAX_REQUEST_COST_USD")? {
+			self.max_request_cost_usd = value;
+		}
+		if let Some(value) = env_var_u64("OPENROUTER_MAX_LATENCY_MS")? {
+			self.max_latency_ms = value;
+		}
+		if let Some(value) = env_override_string("ROKU_RUNTIME__LLM__OPENROUTER__PRIMARY_MODEL") {
+			self.primary_model = value;
+		}
+		if let Some(value) = env_override_string("ROKU_RUNTIME__LLM__OPENROUTER__FALLBACK_MODELS") {
+			self.fallback_models = parse_model_list(&value);
+		}
+		if let Some(value) = env_override_string("ROKU_RUNTIME__LLM__OPENROUTER__APP_NAME") {
+			self.app_name = Some(value);
+		}
+		if let Some(value) = env_override_string("ROKU_RUNTIME__LLM__OPENROUTER__SITE_URL") {
+			self.site_url = Some(value);
+		}
+		if let Some(value) = env_override_string("ROKU_RUNTIME__LLM__OPENROUTER__BASE_URL") {
+			self.base_url = value;
+		}
+		if let Some(value) = env_override_u64("ROKU_RUNTIME__LLM__OPENROUTER__MAX_CONTEXT_TOKENS")?
+		{
+			self.max_context_tokens = value;
+		}
+		if let Some(value) =
+			env_override_f64("ROKU_RUNTIME__LLM__OPENROUTER__COST_PER_1K_TOKENS_USD")?
+		{
+			self.cost_per_1k_tokens_usd = value;
+		}
+		if let Some(value) =
+			env_override_f64("ROKU_RUNTIME__LLM__OPENROUTER__MAX_REQUEST_COST_USD")?
+		{
+			self.max_request_cost_usd = value;
+		}
+		if let Some(value) = env_override_u64("ROKU_RUNTIME__LLM__OPENROUTER__MAX_LATENCY_MS")? {
+			self.max_latency_ms = value;
+		}
+		Ok(())
+	}
+
+	pub fn validate_and_clamp(&mut self) -> Result<(), OpenRouterBootstrapError> {
+		self.primary_model = normalize_model_id(&self.primary_model);
+		self.fallback_models =
+			dedupe_model_chain(&self.primary_model, self.fallback_models.clone());
+		self.base_url = self.base_url.trim().to_string();
+		self.app_name = self
+			.app_name
+			.take()
+			.map(|value| value.trim().to_string())
+			.filter(|value| !value.is_empty());
+		self.site_url = self
+			.site_url
+			.take()
+			.map(|value| value.trim().to_string())
+			.filter(|value| !value.is_empty());
+		if self.base_url.is_empty() {
+			return Err(OpenRouterBootstrapError::InvalidEnv {
+				key: "OPENROUTER_BASE_URL",
+				message: "value cannot be empty".to_string(),
+			});
+		}
+		if self.max_context_tokens == 0 {
+			return Err(OpenRouterBootstrapError::InvalidEnv {
+				key: "OPENROUTER_MAX_CONTEXT_TOKENS",
+				message: "value must be greater than zero".to_string(),
+			});
+		}
+		if self.cost_per_1k_tokens_usd < 0.0 {
+			return Err(OpenRouterBootstrapError::InvalidEnv {
+				key: "OPENROUTER_COST_PER_1K_TOKENS_USD",
+				message: "value must be non-negative".to_string(),
+			});
+		}
+		if self.max_request_cost_usd <= 0.0 {
+			return Err(OpenRouterBootstrapError::InvalidEnv {
+				key: "OPENROUTER_MAX_REQUEST_COST_USD",
+				message: "value must be greater than zero".to_string(),
+			});
+		}
+		if self.max_latency_ms == 0 {
+			return Err(OpenRouterBootstrapError::InvalidEnv {
+				key: "OPENROUTER_MAX_LATENCY_MS",
+				message: "value must be greater than zero".to_string(),
+			});
+		}
+		self.max_context_tokens = self.max_context_tokens.min(HARD_MAX_CONTEXT_TOKENS);
+		self.max_request_cost_usd = self.max_request_cost_usd.min(HARD_MAX_REQUEST_COST_USD);
+		self.max_latency_ms = self.max_latency_ms.min(HARD_MAX_LATENCY_MS);
+		Ok(())
+	}
+
+	pub fn with_api_key(self, api_key: String) -> OpenRouterConfig {
+		OpenRouterConfig {
+			api_key,
+			primary_model: self.primary_model,
+			fallback_models: self.fallback_models,
+			app_name: self.app_name,
+			site_url: self.site_url,
+			base_url: self.base_url,
+			max_context_tokens: self.max_context_tokens,
+			cost_per_1k_tokens_usd: self.cost_per_1k_tokens_usd,
+			max_request_cost_usd: self.max_request_cost_usd,
+			max_latency_ms: self.max_latency_ms,
+		}
 	}
 }
 
@@ -630,6 +800,13 @@ fn normalize_model_id(model_id: &str) -> String {
 	}
 }
 
+fn env_override_string(key: &str) -> Option<String> {
+	env::var(key)
+		.ok()
+		.map(|value| value.trim().to_string())
+		.filter(|value| !value.is_empty())
+}
+
 fn env_var_required(key: &'static str) -> Result<String, OpenRouterBootstrapError> {
 	let value = env::var(key).map_err(|_| OpenRouterBootstrapError::MissingEnv(key))?;
 	if value.trim().is_empty() {
@@ -657,6 +834,21 @@ fn env_var_u64(key: &'static str) -> Result<Option<u64>, OpenRouterBootstrapErro
 	}
 }
 
+fn env_override_u64(key: &'static str) -> Result<Option<u64>, OpenRouterBootstrapError> {
+	match env_override_string(key) {
+		Some(value) => {
+			value
+				.parse::<u64>()
+				.map(Some)
+				.map_err(|error| OpenRouterBootstrapError::InvalidEnv {
+					key,
+					message: error.to_string(),
+				})
+		}
+		None => Ok(None),
+	}
+}
+
 fn env_var_f64(key: &'static str) -> Result<Option<f64>, OpenRouterBootstrapError> {
 	match env::var(key) {
 		Ok(value) if !value.trim().is_empty() => {
@@ -673,6 +865,21 @@ fn env_var_f64(key: &'static str) -> Result<Option<f64>, OpenRouterBootstrapErro
 			key,
 			message: error.to_string(),
 		}),
+	}
+}
+
+fn env_override_f64(key: &'static str) -> Result<Option<f64>, OpenRouterBootstrapError> {
+	match env_override_string(key) {
+		Some(value) => {
+			value
+				.parse::<f64>()
+				.map(Some)
+				.map_err(|error| OpenRouterBootstrapError::InvalidEnv {
+					key,
+					message: error.to_string(),
+				})
+		}
+		None => Ok(None),
 	}
 }
 

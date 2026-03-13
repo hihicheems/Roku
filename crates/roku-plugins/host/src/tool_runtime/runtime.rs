@@ -372,6 +372,8 @@ fn fingerprint_json(value: &Value) -> String {
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
+	// Stable FNV constants for invocation fingerprinting. These are implementation invariants,
+	// not operator-tunable runtime settings.
 	const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 	const PRIME: u64 = 0x100000001b3;
 
