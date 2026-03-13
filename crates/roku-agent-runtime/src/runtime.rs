@@ -27,11 +27,11 @@ use crate::runtime_loop::{
 	build_loop_context, decide_tool_loop_next_step, effective_ask_user_payload, intake_request,
 	interpret_observation, next_working_directory_from_observation, summarize_observation,
 };
-use crate::tool_config::ToolCatalogConfig;
+use crate::tool_config::{ToolCatalogConfig, ToolsRuntimeConfig};
 use crate::tools::{
-	build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities,
-	build_llm_tool_runtime_with_plugin_snapshot,
-	build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities,
+	build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config,
+	build_llm_tool_runtime_with_plugin_snapshot_and_runtime_config,
+	build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config,
 };
 use crate::workers::{
 	data_worker_with_config, generic_worker_with_config, inventory_worker_with_config,
@@ -153,6 +153,7 @@ impl GenericAgentRuntime {
 			skill_registry,
 			tool_config,
 			PluginRegistrySnapshot::permissive(),
+			ToolsRuntimeConfig::default(),
 		)
 	}
 
@@ -160,18 +161,22 @@ impl GenericAgentRuntime {
 		skill_registry: SkillRegistry,
 		tool_config: ToolCatalogConfig,
 		plugin_snapshot: PluginRegistrySnapshot,
+		tools_runtime_config: ToolsRuntimeConfig,
 	) -> Self {
-		let resource_catalog = build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities(
-			&skill_registry,
-			&tool_config,
-			&plugin_snapshot,
-			false,
-		);
+		let resource_catalog =
+			build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config(
+				&skill_registry,
+				&tool_config,
+				&plugin_snapshot,
+				&tools_runtime_config,
+				false,
+			);
 		Self::with_tool_runtime_and_plugin_snapshot(
-			build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities(
+			build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config(
 				skill_registry,
 				&tool_config,
 				&plugin_snapshot,
+				&tools_runtime_config,
 				false,
 			),
 			resource_catalog,
@@ -205,6 +210,7 @@ impl GenericAgentRuntime {
 			skill_registry,
 			tool_config,
 			PluginRegistrySnapshot::permissive(),
+			ToolsRuntimeConfig::default(),
 		)
 	}
 
@@ -213,6 +219,7 @@ impl GenericAgentRuntime {
 		skill_registry: SkillRegistry,
 		tool_config: ToolCatalogConfig,
 		plugin_snapshot: PluginRegistrySnapshot,
+		tools_runtime_config: ToolsRuntimeConfig,
 	) -> Self {
 		let shared_router = Arc::new(router);
 		Self::with_llm_execution_and_route_routers(
@@ -221,6 +228,7 @@ impl GenericAgentRuntime {
 			skill_registry,
 			tool_config,
 			plugin_snapshot,
+			tools_runtime_config,
 		)
 	}
 
@@ -230,6 +238,7 @@ impl GenericAgentRuntime {
 		skill_registry: SkillRegistry,
 		tool_config: ToolCatalogConfig,
 		plugin_snapshot: PluginRegistrySnapshot,
+		tools_runtime_config: ToolsRuntimeConfig,
 	) -> Self {
 		Self::with_llm_execution_and_route_routers(
 			Arc::new(execution_router),
@@ -237,6 +246,7 @@ impl GenericAgentRuntime {
 			skill_registry,
 			tool_config,
 			plugin_snapshot,
+			tools_runtime_config,
 		)
 	}
 
@@ -246,20 +256,24 @@ impl GenericAgentRuntime {
 		skill_registry: SkillRegistry,
 		tool_config: ToolCatalogConfig,
 		plugin_snapshot: PluginRegistrySnapshot,
+		tools_runtime_config: ToolsRuntimeConfig,
 	) -> Self {
-		let resource_catalog = build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities(
-			&skill_registry,
-			&tool_config,
-			&plugin_snapshot,
-			true,
-		);
+		let resource_catalog =
+			build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config(
+				&skill_registry,
+				&tool_config,
+				&plugin_snapshot,
+				&tools_runtime_config,
+				true,
+			);
 		Self::with_tool_runtime_and_plugin_snapshot(
-			build_llm_tool_runtime_with_plugin_snapshot(
+			build_llm_tool_runtime_with_plugin_snapshot_and_runtime_config(
 				Arc::clone(&execution_router),
 				skill_registry,
 				&tool_config,
 				&resource_catalog,
 				&plugin_snapshot,
+				&tools_runtime_config,
 			),
 			resource_catalog,
 			tool_config,
@@ -1802,6 +1816,7 @@ So, I'll output: "星期日""#
 				SkillRegistry::file_backed(root.keep()),
 				ToolCatalogConfig::default(),
 				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
 			);
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-loop".to_string()),
@@ -1897,6 +1912,7 @@ So, I'll output: "星期日""#
 				SkillRegistry::file_backed(root.keep()),
 				ToolCatalogConfig::default(),
 				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
 			);
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-ask-user".to_string()),
@@ -1956,6 +1972,7 @@ So, I'll output: "星期日""#
 				SkillRegistry::file_backed(root.keep()),
 				ToolCatalogConfig::default(),
 				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
 			);
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-unknown".to_string()),
@@ -1997,6 +2014,7 @@ So, I'll output: "星期日""#
 				SkillRegistry::file_backed(root.keep()),
 				ToolCatalogConfig::default(),
 				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
 			);
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-low-confidence".to_string()),

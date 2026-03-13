@@ -1623,9 +1623,11 @@ dependencies = [
  "roku-plugin-telegram",
  "roku-runtime-service",
  "roku-state-store",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",
+ "toml 0.9.12+spec-1.1.0",
  "zip 8.2.0",
 ]
 
@@ -1686,7 +1688,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "thiserror",
- "toml",
+ "toml 1.0.6+spec-1.1.0",
 ]
 
 [[package]]
@@ -1699,7 +1701,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
- "toml",
+ "toml 1.0.6+spec-1.1.0",
  "walkdir",
 ]
 
@@ -1772,6 +1774,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "time",
+ "toml 0.9.12+spec-1.1.0",
  "url",
  "zip 8.2.0",
 ]
@@ -2276,6 +2279,21 @@ dependencies = [
 
 [[package]]
 name = "toml"
+version = "0.9.12+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf92845e79fc2e2def6a5d828f0801e29a2f8acc037becc5ab08595c7d5e9863"
+dependencies = [
+ "indexmap",
+ "serde_core",
+ "serde_spanned",
+ "toml_datetime 0.7.5+spec-1.1.0",
+ "toml_parser",
+ "toml_writer",
+ "winnow",
+]
+
+[[package]]
+name = "toml"
 version = "1.0.6+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "399b1124a3c9e16766831c6bba21e50192572cdd98706ea114f9502509686ffc"
@@ -2283,10 +2301,19 @@ dependencies = [
  "indexmap",
  "serde_core",
  "serde_spanned",
- "toml_datetime",
+ "toml_datetime 1.0.0+spec-1.1.0",
  "toml_parser",
  "toml_writer",
  "winnow",
+]
+
+[[package]]
+name = "toml_datetime"
+version = "0.7.5+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92e1cfed4a3038bc5a127e35a2d360f145e1f4b971b551a2ba5fd7aedf7e1347"
+dependencies = [
+ "serde_core",
 ]
 
 [[package]]

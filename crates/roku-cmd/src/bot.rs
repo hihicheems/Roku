@@ -21,7 +21,8 @@ use roku_common_types::{
 };
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_telegram::{
-	TelegramInteractionHandler, TelegramOutboundMessage, TelegramParseMode,
+	TelegramBotConfig, TelegramInteractionHandler, TelegramOutboundMessage, TelegramParseMode,
+	TelegramRuntimeConfig,
 };
 use roku_state_store::{
 	ConversationRepository, InMemoryConversationRepository, InMemorySessionPreferenceRepository,
@@ -42,8 +43,21 @@ use crate::telegram_loop_bridge::{
 };
 
 pub fn run_telegram_bot_from_env() -> Result<(), CommandError> {
-	let handler = build_live_telegram_handler_from_env()?;
-	let runner = roku_plugin_telegram::TelegramPollingRunner::from_env()?;
+	let (layout, bootstrap) = build_plugin_bootstrap_from_env()?;
+	ensure_plugin_enabled_for_command(
+		&bootstrap.plugin_snapshot,
+		"telegram",
+		"telegram-once/telegram-bot",
+	)?;
+	let runner = roku_plugin_telegram::TelegramPollingRunner::new(telegram_bot_config_from_env(
+		bootstrap.runtime_configs.telegram.clone(),
+	)?)?;
+	let handler = RuntimeServiceTelegramHandler {
+		service: Arc::new(build_live_runtime_service_from_layout_and_bootstrap(
+			&layout, bootstrap,
+		)?),
+		session_state: Arc::new(TelegramSessionState::from_env()?),
+	};
 	let _ = emit_global_log(LogRecord::new(
 		"roku-cmd",
 		LogLevel::Info,
@@ -82,6 +96,21 @@ fn build_live_telegram_handler_from_env() -> Result<RuntimeServiceTelegramHandle
 		)?),
 		session_state: Arc::new(TelegramSessionState::from_env()?),
 	})
+}
+
+fn telegram_bot_config_from_env(
+	runtime_config: TelegramRuntimeConfig,
+) -> Result<TelegramBotConfig, CommandError> {
+	let token = std::env::var("TELOXIDE_TOKEN")
+		.ok()
+		.filter(|value| !value.trim().is_empty())
+		.or_else(|| {
+			std::env::var("TELEGRAM_BOT_TOKEN")
+				.ok()
+				.filter(|value| !value.trim().is_empty())
+		})
+		.ok_or(roku_plugin_telegram::TelegramTransportError::MissingBotToken)?;
+	Ok(runtime_config.with_token(token))
 }
 
 struct RuntimeServiceTelegramHandler {

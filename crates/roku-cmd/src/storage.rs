@@ -27,6 +27,7 @@ pub(crate) struct LocalStorageLayout {
 	pub skill_root: PathBuf,
 	pub generated_skill_root: PathBuf,
 	pub tool_config_path: PathBuf,
+	pub runtime_config_path: PathBuf,
 	pub plugin_config_path: PathBuf,
 	pub workspace_plugin_root: PathBuf,
 	pub user_plugin_root: PathBuf,
@@ -53,7 +54,9 @@ impl LocalStorageLayout {
 			normalize_path(env_path("ROKU_SKILL_ROOT").unwrap_or_else(default_project_skill_root));
 		let generated_skill_root = skill_root.clone();
 		let tool_config_path = env_path("ROKU_TOOL_CONFIG_PATH")
-			.unwrap_or_else(|| PathBuf::from("config").join("tools.json"));
+			.unwrap_or_else(|| PathBuf::from("config").join("tools.toml"));
+		let runtime_config_path = env_path("ROKU_RUNTIME_CONFIG_PATH")
+			.unwrap_or_else(|| PathBuf::from("config").join("runtime.toml"));
 		let plugin_config_path = env_path("ROKU_PLUGIN_CONFIG_PATH")
 			.unwrap_or_else(|| PathBuf::from("config").join("plugins.toml"));
 		let workspace_plugin_root = normalize_path(PathBuf::from(".roku").join("plugins"));
@@ -80,6 +83,7 @@ impl LocalStorageLayout {
 			skill_root,
 			generated_skill_root,
 			tool_config_path,
+			runtime_config_path,
 			plugin_config_path,
 			workspace_plugin_root,
 			user_plugin_root,
@@ -179,7 +183,8 @@ mod tests {
 		assert!(layout.artifact_root.ends_with("artifacts"));
 		assert!(layout.skill_root.ends_with(".roku/skills"));
 		assert_eq!(layout.generated_skill_root, layout.skill_root);
-		assert!(layout.tool_config_path.ends_with("config/tools.json"));
+		assert!(layout.tool_config_path.ends_with("config/tools.toml"));
+		assert!(layout.runtime_config_path.ends_with("config/runtime.toml"));
 		assert!(layout.plugin_config_path.ends_with("config/plugins.toml"));
 		assert!(layout.workspace_plugin_root.ends_with(".roku/plugins"));
 		assert!(layout.user_plugin_root.ends_with(".roku/plugins"));

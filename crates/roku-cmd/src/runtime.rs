@@ -30,8 +30,8 @@ use roku_plugin_host::{
 	PluginDiscoveryConfig, PluginStartupConfig, build_plugin_registry_snapshot,
 	default_bundled_plugin_descriptors,
 };
-use roku_plugin_llm::{OpenRouterConfig, build_openrouter_router_with_metrics};
-use roku_plugin_skills::SkillRegistry;
+use roku_plugin_llm::build_openrouter_router_with_metrics;
+use roku_plugin_skills::{SkillRegistry, SkillsRuntimeConfig};
 pub use roku_runtime_service::RunMode;
 use roku_runtime_service::{RuntimeModeReport, RuntimeService};
 use roku_state_store::{
@@ -41,6 +41,7 @@ use roku_state_store::{
 use serde_json::json;
 
 use crate::CommandError;
+use crate::runtime_config::{PluginRuntimeConfigs, load_plugin_runtime_configs};
 use crate::storage::LocalStorageLayout;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,6 +277,7 @@ fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandEr
 		bootstrap.skill_registry,
 		bootstrap.tool_config,
 		bootstrap.plugin_snapshot,
+		bootstrap.runtime_configs.tools,
 	);
 	let store_config = sqlite_store_config(&layout);
 	let (artifact_store, experiment_registry) = build_runtime_data_plane(&layout);
@@ -392,6 +394,7 @@ pub(crate) struct PluginBootstrap {
 	pub(crate) plugin_snapshot: PluginRegistrySnapshot,
 	pub(crate) tool_config: ToolCatalogConfig,
 	pub(crate) skill_registry: SkillRegistry,
+	pub(crate) runtime_configs: PluginRuntimeConfigs,
 }
 
 pub(crate) fn build_plugin_bootstrap_from_env()
@@ -404,6 +407,7 @@ pub(crate) fn build_plugin_bootstrap_from_env()
 
 fn build_plugin_bootstrap(layout: &LocalStorageLayout) -> Result<PluginBootstrap, CommandError> {
 	let tool_config = load_tool_catalog_config(layout)?;
+	let runtime_configs = load_plugin_runtime_configs(layout)?;
 	let policy = load_plugin_policy_config(layout)?;
 	let discovery = PluginDiscoveryConfig {
 		explicit_paths: policy.paths.clone(),
@@ -424,12 +428,14 @@ fn build_plugin_bootstrap(layout: &LocalStorageLayout) -> Result<PluginBootstrap
 		bundled_descriptors,
 	};
 	let plugin_snapshot = build_plugin_registry_snapshot(&startup)?;
-	let skill_registry = build_skill_registry(layout, &plugin_snapshot);
+	let skill_registry =
+		build_skill_registry(layout, &plugin_snapshot, runtime_configs.skills.clone());
 
 	Ok(PluginBootstrap {
 		plugin_snapshot,
 		tool_config,
 		skill_registry,
+		runtime_configs,
 	})
 }
 
@@ -455,10 +461,11 @@ pub(crate) fn ensure_plugin_enabled_for_command(
 fn build_skill_registry(
 	layout: &LocalStorageLayout,
 	plugin_snapshot: &PluginRegistrySnapshot,
+	skills_runtime_config: SkillsRuntimeConfig,
 ) -> SkillRegistry {
 	if plugin_snapshot.is_plugin_enabled("skill-source-local") {
 		log_data_plane_backend("skill-registry", &layout.skill_root);
-		SkillRegistry::file_backed(layout.skill_root.clone())
+		SkillRegistry::file_backed_with_config(layout.skill_root.clone(), skills_runtime_config)
 	} else {
 		let _ = emit_global_log(LogRecord::new(
 			"roku-cmd",
@@ -475,6 +482,7 @@ fn build_deterministic_runtime_service_from_env() -> Result<RuntimeService, Comm
 		bootstrap.skill_registry,
 		bootstrap.tool_config,
 		bootstrap.plugin_snapshot,
+		bootstrap.runtime_configs.tools,
 	);
 	log_runtime_bootstrap_mode(&RuntimeModeReport::deterministic());
 	Ok(RuntimeService::in_memory_with_agent_runtime(runtime)
@@ -521,13 +529,18 @@ fn build_live_runtime(
 				bootstrap.skill_registry,
 				bootstrap.tool_config,
 				bootstrap.plugin_snapshot,
+				bootstrap.runtime_configs.tools,
 			),
 			runtime_mode,
 		));
 	}
 
-	let config = match OpenRouterConfig::from_env() {
-		Ok(config) => config,
+	let config = match openrouter_api_key_from_env() {
+		Ok(api_key) => bootstrap
+			.runtime_configs
+			.openrouter
+			.clone()
+			.with_api_key(api_key),
 		Err(error) => {
 			let fallback_reason = format!("openrouter bootstrap failed: {error}");
 			bootstrap.plugin_snapshot = bootstrap.plugin_snapshot.with_runtime_disable(
@@ -544,6 +557,7 @@ fn build_live_runtime(
 					bootstrap.skill_registry,
 					bootstrap.tool_config,
 					bootstrap.plugin_snapshot,
+					bootstrap.runtime_configs.tools,
 				),
 				runtime_mode,
 			));
@@ -560,9 +574,21 @@ fn build_live_runtime(
 			bootstrap.skill_registry,
 			bootstrap.tool_config,
 			bootstrap.plugin_snapshot,
+			bootstrap.runtime_configs.tools,
 		),
 		runtime_mode,
 	))
+}
+
+pub(crate) fn openrouter_api_key_from_env()
+-> Result<String, roku_plugin_llm::OpenRouterBootstrapError> {
+	std::env::var("OPENROUTER_API_KEY")
+		.ok()
+		.map(|value| value.trim().to_string())
+		.filter(|value| !value.is_empty())
+		.ok_or(roku_plugin_llm::OpenRouterBootstrapError::MissingEnv(
+			"OPENROUTER_API_KEY",
+		))
 }
 
 fn log_runtime_bootstrap_mode(runtime_mode: &RuntimeModeReport) {
