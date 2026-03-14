@@ -37,9 +37,8 @@ pub(crate) fn catalog_descriptors_with_config(
 		kind: ResourceKind::Tool,
 		name: "web.search".to_string(),
 		role: Some("core_web".to_string()),
-		description:
-			"Search the web through a configured HTTP JSON backend and return structured result summaries."
-				.to_string(),
+		description: "Use this when you have a concrete search query and need fresh external search results from the configured backend. Do not use it for filesystem questions, broad research planning without a query, or as a substitute for final synthesis. It returns structured result summaries that usually need a follow-up explanation or comparison before the final answer."
+			.to_string(),
 		discoverable: true,
 		tags: vec!["web".to_string(), "search".to_string(), "lookup".to_string()],
 		examples: vec!["Search the web for the latest Rust edition.".to_string()],
@@ -50,7 +49,7 @@ pub(crate) fn catalog_descriptors_with_config(
 			estimated_latency_ms: 3_000,
 		},
 		required_capabilities: vec!["web.search".to_string()],
-		summary: "Search the web through a configured HTTP backend.".to_string(),
+		summary: "Run a concrete web query and return structured search results.".to_string(),
 		key_commands: Vec::new(),
 		use_cases: Vec::new(),
 	}]

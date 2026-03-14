@@ -39,9 +39,8 @@ pub(crate) fn catalog_descriptors_with_config(
 		kind: ResourceKind::Tool,
 		name: "python.run".to_string(),
 		role: Some("core_python".to_string()),
-		description:
-			"Run explicit Python code through a constrained subprocess and return stdout/stderr."
-				.to_string(),
+		description: "Use this only when the request already contains explicit Python code to run or a clearly bounded snippet the agent has produced as code. Do not dump raw natural-language tasks into it and do not use it for shell commands. It returns stdout/stderr and exit facts from a constrained subprocess, which can be interpreted or summarized later."
+			.to_string(),
 		discoverable: true,
 		tags: vec![
 			"python".to_string(),
@@ -58,7 +57,7 @@ pub(crate) fn catalog_descriptors_with_config(
 			estimated_latency_ms: config.default_timeout_ms,
 		},
 		required_capabilities: vec!["python.run".to_string()],
-		summary: "Execute explicit Python code in a bounded subprocess.".to_string(),
+		summary: "Run explicit Python code and return grounded subprocess output.".to_string(),
 		key_commands: Vec::new(),
 		use_cases: Vec::new(),
 	}]
