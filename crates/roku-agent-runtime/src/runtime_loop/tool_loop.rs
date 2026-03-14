@@ -16,6 +16,7 @@ use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier};
 use serde_json::{Value, json};
 
+use crate::runtime_config::NextStepRuntimeConfig;
 use crate::runtime_loop::grounding::{
 	extract_explicit_python_code, extract_path_candidates, extract_row_limit, extract_sheet_name,
 	extract_skill_source_url, extract_table_path, extract_web_query,
@@ -30,10 +31,11 @@ pub(crate) fn decide_tool_loop_next_step(
 	context_projection: &ContextProjection,
 	router: Option<&LlmRouter>,
 	user_reply: Option<&str>,
+	config: &NextStepRuntimeConfig,
 ) -> NextStepDecision {
 	if let Some(router) = router
 		&& let Some(decision) =
-			decide_with_router(loop_state, context_projection, router, user_reply)
+			decide_with_router(loop_state, context_projection, router, user_reply, config)
 	{
 		return decision;
 	}
@@ -45,6 +47,7 @@ fn decide_with_router(
 	context_projection: &ContextProjection,
 	router: &LlmRouter,
 	user_reply: Option<&str>,
+	config: &NextStepRuntimeConfig,
 ) -> Option<NextStepDecision> {
 	let response = match router.generate_json_value(&GenerationRequest {
 		system_prompt: Some(
@@ -52,11 +55,11 @@ fn decide_with_router(
 				.to_string(),
 		),
 		prompt: tool_loop_prompt(context_projection, user_reply),
-		expected_output_tokens: 240,
+		expected_output_tokens: config.expected_output_tokens,
 		risk_tier: RiskTier::Low,
 		preferred_provider: None,
-		budget_tokens_remaining: 3_000,
-		budget_cost_remaining_usd: 0.05,
+		budget_tokens_remaining: config.budget_tokens_remaining,
+		budget_cost_remaining_usd: config.budget_cost_remaining_usd,
 	}) {
 		Ok(response) => response,
 		Err(error) => {
@@ -517,6 +520,7 @@ mod tests {
 	use serde_json::json;
 
 	use super::{decide_tool_loop_next_step, tool_loop_prompt};
+	use crate::NextStepRuntimeConfig;
 	use crate::router::{IntentFamily, RouteDecision, RouteRisk};
 	use crate::runtime_loop::{
 		ContextProjection, LoopContext, LoopState, StepObservation, ToolObservation,
@@ -694,7 +698,13 @@ mod tests {
 			"final_message": null
 		})]);
 
-		let decision = decide_tool_loop_next_step(&loop_state, &projection, Some(&router), None);
+		let decision = decide_tool_loop_next_step(
+			&loop_state,
+			&projection,
+			Some(&router),
+			None,
+			&NextStepRuntimeConfig::default(),
+		);
 
 		assert_eq!(
 			decision.action,
@@ -727,7 +737,13 @@ mod tests {
 		});
 		let projection = build_context_projection(&loop_state);
 
-		let decision = decide_tool_loop_next_step(&loop_state, &projection, None, None);
+		let decision = decide_tool_loop_next_step(
+			&loop_state,
+			&projection,
+			None,
+			None,
+			&NextStepRuntimeConfig::default(),
+		);
 
 		assert_eq!(decision.action, crate::runtime_loop::NextStepAction::Fail);
 		assert!(
@@ -760,7 +776,13 @@ mod tests {
 		});
 		let projection = build_context_projection(&loop_state);
 
-		let decision = decide_tool_loop_next_step(&loop_state, &projection, None, None);
+		let decision = decide_tool_loop_next_step(
+			&loop_state,
+			&projection,
+			None,
+			None,
+			&NextStepRuntimeConfig::default(),
+		);
 
 		assert_eq!(
 			decision.action,

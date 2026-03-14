@@ -21,6 +21,7 @@ use crate::router::{
 	DirectRouteExecutionResult, EscalationAction, IntentFamily, RouteClassifierContext,
 	RouteDecisionResult,
 };
+use crate::runtime_config::AgentRuntimeConfig;
 use crate::runtime_loop::{
 	AskUserPayload, ContextProjection, LoopContext, LoopState, StepAction, StepObservation,
 	StepRecord, ToolObservation, VisibleToolHint, attachments_for_tool, build_context_projection,
@@ -75,6 +76,7 @@ pub struct GenericAgentRuntime {
 	plugin_snapshot: PluginRegistrySnapshot,
 	route_router: Option<Arc<LlmRouter>>,
 	skill_execution_available: bool,
+	agent_runtime_config: AgentRuntimeConfig,
 }
 
 impl GenericAgentRuntime {
@@ -97,6 +99,22 @@ impl GenericAgentRuntime {
 		tool_config: ToolCatalogConfig,
 		plugin_snapshot: PluginRegistrySnapshot,
 	) -> Self {
+		Self::with_tool_runtime_and_plugin_snapshot_and_runtime_config(
+			tool_runtime,
+			resource_catalog,
+			tool_config,
+			plugin_snapshot,
+			AgentRuntimeConfig::default(),
+		)
+	}
+
+	pub fn with_tool_runtime_and_plugin_snapshot_and_runtime_config(
+		tool_runtime: ToolRuntime,
+		resource_catalog: ResourceCatalog,
+		tool_config: ToolCatalogConfig,
+		plugin_snapshot: PluginRegistrySnapshot,
+		agent_runtime_config: AgentRuntimeConfig,
+	) -> Self {
 		let skill_execution_available = resource_catalog
 			.entries()
 			.iter()
@@ -110,6 +128,7 @@ impl GenericAgentRuntime {
 			plugin_snapshot,
 			route_router: None,
 			skill_execution_available,
+			agent_runtime_config,
 		};
 		runtime.register_worker(
 			96,
@@ -164,6 +183,22 @@ impl GenericAgentRuntime {
 		plugin_snapshot: PluginRegistrySnapshot,
 		tools_runtime_config: ToolsRuntimeConfig,
 	) -> Self {
+		Self::with_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
+			skill_registry,
+			tool_config,
+			plugin_snapshot,
+			tools_runtime_config,
+			AgentRuntimeConfig::default(),
+		)
+	}
+
+	pub fn with_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
+		skill_registry: SkillRegistry,
+		tool_config: ToolCatalogConfig,
+		plugin_snapshot: PluginRegistrySnapshot,
+		tools_runtime_config: ToolsRuntimeConfig,
+		agent_runtime_config: AgentRuntimeConfig,
+	) -> Self {
 		let resource_catalog =
 			build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config(
 				&skill_registry,
@@ -172,7 +207,7 @@ impl GenericAgentRuntime {
 				&tools_runtime_config,
 				false,
 			);
-		Self::with_tool_runtime_and_plugin_snapshot(
+		Self::with_tool_runtime_and_plugin_snapshot_and_runtime_config(
 			build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config(
 				skill_registry,
 				&tool_config,
@@ -183,6 +218,7 @@ impl GenericAgentRuntime {
 			resource_catalog,
 			tool_config,
 			plugin_snapshot,
+			agent_runtime_config,
 		)
 	}
 
@@ -222,6 +258,24 @@ impl GenericAgentRuntime {
 		plugin_snapshot: PluginRegistrySnapshot,
 		tools_runtime_config: ToolsRuntimeConfig,
 	) -> Self {
+		Self::with_llm_router_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
+			router,
+			skill_registry,
+			tool_config,
+			plugin_snapshot,
+			tools_runtime_config,
+			AgentRuntimeConfig::default(),
+		)
+	}
+
+	pub fn with_llm_router_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
+		router: LlmRouter,
+		skill_registry: SkillRegistry,
+		tool_config: ToolCatalogConfig,
+		plugin_snapshot: PluginRegistrySnapshot,
+		tools_runtime_config: ToolsRuntimeConfig,
+		agent_runtime_config: AgentRuntimeConfig,
+	) -> Self {
 		let shared_router = Arc::new(router);
 		Self::with_llm_execution_and_route_routers(
 			Arc::clone(&shared_router),
@@ -230,6 +284,7 @@ impl GenericAgentRuntime {
 			tool_config,
 			plugin_snapshot,
 			tools_runtime_config,
+			agent_runtime_config,
 		)
 	}
 
@@ -241,6 +296,26 @@ impl GenericAgentRuntime {
 		plugin_snapshot: PluginRegistrySnapshot,
 		tools_runtime_config: ToolsRuntimeConfig,
 	) -> Self {
+		Self::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
+			route_router,
+			execution_router,
+			skill_registry,
+			tool_config,
+			plugin_snapshot,
+			tools_runtime_config,
+			AgentRuntimeConfig::default(),
+		)
+	}
+
+	pub fn with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
+		route_router: LlmRouter,
+		execution_router: LlmRouter,
+		skill_registry: SkillRegistry,
+		tool_config: ToolCatalogConfig,
+		plugin_snapshot: PluginRegistrySnapshot,
+		tools_runtime_config: ToolsRuntimeConfig,
+		agent_runtime_config: AgentRuntimeConfig,
+	) -> Self {
 		Self::with_llm_execution_and_route_routers(
 			Arc::new(execution_router),
 			Arc::new(route_router),
@@ -248,6 +323,7 @@ impl GenericAgentRuntime {
 			tool_config,
 			plugin_snapshot,
 			tools_runtime_config,
+			agent_runtime_config,
 		)
 	}
 
@@ -258,6 +334,7 @@ impl GenericAgentRuntime {
 		tool_config: ToolCatalogConfig,
 		plugin_snapshot: PluginRegistrySnapshot,
 		tools_runtime_config: ToolsRuntimeConfig,
+		agent_runtime_config: AgentRuntimeConfig,
 	) -> Self {
 		let resource_catalog =
 			build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config(
@@ -267,7 +344,7 @@ impl GenericAgentRuntime {
 				&tools_runtime_config,
 				true,
 			);
-		Self::with_tool_runtime_and_plugin_snapshot(
+		Self::with_tool_runtime_and_plugin_snapshot_and_runtime_config(
 			build_llm_tool_runtime_with_plugin_snapshot_and_runtime_config(
 				Arc::clone(&execution_router),
 				skill_registry,
@@ -279,6 +356,7 @@ impl GenericAgentRuntime {
 			resource_catalog,
 			tool_config,
 			plugin_snapshot,
+			agent_runtime_config,
 		)
 		.with_route_router(route_router)
 	}
@@ -304,6 +382,7 @@ impl GenericAgentRuntime {
 			RouteClassifierContext {
 				catalog: &self.resource_catalog,
 				tool_config: &self.tool_config,
+				agent_runtime_config: &self.agent_runtime_config,
 				plugin_snapshot: &self.plugin_snapshot,
 				route_router: self.route_router.as_deref(),
 				skill_execution_available: self.skill_execution_available,
@@ -336,7 +415,12 @@ impl GenericAgentRuntime {
 		bound_resources: Vec<ResourceSelector>,
 	) -> LoopState {
 		let context = self.build_loop_context(request, session_id, route_decision, bound_resources);
-		LoopState::new(format!("loop-{}", request.request_id.0), &context)
+		LoopState::with_budgets(
+			format!("loop-{}", request.request_id.0),
+			&context,
+			self.agent_runtime_config.r#loop.initial_step_budget,
+			self.agent_runtime_config.r#loop.initial_recovery_budget,
+		)
 	}
 
 	pub fn record_terminal_step(
@@ -435,6 +519,7 @@ impl GenericAgentRuntime {
 				&context_projection,
 				self.route_router.as_deref(),
 				user_reply,
+				&self.agent_runtime_config.next_step,
 			);
 			match next_step.action {
 				crate::runtime_loop::NextStepAction::CallTool => {
@@ -732,7 +817,12 @@ impl GenericAgentRuntime {
 						(
 							tool_name.clone(),
 							VisibleToolHint {
-								description: compact_tool_hint(&entry.description),
+								description: compact_tool_hint(
+									&entry.description,
+									self.agent_runtime_config
+										.prompts
+										.visible_tool_hint_max_chars,
+								),
 								required_argument_keys: tool_required_argument_keys(tool_name)
 									.iter()
 									.map(|key| (*key).to_string())
@@ -1320,15 +1410,14 @@ fn append_enabled_tool_names<'a>(
 	}
 }
 
-fn compact_tool_hint(description: &str) -> String {
-	const MAX_HINT_CHARS: usize = 180;
+fn compact_tool_hint(description: &str, max_chars: usize) -> String {
 	let trimmed = description.trim();
-	if trimmed.chars().count() <= MAX_HINT_CHARS {
+	if trimmed.chars().count() <= max_chars {
 		return trimmed.to_string();
 	}
 	let truncated = trimmed
 		.chars()
-		.take(MAX_HINT_CHARS.saturating_sub(3))
+		.take(max_chars.saturating_sub(3))
 		.collect::<String>();
 	format!("{truncated}...")
 }
