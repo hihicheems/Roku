@@ -2,54 +2,120 @@
 # Secrets stay in environment variables and are rejected if added here.
 #
 # Ownership:
+# - [runtime.agent.*]        -> crates/roku-agent-runtime
 # - [runtime.tools.*]        -> crates/roku-plugins/tools
 # - [runtime.llm.openrouter] -> crates/roku-plugins/llm
 # - [runtime.telegram]       -> crates/roku-plugins/telegram
 # - [runtime.skills]         -> crates/roku-plugins/skills
+#
+# Values in this file are runtime defaults and overrides.
+# Final hard ceilings still live in code so one bad edit cannot push the
+# process past its safety envelope.
+
+[runtime.agent.loop]
+# Initial maximum number of tool-loop steps before the runtime forces termination.
+initial_step_budget = 4
+# Initial maximum number of recovery attempts after non-terminal tool failures.
+initial_recovery_budget = 2
+
+[runtime.agent.router]
+# Target size of the JSON route-classifier response.
+expected_output_tokens = 220
+# Token budget reserved for the route-classifier prompt plus response.
+budget_tokens_remaining = 3000
+# Cost budget reserved for a single route-classifier call.
+budget_cost_remaining_usd = 0.1
+# Maximum number of inventory entries exposed to the route classifier in one prompt.
+candidate_inventory_limit = 10
+
+[runtime.agent.prompts]
+# Maximum characters kept from one visible tool hint inside ContextProjection.
+visible_tool_hint_max_chars = 180
+# Maximum characters kept from one route-candidate description.
+candidate_description_max_chars = 180
+# Maximum characters kept from one route-candidate example.
+candidate_example_max_chars = 96
+
+[runtime.agent.next_step]
+# Target size of one generic loop next-step JSON decision.
+expected_output_tokens = 240
+# Token budget reserved for one generic loop next-step model call.
+budget_tokens_remaining = 3000
+# Cost budget reserved for one generic loop next-step model call.
+budget_cost_remaining_usd = 0.05
 
 [runtime.tools.fs]
+# Default byte cap for one fs.read_text call when the request does not provide `max_bytes`.
 default_max_bytes = 4096
+# Maximum directory entries returned by one fs.list_dir call before truncation.
 max_dir_entries = 200
+# Maximum glob matches returned by one fs.glob call before truncation.
 max_glob_matches = 200
+# Maximum descendant entries scanned while resolving fuzzy basenames for fs.find.
 max_descendant_scan_entries = 8000
 
 [runtime.tools.python]
+# Default subprocess timeout for python.run.
 default_timeout_ms = 10000
+# Maximum stdout/stderr bytes retained from one python.run invocation.
 max_output_bytes = 8192
 
 [runtime.tools.table]
+# Default row count returned by table.preview when the request does not specify `rows`.
 default_preview_rows = 5
 
 [runtime.tools.web]
+# Default result count returned by web.search when the request does not specify `top_k`.
 default_top_k = 5
 
 [runtime.tools.workers]
+# Timeout applied to tool-backed LLM workers such as inventory.describe or general.execute.
 llm_tool_timeout_ms = 45000
+# Character budget for injected installed-skill excerpts inside worker prompts.
 max_skill_prompt_context_chars = 16000
+# Maximum characters retained from raw worker output before sanitization/truncation.
 max_skill_execution_output_chars = 4000
 
 [runtime.llm.openrouter]
+# Primary model id for live LLM routing.
 primary_model = "deepseek-chat"
+# Ordered fallback chain when the primary model/provider cannot serve the request.
 fallback_models = ["gemini-2.0-flash"]
+# Base URL for the OpenRouter-compatible chat-completions endpoint.
 base_url = "https://openrouter.ai/api/v1/chat/completions"
 # OPENROUTER_API_KEY remains env-only.
+# Hard policy ceiling for model context size considered eligible by the router.
 max_context_tokens = 128000
+# Cost estimate used by local budget checks; 0.0 means "do not enforce via price".
 cost_per_1k_tokens_usd = 0.0
+# Maximum allowed estimated cost for a single routed LLM request.
 max_request_cost_usd = 1.0
+# Maximum allowed provider latency before the router treats the model as too slow.
 max_latency_ms = 60000
 
 [runtime.telegram]
+# API base URL for Telegram HTTP requests.
 api_base_url = "https://api.telegram.org"
 # TELOXIDE_TOKEN / TELEGRAM_BOT_TOKEN remain env-only.
+# Long-poll timeout in seconds for one getUpdates request.
 poll_timeout_seconds = 30
+# Idle backoff between polling iterations when there is no work.
 idle_backoff_ms = 500
+# Number of consecutive poll failures before noisy logging starts.
 poll_error_log_threshold = 5
+# Whether to emit progress notices back to Telegram chats.
 progress_notices_enabled = false
+# Whether outbound Telegram messages should include request metadata.
 include_request_metadata = false
+# Whether outbound Telegram messages should include attachment details.
 show_attachments = false
 
 [runtime.skills]
+# HTTP timeout for downloading/installing skills.
 http_timeout_seconds = 30
+# Maximum compressed archive size accepted during skill installation.
 max_archive_bytes = 33554432
+# Maximum bytes extracted from one prompt-supporting skill document.
 max_prompt_document_bytes = 24576
+# Maximum number of skill documents included in prompt context.
 max_prompt_documents = 24

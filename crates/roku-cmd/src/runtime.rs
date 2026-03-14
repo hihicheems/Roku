@@ -41,7 +41,7 @@ use roku_state_store::{
 use serde_json::json;
 
 use crate::CommandError;
-use crate::runtime_config::{PluginRuntimeConfigs, load_plugin_runtime_configs};
+use crate::runtime_config::{RuntimeConfigs, load_runtime_configs};
 use crate::storage::LocalStorageLayout;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,12 +273,14 @@ pub(crate) fn decide_approval_from_env(
 
 fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandError> {
 	let (layout, bootstrap) = build_plugin_bootstrap_from_env()?;
-	let runtime = GenericAgentRuntime::with_skill_registry_tool_config_and_plugin_snapshot(
-		bootstrap.skill_registry,
-		bootstrap.tool_config,
-		bootstrap.plugin_snapshot,
-		bootstrap.runtime_configs.tools,
-	);
+	let runtime =
+		GenericAgentRuntime::with_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
+			bootstrap.skill_registry,
+			bootstrap.tool_config,
+			bootstrap.plugin_snapshot,
+			bootstrap.runtime_configs.tools,
+			bootstrap.runtime_configs.agent,
+		);
 	let store_config = sqlite_store_config(&layout);
 	let (artifact_store, experiment_registry) = build_runtime_data_plane(&layout);
 
@@ -394,7 +396,7 @@ pub(crate) struct PluginBootstrap {
 	pub(crate) plugin_snapshot: PluginRegistrySnapshot,
 	pub(crate) tool_config: ToolCatalogConfig,
 	pub(crate) skill_registry: SkillRegistry,
-	pub(crate) runtime_configs: PluginRuntimeConfigs,
+	pub(crate) runtime_configs: RuntimeConfigs,
 }
 
 pub(crate) fn build_plugin_bootstrap_from_env()
@@ -407,7 +409,7 @@ pub(crate) fn build_plugin_bootstrap_from_env()
 
 fn build_plugin_bootstrap(layout: &LocalStorageLayout) -> Result<PluginBootstrap, CommandError> {
 	let tool_config = load_tool_catalog_config(layout)?;
-	let runtime_configs = load_plugin_runtime_configs(layout)?;
+	let runtime_configs = load_runtime_configs(layout)?;
 	let policy = load_plugin_policy_config(layout)?;
 	let discovery = PluginDiscoveryConfig {
 		explicit_paths: policy.paths.clone(),
@@ -478,12 +480,14 @@ fn build_skill_registry(
 
 fn build_deterministic_runtime_service_from_env() -> Result<RuntimeService, CommandError> {
 	let (_, bootstrap) = build_plugin_bootstrap_from_env()?;
-	let runtime = GenericAgentRuntime::with_skill_registry_tool_config_and_plugin_snapshot(
-		bootstrap.skill_registry,
-		bootstrap.tool_config,
-		bootstrap.plugin_snapshot,
-		bootstrap.runtime_configs.tools,
-	);
+	let runtime =
+		GenericAgentRuntime::with_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
+			bootstrap.skill_registry,
+			bootstrap.tool_config,
+			bootstrap.plugin_snapshot,
+			bootstrap.runtime_configs.tools,
+			bootstrap.runtime_configs.agent,
+		);
 	log_runtime_bootstrap_mode(&RuntimeModeReport::deterministic());
 	Ok(RuntimeService::in_memory_with_agent_runtime(runtime)
 		.with_runtime_mode_report(RuntimeModeReport::deterministic()))
@@ -525,11 +529,12 @@ fn build_live_runtime(
 		);
 		log_runtime_bootstrap_mode(&runtime_mode);
 		return Ok((
-			GenericAgentRuntime::with_skill_registry_tool_config_and_plugin_snapshot(
+			GenericAgentRuntime::with_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
 				bootstrap.skill_registry,
 				bootstrap.tool_config,
 				bootstrap.plugin_snapshot,
 				bootstrap.runtime_configs.tools,
+				bootstrap.runtime_configs.agent,
 			),
 			runtime_mode,
 		));
@@ -553,11 +558,12 @@ fn build_live_runtime(
 				RuntimeModeReport::live_react_fallback_to_deterministic(fallback_reason);
 			log_runtime_bootstrap_mode(&runtime_mode);
 			return Ok((
-				GenericAgentRuntime::with_skill_registry_tool_config_and_plugin_snapshot(
+				GenericAgentRuntime::with_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
 					bootstrap.skill_registry,
 					bootstrap.tool_config,
 					bootstrap.plugin_snapshot,
 					bootstrap.runtime_configs.tools,
+					bootstrap.runtime_configs.agent,
 				),
 				runtime_mode,
 			));
@@ -568,13 +574,14 @@ fn build_live_runtime(
 	let runtime_mode = RuntimeModeReport::live_react();
 	log_runtime_bootstrap_mode(&runtime_mode);
 	Ok((
-		GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+		GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
 			route_router,
 			execution_router,
 			bootstrap.skill_registry,
 			bootstrap.tool_config,
 			bootstrap.plugin_snapshot,
 			bootstrap.runtime_configs.tools,
+			bootstrap.runtime_configs.agent,
 		),
 		runtime_mode,
 	))
