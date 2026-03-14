@@ -1,3 +1,8 @@
+# Tool catalog metadata for builtin tools.
+# `terminal_output = true` means the tool contract is allowed to stop the loop
+# after a successful observation; this is descriptor metadata, not runtime-side
+# follow-up routing.
+
 [[tools]]
 name = "skill.ensure_installed"
 role = "skill_install"
@@ -26,6 +31,7 @@ required_capabilities = ["skill.execute"]
 name = "inventory.describe"
 role = "inventory"
 discoverable = true
+terminal_output = true
 description = "Describe Roku's current local inventory, including installed skills, discoverable tools, and capability families, and reformat that inventory for the user."
 tags = ["inventory", "skills", "tools", "capabilities", "listing"]
 examples = [
@@ -44,6 +50,7 @@ required_capabilities = ["inventory.read"]
 name = "research.synthesize"
 role = "research"
 discoverable = true
+terminal_output = true
 description = "Research a topic, read context, and synthesize grounded findings."
 tags = ["research", "analysis", "information"]
 examples = ["Summarize the latest requirements from the project docs."]
@@ -56,6 +63,7 @@ required_capabilities = ["information.read"]
 name = "data.execute"
 role = "data"
 discoverable = true
+terminal_output = true
 description = "Transform datasets, aggregate metrics, or run structured data processing."
 tags = ["data", "metrics", "pipeline"]
 examples = ["Aggregate the experiment results into a compact table."]
@@ -68,6 +76,7 @@ required_capabilities = ["data.read"]
 name = "review.assess"
 role = "review"
 discoverable = true
+terminal_output = true
 description = "Review a draft, assess correctness, and call out residual risks."
 tags = ["review", "validation", "risk"]
 examples = ["Review the proposed plan and list the main risks."]
@@ -80,6 +89,7 @@ required_capabilities = ["review.check"]
 name = "general.execute"
 role = "general"
 discoverable = false
+terminal_output = true
 description = "Answer directly when the request does not require an external tool or skill."
 tags = ["general", "conversation"]
 examples = ["Reply to a simple greeting or explain available capabilities."]
