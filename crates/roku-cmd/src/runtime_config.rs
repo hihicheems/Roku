@@ -14,7 +14,9 @@
 
 use std::fs;
 
-use roku_agent_runtime::{ToolsRuntimeConfig, ToolsRuntimeConfigPatch};
+use roku_agent_runtime::{
+	AgentRuntimeConfig, AgentRuntimeConfigPatch, ToolsRuntimeConfig, ToolsRuntimeConfigPatch,
+};
 use roku_plugin_llm::{OpenRouterRuntimeConfig, OpenRouterRuntimeConfigPatch};
 use roku_plugin_skills::{SkillsRuntimeConfig, SkillsRuntimeConfigPatch};
 use roku_plugin_telegram::{TelegramRuntimeConfig, TelegramRuntimeConfigPatch};
@@ -22,12 +24,13 @@ use serde::Deserialize;
 
 use crate::{CommandError, storage::LocalStorageLayout};
 
-/// Effective runtime configuration bundle for plugin crates.
+/// Effective runtime configuration bundle for startup-owned runtime defaults.
 ///
-/// The startup layer owns file parsing and composition. Each plugin crate owns
-/// its typed config, patch application, and validate/clamp logic.
+/// The startup layer owns file parsing and composition. Each runtime-owning
+/// crate owns its typed config, patch application, and validate/clamp logic.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct PluginRuntimeConfigs {
+pub(crate) struct RuntimeConfigs {
+	pub agent: AgentRuntimeConfig,
 	pub tools: ToolsRuntimeConfig,
 	pub openrouter: OpenRouterRuntimeConfig,
 	pub telegram: TelegramRuntimeConfig,
@@ -45,6 +48,8 @@ struct RuntimeTomlConfig {
 #[serde(deny_unknown_fields)]
 struct RuntimeSections {
 	#[serde(default)]
+	agent: AgentRuntimeConfigPatch,
+	#[serde(default)]
 	tools: ToolsRuntimeConfigPatch,
 	#[serde(default)]
 	llm: LlmSections,
@@ -61,9 +66,9 @@ struct LlmSections {
 	openrouter: OpenRouterRuntimeConfigPatch,
 }
 
-pub(crate) fn load_plugin_runtime_configs(
+pub(crate) fn load_runtime_configs(
 	layout: &LocalStorageLayout,
-) -> Result<PluginRuntimeConfigs, CommandError> {
+) -> Result<RuntimeConfigs, CommandError> {
 	let parsed = if layout.runtime_config_path.exists() {
 		let content = fs::read_to_string(&layout.runtime_config_path).map_err(CommandError::Io)?;
 		toml::from_str::<RuntimeTomlConfig>(&content).map_err(|error| {
@@ -75,6 +80,19 @@ pub(crate) fn load_plugin_runtime_configs(
 	} else {
 		RuntimeTomlConfig::default()
 	};
+
+	let mut agent = AgentRuntimeConfig::default();
+	agent.apply_patch(parsed.runtime.agent);
+	agent.apply_env_overrides().map_err(|error| {
+		CommandError::RuntimeConfigBootstrap(format!(
+			"failed to load runtime.agent config: {error}"
+		))
+	})?;
+	agent.validate_and_clamp().map_err(|error| {
+		CommandError::RuntimeConfigBootstrap(format!(
+			"failed to validate runtime.agent config: {error}"
+		))
+	})?;
 
 	let mut tools = ToolsRuntimeConfig::default();
 	tools.apply_patch(parsed.runtime.tools);
@@ -108,7 +126,8 @@ pub(crate) fn load_plugin_runtime_configs(
 	skills.apply_env_overrides().map_err(CommandError::from)?;
 	skills.validate_and_clamp().map_err(CommandError::from)?;
 
-	Ok(PluginRuntimeConfigs {
+	Ok(RuntimeConfigs {
+		agent,
 		tools,
 		openrouter,
 		telegram,
@@ -211,8 +230,10 @@ mod tests {
 		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
 		let layout = temp_layout();
 
-		let configs = load_plugin_runtime_configs(&layout).expect("defaults should load");
+		let configs = load_runtime_configs(&layout).expect("defaults should load");
 
+		assert_eq!(configs.agent.r#loop.initial_step_budget, 4);
+		assert_eq!(configs.agent.router.budget_tokens_remaining, 3_000);
 		assert_eq!(configs.tools.fs.default_max_bytes, 4_096);
 		assert_eq!(configs.openrouter.max_latency_ms, 60_000);
 		assert_eq!(configs.telegram.poll_timeout_seconds, 30);
@@ -232,6 +253,12 @@ max_dir_entries = 999999
 max_glob_matches = 999999
 max_descendant_scan_entries = 999999
 
+[runtime.agent.router]
+budget_tokens_remaining = 999999
+
+[runtime.agent.prompts]
+visible_tool_hint_max_chars = 999999
+
 [runtime.tools.web]
 default_top_k = 999999
 
@@ -249,8 +276,16 @@ max_prompt_documents = 999
 "#,
 		);
 
-		let configs = load_plugin_runtime_configs(&layout).expect("runtime toml should load");
+		let configs = load_runtime_configs(&layout).expect("runtime toml should load");
 
+		assert_eq!(
+			configs.agent.router.budget_tokens_remaining,
+			roku_agent_runtime::HARD_MAX_ROUTE_BUDGET_TOKENS_REMAINING
+		);
+		assert_eq!(
+			configs.agent.prompts.visible_tool_hint_max_chars,
+			roku_agent_runtime::HARD_MAX_VISIBLE_TOOL_HINT_MAX_CHARS
+		);
 		assert_eq!(configs.tools.fs.default_max_bytes, HARD_MAX_READ_BYTES);
 		assert_eq!(configs.tools.fs.max_dir_entries, HARD_MAX_DIR_ENTRIES);
 		assert_eq!(configs.tools.fs.max_glob_matches, HARD_MAX_GLOB_MATCHES);
@@ -280,8 +315,7 @@ api_key = "should-not-be-configurable"
 "#,
 		);
 
-		let error =
-			load_plugin_runtime_configs(&layout).expect_err("unknown field should fail bootstrap");
+		let error = load_runtime_configs(&layout).expect_err("unknown field should fail bootstrap");
 
 		assert!(matches!(error, CommandError::RuntimeConfigBootstrap(_)));
 		assert!(error.to_string().contains("unknown field `api_key`"));
@@ -302,6 +336,9 @@ primary_model = "toml-model"
 
 [runtime.telegram]
 poll_timeout_seconds = 12
+
+[runtime.agent.next_step]
+expected_output_tokens = 222
 "#,
 		);
 
@@ -311,6 +348,8 @@ poll_timeout_seconds = 12
 		let _clear_model_legacy = EnvGuard::remove("OPENROUTER_PRIMARY_MODEL");
 		let _clear_poll = EnvGuard::remove("ROKU_RUNTIME__TELEGRAM__POLL_TIMEOUT_SECONDS");
 		let _clear_poll_legacy = EnvGuard::remove("TELEGRAM_POLL_TIMEOUT_SECONDS");
+		let _clear_next_step =
+			EnvGuard::remove("ROKU_RUNTIME__AGENT__NEXT_STEP__EXPECTED_OUTPUT_TOKENS");
 
 		let _legacy_tools = EnvGuard::set("ROKU_WEB_SEARCH_URL", "https://legacy.example/search");
 		let _canonical_tools = EnvGuard::set(
@@ -324,9 +363,14 @@ poll_timeout_seconds = 12
 		);
 		let _legacy_poll = EnvGuard::set("TELEGRAM_POLL_TIMEOUT_SECONDS", "33");
 		let _canonical_poll = EnvGuard::set("ROKU_RUNTIME__TELEGRAM__POLL_TIMEOUT_SECONDS", "44");
+		let _canonical_next_step = EnvGuard::set(
+			"ROKU_RUNTIME__AGENT__NEXT_STEP__EXPECTED_OUTPUT_TOKENS",
+			"321",
+		);
 
-		let configs = load_plugin_runtime_configs(&layout).expect("env overrides should load");
+		let configs = load_runtime_configs(&layout).expect("env overrides should load");
 
+		assert_eq!(configs.agent.next_step.expected_output_tokens, 321);
 		assert_eq!(
 			configs.tools.web.endpoint.as_deref(),
 			Some("https://canonical.example/search")
