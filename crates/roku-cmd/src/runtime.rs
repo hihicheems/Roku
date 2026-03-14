@@ -15,6 +15,7 @@
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use roku_agent_runtime::{GenericAgentRuntime, PluginRegistrySnapshot, ToolCatalogConfig};
 use roku_api_gateway::{Gateway, RawRequest};
@@ -84,7 +85,7 @@ pub(crate) fn run_with_mode_and_options(
 	let gateway = Gateway;
 	let service = build_deterministic_runtime_service_from_env()
 		.map_err(|error| RuntimeError::new(error.to_string()))?;
-	let request = build_request(&gateway, options, 1);
+	let request = build_request(&gateway, options, next_cli_request_sequence());
 	execute_with_service_and_mode(service, request, mode)
 }
 
@@ -103,7 +104,7 @@ pub(crate) fn run_live_once_with_options_from_env(
 	apply_request_env_overrides(&options);
 	let gateway = Gateway;
 	let service = build_live_runtime_service_from_env()?;
-	let request = build_request(&gateway, options, 1);
+	let request = build_request(&gateway, options, next_cli_request_sequence());
 	execute_with_service_and_mode(service, request, RunMode::Normal).map_err(CommandError::Runtime)
 }
 
@@ -700,6 +701,13 @@ fn build_request(
 	);
 	request.planning_mode_hint = options.planning_mode_hint;
 	request
+}
+
+fn next_cli_request_sequence() -> u64 {
+	SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+		.unwrap_or(1)
 }
 
 pub(crate) fn apply_request_env_overrides(options: &ExecutionRequestOptions) {
