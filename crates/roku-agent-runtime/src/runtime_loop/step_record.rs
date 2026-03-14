@@ -13,10 +13,11 @@
 // limitations under the License.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::runtime_loop::StepObservation;
+use crate::runtime_loop::{InterpretedObservation, StepObservation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -40,7 +41,9 @@ pub enum StepAction {
 /// - `decision_reason`: Runtime or model reason attached to the chosen action.
 /// - `started_at` / `finished_at`: RFC3339 timestamps for replay and audit.
 /// - `tool_latency_ms`: Tool latency when a tool call occurred.
+/// - `raw_tool_output`: Raw tool or adapter payload captured before normalization.
 /// - `observation`: Observed result recorded for the step.
+/// - `interpreted_observation`: Runtime-owned interpretation derived from the observation.
 /// - `remaining_step_budget_after`: Remaining step budget after this step committed.
 /// - `remaining_recovery_budget_after`: Remaining recovery budget after this step committed.
 /// - `working_directory_after`: Working directory to carry into the next round.
@@ -62,7 +65,9 @@ pub struct StepRecord {
 	pub started_at: String,
 	pub finished_at: String,
 	pub tool_latency_ms: Option<u64>,
+	pub raw_tool_output: Option<Value>,
 	pub observation: Option<StepObservation>,
+	pub interpreted_observation: Option<InterpretedObservation>,
 	pub remaining_step_budget_after: u32,
 	pub remaining_recovery_budget_after: u32,
 	pub working_directory_after: String,
@@ -73,7 +78,9 @@ impl StepRecord {
 		step_index: u32,
 		tool_name: impl Into<String>,
 		decision_reason: impl Into<String>,
+		raw_tool_output: Value,
 		observation: StepObservation,
+		interpreted_observation: InterpretedObservation,
 		tool_latency_ms: Option<u64>,
 		remaining_step_budget_after: u32,
 		remaining_recovery_budget_after: u32,
@@ -88,7 +95,9 @@ impl StepRecord {
 			started_at: timestamp.clone(),
 			finished_at: timestamp,
 			tool_latency_ms,
+			raw_tool_output: Some(raw_tool_output),
 			observation: Some(observation),
+			interpreted_observation: Some(interpreted_observation),
 			remaining_step_budget_after,
 			remaining_recovery_budget_after,
 			working_directory_after: working_directory_after.into(),
@@ -113,7 +122,9 @@ impl StepRecord {
 			started_at: timestamp.clone(),
 			finished_at: timestamp,
 			tool_latency_ms: None,
+			raw_tool_output: None,
 			observation,
+			interpreted_observation: None,
 			remaining_step_budget_after,
 			remaining_recovery_budget_after,
 			working_directory_after: working_directory_after.into(),

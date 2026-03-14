@@ -114,6 +114,20 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 		},
 		BundledPluginDescriptor {
 			manifest: PluginManifest {
+				id: PluginId::new("core-command").expect("bundled plugin id should be valid"),
+				kind: roku_plugin_core::PluginKind::Toolset,
+				enabled_by_default: true,
+				capabilities: PluginCapabilities {
+					provides_tools: vec!["command.run".to_string()],
+					has_side_effects: true,
+					..PluginCapabilities::default()
+				},
+				requirements: PluginRequirements::default(),
+			},
+			required: false,
+		},
+		BundledPluginDescriptor {
+			manifest: PluginManifest {
 				id: PluginId::new("core-table").expect("bundled plugin id should be valid"),
 				kind: roku_plugin_core::PluginKind::Toolset,
 				enabled_by_default: true,
@@ -236,6 +250,7 @@ pub(crate) fn profile_decision(profile: PluginProfile, plugin_id: &PluginId) -> 
 				"builtin-tools"
 					| "skill-source-local"
 					| "openrouter" | "core-fs"
+					| "core-command"
 					| "core-table" | "core-web"
 					| "core-python"
 			),
@@ -244,6 +259,7 @@ pub(crate) fn profile_decision(profile: PluginProfile, plugin_id: &PluginId) -> 
 				"builtin-tools"
 					| "skill-source-local"
 					| "openrouter" | "core-fs"
+					| "core-command"
 					| "core-table" | "core-web"
 					| "core-python" | "coding"
 					| "mcp"
@@ -253,6 +269,7 @@ pub(crate) fn profile_decision(profile: PluginProfile, plugin_id: &PluginId) -> 
 				"builtin-tools"
 					| "skill-source-local"
 					| "openrouter" | "core-fs"
+					| "core-command"
 					| "core-table" | "core-web"
 					| "core-python" | "telegram"
 			),
@@ -261,6 +278,7 @@ pub(crate) fn profile_decision(profile: PluginProfile, plugin_id: &PluginId) -> 
 				"builtin-tools"
 					| "skill-source-local"
 					| "openrouter" | "core-fs"
+					| "core-command"
 					| "core-table" | "core-web"
 					| "core-python" | "telegram"
 					| "coding" | "mcp"
