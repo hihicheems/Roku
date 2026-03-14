@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::runtime_loop::{LoopState, StepAction, StepObservation, ToolObservation};
@@ -33,6 +35,7 @@ use crate::runtime_loop::{LoopState, StepAction, StepObservation, ToolObservatio
 /// - `remaining_step_budget`: Step budget still available before the next action.
 /// - `remaining_recovery_budget`: Recovery budget still available before the next action.
 /// - `visible_tools`: Tool names currently visible to the next decision round.
+/// - `visible_tool_hints`: Compact semantic hints for the currently visible tools.
 /// - `last_observation`: The latest grounded tool observation, if any.
 /// - `history_digest`: A compact summary of recent steps and current open state.
 /// - `unresolved_blockers`: Open blockers that may require follow-up or user clarification.
@@ -45,6 +48,7 @@ use crate::runtime_loop::{LoopState, StepAction, StepObservation, ToolObservatio
 ///   observations.
 /// - `visible_tools` must come from the current runtime round, not a stale initialization-only
 ///   snapshot.
+/// - `visible_tool_hints` must stay aligned with `visible_tools` for the current round.
 ///
 /// ## Non-Goals
 /// - This projection is not a replay log or audit record.
@@ -60,10 +64,27 @@ pub struct ContextProjection {
 	pub remaining_step_budget: u32,
 	pub remaining_recovery_budget: u32,
 	pub visible_tools: Vec<String>,
+	pub visible_tool_hints: BTreeMap<String, VisibleToolHint>,
 	pub last_observation: Option<ToolObservation>,
 	pub history_digest: String,
 	pub unresolved_blockers: Vec<String>,
 	pub working_assumptions: Vec<String>,
+}
+
+/// Compact model-facing hint for one visible tool.
+///
+/// ## Why this exists
+/// Generic loop tool selection should not depend only on raw tool names and required keys.
+/// `VisibleToolHint` carries the minimum semantic guidance needed to distinguish overlapping
+/// tools without dumping the full registry into every prompt.
+///
+/// ## Fields
+/// - `description`: Short semantic boundary for when the tool is appropriate.
+/// - `required_argument_keys`: Required runtime keys for `call_tool`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VisibleToolHint {
+	pub description: String,
+	pub required_argument_keys: Vec<String>,
 }
 
 pub(crate) fn build_context_projection(loop_state: &LoopState) -> ContextProjection {
@@ -85,6 +106,7 @@ pub(crate) fn build_context_projection(loop_state: &LoopState) -> ContextProject
 		remaining_step_budget: loop_state.remaining_step_budget,
 		remaining_recovery_budget: loop_state.remaining_recovery_budget,
 		visible_tools: loop_state.visible_tools.clone(),
+		visible_tool_hints: BTreeMap::new(),
 		last_observation: loop_state.last_observation.clone(),
 		history_digest: history_digest(loop_state, &unresolved_blockers, &working_assumptions),
 		unresolved_blockers,

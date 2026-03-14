@@ -31,10 +31,11 @@ pub(crate) use ask_user::effective_ask_user_payload;
 pub use ask_user::{AskUserPayload, AskUserResumeContract, AskUserResumeDirective};
 pub use context_assembly::LoopContext;
 pub(crate) use context_assembly::build_loop_context;
-pub use context_projection::ContextProjection;
 pub(crate) use context_projection::build_context_projection;
+pub use context_projection::{ContextProjection, VisibleToolHint};
 pub(crate) use grounding::extract_path_candidates;
 pub(crate) use grounding::extract_skill_source_url;
+pub(crate) use grounding::extract_web_query;
 pub use loop_state::{LoopState, LoopStatus};
 pub use next_step::{NextStepAction, NextStepDecision, NextStepDecisionSchemaError};
 pub use observation::{StepObservation, ToolObservation};
@@ -48,4 +49,5 @@ pub use summarizer::FinalAnswerPayload;
 pub(crate) use summarizer::summarize_observation;
 pub(crate) use tool_loop::{
 	attachments_for_tool, decide_tool_loop_next_step, next_working_directory_from_observation,
+	tool_required_argument_keys,
 };

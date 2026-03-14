@@ -24,6 +24,7 @@ use crate::router::{
 };
 use crate::runtime_loop::{
 	extract_path_candidates as shared_extract_path_candidates, extract_skill_source_url,
+	extract_web_query,
 };
 use crate::tool_config::{BuiltinToolRole, ToolCatalogConfig};
 
@@ -164,6 +165,9 @@ fn classify_contract_level_grounded_hint(
 	if let Some(selector) = explicit_tool_selector(context.catalog, &request.goal) {
 		let descriptor = context.catalog.descriptor(&selector)?;
 		let tool_name = descriptor.name.clone();
+		if !explicit_tool_hint_is_grounded(&tool_name, &request.goal) {
+			return None;
+		}
 		let decision = RouteDecision::new(
 			coarse_intent_hint_for_tool(&tool_name),
 			0.9,
@@ -292,6 +296,22 @@ fn coarse_intent_hint_for_tool(tool_name: &str) -> IntentFamily {
 	}
 }
 
+fn explicit_tool_hint_is_grounded(tool_name: &str, goal: &str) -> bool {
+	match tool_name {
+		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" | "fs.find" => {
+			!extract_path_candidates(goal).is_empty()
+		}
+		"fs.glob" => extract_glob_pattern(goal).is_some(),
+		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
+			extract_table_path(goal).is_some()
+		}
+		"web.search" => extract_web_query(goal).is_some(),
+		"python.run" => extract_explicit_python_code(goal).is_some(),
+		"skill.install" => extract_skill_source_url(goal).is_some(),
+		_ => false,
+	}
+}
+
 fn classify_with_llm(
 	context: &RouteClassifierContext<'_>,
 	request: &RequestEnvelope,
@@ -315,7 +335,7 @@ fn classify_with_llm(
 		expected_output_tokens: 220,
 		risk_tier: RiskTier::Low,
 		preferred_provider: None,
-		budget_tokens_remaining: 2_000,
+		budget_tokens_remaining: 3_000,
 		budget_cost_remaining_usd: 0.1,
 	});
 	let value = match response {
@@ -420,14 +440,30 @@ fn llm_candidates(catalog: &ResourceCatalog) -> Vec<serde_json::Value> {
 				"selector": entry.selector.display_key(),
 				"kind": format!("{:?}", entry.kind),
 				"name": entry.name,
-				"description": entry.description,
-				"summary": entry.summary,
-				"examples": entry.examples,
+				"description": compact_candidate_text(&entry.description),
+				"example": entry
+					.examples
+					.first()
+					.map(|example| compact_candidate_text(example)),
+				"input_schema": entry.input_schema,
 			})
 		})
 		.collect::<Vec<_>>();
 	entries.truncate(10);
 	entries
+}
+
+fn compact_candidate_text(value: &str) -> String {
+	const MAX_CANDIDATE_CHARS: usize = 180;
+	let trimmed = value.trim();
+	if trimmed.chars().count() <= MAX_CANDIDATE_CHARS {
+		return trimmed.to_string();
+	}
+	let truncated = trimmed
+		.chars()
+		.take(MAX_CANDIDATE_CHARS.saturating_sub(3))
+		.collect::<String>();
+	format!("{truncated}...")
 }
 
 fn route_classifier_prompt(request: &RequestEnvelope, candidates: &[serde_json::Value]) -> String {
