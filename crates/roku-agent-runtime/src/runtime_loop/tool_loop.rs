@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier};
 use serde_json::{Value, json};
 
@@ -45,42 +46,125 @@ fn decide_with_router(
 	router: &LlmRouter,
 	user_reply: Option<&str>,
 ) -> Option<NextStepDecision> {
-	let response = router
-		.generate_json_value(&GenerationRequest {
-			system_prompt: Some(
-				"You are Roku's runtime loop next-step decision model. Return only valid JSON."
-					.to_string(),
-			),
-			prompt: tool_loop_prompt(context_projection, user_reply),
-			expected_output_tokens: 240,
-			risk_tier: RiskTier::Low,
-			preferred_provider: None,
-			budget_tokens_remaining: 1_500,
-			budget_cost_remaining_usd: 0.05,
-		})
-		.ok()?;
-	let decision = NextStepDecision::from_json_value(&response.value).ok()?;
-	validate_router_decision(loop_state, decision)
+	let response = match router.generate_json_value(&GenerationRequest {
+		system_prompt: Some(
+			"You are Roku's runtime loop next-step decision model. Return only valid JSON."
+				.to_string(),
+		),
+		prompt: tool_loop_prompt(context_projection, user_reply),
+		expected_output_tokens: 240,
+		risk_tier: RiskTier::Low,
+		preferred_provider: None,
+		budget_tokens_remaining: 3_000,
+		budget_cost_remaining_usd: 0.05,
+	}) {
+		Ok(response) => response,
+		Err(error) => {
+			log_tool_loop_warning(
+				"next-step model did not return a usable response",
+				[
+					("run_id", loop_state.run_id.clone()),
+					(
+						"last_tool",
+						loop_state
+							.last_observation
+							.as_ref()
+							.map(|observation| observation.tool_name.clone())
+							.unwrap_or_else(|| "none".to_string()),
+					),
+					("error", error.to_string()),
+				],
+			);
+			return None;
+		}
+	};
+	let decision = match NextStepDecision::from_json_value(&response.value) {
+		Ok(decision) => decision,
+		Err(error) => {
+			log_tool_loop_warning(
+				"next-step model returned invalid decision JSON",
+				[
+					("run_id", loop_state.run_id.clone()),
+					(
+						"last_tool",
+						loop_state
+							.last_observation
+							.as_ref()
+							.map(|observation| observation.tool_name.clone())
+							.unwrap_or_else(|| "none".to_string()),
+					),
+					("error", error.to_string()),
+					(
+						"response",
+						truncate_for_log(
+							&serde_json::to_string(&response.value)
+								.unwrap_or_else(|_| "<unserializable-json>".to_string()),
+							320,
+						),
+					),
+				],
+			);
+			return None;
+		}
+	};
+	match validate_router_decision(loop_state, decision) {
+		Ok(decision) => Some(decision),
+		Err(reason) => {
+			log_tool_loop_warning(
+				"next-step model decision was rejected by runtime validation",
+				[
+					("run_id", loop_state.run_id.clone()),
+					(
+						"last_tool",
+						loop_state
+							.last_observation
+							.as_ref()
+							.map(|observation| observation.tool_name.clone())
+							.unwrap_or_else(|| "none".to_string()),
+					),
+					("reason", reason),
+				],
+			);
+			None
+		}
+	}
 }
 
 fn validate_router_decision(
 	loop_state: &LoopState,
 	decision: NextStepDecision,
-) -> Option<NextStepDecision> {
+) -> Result<NextStepDecision, String> {
 	match decision.action {
 		NextStepAction::CallTool => {
-			let tool_name = decision.tool_name.as_deref()?;
+			let Some(tool_name) = decision.tool_name.as_deref() else {
+				return Err("call_tool decision omitted tool_name".to_string());
+			};
 			if !tool_visible(loop_state, tool_name) {
-				return None;
+				return Err(format!(
+					"tool `{tool_name}` is not visible in this round ({})",
+					loop_state.visible_tools.join(", ")
+				));
 			}
-			let arguments = decision.arguments.as_ref()?.as_object()?;
-			tool_required_argument_keys(tool_name)
+			let Some(arguments) = decision.arguments.as_ref().and_then(Value::as_object) else {
+				return Err(format!(
+					"call_tool decision for `{tool_name}` omitted an arguments object"
+				));
+			};
+			let missing_keys = tool_required_argument_keys(tool_name)
 				.iter()
-				.all(|key| arguments.contains_key(*key))
-				.then_some(decision)
+				.filter(|key| !arguments.contains_key(**key))
+				.copied()
+				.collect::<Vec<_>>();
+			if !missing_keys.is_empty() {
+				return Err(format!(
+					"call_tool decision for `{tool_name}` omitted required keys: {}",
+					missing_keys.join(", ")
+				));
+			}
+			Ok(decision)
 		}
-		NextStepAction::FinalAnswer => Some(decision),
-		NextStepAction::AskUser | NextStepAction::Fail => Some(decision),
+		NextStepAction::FinalAnswer => Ok(decision),
+		NextStepAction::AskUser | NextStepAction::Fail => Ok(decision),
 	}
 }
 
@@ -111,26 +195,17 @@ Rules:
 - When the current request references concrete local files, directories, workspace paths, or shell-style inspection goals and `fs.*` tools are visible, gather grounded filesystem evidence before using `general.execute`.
 - Do not call `general.execute` only to speculate about which filesystem tools could be used. Prefer `fs.inspect`, `fs.list_dir`, `fs.read_text`, `fs.find`, or `fs.glob` when the current context already grounds one of them.
 - When a filesystem, table, web, or python observation provides raw evidence but the user still needs explanation, comparison, or synthesis, prefer `general.execute` before emitting `final_answer`.
+- When the latest observation already directly satisfies a bounded inspection or listing request, emit `final_answer` with a concise grounded reply that reuses the observation message instead of copying large raw payloads into JSON.
 - Use `ask_user` when the current information is still insufficient.
 - Use `final_answer` only when the current context projection already proves the user request is satisfied.
 
 Context projection:
 {projection_json}
 
-History digest:
-{history_digest}
-
-Tool requirements:
-{tool_requirements}
-
 Current user follow-up:
 {user_reply}
 "#,
 		projection_json = projection_json,
-		history_digest = context_projection.history_digest,
-		tool_requirements =
-			serde_json::to_string_pretty(&tool_requirements(&context_projection.visible_tools))
-				.unwrap_or_else(|_| "{}".to_string()),
 		user_reply = user_reply.unwrap_or("null"),
 	)
 }
@@ -306,23 +381,7 @@ fn resume_from_awaiting_user_contract(
 	}
 }
 
-fn tool_requirements(visible_tools: &[String]) -> serde_json::Value {
-	serde_json::Value::Object(
-		visible_tools
-			.iter()
-			.map(|tool_name| {
-				(
-					tool_name.clone(),
-					json!({
-						"required_argument_keys": tool_required_argument_keys(tool_name),
-					}),
-				)
-			})
-			.collect(),
-	)
-}
-
-fn tool_required_argument_keys(tool_name: &str) -> &'static [&'static str] {
+pub(crate) fn tool_required_argument_keys(tool_name: &str) -> &'static [&'static str] {
 	match tool_name {
 		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => &["path"],
 		"fs.find" => &["name"],
@@ -387,6 +446,26 @@ fn extract_glob_pattern(value: &str) -> Option<String> {
 	extract_path_candidates(value)
 		.into_iter()
 		.find(|candidate| candidate.contains('*') || candidate.contains('?'))
+}
+
+fn log_tool_loop_warning(message: &str, fields: impl IntoIterator<Item = (&'static str, String)>) {
+	let mut record = LogRecord::new("roku-agent-runtime", LogLevel::Warn, message);
+	for (key, value) in fields {
+		record = record.with_field(key, value);
+	}
+	let _ = emit_global_log(record);
+}
+
+fn truncate_for_log(value: &str, max_chars: usize) -> String {
+	let char_count = value.chars().count();
+	if char_count <= max_chars {
+		return value.to_string();
+	}
+	let truncated = value
+		.chars()
+		.take(max_chars.saturating_sub(3))
+		.collect::<String>();
+	format!("{truncated}...")
 }
 
 pub(crate) fn next_working_directory_from_observation(
@@ -587,11 +666,12 @@ mod tests {
 		let projection = build_context_projection(&loop_state);
 		let prompt = tool_loop_prompt(&projection, None);
 
-		assert!(prompt.contains("History digest:"));
+		assert!(prompt.contains("\"history_digest\":"));
 		assert!(prompt.contains("step 1"));
 		assert!(prompt.contains("inventory.describe"));
 		assert!(!prompt.contains("\"started_at\""));
 		assert!(!prompt.contains("\"finished_at\""));
+		assert!(!prompt.contains("Visible tool hints:"));
 	}
 
 	#[test]

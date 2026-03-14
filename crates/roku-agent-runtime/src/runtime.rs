@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -23,9 +23,10 @@ use crate::router::{
 };
 use crate::runtime_loop::{
 	AskUserPayload, ContextProjection, LoopContext, LoopState, StepAction, StepObservation,
-	StepRecord, ToolObservation, attachments_for_tool, build_context_projection,
+	StepRecord, ToolObservation, VisibleToolHint, attachments_for_tool, build_context_projection,
 	build_loop_context, decide_tool_loop_next_step, effective_ask_user_payload, intake_request,
 	interpret_observation, next_working_directory_from_observation, summarize_observation,
+	tool_required_argument_keys,
 };
 use crate::tool_config::{ToolCatalogConfig, ToolsRuntimeConfig};
 use crate::tools::{
@@ -711,7 +712,36 @@ impl GenericAgentRuntime {
 
 	fn refresh_tool_loop_projection(&self, loop_state: &mut LoopState) -> ContextProjection {
 		loop_state.visible_tools = self.visible_tools_for_loop_state(loop_state);
-		build_context_projection(loop_state)
+		let mut projection = build_context_projection(loop_state);
+		projection.visible_tool_hints = self.visible_tool_hints_for(&loop_state.visible_tools);
+		projection
+	}
+
+	fn visible_tool_hints_for(
+		&self,
+		visible_tools: &[String],
+	) -> BTreeMap<String, VisibleToolHint> {
+		visible_tools
+			.iter()
+			.filter_map(|tool_name| {
+				self.resource_catalog
+					.entries()
+					.iter()
+					.find(|entry| entry.kind == ResourceKind::Tool && entry.name == *tool_name)
+					.map(|entry| {
+						(
+							tool_name.clone(),
+							VisibleToolHint {
+								description: compact_tool_hint(&entry.description),
+								required_argument_keys: tool_required_argument_keys(tool_name)
+									.iter()
+									.map(|key| (*key).to_string())
+									.collect(),
+							},
+						)
+					})
+			})
+			.collect()
 	}
 
 	fn compose_visible_tools(
@@ -1288,6 +1318,19 @@ fn append_enabled_tool_names<'a>(
 			visible_tools.push(tool_name.to_string());
 		}
 	}
+}
+
+fn compact_tool_hint(description: &str) -> String {
+	const MAX_HINT_CHARS: usize = 180;
+	let trimmed = description.trim();
+	if trimmed.chars().count() <= MAX_HINT_CHARS {
+		return trimmed.to_string();
+	}
+	let truncated = trimmed
+		.chars()
+		.take(MAX_HINT_CHARS.saturating_sub(3))
+		.collect::<String>();
+	format!("{truncated}...")
 }
 
 fn safe_baseline_tool_pool() -> &'static [&'static str] {
@@ -1886,8 +1929,9 @@ So, I'll output: "星期日""#
 		let prompts = prompts.lock().expect("prompt lock should succeed");
 		assert_eq!(prompts.len(), 2);
 		assert!(prompts[0].contains("\"visible_tools\": ["));
+		assert!(prompts[0].contains("\"visible_tool_hints\": {"));
 		assert!(prompts[0].contains("\"fs.inspect\""));
-		assert!(prompts[1].contains("History digest:"));
+		assert!(prompts[1].contains("\"history_digest\":"));
 		assert!(prompts[1].contains("step 1"));
 		assert!(prompts[1].contains("fs.inspect"));
 		assert!(!prompts[1].contains("\"started_at\""));
@@ -2106,6 +2150,71 @@ So, I'll output: "星期日""#
 				assert!(plan.decision.candidate_tools.is_empty());
 			}
 			other => panic!("expected filesystem read to use generic tool loop, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn refresh_tool_loop_projection_includes_semantic_tool_hints() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-tool-hints".to_string()),
+			session_id: "session-tool-hints".to_string(),
+			goal: "Count Cargo.toml files in the workspace".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::FilesystemRead,
+			0.9,
+			false,
+			crate::router::RouteRisk::Low,
+			vec!["fs.glob".to_string()],
+			vec!["core-fs".to_string()],
+			Vec::new(),
+			"filesystem request",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+
+		let projection = runtime.refresh_tool_loop_projection(&mut loop_state);
+
+		let glob_hint = projection
+			.visible_tool_hints
+			.get("fs.glob")
+			.expect("fs.glob hint should be present");
+		assert!(glob_hint.description.contains("Cargo.toml"));
+		assert!(
+			glob_hint
+				.required_argument_keys
+				.contains(&"pattern".to_string())
+		);
+		assert!(glob_hint.description.chars().count() <= 180);
+	}
+
+	#[test]
+	fn quoted_tool_names_do_not_force_a_contract_hint_without_grounded_arguments() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-tool-quote".to_string()),
+			session_id: "session-tool-quote".to_string(),
+			goal: "你说的这个是什么意思？ task failed: The runtime loop needs an explicit next-step decision after the non-terminal fs.list_dir observation.".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+
+		match route {
+			crate::router::RouteDecisionResult::Direct(plan) => {
+				assert_eq!(plan.decision.intent_family, IntentFamily::Chat);
+				assert_eq!(
+					plan.decision.candidate_tools,
+					vec!["general.execute".to_string()]
+				);
+			}
+			other => {
+				panic!("expected explanatory tool-name quote to stay on chat route, got {other:?}")
+			}
 		}
 	}
 
