@@ -2,6 +2,47 @@
 
 # Changelog
 
+## [v0.0.4] - 2026-03-14
+
+### Features
+
+- **(roku-plugins)** add typed runtime config for plugin crates (by @[itscheems](https://github.com/itscheems)) - ([ead97b7](https://github.com/itscheems/Roku/commit/ead97b7c89ac78cf2cb8fcd3b4b82a6812497554))
+
+### Bug Fixes
+
+- **(roku-plugin-tools)** move terminal tool semantics into catalog metadata (by @[itscheems](https://github.com/itscheems)) - ([1d92d04](https://github.com/itscheems/Roku/commit/1d92d0485be1833dd0f32de2edad051256871b27))
+- **(roku-plugin-tools)** improve fuzzy filesystem grounding (by @[itscheems](https://github.com/itscheems)) - ([7b19c86](https://github.com/itscheems/Roku/commit/7b19c8674aca0d202061ac1bfb4217a4c7f4214d))
+- **(roku-runtime)** derive loop termination from tool contracts (by @[itscheems](https://github.com/itscheems)) - ([e7a7607](https://github.com/itscheems/Roku/commit/e7a7607ecce7a24193f86a01184c69f63f97c7a8))
+- **(roku-runtime-service)** resume pending loops through their original driver (by @[itscheems](https://github.com/itscheems)) - ([3e12ac5](https://github.com/itscheems/Roku/commit/3e12ac55acc712606b9094cae1fb59d55039a512))
+
+### Refactor
+
+- **(roku-agent-runtime)** add typed config for loop and routing budgets (by @[itscheems](https://github.com/itscheems)) - ([02cd472](https://github.com/itscheems/Roku/commit/02cd4725999d34edd425db3e9213bfcc7aa3ca26))
+- **(roku-agent-runtime)** compact tool hint projection for routing and loop selection (by @[itscheems](https://github.com/itscheems)) - ([f39225e](https://github.com/itscheems/Roku/commit/f39225e2a76a03ad34460ac0bc63332bf8ffdc29))
+- **(roku-cmd)** load agent runtime config during bootstrap (by @[itscheems](https://github.com/itscheems)) - ([21d0d88](https://github.com/itscheems/Roku/commit/21d0d88449429965ab8e7e0058bf982abfdcc7e3))
+- **(roku-cmd)** load plugin runtime config during bootstrap (by @[itscheems](https://github.com/itscheems)) - ([cb9b13f](https://github.com/itscheems/Roku/commit/cb9b13f747e232b1acd2443e99c9523bec15d435))
+- **(roku-plugin-tools)** sharpen builtin tool boundary hints (by @[itscheems](https://github.com/itscheems)) - ([bef92a8](https://github.com/itscheems/Roku/commit/bef92a8eb901bd12335d4b3e0f8dd3d916cdc995))
+- **(roku-router)** shrink route classification back to coarse hints (by @[itscheems](https://github.com/itscheems)) - ([356a6e6](https://github.com/itscheems/Roku/commit/356a6e696d29ca0c66f4d02fa764c9ccd2f6c9c0))
+- **(roku-runtime)** remove static follow-up routing from the generic loop (by @[itscheems](https://github.com/itscheems)) - ([1280ebd](https://github.com/itscheems/Roku/commit/1280ebd12a91af96dceaf6b070b35099ac201f09))
+- **(roku-runtime)** tighten loop pause and visibility contracts (by @[itscheems](https://github.com/itscheems)) - ([0290f2c](https://github.com/itscheems/Roku/commit/0290f2c21635ffd73202c528e28060f8afdff675))
+- **(roku-runtime)** remove filesystem loop shadow paths (by @[itscheems](https://github.com/itscheems)) - ([6e88db0](https://github.com/itscheems/Roku/commit/6e88db06d96cd585f8929018ba9e846dea2e40a9))
+- **(roku-runtime)** add soft cross-tool routing to the generic loop (by @[itscheems](https://github.com/itscheems)) - ([aa0d3d7](https://github.com/itscheems/Roku/commit/aa0d3d7d73ee37398f1f21dfd7ea53f66b43969e))
+- **(roku-runtime)** resume clarification through the generic loop (by @[itscheems](https://github.com/itscheems)) - ([9690c8f](https://github.com/itscheems/Roku/commit/9690c8fd5658ee2e5ffb1744f27f0e5ddd66a25e))
+- **(roku-runtime)** treat route decisions as loop hints (by @[itscheems](https://github.com/itscheems)) - ([0e4f2e3](https://github.com/itscheems/Roku/commit/0e4f2e308ac14d7fa9d2ea28c3fba7e7c70be478))
+- **(roku-runtime)** make tool loop observation-driven (by @[itscheems](https://github.com/itscheems)) - ([11ac54b](https://github.com/itscheems/Roku/commit/11ac54ba637ded27057b69ba41e3e8852cf80b71))
+- **(roku-runtime)** formalize loop context contracts (by @[itscheems](https://github.com/itscheems)) - ([8e10bfd](https://github.com/itscheems/Roku/commit/8e10bfd5df0b0031a88c1d1204a2d3f4cddee227))
+- **(roku-runtime)** make runtime mode explicit across runtime entrypoints (by @[itscheems](https://github.com/itscheems)) - ([490e848](https://github.com/itscheems/Roku/commit/490e8488aaba1a29cd80b122a4ae59927b8710ea))
+
+### Documentation
+
+- **(roku-plugin-tools)** clarify filesystem output limits (by @[itscheems](https://github.com/itscheems)) - ([c769c33](https://github.com/itscheems/Roku/commit/c769c334c6b0862f773e80d82049321e77710a02))
+
+### Testing
+
+- **(roku-runtime)** refresh route hint expectations (by @[itscheems](https://github.com/itscheems)) - ([849e681](https://github.com/itscheems/Roku/commit/849e681602db6b8351e63a55fdbea7891e6a9827))
+- **(roku-runtime)** refresh react loop regression fixtures (by @[itscheems](https://github.com/itscheems)) - ([80578f1](https://github.com/itscheems/Roku/commit/80578f18eb41a915159df91ace200d5d4f5040a9))
+- **(roku-runtime-service)** align pending loop recovery with explicit next-step contracts (by @[itscheems](https://github.com/itscheems)) - ([7294b2e](https://github.com/itscheems/Roku/commit/7294b2e7a2201285b1ddbe0ce0179b8002901d3a))
+
 ## [v0.0.3] - 2026-03-12
 
 ### Features
