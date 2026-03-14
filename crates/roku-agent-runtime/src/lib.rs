@@ -17,6 +17,7 @@
 mod result;
 mod router;
 mod runtime;
+mod runtime_config;
 mod runtime_loop;
 mod tool_config;
 mod tools;
@@ -28,6 +29,18 @@ pub use router::{
 	RouteDecision, RouteDecisionResult, RouteEscalationPlan, RouteRisk,
 };
 pub use runtime::{AgentWorker, GenericAgentRuntime, RuntimeWorker};
+pub use runtime_config::{
+	AgentRuntimeConfig, AgentRuntimeConfigError, AgentRuntimeConfigPatch,
+	HARD_MAX_CANDIDATE_DESCRIPTION_MAX_CHARS, HARD_MAX_CANDIDATE_EXAMPLE_MAX_CHARS,
+	HARD_MAX_CANDIDATE_INVENTORY_LIMIT, HARD_MAX_INITIAL_RECOVERY_BUDGET,
+	HARD_MAX_INITIAL_STEP_BUDGET, HARD_MAX_NEXT_STEP_BUDGET_COST_REMAINING_USD,
+	HARD_MAX_NEXT_STEP_BUDGET_TOKENS_REMAINING, HARD_MAX_NEXT_STEP_EXPECTED_OUTPUT_TOKENS,
+	HARD_MAX_ROUTE_BUDGET_COST_REMAINING_USD, HARD_MAX_ROUTE_BUDGET_TOKENS_REMAINING,
+	HARD_MAX_ROUTE_EXPECTED_OUTPUT_TOKENS, HARD_MAX_VISIBLE_TOOL_HINT_MAX_CHARS, LoopRuntimeConfig,
+	LoopRuntimeConfigPatch, NextStepRuntimeConfig, NextStepRuntimeConfigPatch,
+	PromptCompactionRuntimeConfig, PromptCompactionRuntimeConfigPatch,
+	RouteClassifierRuntimeConfig, RouteClassifierRuntimeConfigPatch,
+};
 pub use runtime_loop::{
 	AskUserPayload, AskUserResumeContract, AskUserResumeDirective, FinalAnswerPayload,
 	InterpretedObservation, LoopContext, LoopRequest, LoopState, LoopStatus, NextStepAction,

@@ -18,6 +18,7 @@ use roku_plugin_core::PluginRegistrySnapshot;
 use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier, StructuredGenerationError};
 use serde_json::json;
 
+use crate::AgentRuntimeConfig;
 use crate::router::{
 	DirectRoutePlan, EscalationAction, EscalationReason, IntentFamily, RouteDecision,
 	RouteDecisionResult, RouteEscalationPlan, RouteRisk,
@@ -34,6 +35,7 @@ const ROUTE_CONFIDENCE_FLOOR: f32 = 0.65;
 pub(crate) struct RouteClassifierContext<'a> {
 	pub(crate) catalog: &'a ResourceCatalog,
 	pub(crate) tool_config: &'a ToolCatalogConfig,
+	pub(crate) agent_runtime_config: &'a AgentRuntimeConfig,
 	pub(crate) plugin_snapshot: &'a PluginRegistrySnapshot,
 	pub(crate) route_router: Option<&'a LlmRouter>,
 	pub(crate) skill_execution_available: bool,
@@ -325,18 +327,21 @@ fn classify_with_llm(
 	let skill_matches = context
 		.catalog
 		.retrieve(&request.goal, Some(ResourceKind::Skill), 4);
-	let candidates = llm_candidates(context.catalog);
+	let candidates = llm_candidates(context.catalog, context.agent_runtime_config);
 	let response = router.generate_json_value(&GenerationRequest {
 		system_prompt: Some(
 			"You are Roku's route classifier. Return only valid JSON matching the requested schema."
 				.to_string(),
 		),
 		prompt: route_classifier_prompt(request, &candidates),
-		expected_output_tokens: 220,
+		expected_output_tokens: context.agent_runtime_config.router.expected_output_tokens,
 		risk_tier: RiskTier::Low,
 		preferred_provider: None,
-		budget_tokens_remaining: 3_000,
-		budget_cost_remaining_usd: 0.1,
+		budget_tokens_remaining: context.agent_runtime_config.router.budget_tokens_remaining,
+		budget_cost_remaining_usd: context
+			.agent_runtime_config
+			.router
+			.budget_cost_remaining_usd,
 	});
 	let value = match response {
 		Ok(response) => response.value,
@@ -431,7 +436,10 @@ fn llm_classifier_failure_route(
 	build_loop_hint_route(context, decision)
 }
 
-fn llm_candidates(catalog: &ResourceCatalog) -> Vec<serde_json::Value> {
+fn llm_candidates(
+	catalog: &ResourceCatalog,
+	config: &AgentRuntimeConfig,
+) -> Vec<serde_json::Value> {
 	let mut entries = catalog
 		.entries()
 		.iter()
@@ -440,28 +448,35 @@ fn llm_candidates(catalog: &ResourceCatalog) -> Vec<serde_json::Value> {
 				"selector": entry.selector.display_key(),
 				"kind": format!("{:?}", entry.kind),
 				"name": entry.name,
-				"description": compact_candidate_text(&entry.description),
+				"description": compact_candidate_text(
+					&entry.description,
+					config.prompts.candidate_description_max_chars,
+				),
 				"example": entry
 					.examples
 					.first()
-					.map(|example| compact_candidate_text(example)),
+					.map(|example| {
+						compact_candidate_text(
+							example,
+							config.prompts.candidate_example_max_chars,
+						)
+					}),
 				"input_schema": entry.input_schema,
 			})
 		})
 		.collect::<Vec<_>>();
-	entries.truncate(10);
+	entries.truncate(config.router.candidate_inventory_limit);
 	entries
 }
 
-fn compact_candidate_text(value: &str) -> String {
-	const MAX_CANDIDATE_CHARS: usize = 180;
+fn compact_candidate_text(value: &str, max_chars: usize) -> String {
 	let trimmed = value.trim();
-	if trimmed.chars().count() <= MAX_CANDIDATE_CHARS {
+	if trimmed.chars().count() <= max_chars {
 		return trimmed.to_string();
 	}
 	let truncated = trimmed
 		.chars()
-		.take(MAX_CANDIDATE_CHARS.saturating_sub(3))
+		.take(max_chars.saturating_sub(3))
 		.collect::<String>();
 	format!("{truncated}...")
 }

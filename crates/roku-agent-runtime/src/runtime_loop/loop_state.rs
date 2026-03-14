@@ -16,6 +16,7 @@ use roku_common_types::ResourceSelector;
 use serde::{Deserialize, Serialize};
 
 use crate::router::RouteDecision;
+use crate::runtime_config::LoopRuntimeConfig;
 use crate::runtime_loop::{AskUserPayload, LoopContext, StepRecord, ToolObservation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +88,21 @@ pub struct LoopState {
 
 impl LoopState {
 	pub fn new(run_id: impl Into<String>, context: &LoopContext) -> Self {
+		let defaults = LoopRuntimeConfig::default();
+		Self::with_budgets(
+			run_id,
+			context,
+			defaults.initial_step_budget,
+			defaults.initial_recovery_budget,
+		)
+	}
+
+	pub fn with_budgets(
+		run_id: impl Into<String>,
+		context: &LoopContext,
+		initial_step_budget: u32,
+		initial_recovery_budget: u32,
+	) -> Self {
 		Self {
 			run_id: run_id.into(),
 			request_id: context.request_id.clone(),
@@ -95,8 +111,8 @@ impl LoopState {
 			route_decision: context.route_decision.clone(),
 			status: LoopStatus::LoopRunning,
 			step_index: 0,
-			remaining_step_budget: 4,
-			remaining_recovery_budget: 2,
+			remaining_step_budget: initial_step_budget,
+			remaining_recovery_budget: initial_recovery_budget,
 			working_directory: context.working_directory.clone(),
 			visible_tools: context.visible_tools.clone(),
 			bound_resources: context.bound_resources.clone(),
