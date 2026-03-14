@@ -18,7 +18,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use crate::builtin::{fs as core_fs, python as core_python, table as core_table, web as core_web};
+use crate::builtin::{
+	command as core_command, fs as core_fs, python as core_python, table as core_table,
+	web as core_web,
+};
 use crate::config::{BuiltinToolRole, ConfiguredTool, ToolCatalogConfig};
 use crate::runtime_config::{ToolWorkerRuntimeConfig, ToolsRuntimeConfig};
 use roku_common_types::{
@@ -116,6 +119,11 @@ pub fn build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities_and_
 	if plugin_snapshot.is_plugin_enabled("core-fs") {
 		entries.extend(core_fs::catalog_descriptors_with_config(&runtime_config.fs));
 	}
+	if plugin_snapshot.is_plugin_enabled("core-command") {
+		entries.extend(core_command::catalog_descriptors_with_config(
+			&runtime_config.command,
+		));
+	}
 	if plugin_snapshot.is_plugin_enabled("core-table") {
 		entries.extend(core_table::catalog_descriptors_with_config(
 			&runtime_config.table,
@@ -207,6 +215,10 @@ pub fn build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities_
 			core_fs::register_tools_with_config(&mut runtime, &runtime_config.fs)
 				.expect("filesystem tools must register successfully");
 		}
+		if plugin_snapshot.is_plugin_enabled("core-command") {
+			core_command::register_tools_with_config(&mut runtime, &runtime_config.command)
+				.expect("command tools must register successfully");
+		}
 		if plugin_snapshot.is_plugin_enabled("core-table") {
 			core_table::register_tools_with_config(&mut runtime, &runtime_config.table)
 				.expect("table tools must register successfully");
@@ -252,6 +264,10 @@ pub fn build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities_
 	if plugin_snapshot.is_plugin_enabled("core-fs") {
 		core_fs::register_tools_with_config(&mut runtime, &runtime_config.fs)
 			.expect("filesystem tools must register successfully");
+	}
+	if plugin_snapshot.is_plugin_enabled("core-command") {
+		core_command::register_tools_with_config(&mut runtime, &runtime_config.command)
+			.expect("command tools must register successfully");
 	}
 	if plugin_snapshot.is_plugin_enabled("core-table") {
 		core_table::register_tools_with_config(&mut runtime, &runtime_config.table)
@@ -315,6 +331,10 @@ pub fn build_llm_tool_runtime_with_plugin_snapshot_and_runtime_config(
 			core_fs::register_tools_with_config(&mut runtime, &runtime_config.fs)
 				.expect("filesystem tools must register successfully");
 		}
+		if plugin_snapshot.is_plugin_enabled("core-command") {
+			core_command::register_tools_with_config(&mut runtime, &runtime_config.command)
+				.expect("command tools must register successfully");
+		}
 		if plugin_snapshot.is_plugin_enabled("core-table") {
 			core_table::register_tools_with_config(&mut runtime, &runtime_config.table)
 				.expect("table tools must register successfully");
@@ -363,6 +383,10 @@ pub fn build_llm_tool_runtime_with_plugin_snapshot_and_runtime_config(
 	if plugin_snapshot.is_plugin_enabled("core-fs") {
 		core_fs::register_tools_with_config(&mut runtime, &runtime_config.fs)
 			.expect("filesystem tools must register successfully");
+	}
+	if plugin_snapshot.is_plugin_enabled("core-command") {
+		core_command::register_tools_with_config(&mut runtime, &runtime_config.command)
+			.expect("command tools must register successfully");
 	}
 	if plugin_snapshot.is_plugin_enabled("core-table") {
 		core_table::register_tools_with_config(&mut runtime, &runtime_config.table)

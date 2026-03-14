@@ -33,9 +33,9 @@ pub use builders::{
 };
 pub use config::{BuiltinToolRole, ConfiguredTool, ToolCatalogConfig, ToolCatalogConfigError};
 pub use runtime_config::{
-	FsToolRuntimeConfig, FsToolRuntimeConfigPatch, PythonToolRuntimeConfig,
-	PythonToolRuntimeConfigPatch, TableToolRuntimeConfig, TableToolRuntimeConfigPatch,
-	ToolWorkerRuntimeConfig, ToolWorkerRuntimeConfigPatch, ToolsRuntimeConfig,
-	ToolsRuntimeConfigError, ToolsRuntimeConfigPatch, WebToolRuntimeConfig,
-	WebToolRuntimeConfigPatch,
+	CommandToolRuntimeConfig, CommandToolRuntimeConfigPatch, FsToolRuntimeConfig,
+	FsToolRuntimeConfigPatch, PythonToolRuntimeConfig, PythonToolRuntimeConfigPatch,
+	TableToolRuntimeConfig, TableToolRuntimeConfigPatch, ToolWorkerRuntimeConfig,
+	ToolWorkerRuntimeConfigPatch, ToolsRuntimeConfig, ToolsRuntimeConfigError,
+	ToolsRuntimeConfigPatch, WebToolRuntimeConfig, WebToolRuntimeConfigPatch,
 };

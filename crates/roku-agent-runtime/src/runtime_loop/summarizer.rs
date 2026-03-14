@@ -56,6 +56,13 @@ pub(crate) fn summarize_observation(
 			"fs.list_dir" | "fs.inspect" | "fs.exists" | "fs.find" => observation.message.clone(),
 			"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema"
 			| "web.search" | "general.execute" => observation.message.clone(),
+			"command.run" => observation
+				.data
+				.get("stdout")
+				.and_then(serde_json::Value::as_str)
+				.and_then(|stdout| (!stdout.trim().is_empty()).then_some(stdout.trim()))
+				.map(str::to_string)
+				.unwrap_or_else(|| observation.message.clone()),
 			"python.run" => observation
 				.data
 				.get("stdout")
@@ -78,6 +85,11 @@ pub(crate) fn summarize_observation(
 fn summarize_failure(goal: &str, observation: &ToolObservation) -> Option<String> {
 	let error_type = observation.error_type.as_deref()?;
 	let is_non_ascii = !goal.is_ascii();
+	let command = observation
+		.data
+		.get("command")
+		.and_then(serde_json::Value::as_str)
+		.unwrap_or("the requested command");
 	let path = observation
 		.data
 		.get("path")
@@ -116,9 +128,32 @@ fn summarize_failure(goal: &str, observation: &ToolObservation) -> Option<String
 			format!("I don't have permission to access `{path}`.")
 		}),
 		"tool_timeout" => Some(if is_non_ascii {
-			"这次文件系统操作超时了，请缩小范围后再试。".to_string()
+			if observation.tool_name == "command.run" {
+				format!("命令 `{command}` 超时了，请换一个更短、更窄的命令再试。")
+			} else {
+				"这次文件系统操作超时了，请缩小范围后再试。".to_string()
+			}
+		} else if observation.tool_name == "command.run" {
+			format!("The command `{command}` timed out. Please try a shorter, narrower command.")
 		} else {
 			"The filesystem operation timed out. Please try a narrower target.".to_string()
+		}),
+		"unsafe_shell_syntax" | "command_not_allowed" => Some(if is_non_ascii {
+			format!("命令 `{command}` 超出了 `command.run` 的受限执行边界。")
+		} else {
+			format!("The command `{command}` is outside the constrained `command.run` boundary.")
+		}),
+		"path_out_of_scope" => Some(if is_non_ascii {
+			format!("命令 `{command}` 试图访问当前工作区范围之外的路径。")
+		} else {
+			format!(
+				"The command `{command}` tries to access a path outside the allowed workspace roots."
+			)
+		}),
+		"non_zero_exit" => Some(if is_non_ascii {
+			format!("命令 `{command}` 已执行，但以非零状态退出。")
+		} else {
+			format!("The command `{command}` ran but exited with a non-zero status.")
 		}),
 		_ => None,
 	}

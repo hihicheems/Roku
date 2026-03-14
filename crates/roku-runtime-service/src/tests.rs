@@ -228,24 +228,35 @@ fn pending_filesystem_tool_loops_resume_through_the_generic_loop_driver() {
 		last_observation: None,
 	};
 	let mut loop_state = LoopState::new("loop-pending-tool-loop", &context);
+	let observation = ToolObservation {
+		ok: false,
+		tool_name: "fs.read_text".to_string(),
+		error_type: Some("multiple_candidates".to_string()),
+		terminal: false,
+		data: serde_json::json!({
+			"path": "Cargo.toml",
+			"matches": [root_manifest, nested_manifest],
+		}),
+		message: "Found 2 matching candidates for `Cargo.toml`.".to_string(),
+	};
+	let interpreted =
+		roku_agent_runtime::interpret_observation(&loop_state, observation.clone(), None);
 	loop_state.record_step(StepRecord::tool_call(
 		1,
 		"fs.read_text",
 		"Read the grounded workspace manifest first.",
-		StepObservation::Tool(ToolObservation {
-			ok: false,
-			tool_name: "fs.read_text".to_string(),
-			error_type: Some("multiple_candidates".to_string()),
-			terminal: false,
-			data: serde_json::json!({
-				"path": "Cargo.toml",
-				"matches": [root_manifest, nested_manifest],
-			}),
-			message: "Found 2 matching candidates for `Cargo.toml`.".to_string(),
+		serde_json::json!({
+			"ok": false,
+			"error_type": "multiple_candidates",
+			"terminal": false,
+			"message": "Found 2 matching candidates for `Cargo.toml`.",
+			"data": observation.data.clone(),
 		}),
+		StepObservation::Tool(observation),
+		interpreted.clone(),
 		Some(12),
-		3,
-		2,
+		interpreted.remaining_step_budget,
+		interpreted.remaining_recovery_budget,
 		cwd.display().to_string(),
 	));
 	loop_state.record_step(StepRecord::terminal(
@@ -282,7 +293,7 @@ fn pending_filesystem_tool_loops_resume_through_the_generic_loop_driver() {
 		.execute(request("Cargo.toml"))
 		.expect("pending loop should resume");
 
-	assert_eq!(response.status, ResponseStatus::Failed);
+	assert_eq!(response.status, ResponseStatus::Succeeded);
 	assert!(
 		service
 			.pending_loop("session-1")
@@ -294,9 +305,10 @@ fn pending_filesystem_tool_loops_resume_through_the_generic_loop_driver() {
 		.get_task(&TaskId("task-req-1".to_string()))
 		.expect("task lookup should succeed")
 		.expect("task should be persisted");
-	assert_eq!(task.state, TaskState::Failed);
+	assert_eq!(task.state, TaskState::Succeeded);
+	assert!(task.last_result.is_some());
 	assert!(
-		response
+		!response
 			.message
 			.contains("non-terminal `fs.read_text` observation")
 	);

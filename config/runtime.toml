@@ -54,6 +54,12 @@ max_glob_matches = 200
 # Maximum descendant entries scanned while resolving fuzzy basenames for fs.find.
 max_descendant_scan_entries = 8000
 
+[runtime.tools.command]
+# Default subprocess timeout for command.run.
+default_timeout_ms = 1500
+# Maximum stdout/stderr bytes retained from one command.run invocation.
+max_output_bytes = 8192
+
 [runtime.tools.python]
 # Default subprocess timeout for python.run.
 default_timeout_ms = 10000

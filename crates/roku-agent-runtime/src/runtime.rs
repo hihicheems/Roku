@@ -530,6 +530,7 @@ impl GenericAgentRuntime {
 							next_step.reason,
 							StepAction::Fail,
 							ResultStatus::Error,
+							Some(loop_state),
 						);
 					};
 					let attachments =
@@ -543,6 +544,7 @@ impl GenericAgentRuntime {
 						next_step.arguments.clone().unwrap_or_else(|| json!({})),
 						&attachments,
 					);
+					let raw_tool_output = raw_tool_output_from_result(&execution.result);
 					let observation =
 						self.loop_observation_from_execution(tool_name, &execution.result);
 					let interpreted = interpret_observation(
@@ -557,7 +559,9 @@ impl GenericAgentRuntime {
 						loop_state.step_index + 1,
 						tool_name,
 						next_step.reason,
+						raw_tool_output,
 						StepObservation::Tool(observation.clone()),
+						interpreted.clone(),
 						execution_elapsed_ms(&execution.result),
 						interpreted.remaining_step_budget,
 						interpreted.remaining_recovery_budget,
@@ -585,6 +589,7 @@ impl GenericAgentRuntime {
 							message,
 							StepAction::AskUser,
 							ResultStatus::Ok,
+							Some(loop_state),
 						);
 					}
 					if interpreted.should_emit_final_answer {
@@ -601,6 +606,7 @@ impl GenericAgentRuntime {
 							message,
 							StepAction::FinalAnswer,
 							ResultStatus::Ok,
+							Some(loop_state),
 						);
 					}
 					if interpreted.should_fail || !interpreted.continue_allowed {
@@ -617,6 +623,7 @@ impl GenericAgentRuntime {
 							message,
 							StepAction::Fail,
 							ResultStatus::Error,
+							Some(loop_state),
 						);
 					}
 				}
@@ -634,6 +641,7 @@ impl GenericAgentRuntime {
 						message,
 						StepAction::AskUser,
 						ResultStatus::Ok,
+						Some(loop_state),
 					);
 				}
 				crate::runtime_loop::NextStepAction::FinalAnswer => {
@@ -658,6 +666,7 @@ impl GenericAgentRuntime {
 						message,
 						StepAction::FinalAnswer,
 						ResultStatus::Ok,
+						Some(loop_state),
 					);
 				}
 				crate::runtime_loop::NextStepAction::Fail => {
@@ -675,6 +684,7 @@ impl GenericAgentRuntime {
 						message,
 						StepAction::Fail,
 						ResultStatus::Error,
+						Some(loop_state),
 					);
 				}
 			}
@@ -1193,6 +1203,7 @@ impl GenericAgentRuntime {
 		message: String,
 		terminal_step_action: StepAction,
 		status: ResultStatus,
+		loop_state: Option<&LoopState>,
 	) -> DirectRouteExecutionResult {
 		let node_id = format!("runtime-loop:{loop_name}");
 		let node = TaskNode {
@@ -1224,6 +1235,7 @@ impl GenericAgentRuntime {
 				"message": message,
 				"direct_route": true,
 				"runtime_loop": loop_name,
+				"probe_trace": loop_state.map(loop_probe_trace_payload),
 			})
 			.to_string(),
 			evidence: vec![EvidenceItem {
@@ -1325,6 +1337,27 @@ fn execution_elapsed_ms(result: &ResultEnvelope) -> Option<u64> {
 	serde_json::from_str::<Value>(&result.payload)
 		.ok()
 		.and_then(|payload| payload.get("elapsed_ms").and_then(Value::as_u64))
+}
+
+fn raw_tool_output_from_result(result: &ResultEnvelope) -> Value {
+	let payload = serde_json::from_str::<Value>(&result.payload)
+		.unwrap_or_else(|_| json!({ "message": result.payload.clone() }));
+	if result.status == ResultStatus::Ok {
+		return payload
+			.get("output")
+			.cloned()
+			.unwrap_or_else(|| payload.clone());
+	}
+	payload
+}
+
+fn loop_probe_trace_payload(loop_state: &LoopState) -> Value {
+	json!({
+		"run_id": loop_state.run_id.clone(),
+		"status": format!("{:?}", loop_state.status),
+		"step_count": loop_state.history.len(),
+		"history": loop_state.history.clone(),
+	})
 }
 
 fn ask_for_more_info_message(goal: &str, missing_arguments: &[String]) -> String {
@@ -1437,6 +1470,7 @@ fn safe_baseline_tool_pool() -> &'static [&'static str] {
 		"table.list_sheets",
 		"table.schema",
 		"web.search",
+		"command.run",
 		"python.run",
 	]
 }
@@ -2329,24 +2363,34 @@ So, I'll output: "星期日""#
 		);
 		let mut loop_state =
 			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+		let observation = ToolObservation {
+			ok: true,
+			tool_name: "fs.read_text".to_string(),
+			error_type: None,
+			terminal: false,
+			data: serde_json::json!({
+				"path": "/workspace/Cargo.toml",
+				"content": "[workspace]\nmembers = [\"crates/roku-agent-runtime\"]",
+			}),
+			message: "Read the grounded workspace manifest.".to_string(),
+		};
+		let interpreted =
+			crate::runtime_loop::interpret_observation(&loop_state, observation.clone(), None);
 		loop_state.record_step(StepRecord::tool_call(
 			1,
 			"fs.read_text",
 			"Read the grounded workspace manifest first.",
-			StepObservation::Tool(ToolObservation {
-				ok: true,
-				tool_name: "fs.read_text".to_string(),
-				error_type: None,
-				terminal: false,
-				data: serde_json::json!({
-					"path": "/workspace/Cargo.toml",
-					"content": "[workspace]\nmembers = [\"crates/roku-agent-runtime\"]",
-				}),
-				message: "Read the grounded workspace manifest.".to_string(),
+			serde_json::json!({
+				"ok": true,
+				"terminal": false,
+				"message": "Read the grounded workspace manifest.",
+				"data": observation.data.clone(),
 			}),
+			StepObservation::Tool(observation),
+			interpreted.clone(),
 			Some(12),
-			3,
-			2,
+			interpreted.remaining_step_budget,
+			interpreted.remaining_recovery_budget,
 			"/workspace",
 		));
 

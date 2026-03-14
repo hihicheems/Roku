@@ -45,13 +45,14 @@ pub use runtime_loop::{
 	AskUserPayload, AskUserResumeContract, AskUserResumeDirective, FinalAnswerPayload,
 	InterpretedObservation, LoopContext, LoopRequest, LoopState, LoopStatus, NextStepAction,
 	NextStepDecision, NextStepDecisionSchemaError, StepAction, StepObservation, StepRecord,
-	ToolObservation, interpret_observation, should_resume_awaiting_user,
+	ToolObservation, ToolProbeCheckReport, check_seed_tool_probe, interpret_observation,
+	should_resume_awaiting_user,
 };
 pub use tool_config::{
-	BuiltinToolRole, ConfiguredTool, FsToolRuntimeConfig, FsToolRuntimeConfigPatch,
-	PythonToolRuntimeConfig, PythonToolRuntimeConfigPatch, TableToolRuntimeConfig,
-	TableToolRuntimeConfigPatch, ToolCatalogConfig, ToolCatalogConfigError,
-	ToolWorkerRuntimeConfig, ToolWorkerRuntimeConfigPatch, ToolsRuntimeConfig,
-	ToolsRuntimeConfigError, ToolsRuntimeConfigPatch, WebToolRuntimeConfig,
-	WebToolRuntimeConfigPatch,
+	BuiltinToolRole, CommandToolRuntimeConfig, CommandToolRuntimeConfigPatch, ConfiguredTool,
+	FsToolRuntimeConfig, FsToolRuntimeConfigPatch, PythonToolRuntimeConfig,
+	PythonToolRuntimeConfigPatch, TableToolRuntimeConfig, TableToolRuntimeConfigPatch,
+	ToolCatalogConfig, ToolCatalogConfigError, ToolWorkerRuntimeConfig,
+	ToolWorkerRuntimeConfigPatch, ToolsRuntimeConfig, ToolsRuntimeConfigError,
+	ToolsRuntimeConfigPatch, WebToolRuntimeConfig, WebToolRuntimeConfigPatch,
 };

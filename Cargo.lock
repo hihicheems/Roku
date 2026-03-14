@@ -1771,6 +1771,7 @@ dependencies = [
  "roku-plugin-skills",
  "serde",
  "serde_json",
+ "shlex",
  "tempfile",
  "thiserror",
  "time",

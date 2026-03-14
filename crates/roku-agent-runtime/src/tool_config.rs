@@ -13,10 +13,10 @@
 // limitations under the License.
 
 pub use roku_plugin_tools::{
-	BuiltinToolRole, ConfiguredTool, FsToolRuntimeConfig, FsToolRuntimeConfigPatch,
-	PythonToolRuntimeConfig, PythonToolRuntimeConfigPatch, TableToolRuntimeConfig,
-	TableToolRuntimeConfigPatch, ToolCatalogConfig, ToolCatalogConfigError,
-	ToolWorkerRuntimeConfig, ToolWorkerRuntimeConfigPatch, ToolsRuntimeConfig,
-	ToolsRuntimeConfigError, ToolsRuntimeConfigPatch, WebToolRuntimeConfig,
-	WebToolRuntimeConfigPatch,
+	BuiltinToolRole, CommandToolRuntimeConfig, CommandToolRuntimeConfigPatch, ConfiguredTool,
+	FsToolRuntimeConfig, FsToolRuntimeConfigPatch, PythonToolRuntimeConfig,
+	PythonToolRuntimeConfigPatch, TableToolRuntimeConfig, TableToolRuntimeConfigPatch,
+	ToolCatalogConfig, ToolCatalogConfigError, ToolWorkerRuntimeConfig,
+	ToolWorkerRuntimeConfigPatch, ToolsRuntimeConfig, ToolsRuntimeConfigError,
+	ToolsRuntimeConfigPatch, WebToolRuntimeConfig, WebToolRuntimeConfigPatch,
 };

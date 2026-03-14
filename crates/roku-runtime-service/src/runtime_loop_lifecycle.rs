@@ -24,27 +24,52 @@ use crate::{log_runtime, truncate_for_log};
 impl RuntimeService {
 	pub(super) fn record_runtime_loop_history(&self, loop_state: &LoopState, start_index: usize) {
 		for step in loop_state.history.iter().skip(start_index) {
-			log_runtime(
-				LogLevel::Debug,
-				"runtime loop step recorded",
-				[
-					("run_id", loop_state.run_id.clone()),
-					("step_index", step.step_index.to_string()),
-					("action", format!("{:?}", step.action)),
-					(
-						"tool_name",
-						step.tool_name.clone().unwrap_or_else(|| "none".to_string()),
+			let mut fields = vec![
+				("run_id", loop_state.run_id.clone()),
+				("step_index", step.step_index.to_string()),
+				("action", format!("{:?}", step.action)),
+				(
+					"tool_name",
+					step.tool_name.clone().unwrap_or_else(|| "none".to_string()),
+				),
+				(
+					"remaining_step_budget_after",
+					step.remaining_step_budget_after.to_string(),
+				),
+				(
+					"remaining_recovery_budget_after",
+					step.remaining_recovery_budget_after.to_string(),
+				),
+			];
+			if let Some(raw_tool_output) = step.raw_tool_output.as_ref() {
+				fields.push((
+					"raw_tool_output",
+					truncate_for_log(
+						&serde_json::to_string(raw_tool_output)
+							.unwrap_or_else(|_| "<unserializable-json>".to_string()),
+						200,
 					),
-					(
-						"remaining_step_budget_after",
-						step.remaining_step_budget_after.to_string(),
-					),
-					(
-						"remaining_recovery_budget_after",
-						step.remaining_recovery_budget_after.to_string(),
-					),
-				],
-			);
+				));
+			}
+			if let Some(interpreted) = step.interpreted_observation.as_ref() {
+				fields.push((
+					"interpreted_continue_allowed",
+					interpreted.continue_allowed.to_string(),
+				));
+				fields.push((
+					"interpreted_should_ask_user",
+					interpreted.should_ask_user.to_string(),
+				));
+				fields.push((
+					"interpreted_should_emit_final_answer",
+					interpreted.should_emit_final_answer.to_string(),
+				));
+				fields.push((
+					"interpreted_should_fail",
+					interpreted.should_fail.to_string(),
+				));
+			}
+			log_runtime(LogLevel::Debug, "runtime loop step recorded", fields);
 		}
 	}
 

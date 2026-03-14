@@ -24,6 +24,7 @@ use crate::router::{
 	RouteDecisionResult, RouteEscalationPlan, RouteRisk,
 };
 use crate::runtime_loop::{
+	extract_explicit_shell_command as shared_extract_explicit_shell_command,
 	extract_path_candidates as shared_extract_path_candidates, extract_skill_source_url,
 	extract_web_query,
 };
@@ -213,6 +214,29 @@ fn classify_contract_level_grounded_hint(
 		));
 	}
 
+	if let Some(command) = extract_explicit_shell_command(&request.goal)
+		&& let Some(selector) = tool_selector(context.catalog, "command.run")
+	{
+		let decision = RouteDecision::new(
+			IntentFamily::CodeExec,
+			0.94,
+			false,
+			RouteRisk::Medium,
+			vec!["command.run".to_string()],
+			candidate_plugins_for_tool(context.plugin_snapshot, "command.run"),
+			Vec::new(),
+			"contract-level grounded shell command provides a non-authoritative `command.run` hint",
+		);
+		let _ = selector;
+		let _ = command;
+		return Some(build_tool_loop_route(
+			context,
+			decision,
+			Some("command.run"),
+			Vec::new(),
+		));
+	}
+
 	if extract_glob_pattern(&request.goal).is_some()
 		&& tool_selector(context.catalog, "fs.glob").is_some()
 	{
@@ -293,7 +317,9 @@ fn coarse_intent_hint_for_tool(tool_name: &str) -> IntentFamily {
 		name if name.starts_with("fs.") => IntentFamily::FilesystemRead,
 		name if name.starts_with("table.") => IntentFamily::TableRead,
 		name if name.starts_with("web.") => IntentFamily::WebLookup,
-		name if name.starts_with("python.") => IntentFamily::CodeExec,
+		name if name.starts_with("python.") || name.starts_with("command.") => {
+			IntentFamily::CodeExec
+		}
 		_ => IntentFamily::TextTransform,
 	}
 }
@@ -308,6 +334,7 @@ fn explicit_tool_hint_is_grounded(tool_name: &str, goal: &str) -> bool {
 			extract_table_path(goal).is_some()
 		}
 		"web.search" => extract_web_query(goal).is_some(),
+		"command.run" => extract_explicit_shell_command(goal).is_some(),
 		"python.run" => extract_explicit_python_code(goal).is_some(),
 		"skill.install" => extract_skill_source_url(goal).is_some(),
 		_ => false,
@@ -557,6 +584,14 @@ fn classify_structural_fallback(
 			"explicit Python code was provided, but `python.run` is not enabled in the current runtime inventory",
 		));
 	}
+	if extract_explicit_shell_command(goal).is_some()
+		&& tool_selector(context.catalog, "command.run").is_none()
+	{
+		return Some(unavailable_family_route(
+			IntentFamily::CodeExec,
+			"explicit shell command was provided, but `command.run` is not enabled in the current runtime inventory",
+		));
+	}
 	if extract_table_path(goal).is_some()
 		&& !has_enabled_tool_with_prefix(context.catalog, "table.")
 	{
@@ -759,6 +794,10 @@ fn extract_path_candidates(goal: &str) -> Vec<String> {
 	shared_extract_path_candidates(goal)
 }
 
+fn extract_explicit_shell_command(goal: &str) -> Option<String> {
+	shared_extract_explicit_shell_command(goal)
+}
+
 fn explicit_skill_tokens(goal: &str) -> Vec<String> {
 	let mut tokens = goal
 		.split_whitespace()
@@ -792,7 +831,7 @@ fn extract_explicit_python_code(goal: &str) -> Option<String> {
 	if let Some(code) = extract_fenced_python_code(goal) {
 		return Some(code);
 	}
-	if let Some(code) = extract_inline_code(goal) {
+	if let Some(code) = extract_inline_code(goal).filter(|code| is_probable_python_snippet(code)) {
 		return Some(code);
 	}
 	extract_line_or_block_python_code(goal)
@@ -1035,6 +1074,9 @@ fn candidate_plugins_for_tool(
 	}
 	if tool_name.starts_with("web.") && plugin_snapshot.is_plugin_enabled("core-web") {
 		plugins.push("core-web".to_string());
+	}
+	if tool_name.starts_with("command.") && plugin_snapshot.is_plugin_enabled("core-command") {
+		plugins.push("core-command".to_string());
 	}
 	if tool_name.starts_with("python.") && plugin_snapshot.is_plugin_enabled("core-python") {
 		plugins.push("core-python".to_string());

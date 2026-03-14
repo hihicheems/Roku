@@ -91,10 +91,26 @@ pub(crate) fn extract_explicit_python_code(goal: &str) -> Option<String> {
 	if let Some(code) = extract_fenced_python_code(goal) {
 		return Some(code);
 	}
-	if let Some(code) = extract_inline_code(goal) {
+	if let Some(code) = extract_inline_code(goal).filter(|code| is_probable_python_snippet(code)) {
 		return Some(code);
 	}
 	extract_line_or_block_python_code(goal)
+}
+
+pub(crate) fn extract_explicit_shell_command(goal: &str) -> Option<String> {
+	if let Some(command) = extract_fenced_shell_command(goal) {
+		return Some(command);
+	}
+	if let Some(command) = extract_inline_code(goal)
+		.as_deref()
+		.and_then(normalize_shell_command)
+	{
+		return Some(command);
+	}
+	if let Some(command) = extract_dollar_prefixed_command(goal) {
+		return Some(command);
+	}
+	extract_command_suffix_after_separator(goal)
 }
 
 pub(crate) fn extract_skill_source_url(goal: &str) -> Option<String> {
@@ -328,6 +344,22 @@ fn extract_inline_code(goal: &str) -> Option<String> {
 	(!code.is_empty()).then(|| code.to_string())
 }
 
+fn extract_fenced_shell_command(goal: &str) -> Option<String> {
+	for language in ["bash", "sh", "shell", "zsh"] {
+		let marker = format!("```{language}\n");
+		let Some(start) = goal.find(&marker) else {
+			continue;
+		};
+		let rest = goal.get(start + marker.len()..)?;
+		let end = rest.find("```")?;
+		let command = rest.get(..end)?.trim();
+		if let Some(command) = normalize_shell_command(command) {
+			return Some(command);
+		}
+	}
+	None
+}
+
 fn extract_line_or_block_python_code(goal: &str) -> Option<String> {
 	let trimmed = goal.trim();
 	if let Some(suffix) = extract_python_suffix_after_separator(trimmed) {
@@ -424,4 +456,57 @@ fn is_probable_python_statement(line: &str) -> bool {
 	(keyword_score > 0 || punctuation_score >= 2)
 		&& !trimmed.contains("://")
 		&& !trimmed.contains('，')
+}
+
+fn extract_dollar_prefixed_command(goal: &str) -> Option<String> {
+	goal.lines()
+		.map(str::trim)
+		.find_map(|line| line.strip_prefix("$ ").and_then(normalize_shell_command))
+}
+
+fn extract_command_suffix_after_separator(goal: &str) -> Option<String> {
+	goal.match_indices([':', '：'])
+		.filter_map(|(index, _)| {
+			let prefix = goal.get(..index)?.trim().to_ascii_lowercase();
+			let suffix = goal.get(index + 1..)?.trim();
+			(prefix.contains("command")
+				|| prefix.contains("cmd")
+				|| prefix.contains("shell")
+				|| prefix.contains("bash")
+				|| prefix.ends_with("run this")
+				|| prefix.ends_with("execute this"))
+			.then_some(suffix)
+			.and_then(normalize_shell_command)
+		})
+		.next_back()
+}
+
+fn normalize_shell_command(value: &str) -> Option<String> {
+	let trimmed = value.trim().trim_matches('`').trim();
+	if trimmed.is_empty() {
+		return None;
+	}
+	let lines = trimmed
+		.lines()
+		.map(str::trim)
+		.filter(|line| !line.is_empty())
+		.collect::<Vec<_>>();
+	if lines.len() != 1 {
+		return None;
+	}
+	let line = lines[0].strip_prefix("$ ").unwrap_or(lines[0]).trim();
+	is_probable_shell_command(line).then(|| line.to_string())
+}
+
+fn is_probable_shell_command(value: &str) -> bool {
+	let trimmed = value.trim();
+	if trimmed.is_empty() || trimmed.contains('\n') || trimmed.contains('\r') {
+		return false;
+	}
+	let Some(first_token) = trimmed.split_whitespace().next() else {
+		return false;
+	};
+	first_token
+		.chars()
+		.all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-'))
 }

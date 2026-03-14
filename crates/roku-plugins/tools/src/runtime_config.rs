@@ -25,6 +25,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ToolsRuntimeConfig {
 	pub fs: FsToolRuntimeConfig,
+	pub command: CommandToolRuntimeConfig,
 	pub python: PythonToolRuntimeConfig,
 	pub table: TableToolRuntimeConfig,
 	pub web: WebToolRuntimeConfig,
@@ -39,6 +40,8 @@ pub struct ToolsRuntimeConfig {
 pub struct ToolsRuntimeConfigPatch {
 	#[serde(default)]
 	pub fs: Option<FsToolRuntimeConfigPatch>,
+	#[serde(default)]
+	pub command: Option<CommandToolRuntimeConfigPatch>,
 	#[serde(default)]
 	pub python: Option<PythonToolRuntimeConfigPatch>,
 	#[serde(default)]
@@ -73,6 +76,21 @@ pub struct FsToolRuntimeConfigPatch {
 pub struct PythonToolRuntimeConfig {
 	pub default_timeout_ms: u64,
 	pub max_output_bytes: usize,
+}
+
+/// Effective runtime settings for the constrained command executor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandToolRuntimeConfig {
+	pub default_timeout_ms: u64,
+	pub max_output_bytes: usize,
+}
+
+/// Partial overrides for [`CommandToolRuntimeConfig`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandToolRuntimeConfigPatch {
+	pub default_timeout_ms: Option<u64>,
+	pub max_output_bytes: Option<usize>,
 }
 
 /// Partial overrides for [`PythonToolRuntimeConfig`].
@@ -138,6 +156,10 @@ pub enum ToolsRuntimeConfigError {
 	InvalidFsMaxGlobMatches,
 	#[error("runtime.tools.fs.max_descendant_scan_entries must be greater than zero")]
 	InvalidFsMaxDescendantScanEntries,
+	#[error("runtime.tools.command.default_timeout_ms must be greater than zero")]
+	InvalidCommandDefaultTimeoutMs,
+	#[error("runtime.tools.command.max_output_bytes must be greater than zero")]
+	InvalidCommandMaxOutputBytes,
 	#[error("runtime.tools.python.default_timeout_ms must be greater than zero")]
 	InvalidPythonDefaultTimeoutMs,
 	#[error("runtime.tools.python.max_output_bytes must be greater than zero")]
@@ -188,6 +210,15 @@ impl Default for PythonToolRuntimeConfig {
 	}
 }
 
+impl Default for CommandToolRuntimeConfig {
+	fn default() -> Self {
+		Self {
+			default_timeout_ms: 1_500,
+			max_output_bytes: 8_192,
+		}
+	}
+}
+
 impl Default for TableToolRuntimeConfig {
 	fn default() -> Self {
 		Self {
@@ -220,6 +251,9 @@ impl ToolsRuntimeConfig {
 		if let Some(fs) = patch.fs {
 			self.fs.apply_patch(fs);
 		}
+		if let Some(command) = patch.command {
+			self.command.apply_patch(command);
+		}
 		if let Some(python) = patch.python {
 			self.python.apply_patch(python);
 		}
@@ -236,6 +270,7 @@ impl ToolsRuntimeConfig {
 
 	pub fn validate_and_clamp(&mut self) -> Result<(), ToolsRuntimeConfigError> {
 		self.fs.validate_and_clamp()?;
+		self.command.validate_and_clamp()?;
 		self.python.validate_and_clamp()?;
 		self.table.validate_and_clamp()?;
 		self.web.validate_and_clamp()?;
@@ -245,6 +280,7 @@ impl ToolsRuntimeConfig {
 
 	pub fn apply_env_overrides(&mut self) -> Result<(), ToolsRuntimeConfigError> {
 		self.fs.apply_env_overrides()?;
+		self.command.apply_env_overrides()?;
 		self.python.apply_env_overrides()?;
 		self.table.apply_env_overrides()?;
 		self.web.apply_env_overrides()?;
@@ -337,6 +373,39 @@ impl PythonToolRuntimeConfig {
 			self.default_timeout_ms = value?;
 		}
 		if let Some(value) = env_override_usize("ROKU_RUNTIME__TOOLS__PYTHON__MAX_OUTPUT_BYTES") {
+			self.max_output_bytes = value?;
+		}
+		Ok(())
+	}
+}
+
+impl CommandToolRuntimeConfig {
+	pub fn apply_patch(&mut self, patch: CommandToolRuntimeConfigPatch) {
+		if let Some(value) = patch.default_timeout_ms {
+			self.default_timeout_ms = value;
+		}
+		if let Some(value) = patch.max_output_bytes {
+			self.max_output_bytes = value;
+		}
+	}
+
+	pub fn validate_and_clamp(&mut self) -> Result<(), ToolsRuntimeConfigError> {
+		if self.default_timeout_ms == 0 {
+			return Err(ToolsRuntimeConfigError::InvalidCommandDefaultTimeoutMs);
+		}
+		if self.max_output_bytes == 0 {
+			return Err(ToolsRuntimeConfigError::InvalidCommandMaxOutputBytes);
+		}
+		self.default_timeout_ms = self.default_timeout_ms.min(HARD_MAX_TIMEOUT_MS);
+		self.max_output_bytes = self.max_output_bytes.min(HARD_MAX_OUTPUT_BYTES);
+		Ok(())
+	}
+
+	pub fn apply_env_overrides(&mut self) -> Result<(), ToolsRuntimeConfigError> {
+		if let Some(value) = env_override_u64("ROKU_RUNTIME__TOOLS__COMMAND__DEFAULT_TIMEOUT_MS") {
+			self.default_timeout_ms = value?;
+		}
+		if let Some(value) = env_override_usize("ROKU_RUNTIME__TOOLS__COMMAND__MAX_OUTPUT_BYTES") {
 			self.max_output_bytes = value?;
 		}
 		Ok(())
@@ -487,6 +556,12 @@ fn invalid_env_key(key: &'static str) -> ToolsRuntimeConfigError {
 		"ROKU_RUNTIME__TOOLS__FS__MAX_DESCENDANT_SCAN_ENTRIES" => {
 			ToolsRuntimeConfigError::InvalidFsMaxDescendantScanEntries
 		}
+		"ROKU_RUNTIME__TOOLS__COMMAND__DEFAULT_TIMEOUT_MS" => {
+			ToolsRuntimeConfigError::InvalidCommandDefaultTimeoutMs
+		}
+		"ROKU_RUNTIME__TOOLS__COMMAND__MAX_OUTPUT_BYTES" => {
+			ToolsRuntimeConfigError::InvalidCommandMaxOutputBytes
+		}
 		"ROKU_RUNTIME__TOOLS__PYTHON__DEFAULT_TIMEOUT_MS" => {
 			ToolsRuntimeConfigError::InvalidPythonDefaultTimeoutMs
 		}
@@ -524,6 +599,10 @@ mod tests {
 				max_glob_matches: Some(HARD_MAX_GLOB_MATCHES * 2),
 				max_descendant_scan_entries: Some(HARD_MAX_DESCENDANT_SCAN_ENTRIES * 2),
 			}),
+			command: Some(CommandToolRuntimeConfigPatch {
+				default_timeout_ms: Some(HARD_MAX_TIMEOUT_MS * 2),
+				max_output_bytes: Some(HARD_MAX_OUTPUT_BYTES * 2),
+			}),
 			python: Some(PythonToolRuntimeConfigPatch {
 				default_timeout_ms: Some(HARD_MAX_TIMEOUT_MS * 2),
 				max_output_bytes: Some(HARD_MAX_OUTPUT_BYTES * 2),
@@ -551,6 +630,8 @@ mod tests {
 			config.fs.max_descendant_scan_entries,
 			HARD_MAX_DESCENDANT_SCAN_ENTRIES
 		);
+		assert_eq!(config.command.default_timeout_ms, HARD_MAX_TIMEOUT_MS);
+		assert_eq!(config.command.max_output_bytes, HARD_MAX_OUTPUT_BYTES);
 		assert_eq!(config.python.default_timeout_ms, HARD_MAX_TIMEOUT_MS);
 		assert_eq!(config.python.max_output_bytes, HARD_MAX_OUTPUT_BYTES);
 		assert_eq!(config.table.default_preview_rows, HARD_MAX_PREVIEW_ROWS);
