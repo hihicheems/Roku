@@ -675,7 +675,7 @@ impl PromptedLlmTool {
 			worker_id: worker_id_for_role(tool.role),
 			system_prompt: system_prompt_for_role(tool.role),
 			risk_tier: risk_tier_for_role(tool.role),
-			terminal_output: prompted_tool_is_terminal(tool.role),
+			terminal_output: tool.terminal_output,
 			skill_registry,
 			router,
 			resource_catalog,
@@ -1832,10 +1832,6 @@ fn risk_tier_for_role(role: BuiltinToolRole) -> RiskTier {
 		| BuiltinToolRole::General => RiskTier::Medium,
 		BuiltinToolRole::SkillInstall => RiskTier::Low,
 	}
-}
-
-fn prompted_tool_is_terminal(role: BuiltinToolRole) -> bool {
-	matches!(role, BuiltinToolRole::General)
 }
 
 fn llm_failure(error: LlmAdapterError) -> ToolFailure {

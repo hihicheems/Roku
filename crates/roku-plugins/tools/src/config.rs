@@ -52,6 +52,8 @@ pub struct ConfiguredTool {
 	pub role: BuiltinToolRole,
 	#[serde(default = "default_discoverable")]
 	pub discoverable: bool,
+	#[serde(default)]
+	pub terminal_output: bool,
 	pub description: String,
 	#[serde(default)]
 	pub tags: Vec<String>,
@@ -133,6 +135,16 @@ mod tests {
 			config
 				.tool_for_role(BuiltinToolRole::SkillExecute)
 				.is_some()
+		);
+		assert!(
+			config
+				.tool_for_role(BuiltinToolRole::Inventory)
+				.is_some_and(|tool| tool.terminal_output)
+		);
+		assert!(
+			config
+				.tool_for_role(BuiltinToolRole::General)
+				.is_some_and(|tool| tool.terminal_output)
 		);
 	}
 

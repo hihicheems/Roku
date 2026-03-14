@@ -1353,6 +1353,7 @@ mod tests {
 		DownloadedArchive, SkillArchiveFetcher, SkillRegistry, SkillRegistryError, SkillSource,
 	};
 	use std::collections::VecDeque;
+	use std::env;
 	use std::io::{Cursor, Write};
 	use std::sync::{Arc, Mutex};
 
@@ -1783,27 +1784,24 @@ So, I'll output: "星期日""#
 
 	#[test]
 	fn execute_tool_loop_can_continue_after_non_terminal_success() {
+		let cwd = env::current_dir()
+			.expect("cwd should resolve for tests")
+			.display()
+			.to_string();
 		let (route_router, prompts) = router_with_json_responses(vec![
 			serde_json::json!({
 				"action": "call_tool",
-				"tool_name": "inventory.describe",
-				"arguments": {},
-				"reason": "Collect the first inventory observation.",
-				"final_message": null
-			}),
-			serde_json::json!({
-				"action": "call_tool",
-				"tool_name": "inventory.describe",
-				"arguments": {},
-				"reason": "Collect one more inventory observation before answering.",
+				"tool_name": "fs.inspect",
+				"arguments": { "path": cwd },
+				"reason": "Inspect the grounded workspace path before answering.",
 				"final_message": null
 			}),
 			serde_json::json!({
 				"action": "final_answer",
 				"tool_name": null,
 				"arguments": null,
-				"reason": "The observations are sufficient now.",
-				"final_message": "Loop concluded after two tool observations."
+				"reason": "The workspace inspection is sufficient now.",
+				"final_message": "Loop concluded after a non-terminal filesystem observation."
 			}),
 		]);
 		let execution_router =
@@ -1821,23 +1819,22 @@ So, I'll output: "星期日""#
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-loop".to_string()),
 			session_id: "session-loop".to_string(),
-			goal: "Summarize the runtime inventory".to_string(),
+			goal: "Inspect the current workspace directory".to_string(),
 			planning_mode_hint: None,
 			conversation_history: Vec::new(),
 		};
 		let decision = crate::router::RouteDecision::new(
-			IntentFamily::Chat,
+			IntentFamily::FilesystemRead,
 			0.95,
 			false,
 			crate::router::RouteRisk::Low,
-			vec!["inventory.describe".to_string()],
+			vec!["fs.inspect".to_string()],
 			Vec::new(),
 			Vec::new(),
-			"inventory request",
+			"filesystem request",
 		);
 		let mut loop_state =
 			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
-		loop_state.visible_tools = vec!["general.execute".to_string()];
 
 		let execution = runtime.execute_tool_loop(
 			&TaskId("task-loop".to_string()),
@@ -1853,25 +1850,21 @@ So, I'll output: "星期日""#
 		);
 		assert_eq!(
 			execution.message,
-			"Loop concluded after two tool observations."
+			"Loop concluded after a non-terminal filesystem observation."
 		);
-		assert_eq!(loop_state.history.len(), 3);
+		assert_eq!(loop_state.history.len(), 2);
 		assert_eq!(
 			loop_state.history[0].tool_name.as_deref(),
-			Some("inventory.describe")
+			Some("fs.inspect")
 		);
-		assert_eq!(
-			loop_state.history[1].tool_name.as_deref(),
-			Some("inventory.describe")
-		);
-		assert_eq!(loop_state.history[2].action, StepAction::FinalAnswer);
+		assert_eq!(loop_state.history[1].action, StepAction::FinalAnswer);
 		assert_eq!(
 			loop_state.status,
 			crate::runtime_loop::LoopStatus::Succeeded
 		);
 		assert_eq!(
 			loop_state.visible_tools.first().map(String::as_str),
-			Some("inventory.describe")
+			Some("fs.inspect")
 		);
 		assert!(
 			loop_state
@@ -1880,17 +1873,23 @@ So, I'll output: "星期日""#
 		);
 		assert!(
 			loop_state
-				.visible_tools
-				.contains(&"fs.read_text".to_string())
+				.history
+				.first()
+				.and_then(|step| step.observation.as_ref())
+				.is_some_and(|observation| matches!(
+					observation,
+					crate::runtime_loop::StepObservation::Tool(tool_observation)
+						if !tool_observation.terminal
+				))
 		);
 
 		let prompts = prompts.lock().expect("prompt lock should succeed");
-		assert_eq!(prompts.len(), 3);
+		assert_eq!(prompts.len(), 2);
 		assert!(prompts[0].contains("\"visible_tools\": ["));
-		assert!(prompts[0].contains("\"inventory.describe\""));
+		assert!(prompts[0].contains("\"fs.inspect\""));
 		assert!(prompts[1].contains("History digest:"));
 		assert!(prompts[1].contains("step 1"));
-		assert!(prompts[1].contains("inventory.describe"));
+		assert!(prompts[1].contains("fs.inspect"));
 		assert!(!prompts[1].contains("\"started_at\""));
 	}
 
