@@ -45,7 +45,7 @@ pub(crate) fn catalog_descriptors_with_config(
 	vec![
 		descriptor_catalog(
 			"table.inspect",
-			"Inspect a CSV, TSV, or XLSX table file and return basic metadata.",
+			"Use this first when you have a concrete table file and need high-level facts such as format, size, sheet count, or rough structure. Do not use it when the user specifically asked for row samples or column types; `table.preview` and `table.schema` are more precise. It returns bounded metadata for choosing the next table step.",
 			&["table", "inspect", "xlsx", "csv", "tsv"],
 			&["Inspect tmp/test-excel.xlsx."],
 			&["path"],
@@ -53,7 +53,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		),
 		descriptor_catalog(
 			"table.list_sheets",
-			"List sheets in an XLSX workbook.",
+			"Use this only when the main question is which sheet names exist in a known XLSX workbook. Do not use it for CSV/TSV preview or schema inspection. It returns workbook sheet names, or explains that flat files do not expose named sheets.",
 			&["table", "sheet", "xlsx"],
 			&["List the sheets in tmp/test-excel.xlsx."],
 			&["path"],
@@ -61,7 +61,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		),
 		descriptor_catalog(
 			"table.preview",
-			"Preview the first rows of a CSV, TSV, or XLSX sheet.",
+			"Use this when the user wants actual sample rows from a known table or sheet. Do not use it just to learn column names or inferred types; `table.schema` is better for that. It returns a bounded row preview suitable for direct display or downstream summarization.",
 			&["table", "preview", "rows", "xlsx", "csv"],
 			&["Preview the first few rows of tmp/test-excel.xlsx."],
 			&["path", "sheet", "rows"],
@@ -69,7 +69,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		),
 		descriptor_catalog(
 			"table.schema",
-			"Inspect column names and inferred types for a CSV, TSV, or XLSX sheet.",
+			"Use this when the user wants column names and inferred types from a known table or sheet. Do not use it for row samples or sheet enumeration. It returns structural schema facts that are better for reasoning about the data than `table.inspect` or `table.preview`.",
 			&["table", "schema", "columns", "xlsx", "csv"],
 			&["Show the schema of tmp/test-excel.xlsx."],
 			&["path", "sheet"],

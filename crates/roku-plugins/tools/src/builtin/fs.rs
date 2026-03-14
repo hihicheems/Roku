@@ -48,7 +48,7 @@ pub(crate) fn catalog_descriptors_with_config(
 	vec![
 		descriptor_catalog(
 			"fs.find",
-			"Resolve a basename or fuzzy filesystem reference inside the allowed workspace roots and report whether it matched zero, one, or many candidates.",
+			"Use this when you only know one basename or fuzzy filesystem reference inside the workspace and need grounded candidates before doing anything else. Do not use it when you already have a concrete path, when you expect many repeated matches, or when the task is counting files across directories; `fs.glob` is the right tool for that. It returns zero, one, or many candidate paths that the agent can disambiguate or feed into a later tool call.",
 			&[
 				"find file",
 				"basename grounding",
@@ -56,7 +56,7 @@ pub(crate) fn catalog_descriptors_with_config(
 				"模糊文件定位",
 				"文件定位",
 			],
-			&["Find pr-check-ci.yml", "Find temp.log"],
+			&["Find pr-check-ci.yml", "Find the directory named docs"],
 			&["name", "kind"],
 			&["fs.find"],
 			&["find <name>"],
@@ -68,7 +68,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		),
 		descriptor_catalog(
 			"fs.inspect",
-			"Inspect a filesystem path or the current working directory and return bounded metadata such as kind, size, and timestamps.",
+			"Use this when you need metadata about a known path or need to ground the current working directory. Do not use it to list directory entries or read file contents. It returns bounded path facts like kind, size, and timestamps.",
 			&[
 				"file metadata",
 				"path inspection",
@@ -96,7 +96,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		),
 		descriptor_catalog(
 			"fs.list_dir",
-			"List entries in a directory, including hidden entries, with bounded output and truncation metadata.",
+			"Use this when you already know the directory path and need its immediate entries, including hidden ones, in bounded form. Do not use it when the path is still fuzzy or when you need file contents instead of a listing. It returns a truncated-safe entry list plus enough metadata to answer listing questions or choose a follow-up path.",
 			&[
 				"list files",
 				"directory contents",
@@ -122,7 +122,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		),
 		descriptor_catalog(
 			"fs.read_text",
-			"Read a text file with a maximum byte budget and truncation metadata after grounding the requested path inside the allowed workspace roots.",
+			"Use this when you already have a concrete text file path and need its contents or the first bounded chunk of it. Do not use it for directories, binary inspection, or fuzzy names; resolve those first with `fs.find` or `fs.inspect`. It returns lossy UTF-8 text plus truncation metadata that can be quoted, summarized, or passed to another worker.",
 			&[
 				"read file",
 				"open text",
@@ -143,17 +143,23 @@ pub(crate) fn catalog_descriptors_with_config(
 		),
 		descriptor_catalog(
 			"fs.glob",
-			"Expand a filesystem glob pattern within the allowed workspace roots.",
+			"Use this when the task is about many matching paths at once, especially wildcard searches, repeated filenames across directories, or counts like 'how many Cargo.toml files are there'. Do not use it for a single fuzzy basename or a path you expect to resolve to one best candidate; `fs.find` is better for that. It returns a bounded match set that is good for counting, enumerating, or selecting follow-up files.",
 			&["glob", "pattern match", "find matching files"],
-			&["Find all Rust files under crates/roku-plugins/**/*.rs."],
+			&[
+				"Find all Rust files under crates/roku-plugins/**/*.rs.",
+				"Count all Cargo.toml files in the workspace.",
+			],
 			&["pattern"],
 			&["fs.glob"],
 			&["glob <pattern>"],
-			&["find files that match a glob pattern inside the workspace"],
+			&[
+				"find files that match a glob pattern inside the workspace",
+				"count repeated filenames across directories",
+			],
 		),
 		descriptor_catalog(
 			"fs.exists",
-			"Check whether a filesystem path exists and report its kind if present.",
+			"Use this for a yes/no existence check on a concrete path. Do not use it when you also need metadata, directory contents, or file contents. It returns existence plus kind when present.",
 			&["path exists", "does file exist", "check directory", "存在"],
 			&["Does tmp/test-excel.xlsx exist?"],
 			&["path"],
