@@ -16,7 +16,7 @@ use std::thread;
 use std::time::Duration;
 
 use roku_common_types::{
-	ApprovalDecision, ApprovalId, PlanningModeHint, RequestEnvelope, ResponseEnvelope, RuntimeError,
+	ApprovalDecision, ApprovalId, RequestEnvelope, ResponseEnvelope, RuntimeError,
 };
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
 
@@ -29,11 +29,10 @@ use crate::{
 pub trait TelegramInteractionHandler: Send + Sync {
 	fn handle_request(&self, request: RequestEnvelope) -> Result<ResponseEnvelope, RuntimeError>;
 
-	fn update_session_planning_mode(
+	fn handle_control_command(
 		&self,
-		session_id: &str,
-		planning_mode: Option<PlanningModeHint>,
-	) -> Result<(), RuntimeError>;
+		command: crate::TelegramControlCommandRequest,
+	) -> Result<ResponseEnvelope, RuntimeError>;
 
 	fn handle_approval_decision(
 		&self,
@@ -185,87 +184,21 @@ impl TelegramPollingRunner {
 				}
 				self.dispatch_response(chat_id, handler.handle_request(request))
 			}
-			Ok(TelegramInteraction::SessionCommand(command)) => {
+			Ok(TelegramInteraction::ControlCommand(command)) => {
 				log_telegram(
 					LogLevel::Info,
-					"received session command",
+					"received telegram control command",
 					[
-						("update_type", "session_command".to_string()),
+						("update_type", "control_command".to_string()),
 						("chat_id", command.chat_id.to_string()),
+						("command", command.command.as_str().to_string()),
 						(
-							"planning_mode",
-							command
-								.planning_mode
-								.map(|mode| mode.to_string())
-								.unwrap_or_else(|| "Auto".to_string()),
+							"has_argument",
+							command.argument.as_ref().is_some().to_string(),
 						),
 					],
 				);
-				handler
-					.update_session_planning_mode(&command.session_id, command.planning_mode)
-					.map_err(|error| {
-						TelegramTransportError::Api(format!(
-							"failed to persist telegram session command: {}",
-							error.message
-						))
-					})?;
-				self.client
-					.send_message(&TelegramOutboundMessage::session_mode_updated(
-						command.chat_id,
-						command.planning_mode,
-					))
-			}
-			Ok(TelegramInteraction::SessionCommandRequest(command_request)) => {
-				log_telegram(
-					LogLevel::Info,
-					"received session command request",
-					[
-						("update_type", "session_command_request".to_string()),
-						("chat_id", command_request.command.chat_id.to_string()),
-						(
-							"planning_mode",
-							command_request
-								.command
-								.planning_mode
-								.map(|mode| mode.to_string())
-								.unwrap_or_else(|| "Auto".to_string()),
-						),
-						("request_id", command_request.request.request_id.0.clone()),
-						("goal", truncate_for_log(&command_request.request.goal, 160)),
-					],
-				);
-				handler
-					.update_session_planning_mode(
-						&command_request.command.session_id,
-						command_request.command.planning_mode,
-					)
-					.map_err(|error| {
-						TelegramTransportError::Api(format!(
-							"failed to persist telegram inline session command: {}",
-							error.message
-						))
-					})?;
-				if self.progress_notices_enabled
-					&& let Err(error) =
-						self.client
-							.send_message(&TelegramOutboundMessage::progress_notice(
-								command_request.command.chat_id,
-								&command_request.request,
-							)) {
-					log_telegram(
-						LogLevel::Warn,
-						"failed to send progress notice",
-						[
-							("chat_id", command_request.command.chat_id.to_string()),
-							("request_id", command_request.request.request_id.0.clone()),
-							("error", error.to_string()),
-						],
-					);
-				}
-				self.dispatch_response(
-					command_request.command.chat_id,
-					handler.handle_request(command_request.request),
-				)
+				self.dispatch_response(command.chat_id, handler.handle_control_command(command))
 			}
 			Ok(TelegramInteraction::ApprovalDecision(action)) => {
 				log_telegram(

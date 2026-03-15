@@ -25,8 +25,8 @@ pub use client::{
 };
 pub use inbound::{
 	TelegramApprovalAction, TelegramCallbackQuery, TelegramChat, TelegramConnector,
-	TelegramConnectorError, TelegramInteraction, TelegramMessage, TelegramSessionCommand,
-	TelegramSessionCommandRequest, TelegramUpdate, TelegramUser,
+	TelegramConnectorError, TelegramControlCommand, TelegramControlCommandRequest,
+	TelegramInteraction, TelegramMessage, TelegramUpdate, TelegramUser,
 };
 pub use outbound::{
 	TelegramInlineKeyboardButton, TelegramOutboundMessage, TelegramParseMode, TelegramReplyMarkup,

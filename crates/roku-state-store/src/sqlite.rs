@@ -399,6 +399,15 @@ impl SessionPreferenceRepository for SqliteSessionPreferenceRepository {
 			.map(|value| serde_json::from_str(&value).map_err(StoreError::from))
 			.transpose()
 	}
+
+	fn delete_preferences(&mut self, session_id: &str) -> Result<(), StoreError> {
+		let connection = self.open()?;
+		connection.execute(
+			"DELETE FROM session_preferences WHERE session_id = ?1",
+			params![session_id],
+		)?;
+		Ok(())
+	}
 }
 
 #[derive(Debug, Clone)]
@@ -448,6 +457,15 @@ impl ConversationRepository for SqliteConversationRepository {
 			.collect::<Result<Vec<_>, _>>()?;
 		turns.reverse();
 		Ok(turns)
+	}
+
+	fn delete_conversation(&mut self, session_id: &str) -> Result<(), StoreError> {
+		let connection = self.open()?;
+		connection.execute(
+			"DELETE FROM conversation_turns WHERE session_id = ?1",
+			params![session_id],
+		)?;
+		Ok(())
 	}
 }
 
@@ -1069,6 +1087,25 @@ mod tests {
 				.expect("load turns")
 				.len(),
 			1
+		);
+
+		session_repo
+			.delete_preferences("session-1")
+			.expect("delete preferences");
+		conversation_repo
+			.delete_conversation("session-1")
+			.expect("delete conversation");
+		assert!(
+			session_repo
+				.load_preferences("session-1")
+				.expect("load deleted preferences")
+				.is_none()
+		);
+		assert!(
+			conversation_repo
+				.load_recent_turns("session-1", 8)
+				.expect("load deleted turns")
+				.is_empty()
 		);
 
 		let _ = fs::remove_file(path);
