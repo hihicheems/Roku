@@ -247,11 +247,63 @@ fn validate_router_decision(
 					missing_keys.join(", ")
 				));
 			}
+			if let Some(reason) =
+				ungrounded_consumer_path_rejection_reason(loop_state, tool_name, arguments)
+			{
+				return Err(reason);
+			}
 			Ok(decision)
 		}
 		NextStepAction::FinalAnswer => Ok(decision),
 		NextStepAction::AskUser | NextStepAction::Fail => Ok(decision),
 	}
+}
+
+fn ungrounded_consumer_path_rejection_reason(
+	loop_state: &LoopState,
+	tool_name: &str,
+	arguments: &serde_json::Map<String, Value>,
+) -> Option<String> {
+	let path = arguments.get("path").and_then(Value::as_str)?;
+	let resolved_lookup_path = loop_state
+		.last_observation
+		.as_ref()
+		.and_then(|observation| {
+			observation
+				.data
+				.get("resolved_path")
+				.and_then(Value::as_str)
+				.map(str::to_string)
+		});
+	let path_is_grounded = resolved_lookup_path.as_deref() == Some(path)
+		|| extract_concrete_path_candidates(&loop_state.goal)
+			.iter()
+			.any(|candidate| candidate == path)
+		|| extract_concrete_table_path(&loop_state.goal).as_deref() == Some(path)
+		|| matches!(tool_name, "fs.inspect" | "fs.list_dir")
+			&& path == loop_state.working_directory;
+
+	if path_is_grounded {
+		return None;
+	}
+
+	let requires_grounded_path = matches!(
+		tool_name,
+		"fs.read_text"
+			| "fs.inspect"
+			| "fs.list_dir"
+			| "table.preview"
+			| "table.inspect"
+			| "table.list_sheets"
+			| "table.schema"
+	);
+	if !requires_grounded_path || !tool_visible(loop_state, "fs.find") {
+		return None;
+	}
+
+	Some(format!(
+		"`{tool_name}` requires a grounded concrete path. The current round only mentions an unresolved file hint, so resolve it with `fs.find` before calling `{tool_name}`."
+	))
 }
 
 fn tool_loop_prompt(context_projection: &ContextProjection, user_reply: Option<&str>) -> String {
@@ -275,14 +327,18 @@ Rules:
 - Keep `final_message` concise. Do not paste large grounded documents, search dumps, or long synthesized answers into the JSON decision.
 - Use the current user follow-up if it is present; do not inherit concrete code, paths, or queries from prior conversation turns unless they already exist in the current context projection.
 - For `chat`, prefer `general.execute` when it is visible.
-- For `code_exec`, only call `python.run` when explicit Python code is present and the user is clearly asking to run it; only call `command.run` when the request includes one explicit shell command and the user is asking to execute it.
+- For `code_exec`, you may call `python.run` when explicit Python code is present or when the task now requires one clearly bounded Python snippet for local computation over already grounded evidence. Prefer `python.run` over `command.run` for counting, aggregation, filtering, or transformation tasks. Only call `command.run` when the request includes one explicit shell command and the user is asking to execute it.
+- When generating `python.run` arguments, keep the code short and self-contained. Prefer walking one grounded directory or reading one grounded path at execution time. Do not inline huge path arrays, copied directory listings, or large observation payloads into the code string.
 - For `table_read`, prefer the first shortlisted `table.*` tool that matches the grounded table path.
 - For `web_lookup`, use `web.search` when a concrete query is available.
 - When the current request references concrete local files, directories, workspace paths, or shell-style inspection goals and `fs.*` tools are visible, gather grounded filesystem evidence before using `general.execute`.
+- If the request only mentions a bare filename or fuzzy path hint like `grounding.rs` or `runtime.rs`, do not jump straight to `fs.read_text` or `table.preview`; resolve it with `fs.find` first unless the context already includes one grounded concrete path.
 - Do not call `general.execute` only to speculate about which filesystem tools could be used. Prefer `fs.inspect`, `fs.list_dir`, `fs.read_text`, `fs.find`, or `fs.glob` when the current context already grounds one of them.
 - If a filesystem or table consumer tool fails with `path_not_found` and `fs.find` is visible, prefer locating the target before failing the loop.
 - If a lookup tool returns one `resolved_path` and a visible consumer tool can now accept that concrete path, you may continue with that consumer tool instead of stopping at the lookup step.
 - When a filesystem, table, web, or python observation provides raw evidence but the user still needs explanation, comparison, or synthesis, prefer `general.execute` before emitting `final_answer`.
+- Do not use `general.execute` as a placeholder for future work. If the user asked for a counted, aggregated, transformed, searched, or executed result and the current observations do not already contain that result, keep gathering evidence, use another visible tool, ask the user, or fail honestly.
+- Never emit pseudo tool-call markup, future execution plans, or "let me run/use tool X" prose as if it were a completed result.
 - When the latest observation already directly satisfies a bounded inspection or listing request, emit `final_answer` with a concise grounded reply that reuses the observation message instead of copying large raw payloads into JSON.
 - Treat `intent_family`, `route_reason`, and the initial shortlist as weak seeds, not binding truth. If the current observation is insufficient, you may choose any better-fitting tool from `visible_tools`.
 - Do not assume an ambiguous lookup must immediately become `ask_user` when another visible tool can still answer the task more directly.
@@ -1358,6 +1414,52 @@ mod tests {
 				.and_then(Value::as_str),
 			Some("runtime.rs")
 		);
+	}
+
+	#[test]
+	fn router_rejects_consumer_reads_for_unresolved_basenames() {
+		let loop_state = sample_bootstrap_loop_state(
+			"帮我看看 grounding.rs 这个文件主要是做啥用的吧，一句话总结下",
+			vec!["fs.find", "fs.glob", "fs.inspect"],
+			vec![
+				"fs.find",
+				"fs.glob",
+				"fs.inspect",
+				"fs.read_text",
+				"general.execute",
+			],
+		);
+		let projection = build_context_projection(&loop_state);
+		let (router, _prompts) = router_with_responses(vec![
+			json!({
+				"action": "call_tool",
+				"tool_name": "fs.read_text",
+				"arguments": { "path": "/Users/jojo/cjj_project/Roku/grounding.rs" },
+				"reason": "Read the file directly.",
+				"final_message": null
+			}),
+			json!({
+				"action": "call_tool",
+				"tool_name": "fs.find",
+				"arguments": { "name": "grounding.rs", "kind": "any" },
+				"reason": "Resolve the basename first.",
+				"final_message": null
+			}),
+		]);
+
+		let decision = decide_tool_loop_next_step(
+			&loop_state,
+			&projection,
+			Some(&router),
+			None,
+			&NextStepRuntimeConfig::default(),
+		);
+
+		assert_eq!(
+			decision.action,
+			crate::runtime_loop::NextStepAction::CallTool
+		);
+		assert_eq!(decision.tool_name.as_deref(), Some("fs.find"));
 	}
 
 	#[test]

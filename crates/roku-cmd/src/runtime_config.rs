@@ -232,8 +232,8 @@ mod tests {
 
 		let configs = load_runtime_configs(&layout).expect("defaults should load");
 
-		assert_eq!(configs.agent.r#loop.initial_step_budget, 4);
-		assert_eq!(configs.agent.router.budget_tokens_remaining, 3_000);
+		assert_eq!(configs.agent.r#loop.initial_step_budget, 10);
+		assert_eq!(configs.agent.router.budget_tokens_remaining, 10_000);
 		assert_eq!(configs.tools.fs.default_max_bytes, 4_096);
 		assert_eq!(configs.openrouter.max_latency_ms, 60_000);
 		assert_eq!(configs.telegram.poll_timeout_seconds, 30);
