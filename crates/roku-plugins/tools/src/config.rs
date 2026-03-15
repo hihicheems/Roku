@@ -57,6 +57,8 @@ pub struct ConfiguredTool {
 	pub terminal_output: bool,
 	pub description: String,
 	#[serde(default)]
+	pub selection_hint: String,
+	#[serde(default)]
 	pub tags: Vec<String>,
 	#[serde(default)]
 	pub examples: Vec<String>,
@@ -159,6 +161,7 @@ mod tests {
 name = "general.execute"
 role = "general"
 description = "Answer directly when the request does not require an external tool or skill."
+selection_hint = "Handle plain conversation or last-mile explanation."
 extra = "not-allowed"
 "#,
 		)
@@ -166,5 +169,21 @@ extra = "not-allowed"
 
 		assert!(matches!(error, ToolCatalogConfigError::Parse(_)));
 		assert!(error.to_string().contains("unknown field `extra`"));
+	}
+
+	#[test]
+	fn tool_catalog_allows_missing_selection_hint_for_compatibility() {
+		let config = ToolCatalogConfig::from_toml(
+			r#"
+[[tools]]
+name = "general.execute"
+role = "general"
+description = "Answer directly when the request does not require an external tool or skill."
+"#,
+		)
+		.expect("missing selection_hint should fall back to description");
+
+		assert_eq!(config.tools.len(), 1);
+		assert!(config.tools[0].selection_hint.is_empty());
 	}
 }

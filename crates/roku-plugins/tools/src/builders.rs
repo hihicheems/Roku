@@ -1777,12 +1777,14 @@ fn configured_tool_descriptor(
 }
 
 fn tool_catalog_descriptor(tool: &ConfiguredTool) -> CatalogDescriptor {
+	let selection_hint = configured_selection_hint(tool);
 	CatalogDescriptor {
 		selector: ResourceSelector::tool(&tool.name),
 		kind: ResourceKind::Tool,
 		name: tool.name.clone(),
 		role: Some(tool.role.as_str().to_string()),
 		description: tool.description.clone(),
+		selection_hint: selection_hint.clone(),
 		discoverable: tool.discoverable,
 		tags: tool.tags.clone(),
 		examples: tool.examples.clone(),
@@ -1790,11 +1792,19 @@ fn tool_catalog_descriptor(tool: &ConfiguredTool) -> CatalogDescriptor {
 		risk: tool.risk,
 		cost: tool.cost.clone(),
 		required_capabilities: tool.required_capabilities.clone(),
-		summary: tool.description.clone(),
+		summary: selection_hint,
 		key_commands: Vec::new(),
 		use_cases: Vec::new(),
 		contract: tool.contract.clone(),
 	}
+}
+
+fn configured_selection_hint(tool: &ConfiguredTool) -> String {
+	let selection_hint = tool.selection_hint.trim();
+	if !selection_hint.is_empty() {
+		return selection_hint.to_string();
+	}
+	tool.description.trim().to_string()
 }
 
 fn configured_catalog_input_schema(tool: &ConfiguredTool) -> Vec<String> {

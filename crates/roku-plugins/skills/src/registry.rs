@@ -1016,12 +1016,22 @@ fn build_skill_catalog_descriptor(
 	{
 		examples.push(display_name.trim().to_string());
 	}
-	if let Some(short_description) = short_description
+	if let Some(short_description) = short_description.as_deref()
 		&& !short_description.trim().is_empty()
 	{
 		examples.push(short_description.trim().to_string());
 	}
 	examples.truncate(3);
+	let selection_hint = short_description
+		.as_deref()
+		.map(str::trim)
+		.filter(|value| !value.is_empty())
+		.map(str::to_string)
+		.or_else(|| {
+			let trimmed_summary = summary.trim();
+			(!trimmed_summary.is_empty()).then(|| trimmed_summary.to_string())
+		})
+		.unwrap_or_else(|| record.descriptor.description.trim().to_string());
 
 	Ok(CatalogDescriptor {
 		selector: roku_common_types::ResourceSelector::skill(record.descriptor.name.clone()),
@@ -1030,6 +1040,7 @@ fn build_skill_catalog_descriptor(
 		role: None,
 		discoverable: true,
 		description: record.descriptor.description.clone(),
+		selection_hint,
 		tags,
 		examples,
 		input_schema: Vec::new(),

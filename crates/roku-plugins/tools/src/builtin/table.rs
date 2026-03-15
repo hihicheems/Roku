@@ -35,9 +35,9 @@ use serde_json::{Value, json};
 ///
 /// Used when the core-table plugin is enabled: [`build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities`]
 /// in `builders` extends its tool entries with this list, then builds a [`ResourceCatalog`]. That catalog is
-/// used by the router/classifier for: retrieval over descriptor text (BM25 + embedding), building the LLM
-/// "Current inventory" in the route classifier prompt, resolving a chosen tool name to a [`ResourceSelector`],
-/// and risk/cost for routing decisions. Tool names here must match the tools registered for execution via
+/// used by the router/classifier for: retrieval over compact selection text (BM25 + embedding), building the
+/// route classifier's compact selection inventory, resolving a chosen tool name to a [`ResourceSelector`], and
+/// risk/cost for routing decisions. Tool names here must match the tools registered for execution via
 /// [`register_tools`] in this module.
 #[allow(dead_code)]
 pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
@@ -51,6 +51,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		descriptor_catalog(
 			"table.inspect",
 			"Use this first when you have a concrete table file and need high-level facts such as format, size, sheet count, or rough structure. Do not use it when the user specifically asked for row samples or column types; `table.preview` and `table.schema` are more precise. It returns bounded metadata for choosing the next table step.",
+			"Inspect a known table file for format and high-level structure.",
 			&["table", "inspect", "xlsx", "csv", "tsv"],
 			&["Inspect tmp/test-excel.xlsx."],
 			&["path"],
@@ -59,6 +60,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		descriptor_catalog(
 			"table.list_sheets",
 			"Use this only when the main question is which sheet names exist in a known XLSX workbook. Do not use it for CSV/TSV preview or schema inspection. It returns workbook sheet names, or explains that flat files do not expose named sheets.",
+			"List sheet names in a known XLSX workbook.",
 			&["table", "sheet", "xlsx"],
 			&["List the sheets in tmp/test-excel.xlsx."],
 			&["path"],
@@ -67,6 +69,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		descriptor_catalog(
 			"table.preview",
 			"Use this when the user wants actual sample rows from a known table or sheet. Do not use it just to learn column names or inferred types; `table.schema` is better for that. It returns a bounded row preview suitable for direct display or downstream summarization.",
+			"Preview sample rows from a known table or sheet.",
 			&["table", "preview", "rows", "xlsx", "csv"],
 			&["Preview the first few rows of tmp/test-excel.xlsx."],
 			&["path", "sheet", "rows"],
@@ -75,6 +78,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		descriptor_catalog(
 			"table.schema",
 			"Use this when the user wants column names and inferred types from a known table or sheet. Do not use it for row samples or sheet enumeration. It returns structural schema facts that are better for reasoning about the data than `table.inspect` or `table.preview`.",
+			"Show column names and inferred types for a known table or sheet.",
 			&["table", "schema", "columns", "xlsx", "csv"],
 			&["Show the schema of tmp/test-excel.xlsx."],
 			&["path", "sheet"],
@@ -408,6 +412,7 @@ fn table_tool_contract(name: &str) -> Option<ToolContract> {
 fn descriptor_catalog(
 	name: &str,
 	description: &str,
+	selection_hint: &str,
 	tags: &[&str],
 	examples: &[&str],
 	input_schema: &[&str],
@@ -424,6 +429,7 @@ fn descriptor_catalog(
 		name: name.to_string(),
 		role: Some("core_table".to_string()),
 		description: description.to_string(),
+		selection_hint: selection_hint.to_string(),
 		discoverable: true,
 		tags: tags.iter().map(|value| (*value).to_string()).collect(),
 		examples: examples.iter().map(|value| (*value).to_string()).collect(),
@@ -437,7 +443,7 @@ fn descriptor_catalog(
 			.iter()
 			.map(|value| (*value).to_string())
 			.collect(),
-		summary: description.to_string(),
+		summary: selection_hint.to_string(),
 		key_commands: Vec::new(),
 		use_cases: Vec::new(),
 		contract,
