@@ -41,6 +41,7 @@ impl EchoJsonTool {
 				output_schema: "echo.v1".to_string(),
 				required_capabilities,
 				runtime_constraints,
+				contract: None,
 			},
 		}
 	}
@@ -79,6 +80,7 @@ impl FlakyTool {
 					allowed_read_roots: Vec::new(),
 					allowed_write_roots: Vec::new(),
 				},
+				contract: None,
 			},
 			failures_left: Mutex::new(failures_left),
 		}
@@ -126,6 +128,7 @@ impl SlowTool {
 					allowed_read_roots: Vec::new(),
 					allowed_write_roots: Vec::new(),
 				},
+				contract: None,
 			},
 			sleep_ms,
 		}

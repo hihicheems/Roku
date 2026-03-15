@@ -1636,6 +1636,7 @@ name = "roku-common-types"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1695,6 +1696,7 @@ dependencies = [
 name = "roku-plugin-host"
 version = "0.1.0"
 dependencies = [
+ "roku-common-types",
  "roku-observability",
  "roku-plugin-core",
  "serde",

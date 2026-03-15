@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use roku_common_types::ResourceSelector;
+use roku_common_types::{ResourceSelector, ToolContract};
 use serde::{Deserialize, Serialize};
 
 // Retrieval invariants: these shape the in-process embedding/BM25 scoring model and are not
@@ -87,6 +87,8 @@ pub struct CatalogDescriptor {
 	pub key_commands: Vec<String>,
 	#[serde(default)]
 	pub use_cases: Vec<String>,
+	#[serde(default)]
+	pub contract: Option<ToolContract>,
 }
 
 impl CatalogDescriptor {
@@ -107,6 +109,11 @@ impl CatalogDescriptor {
 			&self.input_schema.join(" "),
 			&self.key_commands.join(" "),
 			&self.use_cases.join(" "),
+			self.contract
+				.as_ref()
+				.map(ToolContract::searchable_text)
+				.as_deref()
+				.unwrap_or_default(),
 		]
 		.join(" ")
 	}
@@ -404,6 +411,7 @@ mod tests {
 			summary: description.to_string(),
 			key_commands: Vec::new(),
 			use_cases: Vec::new(),
+			contract: None,
 		}
 	}
 

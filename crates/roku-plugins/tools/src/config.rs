@@ -15,6 +15,7 @@
 use std::fs;
 use std::path::Path;
 
+use roku_common_types::ToolContract;
 use roku_plugin_catalog::{ResourceCost, ResourceRisk};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -67,6 +68,8 @@ pub struct ConfiguredTool {
 	pub cost: ResourceCost,
 	#[serde(default)]
 	pub required_capabilities: Vec<String>,
+	#[serde(default)]
+	pub contract: Option<ToolContract>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
