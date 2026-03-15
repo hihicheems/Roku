@@ -14,7 +14,7 @@
 
 [runtime.agent.loop]
 # Initial maximum number of tool-loop steps before the runtime forces termination.
-initial_step_budget = 4
+initial_step_budget = 10
 # Initial maximum number of recovery attempts after non-terminal tool failures.
 initial_recovery_budget = 2
 
@@ -22,7 +22,7 @@ initial_recovery_budget = 2
 # Target size of the JSON route-classifier response.
 expected_output_tokens = 220
 # Token budget reserved for the route-classifier prompt plus response.
-budget_tokens_remaining = 3000
+budget_tokens_remaining = 10000
 # Cost budget reserved for a single route-classifier call.
 budget_cost_remaining_usd = 0.1
 # Maximum number of inventory entries exposed to the route classifier in one prompt.
@@ -36,9 +36,9 @@ candidate_description_max_chars = 180
 
 [runtime.agent.next_step]
 # Target size of one generic loop next-step JSON decision.
-expected_output_tokens = 240
+expected_output_tokens = 1200
 # Token budget reserved for one generic loop next-step model call.
-budget_tokens_remaining = 3000
+budget_tokens_remaining = 10000
 # Cost budget reserved for one generic loop next-step model call.
 budget_cost_remaining_usd = 0.05
 
@@ -60,7 +60,7 @@ max_output_bytes = 8192
 
 [runtime.tools.python]
 # Default subprocess timeout for python.run.
-default_timeout_ms = 10000
+default_timeout_ms = 60000
 # Maximum stdout/stderr bytes retained from one python.run invocation.
 max_output_bytes = 8192
 

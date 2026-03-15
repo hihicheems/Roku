@@ -69,17 +69,22 @@ pub fn interpret_observation(
 ) -> InterpretedObservation {
 	let is_multiple_candidates =
 		raw_observation.error_type.as_deref() == Some("multiple_candidates");
+	let needs_more_information =
+		raw_observation.error_type.as_deref() == Some("needs_more_information");
 	let remaining_step_budget = state.remaining_step_budget.saturating_sub(1);
-	let remaining_recovery_budget =
-		if raw_observation.ok || raw_observation.terminal || is_multiple_candidates {
-			state.remaining_recovery_budget
-		} else {
-			state.remaining_recovery_budget.saturating_sub(1)
-		};
+	let remaining_recovery_budget = if raw_observation.ok
+		|| raw_observation.terminal
+		|| is_multiple_candidates
+		|| needs_more_information
+	{
+		state.remaining_recovery_budget
+	} else {
+		state.remaining_recovery_budget.saturating_sub(1)
+	};
 	let terminal = raw_observation.terminal;
 	let budget_exhausted = remaining_step_budget == 0;
 	let recovery_exhausted = !raw_observation.ok && !terminal && remaining_recovery_budget == 0;
-	let should_ask_user = false;
+	let should_ask_user = needs_more_information;
 	let unhandled_failure =
 		!raw_observation.ok && !terminal && !should_ask_user && !is_multiple_candidates;
 	let should_emit_final_answer = raw_observation.ok && terminal;
@@ -275,5 +280,28 @@ mod tests {
 		assert!(!interpreted.recovery_exhausted);
 		assert!(interpreted.continue_allowed);
 		assert!(!interpreted.should_fail);
+	}
+
+	#[test]
+	fn needs_more_information_upgrades_to_ask_user_without_consuming_recovery_budget() {
+		let mut state = loop_state();
+		state.remaining_recovery_budget = 1;
+		let interpreted = interpret_observation(
+			&state,
+			ToolObservation {
+				ok: false,
+				tool_name: "general.execute".to_string(),
+				error_type: Some("needs_more_information".to_string()),
+				terminal: false,
+				data: json!({}),
+				message: "请告诉我你想统计哪个具体目录或文件的代码行数。".to_string(),
+			},
+			None,
+		);
+
+		assert!(!interpreted.continue_allowed);
+		assert!(interpreted.should_ask_user);
+		assert!(!interpreted.should_fail);
+		assert_eq!(interpreted.remaining_recovery_budget, 1);
 	}
 }

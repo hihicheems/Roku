@@ -204,7 +204,7 @@ impl Default for FsToolRuntimeConfig {
 impl Default for PythonToolRuntimeConfig {
 	fn default() -> Self {
 		Self {
-			default_timeout_ms: 10_000,
+			default_timeout_ms: 60_000,
 			max_output_bytes: 8_192,
 		}
 	}

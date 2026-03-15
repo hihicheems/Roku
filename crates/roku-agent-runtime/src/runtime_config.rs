@@ -186,7 +186,7 @@ pub const HARD_MAX_NEXT_STEP_BUDGET_COST_REMAINING_USD: f64 = 10.0;
 impl Default for LoopRuntimeConfig {
 	fn default() -> Self {
 		Self {
-			initial_step_budget: 4,
+			initial_step_budget: 10,
 			initial_recovery_budget: 2,
 		}
 	}
@@ -196,7 +196,7 @@ impl Default for RouteClassifierRuntimeConfig {
 	fn default() -> Self {
 		Self {
 			expected_output_tokens: 220,
-			budget_tokens_remaining: 3_000,
+			budget_tokens_remaining: 10_000,
 			budget_cost_remaining_usd: 0.1,
 			candidate_inventory_limit: 10,
 		}
@@ -215,8 +215,8 @@ impl Default for PromptCompactionRuntimeConfig {
 impl Default for NextStepRuntimeConfig {
 	fn default() -> Self {
 		Self {
-			expected_output_tokens: 240,
-			budget_tokens_remaining: 3_000,
+			expected_output_tokens: 1_200,
+			budget_tokens_remaining: 10_000,
 			budget_cost_remaining_usd: 0.05,
 		}
 	}
@@ -524,10 +524,10 @@ mod tests {
 	#[test]
 	fn defaults_are_stable() {
 		let config = AgentRuntimeConfig::default();
-		assert_eq!(config.r#loop.initial_step_budget, 4);
-		assert_eq!(config.router.budget_tokens_remaining, 3_000);
+		assert_eq!(config.r#loop.initial_step_budget, 10);
+		assert_eq!(config.router.budget_tokens_remaining, 10_000);
 		assert_eq!(config.prompts.visible_tool_hint_max_chars, 180);
-		assert_eq!(config.next_step.expected_output_tokens, 240);
+		assert_eq!(config.next_step.expected_output_tokens, 1_200);
 	}
 
 	#[test]
