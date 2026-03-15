@@ -124,6 +124,25 @@ pub(crate) fn extract_glob_pattern(goal: &str) -> Option<String> {
 		.find(|token| token.contains('*') || token.contains('?') || token.contains('['))
 }
 
+pub(crate) fn goal_requests_web_lookup(goal: &str) -> bool {
+	let lower = goal.trim().to_ascii_lowercase();
+	[
+		"search the web",
+		"search web",
+		"search online",
+		"web search",
+		"look up",
+		"lookup",
+		"google ",
+		"bing ",
+		"网上搜索",
+		"网络搜索",
+		"查一下",
+	]
+	.iter()
+	.any(|marker| lower.contains(marker))
+}
+
 pub(crate) fn extract_sheet_name(goal: &str) -> Option<String> {
 	let lower = goal.to_ascii_lowercase();
 	let marker = "sheet ";
@@ -227,9 +246,41 @@ pub(crate) fn preferred_grounded_table_tool(goal: &str) -> &'static str {
 }
 
 pub(crate) fn extract_web_query(goal: &str) -> Option<String> {
-	let query = goal
-		.trim()
-		.trim_matches(|character: char| matches!(character, '"' | '\'' | '.' | '!' | '?'));
+	if !goal_requests_web_lookup(goal) {
+		return None;
+	}
+	let trimmed = goal.trim();
+	let lower = trimmed.to_ascii_lowercase();
+	for marker in [
+		"search the web for",
+		"search web for",
+		"search online for",
+		"web search for",
+		"look up",
+		"lookup",
+		"google",
+		"bing",
+		"网上搜索",
+		"网络搜索",
+		"查一下",
+	] {
+		if let Some(index) = lower.find(marker) {
+			let suffix = trimmed
+				.get(index + marker.len()..)
+				.unwrap_or_default()
+				.trim()
+				.trim_start_matches([':', '-', ' ']);
+			let query = suffix.trim_matches(|character: char| {
+				matches!(character, '"' | '\'' | '`' | '.' | '!' | '?' | ' ')
+			});
+			if !query.is_empty() {
+				return Some(query.to_string());
+			}
+		}
+	}
+	let query = trimmed.trim_matches(|character: char| {
+		matches!(character, '"' | '\'' | '`' | '.' | '!' | '?' | ' ')
+	});
 	(!query.is_empty()).then(|| query.to_string())
 }
 
@@ -431,12 +482,37 @@ fn looks_like_path_candidate(token: &str) -> bool {
 	}
 	token.contains('/')
 		|| token.contains('\\')
-		|| token.rsplit_once('.').is_some_and(|(_, ext)| {
+		|| token.rsplit_once('.').is_some_and(|(stem, ext)| {
 			!ext.is_empty()
 				&& ext
 					.chars()
 					.all(|character| character.is_ascii_alphanumeric())
+				&& (looks_like_known_file_extension(ext)
+					|| stem.contains('-')
+					|| stem.contains('_')
+					|| stem.chars().any(|character| character.is_ascii_uppercase())
+					|| stem.chars().any(|character| character.is_ascii_digit()))
 		})
+}
+
+fn looks_like_known_file_extension(extension: &str) -> bool {
+	matches!(
+		extension.to_ascii_lowercase().as_str(),
+		"txt"
+			| "md" | "markdown"
+			| "rs" | "toml"
+			| "json" | "yaml"
+			| "yml" | "csv"
+			| "tsv" | "xlsx"
+			| "xls" | "env"
+			| "lock" | "log"
+			| "py" | "js"
+			| "ts" | "jsx"
+			| "tsx" | "html"
+			| "css" | "sh"
+			| "bash" | "zsh"
+			| "sql"
+	)
 }
 
 fn is_standalone_path_candidate(token: &str) -> bool {

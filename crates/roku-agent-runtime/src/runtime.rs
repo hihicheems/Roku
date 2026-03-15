@@ -1549,8 +1549,10 @@ mod tests {
 	use std::collections::VecDeque;
 	use std::env;
 	use std::fs;
-	use std::io::{Cursor, Write};
+	use std::io::{Cursor, Read, Write};
+	use std::net::TcpListener;
 	use std::sync::{Arc, Mutex};
+	use std::thread;
 	use tempfile::Builder;
 
 	use super::*;
@@ -1644,6 +1646,36 @@ mod tests {
 
 	fn cleanup_fixture(path: &str) {
 		let _ = fs::remove_file(path);
+	}
+
+	fn runtime_with_tools_config(tools_runtime_config: ToolsRuntimeConfig) -> GenericAgentRuntime {
+		GenericAgentRuntime::with_skill_registry_tool_config_and_plugin_snapshot(
+			SkillRegistry::disabled(),
+			ToolCatalogConfig::default(),
+			roku_plugin_core::PluginRegistrySnapshot::permissive(),
+			tools_runtime_config,
+		)
+	}
+
+	fn spawn_mock_web_search_server(body: &'static str) -> String {
+		let listener = TcpListener::bind("127.0.0.1:0").expect("mock listener should bind");
+		let address = listener
+			.local_addr()
+			.expect("mock listener should expose an address");
+		thread::spawn(move || {
+			let Ok((mut stream, _)) = listener.accept() else {
+				return;
+			};
+			let mut buffer = [0_u8; 1024];
+			let _ = stream.read(&mut buffer);
+			let response = format!(
+				"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+				body.len(),
+				body
+			);
+			let _ = stream.write_all(response.as_bytes());
+		});
+		format!("http://{address}/search")
 	}
 
 	fn assert_regression_case(
@@ -2558,6 +2590,31 @@ So, I'll output: "星期日""#
 	}
 
 	#[test]
+	fn explicit_web_queries_can_shortlist_web_search() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-web-search".to_string()),
+			session_id: "session-web-search".to_string(),
+			goal: "Search the web for the latest Rust edition.".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+
+		match route {
+			crate::router::RouteDecisionResult::Direct(plan) => {
+				assert_eq!(plan.decision.intent_family, IntentFamily::WebLookup);
+				assert_eq!(
+					plan.decision.candidate_tools.first().map(String::as_str),
+					Some("web.search")
+				);
+			}
+			other => panic!("expected explicit web query to shortlist web.search, got {other:?}"),
+		}
+	}
+
+	#[test]
 	fn classify_route_shortlists_table_preview_for_grounded_table_requests() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
@@ -2690,6 +2747,23 @@ So, I'll output: "星期日""#
 				}],
 			},
 		);
+		let web_tool_explanation_trace =
+			runtime_loop_trace_for_goal(&runtime, "Explain what the tool web.search does.");
+		assert_regression_case(
+			"web-tool-explanation",
+			crate::runtime_loop::RegressionSuiteKind::Confusion,
+			&web_tool_explanation_trace,
+			crate::runtime_loop::RuntimeLoopRegressionExpectation {
+				expected_tool: Some("general.execute".to_string()),
+				forbidden_tools: vec!["web.search".to_string()],
+				expected_terminal_action: Some("final_answer".to_string()),
+				expected_error_type: None,
+				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
+					field: "should_emit_final_answer".to_string(),
+					expected: true,
+				}],
+			},
+		);
 
 		let table_trace = runtime_loop_trace_for_goal(
 			&runtime,
@@ -2797,6 +2871,40 @@ So, I'll output: "星期日""#
 				}],
 			},
 		);
+		let python_non_zero_trace =
+			runtime_loop_trace_for_goal(&runtime, "Run this Python code: `raise SystemExit(3)`");
+		assert_regression_case(
+			"python-non-zero-exit",
+			crate::runtime_loop::RegressionSuiteKind::Boundary,
+			&python_non_zero_trace,
+			crate::runtime_loop::RuntimeLoopRegressionExpectation {
+				expected_tool: Some("python.run".to_string()),
+				forbidden_tools: Vec::new(),
+				expected_terminal_action: Some("fail".to_string()),
+				expected_error_type: Some("non_zero_exit".to_string()),
+				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
+					field: "should_fail".to_string(),
+					expected: true,
+				}],
+			},
+		);
+		let web_missing_endpoint_trace =
+			runtime_loop_trace_for_goal(&runtime, "Search the web for the latest Rust edition.");
+		assert_regression_case(
+			"web-search-endpoint-missing",
+			crate::runtime_loop::RegressionSuiteKind::Boundary,
+			&web_missing_endpoint_trace,
+			crate::runtime_loop::RuntimeLoopRegressionExpectation {
+				expected_tool: Some("web.search".to_string()),
+				forbidden_tools: Vec::new(),
+				expected_terminal_action: Some("fail".to_string()),
+				expected_error_type: Some("endpoint_not_configured".to_string()),
+				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
+					field: "should_fail".to_string(),
+					expected: true,
+				}],
+			},
+		);
 
 		cleanup_fixture(duplicate_a_path.to_string_lossy().as_ref());
 		cleanup_fixture(duplicate_b_path.to_string_lossy().as_ref());
@@ -2814,6 +2922,31 @@ So, I'll output: "星期日""#
 			&command_trace,
 			crate::runtime_loop::RuntimeLoopRegressionExpectation {
 				expected_tool: Some("command.run".to_string()),
+				forbidden_tools: Vec::new(),
+				expected_terminal_action: Some("final_answer".to_string()),
+				expected_error_type: None,
+				interpreted_flags: vec![
+					crate::runtime_loop::InterpretedFlagExpectation {
+						field: "continue_allowed".to_string(),
+						expected: true,
+					},
+					crate::runtime_loop::InterpretedFlagExpectation {
+						field: "should_emit_final_answer".to_string(),
+						expected: false,
+					},
+				],
+			},
+		);
+		let python_trace = runtime_loop_trace_for_goal(
+			&runtime,
+			"Run this Python code: `print(sum(range(1, 6)))`",
+		);
+		assert_regression_case(
+			"python-run-non-terminal-success",
+			crate::runtime_loop::RegressionSuiteKind::OutputInterpretation,
+			&python_trace,
+			crate::runtime_loop::RuntimeLoopRegressionExpectation {
+				expected_tool: Some("python.run".to_string()),
 				forbidden_tools: Vec::new(),
 				expected_terminal_action: Some("final_answer".to_string()),
 				expected_error_type: None,
@@ -2849,6 +2982,37 @@ So, I'll output: "星期日""#
 					crate::runtime_loop::InterpretedFlagExpectation {
 						field: "should_emit_final_answer".to_string(),
 						expected: true,
+					},
+				],
+			},
+		);
+		let endpoint = spawn_mock_web_search_server(
+			r#"{"results":[{"title":"Rust Edition","url":"https://example.test/rust","snippet":"2024 edition"}]}"#,
+		);
+		let mut tools_runtime_config = ToolsRuntimeConfig::default();
+		tools_runtime_config.web.endpoint = Some(endpoint);
+		let web_runtime = runtime_with_tools_config(tools_runtime_config);
+		let web_trace = runtime_loop_trace_for_goal(
+			&web_runtime,
+			"Search the web for the latest Rust edition.",
+		);
+		assert_regression_case(
+			"web-search-non-terminal-success",
+			crate::runtime_loop::RegressionSuiteKind::OutputInterpretation,
+			&web_trace,
+			crate::runtime_loop::RuntimeLoopRegressionExpectation {
+				expected_tool: Some("web.search".to_string()),
+				forbidden_tools: Vec::new(),
+				expected_terminal_action: Some("final_answer".to_string()),
+				expected_error_type: None,
+				interpreted_flags: vec![
+					crate::runtime_loop::InterpretedFlagExpectation {
+						field: "continue_allowed".to_string(),
+						expected: true,
+					},
+					crate::runtime_loop::InterpretedFlagExpectation {
+						field: "should_emit_final_answer".to_string(),
+						expected: false,
 					},
 				],
 			},
