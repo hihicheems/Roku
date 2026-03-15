@@ -23,6 +23,20 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Bash syntax check
+        shell: bash
+        run: |
+          mapfile -t scripts < <(find scripts -type f -name '*.sh' | sort)
+          if [[ ${#scripts[@]} -eq 0 ]]; then
+            echo "No shell scripts found."
+            exit 0
+          fi
+
+          for script in "${scripts[@]}"; do
+            echo "Checking $script"
+            bash -n "$script"
+          done
+
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Check License Header

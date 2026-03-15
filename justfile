@@ -35,6 +35,18 @@ alias t := test
     # This command runs all tests in the workspace using nextest.
     cargo nextest run --locked --workspace
 
+# Build a Docker image for the current local architecture.
+@docker-build image="roku:local":
+    ./scripts/docker-build-current.sh {{image}}
+
+# Validate a multi-architecture Docker build without pushing.
+@docker-build-multiarch image="roku:latest":
+    ./scripts/docker-build-multiarch.sh {{image}}
+
+# Build and push a multi-architecture Docker image.
+@docker-build-multiarch-push image:
+    ./scripts/docker-build-multiarch.sh {{image}} --push
+
 # Start all registered long-running dev services
 @start-all:
     ./scripts/dev-services.sh start-all
