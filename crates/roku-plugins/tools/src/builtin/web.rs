@@ -15,12 +15,17 @@
 use std::env;
 use std::time::Duration;
 
+use crate::contract::{
+	contract_input_schema, contract_tool_schema, input_contract, input_field, output_contract,
+	runtime_contract, selection_contract,
+};
 use crate::runtime_config::{HARD_MAX_WEB_TOP_K, WebToolRuntimeConfig};
 use reqwest::blocking::Client;
+use roku_common_types::{ToolContract, ToolOutputEnvelope, ToolRetryPolicy, ToolSideEffectPolicy};
 use roku_plugin_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
 use roku_plugin_host::{
 	RuntimeConstraints, SandboxProfile, Tool, ToolDescriptor, ToolFailure, ToolInvocationRequest,
-	ToolRuntime, ToolRuntimeError, ToolSchema,
+	ToolRuntime, ToolRuntimeError,
 };
 use serde_json::{Value, json};
 
@@ -30,8 +35,9 @@ pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
 }
 
 pub(crate) fn catalog_descriptors_with_config(
-	_runtime_config: &WebToolRuntimeConfig,
+	runtime_config: &WebToolRuntimeConfig,
 ) -> Vec<CatalogDescriptor> {
+	let contract = web_contract();
 	vec![CatalogDescriptor {
 		selector: roku_common_types::ResourceSelector::tool("web.search"),
 		kind: ResourceKind::Tool,
@@ -44,18 +50,25 @@ pub(crate) fn catalog_descriptors_with_config(
 		discoverable: true,
 		tags: vec!["web".to_string(), "search".to_string(), "lookup".to_string()],
 		examples: vec!["Search the web for the latest Rust edition.".to_string()],
-		input_schema: vec!["query".to_string(), "top_k".to_string()],
+		input_schema: contract_input_schema(
+			Some(&contract),
+			&["query".to_string(), "top_k".to_string()],
+		),
 		risk: ResourceRisk::Low,
 		cost: ResourceCost {
 			estimated_tokens: 0,
-			estimated_latency_ms: 3_000,
+			estimated_latency_ms: runtime_config
+				.endpoint
+				.as_ref()
+				.map(|_| 3_000)
+				.unwrap_or(500),
 		},
-			required_capabilities: vec!["web.search".to_string()],
-			summary: "Run a concrete web query and return structured search results.".to_string(),
-			key_commands: Vec::new(),
-			use_cases: Vec::new(),
-			contract: None,
-		}]
+		required_capabilities: vec!["web.search".to_string()],
+		summary: "Run a concrete web query and return structured search results.".to_string(),
+		key_commands: Vec::new(),
+		use_cases: Vec::new(),
+		contract: Some(contract),
+	}]
 }
 
 #[allow(dead_code)]
@@ -80,33 +93,35 @@ struct WebSearchTool {
 
 impl Tool for WebSearchTool {
 	fn descriptor(&self) -> ToolDescriptor {
+		let runtime_constraints = RuntimeConstraints {
+			timeout_ms: 10_000,
+			max_retries: 0,
+			retry_backoff_ms: 0,
+			sandbox_profile: SandboxProfile::NoIsolation,
+			deterministic_hooks: true,
+			allowed_read_roots: Vec::new(),
+			allowed_write_roots: Vec::new(),
+		};
+		let contract = web_contract();
 		ToolDescriptor {
 			name: "web.search".to_string(),
 			version: "1.0.0".to_string(),
-			input_schema: ToolSchema {
-				required_fields: vec![
-					"task_id".to_string(),
-					"node_id".to_string(),
-					"goal".to_string(),
-					"summary".to_string(),
-					"conversation_history".to_string(),
-					"budget_tokens".to_string(),
-					"time_budget_ms".to_string(),
-					"query".to_string(),
+			input_schema: contract_tool_schema(
+				Some(&contract),
+				&[
+					"task_id",
+					"node_id",
+					"goal",
+					"summary",
+					"conversation_history",
+					"budget_tokens",
+					"time_budget_ms",
 				],
-			},
-			output_schema: "result.v1".to_string(),
+			),
+			output_schema: contract.output.observation_schema.clone(),
 			required_capabilities: vec!["web.search".to_string()],
-			runtime_constraints: RuntimeConstraints {
-				timeout_ms: 10_000,
-				max_retries: 0,
-				retry_backoff_ms: 0,
-				sandbox_profile: SandboxProfile::NoIsolation,
-				deterministic_hooks: true,
-				allowed_read_roots: Vec::new(),
-				allowed_write_roots: Vec::new(),
-			},
-			contract: None,
+			runtime_constraints,
+			contract: Some(contract),
 		}
 	}
 
@@ -124,11 +139,15 @@ impl Tool for WebSearchTool {
 			.and_then(|value| usize::try_from(value).ok())
 			.unwrap_or(self.config.default_top_k)
 			.clamp(1, HARD_MAX_WEB_TOP_K);
-		let endpoint = self
-			.config
-			.endpoint
-			.clone()
-			.ok_or_else(|| ToolFailure::terminal("web search endpoint is not configured"))?;
+		let Some(endpoint) = self.config.endpoint.clone() else {
+			return Ok(error_output(
+				"endpoint_not_configured",
+				"web search endpoint is not configured",
+				query,
+				top_k,
+				None,
+			));
+		};
 		let client = Client::builder()
 			.timeout(Duration::from_millis(8_000))
 			.build()
@@ -136,33 +155,85 @@ impl Tool for WebSearchTool {
 				ToolFailure::terminal(format!("failed to build search client: {error}"))
 			})?;
 		let mut builder = client
-			.get(endpoint)
+			.get(&endpoint)
 			.query(&[("q", query), ("top_k", &top_k.to_string())]);
 		if let Some((name, value)) = optional_auth_header() {
 			builder = builder.header(name, value);
 		}
-		let response = builder.send().map_err(|error| {
-			ToolFailure::terminal(format!("web search backend request failed: {error}"))
-		})?;
+		let response = match builder.send() {
+			Ok(response) => response,
+			Err(error) => {
+				return Ok(error_output(
+					"backend_request_failed",
+					format!("web search backend request failed: {error}"),
+					query,
+					top_k,
+					Some(json!({ "endpoint": endpoint })),
+				));
+			}
+		};
 		let status = response.status();
 		if !status.is_success() {
-			return Err(ToolFailure::terminal(format!(
-				"web search backend returned http {}",
-				status.as_u16()
-			)));
+			return Ok(error_output(
+				"backend_http_error",
+				format!("web search backend returned http {}", status.as_u16()),
+				query,
+				top_k,
+				Some(json!({
+					"endpoint": endpoint,
+					"http_status": status.as_u16(),
+				})),
+			));
 		}
-		let payload = response.json::<Value>().map_err(|error| {
-			ToolFailure::terminal(format!("web search backend returned invalid json: {error}"))
-		})?;
+		let payload = match response.json::<Value>() {
+			Ok(payload) => payload,
+			Err(error) => {
+				return Ok(error_output(
+					"backend_invalid_json",
+					format!("web search backend returned invalid json: {error}"),
+					query,
+					top_k,
+					Some(json!({ "endpoint": endpoint })),
+				));
+			}
+		};
 		let results = parse_results(&payload, top_k);
 		let message = render_result_message(query, &results);
-		Ok(json!({
-			"message": message,
-			"query": query,
-			"results": results,
-			"top_k": top_k,
-		}))
+		Ok(ToolOutputEnvelope::new(
+			true,
+			Option::<String>::None,
+			false,
+			message,
+			json!({
+				"query": query,
+				"results": results,
+				"top_k": top_k,
+				"endpoint": endpoint,
+			}),
+		)
+		.into_value())
 	}
+}
+
+fn error_output(
+	error_type: &str,
+	message: impl Into<String>,
+	query: &str,
+	top_k: usize,
+	extra: Option<Value>,
+) -> Value {
+	let mut data = json!({
+		"query": query,
+		"top_k": top_k,
+	});
+	if let Some(extra) = extra
+		&& let Some(object) = extra.as_object()
+	{
+		for (key, value) in object {
+			data[key] = value.clone();
+		}
+	}
+	ToolOutputEnvelope::new(false, Some(error_type), true, message, data).into_value()
 }
 
 fn optional_auth_header() -> Option<(String, String)> {
@@ -230,4 +301,170 @@ fn render_result_message(query: &str, results: &[Value]) -> String {
 		})
 		.collect::<Vec<_>>();
 	format!("Top web results for `{query}`:\n{}", lines.join("\n"))
+}
+
+fn web_contract() -> ToolContract {
+	let runtime_constraints = RuntimeConstraints {
+		timeout_ms: 10_000,
+		max_retries: 0,
+		retry_backoff_ms: 0,
+		sandbox_profile: SandboxProfile::NoIsolation,
+		deterministic_hooks: true,
+		allowed_read_roots: Vec::new(),
+		allowed_write_roots: Vec::new(),
+	};
+	ToolContract {
+		selection: selection_contract(
+			&[
+				"Use when the user asks for a concrete web lookup and a fresh external search query is available.",
+				"Best for gathering current external search results that will be synthesized later in the loop.",
+			],
+			&[
+				"Do not use for local filesystem, table, or Python execution tasks.",
+				"Do not use for vague research planning without a concrete search query.",
+			],
+			&[
+				"Commonly confused with general.execute for knowledge questions that do not actually require fresh web results.",
+				"Commonly confused with fs.find when the word `search` refers to workspace files rather than the public web.",
+			],
+		),
+		input: input_contract(
+			vec![
+				input_field(
+					"query",
+					true,
+					"A concrete external search query to send to the configured backend.",
+					&["Reject when the request does not contain a concrete search query."],
+				),
+				input_field(
+					"top_k",
+					false,
+					"Optional result count capped by the configured web.search maximum.",
+					&["Reject when zero or larger than the hard maximum result count."],
+				),
+			],
+			&["A web search backend endpoint must be configured before execution."],
+		),
+		output: output_contract(
+			"Returns a bounded set of structured web results with title, url, snippet, query, and top_k.",
+			"No-result searches still return ok=true with an explicit message saying that no results were returned.",
+			&[
+				"Missing endpoint configuration, backend request failures, HTTP errors, and invalid JSON all surface as explicit error_type values.",
+			],
+			true,
+			false,
+		),
+		runtime: runtime_contract(
+			&runtime_constraints,
+			ToolSideEffectPolicy::ExternalMutation,
+			ToolRetryPolicy::Never,
+		),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::io::{Read, Write};
+	use std::net::TcpListener;
+	use std::thread;
+
+	use super::*;
+	use roku_common_types::ToolOutputEnvelope;
+
+	fn invocation_request(input: Value) -> ToolInvocationRequest {
+		ToolInvocationRequest {
+			invocation_key: "test-web-search".to_string(),
+			attempt: 1,
+			input,
+			sandbox_profile: SandboxProfile::NoIsolation,
+			attachments: Vec::new(),
+			allowed_read_roots: Vec::new(),
+			allowed_write_roots: Vec::new(),
+		}
+	}
+
+	fn spawn_mock_search_server(body: &'static str) -> String {
+		let listener = TcpListener::bind("127.0.0.1:0").expect("mock listener should bind");
+		let address = listener
+			.local_addr()
+			.expect("mock listener should expose an address");
+		thread::spawn(move || {
+			let Ok((mut stream, _)) = listener.accept() else {
+				return;
+			};
+			let mut buffer = [0_u8; 1024];
+			let _ = stream.read(&mut buffer);
+			let response = format!(
+				"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+				body.len(),
+				body
+			);
+			let _ = stream.write_all(response.as_bytes());
+		});
+		format!("http://{address}/search")
+	}
+
+	#[test]
+	fn descriptor_exposes_unified_contract() {
+		let descriptor = WebSearchTool {
+			config: WebToolRuntimeConfig::default(),
+		}
+		.descriptor();
+
+		assert_eq!(descriptor.output_schema, "tool_observation.v1");
+		assert!(descriptor.contract.is_some());
+	}
+
+	#[test]
+	fn missing_endpoint_returns_terminal_envelope() {
+		let tool = WebSearchTool {
+			config: WebToolRuntimeConfig::default(),
+		};
+		let output = tool
+			.invoke(invocation_request(json!({
+				"query": "latest Rust edition",
+			})))
+			.expect("web.search should return a structured observation");
+		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
+			.expect("web.search should emit ToolOutputEnvelope");
+
+		assert!(!envelope.ok);
+		assert_eq!(
+			envelope.error_type.as_deref(),
+			Some("endpoint_not_configured")
+		);
+		assert!(envelope.terminal);
+	}
+
+	#[test]
+	fn successful_search_returns_structured_results() {
+		let endpoint = spawn_mock_search_server(
+			r#"{"results":[{"title":"Rust Edition","url":"https://example.test/rust","snippet":"2024 edition"}]}"#,
+		);
+		let tool = WebSearchTool {
+			config: WebToolRuntimeConfig {
+				endpoint: Some(endpoint),
+				default_top_k: 5,
+			},
+		};
+		let output = tool
+			.invoke(invocation_request(json!({
+				"query": "latest Rust edition",
+				"top_k": 3,
+			})))
+			.expect("web.search success should return a structured observation");
+		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
+			.expect("web.search success should emit ToolOutputEnvelope");
+
+		assert!(envelope.ok);
+		assert!(!envelope.terminal);
+		assert_eq!(
+			envelope
+				.data
+				.get("results")
+				.and_then(Value::as_array)
+				.map(Vec::len),
+			Some(1)
+		);
+	}
 }
