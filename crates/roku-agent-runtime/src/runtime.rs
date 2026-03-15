@@ -835,8 +835,8 @@ impl GenericAgentRuntime {
 						(
 							tool_name.clone(),
 							VisibleToolHint {
-								description: compact_tool_hint(
-									&entry.description,
+								selection_hint: compact_selection_hint(
+									entry.effective_selection_hint(),
 									self.agent_runtime_config
 										.prompts
 										.visible_tool_hint_max_chars,
@@ -1471,8 +1471,8 @@ fn append_enabled_tool_names<'a>(
 	}
 }
 
-fn compact_tool_hint(description: &str, max_chars: usize) -> String {
-	let trimmed = description.trim();
+fn compact_selection_hint(selection_hint: &str, max_chars: usize) -> String {
+	let trimmed = selection_hint.trim();
 	if trimmed.chars().count() <= max_chars {
 		return trimmed.to_string();
 	}
@@ -2975,13 +2975,13 @@ So, I'll output: "星期日""#
 			.visible_tool_hints
 			.get("fs.glob")
 			.expect("fs.glob hint should be present");
-		assert!(glob_hint.description.contains("Cargo.toml"));
+		assert!(glob_hint.selection_hint.contains("glob pattern"));
 		assert!(
 			glob_hint
 				.required_argument_keys
 				.contains(&"pattern".to_string())
 		);
-		assert!(glob_hint.description.chars().count() <= 180);
+		assert!(glob_hint.selection_hint.chars().count() <= 180);
 	}
 
 	#[test]

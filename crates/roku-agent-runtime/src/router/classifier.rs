@@ -609,20 +609,11 @@ fn llm_candidates(
 				"selector": entry.selector.display_key(),
 				"kind": format!("{:?}", entry.kind),
 				"name": entry.name,
-				"description": compact_candidate_text(
-					&entry.description,
+				"selection_hint": compact_selection_hint_text(
+					entry.effective_selection_hint(),
 					config.prompts.candidate_description_max_chars,
 				),
-				"example": entry
-					.examples
-					.first()
-					.map(|example| {
-						compact_candidate_text(
-							example,
-							config.prompts.candidate_example_max_chars,
-						)
-					}),
-				"input_schema": entry.input_schema,
+				"required_arguments": tool_required_argument_keys(&entry.name),
 			})
 		})
 		.collect::<Vec<_>>();
@@ -630,7 +621,7 @@ fn llm_candidates(
 	entries
 }
 
-fn compact_candidate_text(value: &str, max_chars: usize) -> String {
+fn compact_selection_hint_text(value: &str, max_chars: usize) -> String {
 	let trimmed = value.trim();
 	if trimmed.chars().count() <= max_chars {
 		return trimmed.to_string();
@@ -657,8 +648,8 @@ fn route_classifier_prompt(request: &RequestEnvelope, candidates: &[serde_json::
 }}
 
 Rules:
-- Use only candidate tool names from the provided inventory if you name tools.
-- Base the decision on the current user goal and the current inventory. Do not inherit intent from prior conversation turns unless the current goal explicitly restates it.
+- Use only candidate tool names from the provided selection inventory if you name tools.
+- Base the decision on the current user goal and the current selection inventory. Do not inherit intent from prior conversation turns unless the current goal explicitly restates it.
 - Use `chat` for greetings or direct assistant conversation.
 - Use `filesystem_read`, `table_read`, `web_lookup`, or `code_exec` when the intent clearly asks for those families even if no tool is available yet.
 - Use `multi_step` when the request obviously needs a planning-heavy workflow.
@@ -670,7 +661,7 @@ Rules:
 User goal:
 {goal}
 
-Current inventory:
+Current selection inventory:
 {candidates}"#,
 		goal = request.goal,
 		candidates = serde_json::to_string_pretty(candidates).unwrap_or_default(),
@@ -1165,7 +1156,6 @@ fn skill_descriptor_is_executable(descriptor: &CatalogDescriptor) -> bool {
 		|| descriptor
 			.key_commands
 			.iter()
-			.chain(descriptor.examples.iter())
 			.any(|value| looks_like_script_reference(value))
 }
 
@@ -1376,5 +1366,84 @@ fn resource_risk(descriptor: &CatalogDescriptor) -> RouteRisk {
 		roku_plugin_catalog::ResourceRisk::Low => RouteRisk::Low,
 		roku_plugin_catalog::ResourceRisk::Medium => RouteRisk::Medium,
 		roku_plugin_catalog::ResourceRisk::High => RouteRisk::High,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use roku_plugin_catalog::{ResourceCost, ResourceRisk};
+
+	fn tool_descriptor(name: &str) -> CatalogDescriptor {
+		CatalogDescriptor {
+			selector: ResourceSelector::tool(name),
+			kind: ResourceKind::Tool,
+			name: name.to_string(),
+			role: Some("test".to_string()),
+			description: "Canonical descriptor that should not be exposed in the route inventory."
+				.to_string(),
+			selection_hint: "Compact selection hint.".to_string(),
+			discoverable: true,
+			tags: vec!["test".to_string()],
+			examples: vec!["Cold-path example".to_string()],
+			input_schema: vec!["query".to_string()],
+			risk: ResourceRisk::Low,
+			cost: ResourceCost::default(),
+			required_capabilities: Vec::new(),
+			summary: "Compact selection hint.".to_string(),
+			key_commands: Vec::new(),
+			use_cases: Vec::new(),
+			contract: None,
+		}
+	}
+
+	#[test]
+	fn llm_candidates_emit_compact_selection_inventory_without_examples() {
+		let catalog = ResourceCatalog::new(vec![tool_descriptor("web.search")]);
+		let candidates = llm_candidates(&catalog, &AgentRuntimeConfig::default());
+		let candidate = candidates
+			.first()
+			.expect("selection inventory should include one candidate");
+
+		assert_eq!(
+			candidate
+				.get("selection_hint")
+				.and_then(|value| value.as_str()),
+			Some("Compact selection hint.")
+		);
+		assert!(candidate.get("description").is_none());
+		assert!(candidate.get("example").is_none());
+		assert_eq!(
+			candidate
+				.get("required_arguments")
+				.and_then(|value| value.as_array())
+				.expect("required arguments should serialize"),
+			&vec![serde_json::Value::String("query".to_string())]
+		);
+	}
+
+	#[test]
+	fn executable_skill_detection_ignores_examples_only_signal() {
+		let descriptor = CatalogDescriptor {
+			selector: ResourceSelector::skill("skill-creator"),
+			kind: ResourceKind::Skill,
+			name: "skill-creator".to_string(),
+			role: None,
+			description: "Create skills".to_string(),
+			selection_hint: "Create skills".to_string(),
+			discoverable: true,
+			tags: Vec::new(),
+			examples: vec!["./scripts/run.sh".to_string()],
+			input_schema: Vec::new(),
+			risk: ResourceRisk::Low,
+			cost: ResourceCost::default(),
+			required_capabilities: Vec::new(),
+			summary: "Create skills".to_string(),
+			key_commands: Vec::new(),
+			use_cases: Vec::new(),
+			contract: None,
+		};
+
+		assert!(!skill_descriptor_is_executable(&descriptor));
 	}
 }

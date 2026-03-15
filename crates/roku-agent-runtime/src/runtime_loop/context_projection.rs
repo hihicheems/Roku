@@ -79,11 +79,11 @@ pub struct ContextProjection {
 /// tools without dumping the full registry into every prompt.
 ///
 /// ## Fields
-/// - `description`: Short semantic boundary for when the tool is appropriate.
+/// - `selection_hint`: Short semantic boundary for when the tool is appropriate.
 /// - `required_argument_keys`: Required runtime keys for `call_tool`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VisibleToolHint {
-	pub description: String,
+	pub selection_hint: String,
 	pub required_argument_keys: Vec<String>,
 }
 
