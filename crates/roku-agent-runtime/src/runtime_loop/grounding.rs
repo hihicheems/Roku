@@ -128,8 +128,26 @@ pub(crate) fn extract_explicit_path_candidates(goal: &str) -> Vec<String> {
 	paths
 }
 
+pub(crate) fn extract_concrete_path_candidates(goal: &str) -> Vec<String> {
+	extract_explicit_path_candidates(goal)
+		.into_iter()
+		.filter(|path| is_concrete_path_candidate(path))
+		.collect()
+}
+
 pub(crate) fn extract_explicit_table_path(goal: &str) -> Option<String> {
 	extract_explicit_path_candidates(goal)
+		.into_iter()
+		.find(|path| {
+			let normalized = path.to_ascii_lowercase();
+			normalized.ends_with(".csv")
+				|| normalized.ends_with(".tsv")
+				|| normalized.ends_with(".xlsx")
+		})
+}
+
+pub(crate) fn extract_concrete_table_path(goal: &str) -> Option<String> {
+	extract_concrete_path_candidates(goal)
 		.into_iter()
 		.find(|path| {
 			let normalized = path.to_ascii_lowercase();
@@ -458,6 +476,21 @@ fn is_standalone_path_candidate(token: &str) -> bool {
 	!token.is_empty()
 		&& token.chars().all(is_path_fragment_char)
 		&& looks_like_path_candidate(token)
+}
+
+fn is_concrete_path_candidate(token: &str) -> bool {
+	token == "."
+		|| token == ".."
+		|| token.contains('/')
+		|| token.contains('\\')
+		|| candidate_exists_in_current_workspace(token)
+}
+
+fn candidate_exists_in_current_workspace(token: &str) -> bool {
+	let Ok(cwd) = std::env::current_dir() else {
+		return false;
+	};
+	cwd.join(token).exists()
 }
 
 fn embedded_path_fragments(token: &str, workspace_entries: &[String]) -> Vec<String> {

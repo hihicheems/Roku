@@ -104,6 +104,8 @@ use crate::router::{
 };
 use crate::runtime_loop::{
 	explanatory_python_code_request, explanatory_shell_command_request,
+	extract_concrete_path_candidates as shared_extract_concrete_path_candidates,
+	extract_concrete_table_path as shared_extract_concrete_table_path,
 	extract_explicit_path_candidates as shared_extract_explicit_path_candidates,
 	extract_explicit_shell_command as shared_extract_explicit_shell_command,
 	extract_explicit_table_path, extract_glob_pattern as shared_extract_glob_pattern,
@@ -441,7 +443,8 @@ fn classify_contract_level_grounded_hint(
 	if extract_explicit_table_path(&request.goal).is_some()
 		&& has_enabled_tool_with_prefix(context.catalog, "table.")
 	{
-		if let Some(tool_name) = explicit_table_action_tool(&request.goal)
+		if extract_concrete_table_path(&request.goal).is_some()
+			&& let Some(tool_name) = explicit_table_action_tool(&request.goal)
 			&& tool_selector(context.catalog, tool_name).is_some()
 		{
 			let decision = RouteDecision::new(
@@ -480,7 +483,8 @@ fn classify_contract_level_grounded_hint(
 	if !extract_explicit_path_candidates(&request.goal).is_empty()
 		&& has_enabled_tool_with_prefix(context.catalog, "fs.")
 	{
-		if let Some(tool_name) = explicit_filesystem_action_tool(&request.goal)
+		if !extract_concrete_path_candidates(&request.goal).is_empty()
+			&& let Some(tool_name) = explicit_filesystem_action_tool(&request.goal)
 			&& tool_selector(context.catalog, tool_name).is_some()
 		{
 			let decision = RouteDecision::new(
@@ -551,12 +555,13 @@ fn coarse_intent_hint_for_tool(tool_name: &str) -> IntentFamily {
 
 fn explicit_tool_hint_is_grounded(tool_name: &str, goal: &str) -> bool {
 	match tool_name {
-		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" | "fs.find" => {
-			!extract_explicit_path_candidates(goal).is_empty()
+		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => {
+			!extract_concrete_path_candidates(goal).is_empty()
 		}
+		"fs.find" => !extract_explicit_path_candidates(goal).is_empty(),
 		"fs.glob" => extract_glob_pattern(goal).is_some(),
 		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
-			extract_explicit_table_path(goal).is_some()
+			extract_concrete_table_path(goal).is_some()
 		}
 		"web.search" => goal_requests_web_lookup(goal) && extract_web_query(goal).is_some(),
 		"command.run" => grounded_shell_command_allows_execution(goal),
@@ -955,35 +960,35 @@ fn deterministic_match_can_start(tool_name: &str, goal: &str) -> bool {
 				&& explicit_filesystem_action_tool(goal) == Some("fs.find")
 		}
 		"fs.exists" => {
-			!extract_explicit_path_candidates(goal).is_empty()
+			!extract_concrete_path_candidates(goal).is_empty()
 				&& explicit_filesystem_action_tool(goal) == Some("fs.exists")
 		}
 		"fs.inspect" => {
-			!extract_explicit_path_candidates(goal).is_empty()
+			!extract_concrete_path_candidates(goal).is_empty()
 				&& explicit_filesystem_action_tool(goal) == Some("fs.inspect")
 		}
 		"fs.list_dir" => {
-			!extract_explicit_path_candidates(goal).is_empty()
+			!extract_concrete_path_candidates(goal).is_empty()
 				&& explicit_filesystem_action_tool(goal) == Some("fs.list_dir")
 		}
 		"fs.read_text" => {
-			!extract_explicit_path_candidates(goal).is_empty()
+			!extract_concrete_path_candidates(goal).is_empty()
 				&& explicit_filesystem_action_tool(goal) == Some("fs.read_text")
 		}
 		"table.inspect" => {
-			extract_explicit_table_path(goal).is_some()
+			extract_concrete_table_path(goal).is_some()
 				&& explicit_table_action_tool(goal) == Some("table.inspect")
 		}
 		"table.list_sheets" => {
-			extract_explicit_table_path(goal).is_some()
+			extract_concrete_table_path(goal).is_some()
 				&& explicit_table_action_tool(goal) == Some("table.list_sheets")
 		}
 		"table.preview" => {
-			extract_explicit_table_path(goal).is_some()
+			extract_concrete_table_path(goal).is_some()
 				&& explicit_table_action_tool(goal) == Some("table.preview")
 		}
 		"table.schema" => {
-			extract_explicit_table_path(goal).is_some()
+			extract_concrete_table_path(goal).is_some()
 				&& explicit_table_action_tool(goal) == Some("table.schema")
 		}
 		_ => {
@@ -1153,7 +1158,7 @@ fn broad_filesystem_candidate_tools(goal: &str) -> Vec<String> {
 			"fs.inspect".to_string(),
 		];
 	}
-	if !extract_explicit_path_candidates(goal).is_empty() {
+	if !extract_concrete_path_candidates(goal).is_empty() {
 		return vec![
 			"fs.inspect".to_string(),
 			"fs.read_text".to_string(),
@@ -1380,6 +1385,14 @@ fn best_skill_selector(
 
 fn extract_explicit_path_candidates(goal: &str) -> Vec<String> {
 	shared_extract_explicit_path_candidates(goal)
+}
+
+fn extract_concrete_path_candidates(goal: &str) -> Vec<String> {
+	shared_extract_concrete_path_candidates(goal)
+}
+
+fn extract_concrete_table_path(goal: &str) -> Option<String> {
+	shared_extract_concrete_table_path(goal)
 }
 
 fn extract_explicit_shell_command(goal: &str) -> Option<String> {

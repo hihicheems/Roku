@@ -38,6 +38,8 @@ pub(crate) use context_projection::build_context_projection;
 pub use context_projection::{ContextProjection, VisibleToolHint};
 pub(crate) use grounding::explanatory_python_code_request;
 pub(crate) use grounding::explanatory_shell_command_request;
+pub(crate) use grounding::extract_concrete_path_candidates;
+pub(crate) use grounding::extract_concrete_table_path;
 pub(crate) use grounding::extract_explicit_path_candidates;
 pub(crate) use grounding::extract_explicit_shell_command;
 pub(crate) use grounding::extract_explicit_table_path;
