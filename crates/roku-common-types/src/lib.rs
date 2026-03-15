@@ -17,6 +17,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TaskId(pub String);
@@ -500,6 +501,254 @@ impl ResourceSelector {
 			Self::Skill { name } => format!("skill:{name}"),
 		}
 	}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ToolContract {
+	#[serde(default)]
+	pub selection: ToolSelectionContract,
+	#[serde(default)]
+	pub input: ToolInputContract,
+	#[serde(default)]
+	pub output: ToolOutputContract,
+	#[serde(default)]
+	pub runtime: ToolRuntimeContract,
+}
+
+impl ToolContract {
+	pub fn searchable_text(&self) -> String {
+		[
+			self.selection.searchable_text(),
+			self.input.searchable_text(),
+			self.output.searchable_text(),
+			self.runtime.searchable_text(),
+		]
+		.into_iter()
+		.filter(|value| !value.is_empty())
+		.collect::<Vec<_>>()
+		.join(" ")
+	}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ToolSelectionContract {
+	#[serde(default)]
+	pub use_when: Vec<String>,
+	#[serde(default)]
+	pub avoid_when: Vec<String>,
+	#[serde(default)]
+	pub common_confusions: Vec<String>,
+}
+
+impl ToolSelectionContract {
+	pub fn searchable_text(&self) -> String {
+		[
+			self.use_when.join(" "),
+			self.avoid_when.join(" "),
+			self.common_confusions.join(" "),
+		]
+		.into_iter()
+		.filter(|value| !value.is_empty())
+		.collect::<Vec<_>>()
+		.join(" ")
+	}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ToolInputContract {
+	#[serde(default)]
+	pub fields: Vec<ToolInputFieldContract>,
+	#[serde(default)]
+	pub preconditions: Vec<String>,
+}
+
+impl ToolInputContract {
+	pub fn field_names(&self) -> Vec<String> {
+		self.fields
+			.iter()
+			.map(|field| field.name.clone())
+			.collect::<Vec<_>>()
+	}
+
+	pub fn required_field_names(&self) -> Vec<String> {
+		self.fields
+			.iter()
+			.filter(|field| field.required)
+			.map(|field| field.name.clone())
+			.collect::<Vec<_>>()
+	}
+
+	pub fn searchable_text(&self) -> String {
+		let field_text = self
+			.fields
+			.iter()
+			.map(ToolInputFieldContract::searchable_text)
+			.collect::<Vec<_>>()
+			.join(" ");
+		[field_text, self.preconditions.join(" ")]
+			.into_iter()
+			.filter(|value| !value.is_empty())
+			.collect::<Vec<_>>()
+			.join(" ")
+	}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ToolInputFieldContract {
+	pub name: String,
+	#[serde(default)]
+	pub required: bool,
+	pub semantics: String,
+	#[serde(default)]
+	pub invalid_when: Vec<String>,
+}
+
+impl ToolInputFieldContract {
+	pub fn searchable_text(&self) -> String {
+		[
+			self.name.clone(),
+			self.semantics.clone(),
+			self.invalid_when.join(" "),
+		]
+		.into_iter()
+		.filter(|value| !value.is_empty())
+		.collect::<Vec<_>>()
+		.join(" ")
+	}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolOutputContract {
+	#[serde(default = "default_tool_observation_schema")]
+	pub observation_schema: String,
+	pub success_semantics: String,
+	pub empty_result_semantics: String,
+	#[serde(default)]
+	pub error_semantics: Vec<String>,
+	#[serde(default)]
+	pub non_terminal_success: bool,
+	#[serde(default)]
+	pub terminal_success: bool,
+}
+
+impl Default for ToolOutputContract {
+	fn default() -> Self {
+		Self {
+			observation_schema: default_tool_observation_schema(),
+			success_semantics: String::new(),
+			empty_result_semantics: String::new(),
+			error_semantics: Vec::new(),
+			non_terminal_success: false,
+			terminal_success: false,
+		}
+	}
+}
+
+impl ToolOutputContract {
+	pub fn searchable_text(&self) -> String {
+		[
+			self.observation_schema.clone(),
+			self.success_semantics.clone(),
+			self.empty_result_semantics.clone(),
+			self.error_semantics.join(" "),
+		]
+		.into_iter()
+		.filter(|value| !value.is_empty())
+		.collect::<Vec<_>>()
+		.join(" ")
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSideEffectPolicy {
+	#[default]
+	None,
+	ReadOnly,
+	WorkspaceWrite,
+	ExternalMutation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRetryPolicy {
+	#[default]
+	Never,
+	RuntimeMayRetry,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolIsolationProfile {
+	#[default]
+	NoIsolation,
+	ReadOnlyFs,
+	PythonResearch,
+	ContainerRestricted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ToolRuntimeContract {
+	#[serde(default)]
+	pub side_effects: ToolSideEffectPolicy,
+	#[serde(default)]
+	pub retry_policy: ToolRetryPolicy,
+	#[serde(default)]
+	pub timeout_ms: u64,
+	#[serde(default)]
+	pub isolation_profile: ToolIsolationProfile,
+}
+
+impl ToolRuntimeContract {
+	pub fn searchable_text(&self) -> String {
+		format!(
+			"{:?} {:?} {} {:?}",
+			self.side_effects, self.retry_policy, self.timeout_ms, self.isolation_profile
+		)
+	}
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolOutputEnvelope {
+	pub ok: bool,
+	#[serde(default)]
+	pub error_type: Option<String>,
+	pub terminal: bool,
+	pub message: String,
+	#[serde(default)]
+	pub data: Value,
+}
+
+impl ToolOutputEnvelope {
+	pub fn new(
+		ok: bool,
+		error_type: Option<impl Into<String>>,
+		terminal: bool,
+		message: impl Into<String>,
+		data: Value,
+	) -> Self {
+		Self {
+			ok,
+			error_type: error_type.map(Into::into),
+			terminal,
+			message: message.into(),
+			data,
+		}
+	}
+
+	pub fn into_value(self) -> Value {
+		json!({
+			"ok": self.ok,
+			"error_type": self.error_type,
+			"terminal": self.terminal,
+			"message": self.message,
+			"data": self.data,
+		})
+	}
+}
+
+fn default_tool_observation_schema() -> String {
+	"tool_observation.v1".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

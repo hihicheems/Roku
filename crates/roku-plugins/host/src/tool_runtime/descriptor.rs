@@ -14,6 +14,7 @@
 
 use std::path::PathBuf;
 
+use roku_common_types::ToolContract;
 use serde::{Deserialize, Serialize};
 
 use crate::ToolRuntimeError;
@@ -73,6 +74,8 @@ pub struct ToolDescriptor {
 	pub output_schema: String,
 	pub required_capabilities: Vec<String>,
 	pub runtime_constraints: RuntimeConstraints,
+	#[serde(default)]
+	pub contract: Option<ToolContract>,
 }
 
 impl ToolDescriptor {

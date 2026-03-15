@@ -1039,6 +1039,7 @@ fn build_skill_catalog_descriptor(
 		summary,
 		key_commands,
 		use_cases,
+		contract: None,
 	})
 }
 
