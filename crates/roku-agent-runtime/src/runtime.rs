@@ -2387,7 +2387,7 @@ So, I'll output: "星期日""#
 	}
 
 	#[test]
-	fn classify_route_shortlists_fs_read_text_for_grounded_filesystem_reads() {
+	fn classify_route_starts_fs_read_text_for_grounded_filesystem_reads() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-fs-tool-loop".to_string()),
@@ -2403,17 +2403,14 @@ So, I'll output: "星期日""#
 			crate::router::RouteDecisionResult::Direct(plan) => {
 				assert_eq!(plan.decision.intent_family, IntentFamily::FilesystemRead);
 				assert_eq!(
-					plan.decision.candidate_tools.first().map(String::as_str),
-					Some("fs.read_text")
-				);
-				assert!(
-					plan.decision
-						.candidate_tools
-						.contains(&"fs.find".to_string())
+					plan.decision.candidate_tools,
+					vec!["fs.read_text".to_string()]
 				);
 			}
 			other => {
-				panic!("expected grounded filesystem read to shortlist fs.read_text, got {other:?}")
+				panic!(
+					"expected grounded filesystem read to start with fs.read_text, got {other:?}"
+				)
 			}
 		}
 	}
@@ -2435,19 +2432,72 @@ So, I'll output: "星期日""#
 			crate::router::RouteDecisionResult::Direct(plan) => {
 				assert_eq!(plan.decision.intent_family, IntentFamily::FilesystemRead);
 				assert_eq!(
-					plan.decision.candidate_tools.first().map(String::as_str),
-					Some("fs.read_text")
-				);
-				assert!(
-					plan.decision
-						.candidate_tools
-						.contains(&"fs.find".to_string())
+					plan.decision.candidate_tools,
+					vec!["fs.read_text".to_string()]
 				);
 			}
 			other => {
 				panic!(
 					"expected explicit relative file path read to shortlist fs.read_text, got {other:?}"
 				)
+			}
+		}
+	}
+
+	#[test]
+	fn classify_route_uses_controlled_family_seed_for_explicit_paths_without_action() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-fs-broad-explicit-path".to_string()),
+			session_id: "session-fs-broad-explicit-path".to_string(),
+			goal: "Cargo.toml 这个文件帮我看看情况。".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+
+		match route {
+			crate::router::RouteDecisionResult::Direct(plan) => {
+				assert_eq!(plan.decision.intent_family, IntentFamily::FilesystemRead);
+				assert_eq!(
+					plan.decision.candidate_tools,
+					vec![
+						"fs.inspect".to_string(),
+						"fs.read_text".to_string(),
+						"fs.list_dir".to_string()
+					]
+				);
+			}
+			other => panic!(
+				"expected explicit path without a concrete action to keep a controlled filesystem starter set, got {other:?}"
+			),
+		}
+	}
+
+	#[test]
+	fn classify_route_starts_fs_inspect_for_explicit_inspect_actions() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-fs-inspect".to_string()),
+			session_id: "session-fs-inspect".to_string(),
+			goal: "Inspect Cargo.toml.".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+
+		match route {
+			crate::router::RouteDecisionResult::Direct(plan) => {
+				assert_eq!(plan.decision.intent_family, IntentFamily::FilesystemRead);
+				assert_eq!(
+					plan.decision.candidate_tools,
+					vec!["fs.inspect".to_string()]
+				);
+			}
+			other => {
+				panic!("expected explicit inspect action to start with fs.inspect, got {other:?}")
 			}
 		}
 	}
@@ -2685,18 +2735,44 @@ So, I'll output: "星期日""#
 			crate::router::RouteDecisionResult::Direct(plan) => {
 				assert_eq!(plan.decision.intent_family, IntentFamily::TableRead);
 				assert_eq!(
-					plan.decision.candidate_tools.first().map(String::as_str),
-					Some("table.preview")
-				);
-				assert!(
-					plan.decision
-						.candidate_tools
-						.contains(&"table.inspect".to_string())
+					plan.decision.candidate_tools,
+					vec!["table.preview".to_string()]
 				);
 			}
 			other => {
 				panic!("expected grounded table request to shortlist table.preview, got {other:?}")
 			}
+		}
+	}
+
+	#[test]
+	fn classify_route_uses_controlled_family_seed_for_explicit_tables_without_action() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-table-broad-explicit-path".to_string()),
+			session_id: "session-table-broad-explicit-path".to_string(),
+			goal: "tmp/example.csv 这个文件帮我处理一下。".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+
+		match route {
+			crate::router::RouteDecisionResult::Direct(plan) => {
+				assert_eq!(plan.decision.intent_family, IntentFamily::TableRead);
+				assert_eq!(
+					plan.decision.candidate_tools,
+					vec![
+						"table.inspect".to_string(),
+						"table.preview".to_string(),
+						"table.list_sheets".to_string()
+					]
+				);
+			}
+			other => panic!(
+				"expected explicit table path without a concrete action to keep a controlled table starter set, got {other:?}"
+			),
 		}
 	}
 
@@ -2716,10 +2792,7 @@ So, I'll output: "星期日""#
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
 				assert_eq!(plan.decision.intent_family, IntentFamily::FilesystemRead);
-				assert_eq!(
-					plan.decision.candidate_tools.first().map(String::as_str),
-					Some("fs.glob")
-				);
+				assert_eq!(plan.decision.candidate_tools, vec!["fs.glob".to_string()]);
 			}
 			other => panic!("expected explicit glob request to shortlist fs.glob, got {other:?}"),
 		}
@@ -2900,7 +2973,7 @@ So, I'll output: "星期日""#
 				expected_terminal_action: Some("ask_user".to_string()),
 				expected_error_type: Some("multiple_candidates".to_string()),
 				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
-					field: "should_ask_user".to_string(),
+					field: "continue_allowed".to_string(),
 					expected: true,
 				}],
 			},

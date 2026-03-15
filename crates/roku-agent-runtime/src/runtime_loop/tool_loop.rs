@@ -1187,6 +1187,35 @@ mod tests {
 	}
 
 	#[test]
+	fn bootstrap_prefers_inspect_for_explicit_paths_without_a_clear_action() {
+		let loop_state = sample_bootstrap_loop_state(
+			"Cargo.toml 这个文件帮我看看情况。",
+			vec!["fs.inspect", "fs.read_text", "fs.list_dir"],
+			vec![
+				"fs.inspect",
+				"fs.read_text",
+				"fs.list_dir",
+				"general.execute",
+			],
+		);
+		let projection = build_context_projection(&loop_state);
+
+		let decision = decide_tool_loop_next_step(
+			&loop_state,
+			&projection,
+			None,
+			None,
+			&NextStepRuntimeConfig::default(),
+		);
+
+		assert_eq!(
+			decision.action,
+			crate::runtime_loop::NextStepAction::CallTool
+		);
+		assert_eq!(decision.tool_name.as_deref(), Some("fs.inspect"));
+	}
+
+	#[test]
 	fn bootstrap_keeps_python_run_for_explicit_execution_requests() {
 		let loop_state = sample_bootstrap_loop_state(
 			"Run this Python code: `print(1)`",
