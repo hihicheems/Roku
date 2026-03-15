@@ -225,4 +225,28 @@ mod tests {
 		assert!(!interpreted.should_emit_final_answer);
 		assert!(interpreted.should_fail);
 	}
+
+	#[test]
+	fn multiple_candidates_stays_recoverable_for_the_live_loop() {
+		let state = loop_state();
+		let interpreted = interpret_observation(
+			&state,
+			ToolObservation {
+				ok: false,
+				tool_name: "fs.find".to_string(),
+				error_type: Some("multiple_candidates".to_string()),
+				terminal: false,
+				data: json!({
+					"matches": ["/workspace/a/runtime.rs", "/workspace/b/runtime.rs"]
+				}),
+				message: "Found 2 matching candidates.".to_string(),
+			},
+			None,
+		);
+
+		assert!(interpreted.continue_allowed);
+		assert!(!interpreted.should_ask_user);
+		assert!(!interpreted.should_emit_final_answer);
+		assert!(!interpreted.should_fail);
+	}
 }
