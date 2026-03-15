@@ -21,6 +21,7 @@ debug
 # Common
 **/*.DS_Store
 logs/
+.codex/
 .env
 .roku/
 run/
