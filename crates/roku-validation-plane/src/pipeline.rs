@@ -59,8 +59,10 @@ impl ValidationPipeline {
 mod tests {
 	use roku_common_types::{
 		Artifact, ArtifactId, ArtifactMetadataEntry, EvidenceItem, NodeId, ResultEnvelope,
-		ResultStatus, TaskId, ValidationEvidenceSet,
+		ResultStatus, RuntimeLoopTrace, RuntimeLoopTraceDecision, RuntimeLoopTraceOutcome,
+		RuntimeLoopTraceStep, TaskId, ValidationEvidenceSet,
 	};
+	use serde_json::json;
 
 	use super::*;
 
@@ -236,6 +238,95 @@ mod tests {
 				.failures
 				.iter()
 				.any(|failure| failure.contains("artifact schema"))
+		);
+	}
+
+	#[test]
+	fn reject_runtime_loop_trace_missing_required_step_layers() {
+		let pipeline = ValidationPipeline::default();
+		let trace = RuntimeLoopTrace {
+			schema_version: RuntimeLoopTrace::schema_version().to_string(),
+			run_id: "loop-1".to_string(),
+			status: "failed".to_string(),
+			step_count: 2,
+			steps: vec![
+				RuntimeLoopTraceStep {
+					step_index: 1,
+					decision: RuntimeLoopTraceDecision {
+						action: "call_tool".to_string(),
+						tool_name: Some("command.run".to_string()),
+						arguments: Some(json!({ "command": "pwd" })),
+						reason: "run explicit command".to_string(),
+						final_message: None,
+					},
+					visible_tools_before: vec![
+						"command.run".to_string(),
+						"general.execute".to_string(),
+					],
+					started_at: "2026-01-01T00:00:00Z".to_string(),
+					finished_at: "2026-01-01T00:00:00Z".to_string(),
+					tool_latency_ms: Some(10),
+					raw_tool_output: None,
+					observation: None,
+					interpreted_observation: None,
+					remaining_step_budget_after: 3,
+					remaining_recovery_budget_after: 2,
+					working_directory_after: "/workspace".to_string(),
+				},
+				RuntimeLoopTraceStep {
+					step_index: 2,
+					decision: RuntimeLoopTraceDecision {
+						action: "fail".to_string(),
+						tool_name: None,
+						arguments: None,
+						reason: "fail after invalid trace".to_string(),
+						final_message: Some("failed".to_string()),
+					},
+					visible_tools_before: vec![
+						"command.run".to_string(),
+						"general.execute".to_string(),
+					],
+					started_at: "2026-01-01T00:00:01Z".to_string(),
+					finished_at: "2026-01-01T00:00:01Z".to_string(),
+					tool_latency_ms: None,
+					raw_tool_output: None,
+					observation: Some(json!({"kind": "final_message", "final_message": "failed"})),
+					interpreted_observation: None,
+					remaining_step_budget_after: 2,
+					remaining_recovery_budget_after: 2,
+					working_directory_after: "/workspace".to_string(),
+				},
+			],
+			final_outcome: RuntimeLoopTraceOutcome {
+				status: "failed".to_string(),
+				terminal_action: Some("fail".to_string()),
+				final_message: Some("failed".to_string()),
+			},
+		};
+		let report = pipeline.validate(&ResultEnvelope {
+			task_id: TaskId("t1".to_string()),
+			node_id: NodeId("n1".to_string()),
+			producer: "runtime-loop".to_string(),
+			schema_version: "result.v1".to_string(),
+			status: ResultStatus::Ok,
+			payload: json!({
+				"message": "failed",
+				"probe_trace": trace,
+			})
+			.to_string(),
+			evidence: vec![EvidenceItem {
+				kind: "runtime".to_string(),
+				value: "runtime-loop".to_string(),
+			}],
+			confidence: 0.9,
+		});
+
+		assert!(!report.accepted);
+		assert!(
+			report
+				.failures
+				.iter()
+				.any(|failure| failure.contains("raw_tool_output"))
 		);
 	}
 }

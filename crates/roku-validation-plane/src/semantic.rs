@@ -14,6 +14,8 @@
 
 use roku_common_types::{ResultEnvelope, ResultStatus};
 
+use crate::trace::run_trace_checks;
+
 pub(crate) fn run_semantic_checks(result: &ResultEnvelope, failures: &mut Vec<String>) {
 	if result.schema_version.starts_with("backtest_report.v1")
 		&& matches!(result.status, ResultStatus::Ok)
@@ -27,6 +29,18 @@ pub(crate) fn run_semantic_checks(result: &ResultEnvelope, failures: &mut Vec<St
 				}
 			}
 			Err(error) => failures.push(format!("backtest payload is not valid json: {error}")),
+		}
+	}
+
+	if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&result.payload)
+		&& let Some(trace_value) = payload.get("probe_trace")
+	{
+		match serde_json::from_value::<roku_common_types::RuntimeLoopTrace>(trace_value.clone()) {
+			Ok(trace) => run_trace_checks(&trace, failures),
+			Err(error) => failures.push(format!(
+				"runtime loop trace payload is not valid {}: {error}",
+				roku_common_types::RuntimeLoopTrace::schema_version()
+			)),
 		}
 	}
 }
