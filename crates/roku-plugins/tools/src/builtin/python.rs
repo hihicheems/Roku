@@ -56,11 +56,12 @@ pub(crate) fn catalog_descriptors_with_config(
 			estimated_tokens: 0,
 			estimated_latency_ms: config.default_timeout_ms,
 		},
-		required_capabilities: vec!["python.run".to_string()],
-		summary: "Run explicit Python code and return grounded subprocess output.".to_string(),
-		key_commands: Vec::new(),
-		use_cases: Vec::new(),
-	}]
+			required_capabilities: vec!["python.run".to_string()],
+			summary: "Run explicit Python code and return grounded subprocess output.".to_string(),
+			key_commands: Vec::new(),
+			use_cases: Vec::new(),
+			contract: None,
+		}]
 }
 
 #[allow(dead_code)]
@@ -111,6 +112,7 @@ impl Tool for PythonRunTool {
 				allowed_read_roots: default_allowed_roots(),
 				allowed_write_roots: Vec::new(),
 			},
+			contract: None,
 		}
 	}
 

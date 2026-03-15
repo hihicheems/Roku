@@ -18,11 +18,16 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::contract::{
+	contract_input_schema, contract_tool_schema, input_contract, input_field, output_contract,
+	runtime_contract, selection_contract,
+};
 use crate::runtime_config::{CommandToolRuntimeConfig, HARD_MAX_TIMEOUT_MS};
+use roku_common_types::{ToolContract, ToolOutputEnvelope, ToolRetryPolicy, ToolSideEffectPolicy};
 use roku_plugin_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
 use roku_plugin_host::{
 	RuntimeConstraints, SandboxProfile, Tool, ToolDescriptor, ToolFailure, ToolInvocationRequest,
-	ToolRuntime, ToolRuntimeError, ToolSchema,
+	ToolRuntime, ToolRuntimeError,
 };
 use serde_json::{Value, json};
 
@@ -34,6 +39,7 @@ pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
 pub(crate) fn catalog_descriptors_with_config(
 	config: &CommandToolRuntimeConfig,
 ) -> Vec<CatalogDescriptor> {
+	let contract = command_contract(config.default_timeout_ms);
 	vec![CatalogDescriptor {
 		selector: roku_common_types::ResourceSelector::tool("command.run"),
 		kind: ResourceKind::Tool,
@@ -52,7 +58,7 @@ pub(crate) fn catalog_descriptors_with_config(
 			"Execute this bash command: ```bash\nrg \"tool\" crates/roku-agent-runtime\n```"
 				.to_string(),
 		],
-		input_schema: vec!["command".to_string(), "cwd".to_string()],
+		input_schema: contract_input_schema(Some(&contract), &["command".to_string(), "cwd".to_string()]),
 		risk: ResourceRisk::Medium,
 		cost: ResourceCost {
 			estimated_tokens: 0,
@@ -63,6 +69,7 @@ pub(crate) fn catalog_descriptors_with_config(
 			.to_string(),
 		key_commands: Vec::new(),
 		use_cases: Vec::new(),
+		contract: Some(contract),
 	}]
 }
 
@@ -88,32 +95,35 @@ struct CommandRunTool {
 
 impl Tool for CommandRunTool {
 	fn descriptor(&self) -> ToolDescriptor {
+		let runtime_constraints = RuntimeConstraints {
+			timeout_ms: self.config.default_timeout_ms,
+			max_retries: 0,
+			retry_backoff_ms: 0,
+			sandbox_profile: SandboxProfile::ReadOnlyFs,
+			deterministic_hooks: false,
+			allowed_read_roots: default_allowed_roots(),
+			allowed_write_roots: Vec::new(),
+		};
+		let contract = command_contract(self.config.default_timeout_ms);
 		ToolDescriptor {
 			name: "command.run".to_string(),
 			version: "1.0.0".to_string(),
-			input_schema: ToolSchema {
-				required_fields: vec![
-					"task_id".to_string(),
-					"node_id".to_string(),
-					"goal".to_string(),
-					"summary".to_string(),
-					"conversation_history".to_string(),
-					"budget_tokens".to_string(),
-					"time_budget_ms".to_string(),
-					"command".to_string(),
+			input_schema: contract_tool_schema(
+				Some(&contract),
+				&[
+					"task_id",
+					"node_id",
+					"goal",
+					"summary",
+					"conversation_history",
+					"budget_tokens",
+					"time_budget_ms",
 				],
-			},
-			output_schema: "result.v1".to_string(),
+			),
+			output_schema: contract.output.observation_schema.clone(),
 			required_capabilities: vec!["command.run".to_string()],
-			runtime_constraints: RuntimeConstraints {
-				timeout_ms: self.config.default_timeout_ms,
-				max_retries: 0,
-				retry_backoff_ms: 0,
-				sandbox_profile: SandboxProfile::ReadOnlyFs,
-				deterministic_hooks: false,
-				allowed_read_roots: default_allowed_roots(),
-				allowed_write_roots: Vec::new(),
-			},
+			runtime_constraints,
+			contract: Some(contract),
 		}
 	}
 
@@ -294,12 +304,12 @@ fn observed_output(
 			exit_code.unwrap_or(-1)
 		)
 	};
-	json!({
-		"ok": ok,
-		"error_type": if ok { Value::Null } else { Value::String("non_zero_exit".to_string()) },
-		"terminal": false,
-		"message": message,
-		"data": {
+	ToolOutputEnvelope::new(
+		ok,
+		(!ok).then_some("non_zero_exit"),
+		false,
+		message,
+		json!({
 			"command": command_text,
 			"argv": argv,
 			"program": argv.first().cloned().unwrap_or_default(),
@@ -309,8 +319,9 @@ fn observed_output(
 			"stdout": stdout,
 			"stderr": stderr,
 			"truncated": truncated,
-		}
-	})
+		}),
+	)
+	.into_value()
 }
 
 fn timeout_output(
@@ -323,12 +334,12 @@ fn timeout_output(
 	truncated: bool,
 	timeout_ms: u64,
 ) -> Value {
-	json!({
-		"ok": false,
-		"error_type": "tool_timeout",
-		"terminal": true,
-		"message": format!("`{command_text}` exceeded its {}ms timeout.", timeout_ms),
-		"data": {
+	ToolOutputEnvelope::new(
+		false,
+		Some("tool_timeout"),
+		true,
+		format!("`{command_text}` exceeded its {}ms timeout.", timeout_ms),
+		json!({
 			"command": command_text,
 			"argv": argv,
 			"program": argv.first().cloned().unwrap_or_default(),
@@ -338,8 +349,9 @@ fn timeout_output(
 			"stderr": stderr,
 			"truncated": truncated,
 			"timeout_ms": timeout_ms,
-		}
-	})
+		}),
+	)
+	.into_value()
 }
 
 fn rejected_output(
@@ -351,18 +363,19 @@ fn rejected_output(
 	message: &str,
 	terminal: bool,
 ) -> Value {
-	json!({
-		"ok": false,
-		"error_type": error_type,
-		"terminal": terminal,
-		"message": message,
-		"data": {
+	ToolOutputEnvelope::new(
+		false,
+		Some(error_type),
+		terminal,
+		message,
+		json!({
 			"command": command_text,
 			"argv": argv.unwrap_or_default(),
 			"cwd": working_directory.display().to_string(),
 			"scope_root": scope_root.display().to_string(),
-		}
-	})
+		}),
+	)
+	.into_value()
 }
 
 fn read_child_output(
@@ -501,6 +514,76 @@ fn default_allowed_roots() -> Vec<PathBuf> {
 		.and_then(|path| path.canonicalize().ok())
 		.map(|path| vec![path])
 		.unwrap_or_default()
+}
+
+fn command_contract(timeout_ms: u64) -> ToolContract {
+	let runtime_constraints = RuntimeConstraints {
+		timeout_ms,
+		max_retries: 0,
+		retry_backoff_ms: 0,
+		sandbox_profile: SandboxProfile::ReadOnlyFs,
+		deterministic_hooks: false,
+		allowed_read_roots: default_allowed_roots(),
+		allowed_write_roots: Vec::new(),
+	};
+	ToolContract {
+		selection: selection_contract(
+			&[
+				"Use when the user already provided one explicit shell command to run.",
+				"Best for bounded read-oriented commands such as pwd, ls, cat, rg, or safe git inspection.",
+			],
+			&[
+				"Do not use for multi-step scripts, chained shell expressions, or commands that modify the workspace.",
+				"Do not use when the user asks to explain a command without executing it.",
+			],
+			&[
+				"Commonly confused with python.run for inline backticks that are shell commands, not Python snippets.",
+				"Commonly confused with fs.* tools when a direct file read or directory listing would answer the question more safely.",
+			],
+		),
+		input: input_contract(
+			vec![
+				input_field(
+					"command",
+					true,
+					"One explicit shell-style command string to execute after shlex-style parsing.",
+					&[
+						"Reject when the string contains shell metacharacters, multiple commands, or unsupported programs.",
+					],
+				),
+				input_field(
+					"cwd",
+					false,
+					"Optional working directory resolved under the allowed read roots.",
+					&["Reject when the directory resolves outside the allowed workspace roots."],
+				),
+				input_field(
+					"timeout_ms",
+					false,
+					"Optional per-call timeout capped by the configured command.run default timeout.",
+					&["Reject when zero or larger than the configured hard timeout ceiling."],
+				),
+			],
+			&[
+				"Execution stays inside read-only workspace roots and a constrained command allowlist.",
+			],
+		),
+		output: output_contract(
+			"Returns grounded subprocess facts such as argv, cwd, exit code, stdout, stderr, truncation, and scope_root.",
+			"Successful commands with no stdout still return ok=true and a message explaining that stdout was empty.",
+			&[
+				"Unsupported commands, unsafe shell syntax, out-of-scope paths, and timeouts surface as explicit error_type values.",
+				"Non-zero exit codes remain non-terminal tool observations and do not by themselves declare task completion.",
+			],
+			true,
+			false,
+		),
+		runtime: runtime_contract(
+			&runtime_constraints,
+			ToolSideEffectPolicy::ReadOnly,
+			ToolRetryPolicy::Never,
+		),
+	}
 }
 
 #[cfg(test)]

@@ -26,7 +26,7 @@ use crate::config::{BuiltinToolRole, ConfiguredTool, ToolCatalogConfig};
 use crate::runtime_config::{ToolWorkerRuntimeConfig, ToolsRuntimeConfig};
 use roku_common_types::{
 	ResourceSelector, SkillExecutionMode, SkillExecutionPlan, SkillExecutionRequest,
-	SkillExecutionResult,
+	SkillExecutionResult, ToolOutputEnvelope,
 };
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_catalog::{CatalogDescriptor, ResourceCatalog, ResourceKind};
@@ -411,12 +411,10 @@ pub(crate) struct SkillInstallTool {
 
 impl SkillInstallTool {
 	fn new(tool: &ConfiguredTool, registry: SkillRegistry) -> Self {
-		let required_capability = tool
-			.required_capabilities
-			.first()
-			.cloned()
-			.unwrap_or_else(|| "skill.ensure_installed".to_string());
-		Self::with_name(&tool.name, &required_capability, registry)
+		Self {
+			descriptor: configured_tool_descriptor(tool, SandboxProfile::ReadOnlyFs, 120_000),
+			registry,
+		}
 	}
 
 	fn legacy(registry: SkillRegistry) -> Self {
@@ -456,23 +454,24 @@ impl Tool for SkillInstallTool {
 			.ensure_installed_from_url(source_url, "runtime")
 			.map_err(|error| ToolFailure::terminal(error.to_string()))?;
 
-		Ok(json!({
-			"ok": true,
-			"terminal": true,
-			"worker_id": "skill-worker",
-			"message": report.message,
-			"task_id": input.task_id,
-			"node_id": input.node_id,
-			"goal": input.goal,
-			"summary": input.summary,
-			"skill_name": report.skill_name,
-			"version": report.version,
-			"source_url": report.source_url,
-			"install_dir": report.install_dir,
-			"installed_files": report.installed_files,
-			"attempt": request.attempt,
-			"invocation_key": request.invocation_key,
-		}))
+		Ok(successful_tool_output(
+			true,
+			report.message.clone(),
+			json!({
+				"worker_id": "skill-worker",
+				"task_id": input.task_id,
+				"node_id": input.node_id,
+				"goal": input.goal,
+				"summary": input.summary,
+				"skill_name": report.skill_name,
+				"version": report.version,
+				"source_url": report.source_url,
+				"install_dir": report.install_dir,
+				"installed_files": report.installed_files,
+				"attempt": request.attempt,
+				"invocation_key": request.invocation_key,
+			}),
+		))
 	}
 }
 
@@ -519,9 +518,8 @@ impl SkillExecuteTool {
 		worker_config: ToolWorkerRuntimeConfig,
 	) -> Self {
 		Self {
-			descriptor: tool_descriptor(
-				&tool.name,
-				tool.required_capabilities.clone(),
+			descriptor: configured_tool_descriptor(
+				tool,
 				SandboxProfile::ContainerRestricted,
 				120_000,
 			),
@@ -580,25 +578,26 @@ impl Tool for SkillExecuteTool {
 			)?
 		};
 
-		Ok(json!({
-			"ok": true,
-			"terminal": true,
-			"worker_id": "skill-execute-worker",
-			"message": result.message,
-			"task_id": input.task_id,
-			"node_id": input.node_id,
-			"goal": input.goal,
-			"summary": input.summary,
-			"selected_skill": result.selected_skill,
-			"execution_mode": result.execution_mode,
-			"success": result.success,
-			"created_paths": result.created_paths,
-			"executed_scripts": result.executed_scripts,
-			"validation_status": result.validation_status,
-			"generated_skill_name": result.generated_skill_name,
-			"attempt": request.attempt,
-			"invocation_key": request.invocation_key,
-		}))
+		Ok(successful_tool_output(
+			true,
+			result.message.clone(),
+			json!({
+				"worker_id": "skill-execute-worker",
+				"task_id": input.task_id,
+				"node_id": input.node_id,
+				"goal": input.goal,
+				"summary": input.summary,
+				"selected_skill": result.selected_skill,
+				"execution_mode": result.execution_mode,
+				"success": result.success,
+				"created_paths": result.created_paths,
+				"executed_scripts": result.executed_scripts,
+				"validation_status": result.validation_status,
+				"generated_skill_name": result.generated_skill_name,
+				"attempt": request.attempt,
+				"invocation_key": request.invocation_key,
+			}),
+		))
 	}
 }
 
@@ -613,15 +612,14 @@ pub(crate) struct WorkerReportTool {
 impl WorkerReportTool {
 	fn from_config(tool: &ConfiguredTool) -> Self {
 		Self {
-			descriptor: tool_descriptor(
-				&tool.name,
-				tool.required_capabilities.clone(),
+			descriptor: configured_tool_descriptor(
+				tool,
 				sandbox_profile_for_role(tool.role),
 				5_000,
 			),
 			worker_id: worker_id_for_role(tool.role),
 			message: completion_message_for_role(tool.role),
-			terminal_output: true,
+			terminal_output: tool.terminal_output,
 		}
 	}
 }
@@ -633,22 +631,23 @@ impl Tool for WorkerReportTool {
 
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
 		let input = request_input(&request)?;
-		Ok(json!({
-			"ok": true,
-			"terminal": self.terminal_output,
-			"worker_id": self.worker_id,
-			"message": self.message,
-			"runtime_mode": "deterministic",
-			"placeholder": true,
-			"task_id": input.task_id,
-			"node_id": input.node_id,
-			"goal": input.goal,
-			"summary": input.summary,
-			"budget_tokens": input.budget_tokens,
-			"time_budget_ms": input.time_budget_ms,
-			"attempt": request.attempt,
-			"invocation_key": request.invocation_key,
-		}))
+		Ok(successful_tool_output(
+			self.terminal_output,
+			self.message,
+			json!({
+				"worker_id": self.worker_id,
+				"runtime_mode": "deterministic",
+				"placeholder": true,
+				"task_id": input.task_id,
+				"node_id": input.node_id,
+				"goal": input.goal,
+				"summary": input.summary,
+				"budget_tokens": input.budget_tokens,
+				"time_budget_ms": input.time_budget_ms,
+				"attempt": request.attempt,
+				"invocation_key": request.invocation_key,
+			}),
+		))
 	}
 }
 
@@ -690,9 +689,8 @@ impl PromptedLlmTool {
 		worker_config: ToolWorkerRuntimeConfig,
 	) -> Self {
 		Self {
-			descriptor: tool_descriptor(
-				&tool.name,
-				tool.required_capabilities.clone(),
+			descriptor: configured_tool_descriptor(
+				tool,
 				sandbox_profile_for_role(tool.role),
 				worker_config.llm_tool_timeout_ms,
 			),
@@ -763,24 +761,25 @@ impl Tool for PromptedLlmTool {
 			None
 		};
 
-		Ok(json!({
-			"ok": true,
-			"terminal": self.terminal_output,
-			"worker_id": self.worker_id,
-			"message": message,
-			"raw_message": raw_message,
-			"task_id": input.task_id,
-			"node_id": input.node_id,
-			"goal": input.goal,
-			"summary": input.summary,
-			"provider": response.provider,
-			"model_id": response.model_id,
-			"prompt_tokens": response.prompt_tokens,
-			"output_tokens": response.output_tokens,
-			"latency_ms": response.latency_ms,
-			"attempt": request.attempt,
-			"invocation_key": request.invocation_key,
-		}))
+		Ok(successful_tool_output(
+			self.terminal_output,
+			message,
+			json!({
+				"worker_id": self.worker_id,
+				"raw_message": raw_message,
+				"task_id": input.task_id,
+				"node_id": input.node_id,
+				"goal": input.goal,
+				"summary": input.summary,
+				"provider": response.provider,
+				"model_id": response.model_id,
+				"prompt_tokens": response.prompt_tokens,
+				"output_tokens": response.output_tokens,
+				"latency_ms": response.latency_ms,
+				"attempt": request.attempt,
+				"invocation_key": request.invocation_key,
+			}),
+		))
 	}
 }
 
@@ -1743,6 +1742,37 @@ fn tool_descriptor(
 			allowed_read_roots: Vec::new(),
 			allowed_write_roots: Vec::new(),
 		},
+		contract: None,
+	}
+}
+
+fn configured_tool_descriptor(
+	tool: &ConfiguredTool,
+	sandbox_profile: SandboxProfile,
+	timeout_ms: u64,
+) -> ToolDescriptor {
+	ToolDescriptor {
+		name: tool.name.clone(),
+		version: "1.0.0".to_string(),
+		input_schema: ToolSchema {
+			required_fields: configured_required_fields(tool),
+		},
+		output_schema: tool
+			.contract
+			.as_ref()
+			.map(|contract| contract.output.observation_schema.clone())
+			.unwrap_or_else(|| "result.v1".to_string()),
+		required_capabilities: tool.required_capabilities.clone(),
+		runtime_constraints: RuntimeConstraints {
+			timeout_ms,
+			max_retries: 0,
+			retry_backoff_ms: 0,
+			sandbox_profile,
+			deterministic_hooks: true,
+			allowed_read_roots: Vec::new(),
+			allowed_write_roots: Vec::new(),
+		},
+		contract: tool.contract.clone(),
 	}
 }
 
@@ -1756,14 +1786,52 @@ fn tool_catalog_descriptor(tool: &ConfiguredTool) -> CatalogDescriptor {
 		discoverable: tool.discoverable,
 		tags: tool.tags.clone(),
 		examples: tool.examples.clone(),
-		input_schema: tool.input_schema.clone(),
+		input_schema: configured_catalog_input_schema(tool),
 		risk: tool.risk,
 		cost: tool.cost.clone(),
 		required_capabilities: tool.required_capabilities.clone(),
 		summary: tool.description.clone(),
 		key_commands: Vec::new(),
 		use_cases: Vec::new(),
+		contract: tool.contract.clone(),
 	}
+}
+
+fn configured_catalog_input_schema(tool: &ConfiguredTool) -> Vec<String> {
+	tool.contract
+		.as_ref()
+		.map(|contract| contract.input.field_names())
+		.filter(|fields| !fields.is_empty())
+		.unwrap_or_else(|| tool.input_schema.clone())
+}
+
+fn configured_required_fields(tool: &ConfiguredTool) -> Vec<String> {
+	let mut required_fields = vec![
+		"task_id".to_string(),
+		"node_id".to_string(),
+		"goal".to_string(),
+		"summary".to_string(),
+		"conversation_history".to_string(),
+		"budget_tokens".to_string(),
+		"time_budget_ms".to_string(),
+	];
+	for field in &tool.input_schema {
+		if !required_fields.iter().any(|existing| existing == field) {
+			required_fields.push(field.clone());
+		}
+	}
+	if let Some(contract) = tool.contract.as_ref() {
+		for field in contract.input.required_field_names() {
+			if !required_fields.iter().any(|existing| existing == &field) {
+				required_fields.push(field);
+			}
+		}
+	}
+	required_fields
+}
+
+fn successful_tool_output(terminal: bool, message: impl Into<String>, data: Value) -> Value {
+	ToolOutputEnvelope::new(true, Option::<String>::None, terminal, message, data).into_value()
 }
 
 fn builtin_tool_is_runtime_enabled(tool: &ConfiguredTool, skill_execution_enabled: bool) -> bool {

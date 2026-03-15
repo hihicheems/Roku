@@ -16,13 +16,18 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::contract::{
+	contract_input_schema, contract_tool_schema, input_contract, input_field, output_contract,
+	runtime_contract, selection_contract,
+};
 use crate::runtime_config::{HARD_MAX_PREVIEW_ROWS, TableToolRuntimeConfig};
 use calamine::{Reader, open_workbook_auto};
 use csv::ReaderBuilder;
+use roku_common_types::{ToolContract, ToolOutputEnvelope, ToolRetryPolicy, ToolSideEffectPolicy};
 use roku_plugin_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
 use roku_plugin_host::{
 	RuntimeConstraints, SandboxProfile, Tool, ToolDescriptor, ToolFailure, ToolInvocationRequest,
-	ToolRuntime, ToolRuntimeError, ToolSchema,
+	ToolRuntime, ToolRuntimeError,
 };
 use serde_json::{Value, json};
 
@@ -173,15 +178,20 @@ impl Tool for TableInspectTool {
 				detail.sheet_names.join(", ")
 			)
 		};
-		Ok(json!({
-			"message": message,
-			"path": resolved.display().to_string(),
-			"format": kind.label(),
-			"size": metadata.len(),
-			"sheet_count": detail.sheet_names.len(),
-			"sheets": detail.sheet_names,
-			"columns": detail.columns,
-		}))
+		Ok(observation_like_output(
+			message,
+			true,
+			None,
+			false,
+			json!({
+				"path": resolved.display().to_string(),
+				"format": kind.label(),
+				"size": metadata.len(),
+				"sheet_count": detail.sheet_names.len(),
+				"sheets": detail.sheet_names,
+				"columns": detail.columns,
+			}),
+		))
 	}
 }
 
@@ -214,11 +224,16 @@ impl Tool for TableListSheetsTool {
 				render_bullet_lines(&sheets)
 			)
 		};
-		Ok(json!({
-			"message": message,
-			"path": resolved.display().to_string(),
-			"sheets": sheets,
-		}))
+		Ok(observation_like_output(
+			message,
+			true,
+			None,
+			false,
+			json!({
+				"path": resolved.display().to_string(),
+				"sheets": sheets,
+			}),
+		))
 	}
 }
 
@@ -246,15 +261,20 @@ impl Tool for TablePreviewTool {
 		let kind = table_kind(&resolved)?;
 		let preview = preview_table(&resolved, kind, sheet, rows)?;
 		let message = render_preview_message(&resolved, &preview);
-		Ok(json!({
-			"message": message,
-			"path": resolved.display().to_string(),
-			"format": kind.label(),
-			"sheet": preview.sheet,
-			"headers": preview.headers,
-			"rows": preview.rows,
-			"truncated": preview.truncated,
-		}))
+		Ok(observation_like_output(
+			message,
+			true,
+			None,
+			false,
+			json!({
+				"path": resolved.display().to_string(),
+				"format": kind.label(),
+				"sheet": preview.sheet,
+				"headers": preview.headers,
+				"rows": preview.rows,
+				"truncated": preview.truncated,
+			}),
+		))
 	}
 }
 
@@ -277,13 +297,18 @@ impl Tool for TableSchemaTool {
 		let preview = preview_table(&resolved, kind, sheet, 20)?;
 		let columns = infer_schema(&preview.headers, &preview.rows);
 		let message = render_schema_message(&resolved, &columns);
-		Ok(json!({
-			"message": message,
-			"path": resolved.display().to_string(),
-			"format": kind.label(),
-			"sheet": preview.sheet,
-			"columns": columns,
-		}))
+		Ok(observation_like_output(
+			message,
+			true,
+			None,
+			false,
+			json!({
+				"path": resolved.display().to_string(),
+				"format": kind.label(),
+				"sheet": preview.sheet,
+				"columns": columns,
+			}),
+		))
 	}
 }
 
@@ -299,6 +324,87 @@ struct TablePreview {
 	truncated: bool,
 }
 
+fn observation_like_output(
+	message: String,
+	ok: bool,
+	error_type: Option<&str>,
+	terminal: bool,
+	data: Value,
+) -> Value {
+	ToolOutputEnvelope::new(ok, error_type, terminal, message, data).into_value()
+}
+
+fn table_tool_contract(name: &str) -> Option<ToolContract> {
+	let runtime_constraints = RuntimeConstraints {
+		timeout_ms: 10_000,
+		max_retries: 0,
+		retry_backoff_ms: 0,
+		sandbox_profile: SandboxProfile::ReadOnlyFs,
+		deterministic_hooks: true,
+		allowed_read_roots: default_allowed_roots(),
+		allowed_write_roots: Vec::new(),
+	};
+	let runtime = runtime_contract(
+		&runtime_constraints,
+		ToolSideEffectPolicy::ReadOnly,
+		ToolRetryPolicy::Never,
+	);
+	match name {
+		"table.preview" => Some(ToolContract {
+			selection: selection_contract(
+				&[
+					"Use when the table path is already grounded and the user needs sample rows from a table or one sheet.",
+				],
+				&[
+					"Do not use when the user only wants column names or inferred types.",
+					"Do not use for sheet enumeration without row samples.",
+				],
+				&[
+					"Commonly confused with table.schema for structure-only questions.",
+					"Commonly confused with table.list_sheets when the user only wants workbook tabs.",
+				],
+			),
+			input: input_contract(
+				vec![
+					input_field(
+						"path",
+						true,
+						"The grounded table file path under the allowed read roots.",
+						&["Reject when the path does not resolve to a supported table file."],
+					),
+					input_field(
+						"sheet",
+						false,
+						"Optional sheet name for XLSX workbooks.",
+						&["Reject when the sheet name does not exist in the workbook."],
+					),
+					input_field(
+						"rows",
+						false,
+						"Optional preview row count clamped by the runtime preview ceiling.",
+						&["Reject when zero or outside the allowed preview range."],
+					),
+				],
+				&[
+					"Preview reads stay inside allowed read roots and remain bounded by a row limit.",
+				],
+			),
+			output: output_contract(
+				"Returns grounded preview rows, headers, selected sheet, and truncation metadata for the requested table.",
+				"An empty table still returns ok=true with headers and zero preview rows.",
+				&[
+					"Unsupported formats, missing sheets, and missing paths surface as explicit failed observations.",
+					"Successful previews are non-terminal observations that can feed later synthesis.",
+				],
+				true,
+				false,
+			),
+			runtime,
+		}),
+		_ => None,
+	}
+}
+
 fn descriptor_catalog(
 	name: &str,
 	description: &str,
@@ -307,6 +413,11 @@ fn descriptor_catalog(
 	input_schema: &[&str],
 	required_capabilities: &[&str],
 ) -> CatalogDescriptor {
+	let contract = table_tool_contract(name);
+	let fallback_input_schema = input_schema
+		.iter()
+		.map(|value| (*value).to_string())
+		.collect::<Vec<_>>();
 	CatalogDescriptor {
 		selector: roku_common_types::ResourceSelector::tool(name),
 		kind: ResourceKind::Tool,
@@ -316,10 +427,7 @@ fn descriptor_catalog(
 		discoverable: true,
 		tags: tags.iter().map(|value| (*value).to_string()).collect(),
 		examples: examples.iter().map(|value| (*value).to_string()).collect(),
-		input_schema: input_schema
-			.iter()
-			.map(|value| (*value).to_string())
-			.collect(),
+		input_schema: contract_input_schema(contract.as_ref(), &fallback_input_schema),
 		risk: ResourceRisk::Low,
 		cost: ResourceCost {
 			estimated_tokens: 0,
@@ -332,6 +440,7 @@ fn descriptor_catalog(
 		summary: description.to_string(),
 		key_commands: Vec::new(),
 		use_cases: Vec::new(),
+		contract,
 	}
 }
 
@@ -340,42 +449,49 @@ fn tool_descriptor(
 	required_fields: &[&str],
 	required_capabilities: &[&str],
 ) -> ToolDescriptor {
+	let runtime_constraints = RuntimeConstraints {
+		timeout_ms: 10_000,
+		max_retries: 0,
+		retry_backoff_ms: 0,
+		sandbox_profile: SandboxProfile::ReadOnlyFs,
+		deterministic_hooks: true,
+		allowed_read_roots: default_allowed_roots(),
+		allowed_write_roots: Vec::new(),
+	};
+	let contract = table_tool_contract(name);
 	ToolDescriptor {
 		name: name.to_string(),
 		version: "1.0.0".to_string(),
-		input_schema: ToolSchema {
-			required_fields: base_required_fields(required_fields),
-		},
-		output_schema: "result.v1".to_string(),
+		input_schema: contract_tool_schema(
+			contract.as_ref(),
+			&base_required_field_names(required_fields),
+		),
+		output_schema: contract
+			.as_ref()
+			.map(|contract| contract.output.observation_schema.clone())
+			.unwrap_or_else(|| "result.v1".to_string()),
 		required_capabilities: required_capabilities
 			.iter()
 			.map(|value| (*value).to_string())
 			.collect(),
-		runtime_constraints: RuntimeConstraints {
-			timeout_ms: 10_000,
-			max_retries: 0,
-			retry_backoff_ms: 0,
-			sandbox_profile: SandboxProfile::ReadOnlyFs,
-			deterministic_hooks: true,
-			allowed_read_roots: default_allowed_roots(),
-			allowed_write_roots: Vec::new(),
-		},
+		runtime_constraints,
+		contract,
 	}
 }
 
-fn base_required_fields(extra: &[&str]) -> Vec<String> {
+fn base_required_field_names<'a>(extra: &'a [&'a str]) -> Vec<&'a str> {
 	let mut fields = vec![
-		"task_id".to_string(),
-		"node_id".to_string(),
-		"goal".to_string(),
-		"summary".to_string(),
-		"conversation_history".to_string(),
-		"budget_tokens".to_string(),
-		"time_budget_ms".to_string(),
+		"task_id",
+		"node_id",
+		"goal",
+		"summary",
+		"conversation_history",
+		"budget_tokens",
+		"time_budget_ms",
 	];
 	for field in extra {
 		if !fields.iter().any(|existing| existing == field) {
-			fields.push((*field).to_string());
+			fields.push(field);
 		}
 	}
 	fields

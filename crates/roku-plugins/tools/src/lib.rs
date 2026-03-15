@@ -17,6 +17,7 @@
 mod builders;
 mod builtin;
 mod config;
+mod contract;
 mod runtime_config;
 
 pub use builders::{

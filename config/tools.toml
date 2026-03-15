@@ -46,6 +46,58 @@ risk = "Low"
 cost = { estimated_tokens = 10000, estimated_latency_ms = 12000 }
 required_capabilities = ["inventory.read"]
 
+[tools.contract.selection]
+use_when = [
+  "The user asks what tools, skills, or capability families are available right now.",
+  "The runtime needs grounded local inventory state instead of a free-form explanation."
+]
+avoid_when = [
+  "The user wants to execute a skill or perform filesystem, table, web, or python work.",
+  "The request is only asking for a conversational explanation that is already proven by prior evidence."
+]
+common_confusions = [
+  "general.execute for free-form explanation after inventory has already been gathered",
+  "skill.execute when the user wants to run an installed skill instead of list capabilities"
+]
+
+[tools.contract.input]
+preconditions = [
+  "The request should be answerable from local runtime inventory without external execution."
+]
+
+[[tools.contract.input.fields]]
+name = "goal"
+required = true
+semantics = "The user-visible inventory question or listing request."
+invalid_when = ["It is empty or unrelated to available tools, skills, or capability families."]
+
+[[tools.contract.input.fields]]
+name = "summary"
+required = true
+semantics = "Short execution hint telling the worker what inventory framing the runtime needs."
+invalid_when = ["It invents tools or capabilities that are not present in local runtime state."]
+
+[[tools.contract.input.fields]]
+name = "conversation_history"
+required = false
+semantics = "Recent user context needed to preserve phrasing or language when presenting inventory."
+invalid_when = ["It is treated as authority over the actual local inventory snapshot."]
+
+[tools.contract.output]
+success_semantics = "Returns a user-facing inventory summary grounded in the current local runtime state."
+empty_result_semantics = "An empty inventory still means the tool succeeded and should say that nothing relevant is currently available."
+error_semantics = [
+  "Provider or runtime failures should surface as tool failures, not as fabricated inventory facts."
+]
+non_terminal_success = false
+terminal_success = true
+
+[tools.contract.runtime]
+side_effects = "none"
+retry_policy = "never"
+timeout_ms = 45000
+isolation_profile = "no_isolation"
+
 [[tools]]
 name = "research.synthesize"
 role = "research"

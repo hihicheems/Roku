@@ -48,11 +48,12 @@ pub(crate) fn catalog_descriptors_with_config(
 			estimated_tokens: 0,
 			estimated_latency_ms: 3_000,
 		},
-		required_capabilities: vec!["web.search".to_string()],
-		summary: "Run a concrete web query and return structured search results.".to_string(),
-		key_commands: Vec::new(),
-		use_cases: Vec::new(),
-	}]
+			required_capabilities: vec!["web.search".to_string()],
+			summary: "Run a concrete web query and return structured search results.".to_string(),
+			key_commands: Vec::new(),
+			use_cases: Vec::new(),
+			contract: None,
+		}]
 }
 
 #[allow(dead_code)]
@@ -103,6 +104,7 @@ impl Tool for WebSearchTool {
 				allowed_read_roots: Vec::new(),
 				allowed_write_roots: Vec::new(),
 			},
+			contract: None,
 		}
 	}
 
