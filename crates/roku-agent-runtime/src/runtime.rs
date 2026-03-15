@@ -2615,6 +2615,58 @@ So, I'll output: "星期日""#
 	}
 
 	#[test]
+	fn incomplete_python_execution_requests_ask_for_code() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-python-missing-code".to_string()),
+			session_id: "session-python-missing-code".to_string(),
+			goal: "Run this Python code.".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+
+		match route {
+			crate::router::RouteDecisionResult::Escalate(plan) => {
+				assert_eq!(plan.action, crate::router::EscalationAction::AskForMoreInfo);
+				assert_eq!(plan.decision.intent_family, IntentFamily::CodeExec);
+				assert_eq!(plan.decision.missing_arguments, vec!["code".to_string()]);
+			}
+			other => {
+				panic!(
+					"expected incomplete Python execution request to ask for code, got {other:?}"
+				)
+			}
+		}
+	}
+
+	#[test]
+	fn incomplete_web_lookup_requests_ask_for_query() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-web-missing-query".to_string()),
+			session_id: "session-web-missing-query".to_string(),
+			goal: "Search the web.".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+
+		match route {
+			crate::router::RouteDecisionResult::Escalate(plan) => {
+				assert_eq!(plan.action, crate::router::EscalationAction::AskForMoreInfo);
+				assert_eq!(plan.decision.intent_family, IntentFamily::WebLookup);
+				assert_eq!(plan.decision.missing_arguments, vec!["query".to_string()]);
+			}
+			other => {
+				panic!("expected incomplete web lookup request to ask for query, got {other:?}")
+			}
+		}
+	}
+
+	#[test]
 	fn classify_route_shortlists_table_preview_for_grounded_table_requests() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
