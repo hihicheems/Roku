@@ -12,6 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Telegram inbound normalization.
+//!
+//! This module is the single transport-facing parser that turns raw Telegram payloads into one of
+//! three runtime-ready interaction kinds:
+//! - ordinary user requests,
+//! - out-of-band control commands,
+//! - approval callback decisions.
+//!
+//! The important boundary here is that slash-command interpretation happens exactly once in this
+//! module. Recognized control commands become `TelegramInteraction::ControlCommand`; all other
+//! slash-prefixed text falls through as ordinary request text. Downstream runner and handler code
+//! must not re-parse or reclassify those messages.
+
 use roku_common_types::{ApprovalDecision, ApprovalId, RequestEnvelope, RequestId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -63,11 +76,14 @@ pub struct TelegramUser {
 
 #[derive(Debug, Clone)]
 pub enum TelegramInteraction {
+	/// A normal natural-language request that should enter the agent/runtime path.
 	Request {
 		chat_id: i64,
 		request: RequestEnvelope,
 	},
+	/// A Telegram-side session control command handled outside the normal agent loop.
 	ControlCommand(TelegramControlCommandRequest),
+	/// An approval callback mapped from Telegram inline keyboard actions.
 	ApprovalDecision(TelegramApprovalAction),
 }
 
@@ -82,13 +98,23 @@ pub struct TelegramApprovalAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TelegramControlCommand {
+	/// Cancel the current chat's pending loop without clearing conversation state.
 	Cancel,
+	/// Clear Telegram session-scoped state for the current chat.
 	Clear,
+	/// Report the current chat's session snapshot.
 	Status,
+	/// Show supported Telegram control commands.
 	Help,
+	/// Show the currently active Telegram session overview.
 	Sessions,
 }
 
+/// Parsed Telegram-side control command.
+///
+/// This is already normalized to the current chat/session boundary, so downstream code should
+/// treat it as a resolved management action instead of trying to infer command semantics from the
+/// original message text again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TelegramControlCommandRequest {
 	pub chat_id: i64,
@@ -119,6 +145,11 @@ pub enum TelegramConnectorError {
 pub struct TelegramConnector;
 
 impl TelegramConnector {
+	/// Normalizes one Telegram update into a single runtime interaction.
+	///
+	/// Control-command detection is intentionally resolved here before request construction so the
+	/// rest of the Telegram pipeline can dispatch on structured variants instead of repeating
+	/// slash-command heuristics.
 	pub fn interaction_from_update(
 		&self,
 		update: TelegramUpdate,
@@ -310,6 +341,11 @@ fn control_command_spec(command: TelegramControlCommand) -> &'static TelegramCon
 		.expect("control command spec should exist")
 }
 
+/// Parses a Telegram slash command once at the transport boundary.
+///
+/// Unknown slash-prefixed text deliberately returns `None` so it can continue through the normal
+/// request path. This helper must stay a thin registry lookup, not a second natural-language
+/// router.
 fn parse_control_command(chat_id: i64, text: &str) -> Option<TelegramControlCommandRequest> {
 	let trimmed = text.trim();
 	let slash_command = trimmed.split_whitespace().next()?;

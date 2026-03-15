@@ -95,6 +95,7 @@ pub trait SessionPreferenceRepository {
 		preferences: SessionPreferences,
 	) -> Result<(), StoreError>;
 	fn load_preferences(&self, session_id: &str) -> Result<Option<SessionPreferences>, StoreError>;
+	/// Deletes one session's preference record without touching other persisted runtime data.
 	fn delete_preferences(&mut self, session_id: &str) -> Result<(), StoreError>;
 }
 
@@ -105,6 +106,7 @@ pub trait ConversationRepository {
 		session_id: &str,
 		limit: usize,
 	) -> Result<Vec<ConversationTurn>, StoreError>;
+	/// Deletes one session's stored conversation turns.
 	fn delete_conversation(&mut self, session_id: &str) -> Result<(), StoreError>;
 }
 

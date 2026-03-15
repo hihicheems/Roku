@@ -12,6 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Telegram polling and dispatch loop.
+//!
+//! This module owns transport concerns: polling updates, normalizing them through the inbound
+//! connector, and dispatching the resulting structured interaction to one handler entry point.
+//! It does not decide business semantics for Telegram commands or request state; that boundary
+//! stays in the handler/runtime layer.
+
 use std::thread;
 use std::time::Duration;
 
@@ -26,9 +33,14 @@ use crate::{
 	TelegramInteraction, TelegramOutboundMessage, TelegramTransportError, TelegramUpdate,
 };
 
+/// Runtime-facing Telegram interaction adapter.
+///
+/// The handler receives already-normalized Telegram interactions. In particular, control commands
+/// arrive as structured management actions and must not be re-parsed from raw text.
 pub trait TelegramInteractionHandler: Send + Sync {
 	fn handle_request(&self, request: RequestEnvelope) -> Result<ResponseEnvelope, RuntimeError>;
 
+	/// Handles an out-of-band Telegram control command such as `/status` or `/clear`.
 	fn handle_control_command(
 		&self,
 		command: crate::TelegramControlCommandRequest,
@@ -41,6 +53,11 @@ pub trait TelegramInteractionHandler: Send + Sync {
 	) -> Result<ResponseEnvelope, RuntimeError>;
 }
 
+/// Long-running Telegram polling runner.
+///
+/// This type is intentionally transport-centric: it polls updates, logs polling health, and
+/// renders outbound responses. It should not accumulate Telegram command semantics or session
+/// state policy.
 pub struct TelegramPollingRunner {
 	connector: TelegramConnector,
 	client: TelegramBotClient,
