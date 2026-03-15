@@ -20,7 +20,6 @@ mod loop_state;
 mod next_step;
 mod observation;
 mod probe_check;
-mod recovery;
 mod regression;
 mod request_intake;
 mod route_classifier;
@@ -55,7 +54,6 @@ pub use loop_state::{LoopState, LoopStatus};
 pub use next_step::{NextStepAction, NextStepDecision, NextStepDecisionSchemaError};
 pub use observation::{StepObservation, ToolObservation};
 pub use probe_check::{ToolProbeCheckReport, check_seed_tool_probe};
-pub use recovery::should_resume_awaiting_user;
 pub use regression::{
 	InterpretedFlagExpectation, RegressionSuiteKind, RuntimeLoopRegressionCaseReport,
 	RuntimeLoopRegressionExpectation, evaluate_runtime_loop_regression_case,

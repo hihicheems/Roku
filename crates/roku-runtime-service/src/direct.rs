@@ -62,12 +62,27 @@ impl RuntimeService {
 			.execute_escalation_action(&task.task_id, request, plan);
 		let response =
 			self.finalize_direct_path(task, execution.node, execution.result, execution.message)?;
-		self.record_runtime_loop_escalation_step(
-			loop_state,
+		if matches!(
 			plan.action,
-			response.status,
-			&response.message,
-		);
+			roku_agent_runtime::EscalationAction::AskForMoreInfo
+		) && !plan.decision.missing_arguments.is_empty()
+		{
+			self.record_runtime_loop_ask_user_payload_step(
+				loop_state,
+				response.status,
+				roku_agent_runtime::AskUserPayload::missing_required_input(
+					response.message.clone(),
+					plan.decision.missing_arguments.clone(),
+				),
+			);
+		} else {
+			self.record_runtime_loop_escalation_step(
+				loop_state,
+				plan.action,
+				response.status,
+				&response.message,
+			);
+		}
 		self.sync_pending_loop(loop_state)?;
 		Ok(response)
 	}

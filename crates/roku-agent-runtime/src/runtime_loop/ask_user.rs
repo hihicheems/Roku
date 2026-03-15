@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use roku_common_types::GeneralExecuteCompletion;
 use serde::{Deserialize, Serialize};
 
 use crate::runtime_loop::{ToolObservation, grounding::reply_selects_candidate};
@@ -24,8 +25,11 @@ use crate::runtime_loop::{ToolObservation, grounding::reply_selects_candidate};
 /// continue the current loop.
 ///
 /// ## Variants
-/// - `AnyNonEmptyReply`: Any non-empty user reply is enough to resume the paused loop.
+/// - `NoAutomaticResume`: The next user reply should be treated as a fresh intake unless a
+///   runtime-owned resume gate explicitly chooses to continue the paused loop.
 /// - `CandidateSelection`: The reply must select one of the presented grounded candidates.
+/// - `MissingRequiredInput`: The loop is paused until the user supplies one or more missing
+///   required input fields for the current request.
 ///
 /// ## Invariants
 /// - This contract only describes resume eligibility for the current pause.
@@ -37,8 +41,9 @@ use crate::runtime_loop::{ToolObservation, grounding::reply_selects_candidate};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AskUserResumeContract {
-	AnyNonEmptyReply,
+	NoAutomaticResume,
 	CandidateSelection { candidates: Vec<String> },
+	MissingRequiredInput { fields: Vec<String> },
 }
 
 /// Optional deterministic resume directive attached to a paused `ask_user` contract.
@@ -91,7 +96,15 @@ impl AskUserPayload {
 	pub fn freeform(final_message: impl Into<String>) -> Self {
 		Self {
 			final_message: final_message.into(),
-			resume_contract: AskUserResumeContract::AnyNonEmptyReply,
+			resume_contract: AskUserResumeContract::NoAutomaticResume,
+			resume_directive: None,
+		}
+	}
+
+	pub fn missing_required_input(final_message: impl Into<String>, fields: Vec<String>) -> Self {
+		Self {
+			final_message: final_message.into(),
+			resume_contract: AskUserResumeContract::MissingRequiredInput { fields },
 			resume_directive: None,
 		}
 	}
@@ -114,21 +127,24 @@ impl AskUserPayload {
 			return false;
 		}
 		match &self.resume_contract {
-			AskUserResumeContract::AnyNonEmptyReply => true,
+			AskUserResumeContract::NoAutomaticResume => false,
 			AskUserResumeContract::CandidateSelection { candidates } => {
 				reply_selects_candidate(trimmed, candidates).is_some()
 			}
+			AskUserResumeContract::MissingRequiredInput { .. } => false,
 		}
 	}
 
 	pub(crate) fn resume_contract_summary(&self) -> String {
 		match &self.resume_contract {
-			AskUserResumeContract::AnyNonEmptyReply => {
-				"Any non-empty user reply may resume the paused loop.".to_string()
-			}
+			AskUserResumeContract::NoAutomaticResume => "The loop is paused for clarification, but the next user message should be treated as a fresh intake unless a runtime-owned resume gate explicitly continues this paused loop.".to_string(),
 			AskUserResumeContract::CandidateSelection { candidates } => format!(
 				"The next user reply must select one of these grounded candidates: {}.",
 				candidates.join(", ")
+			),
+			AskUserResumeContract::MissingRequiredInput { fields } => format!(
+				"The paused loop still needs these required input fields before it may resume: {}.",
+				fields.join(", ")
 			),
 		}
 	}
@@ -138,7 +154,8 @@ impl AskUserPayload {
 			AskUserResumeContract::CandidateSelection { candidates } => {
 				reply_selects_candidate(user_input.trim(), candidates)
 			}
-			AskUserResumeContract::AnyNonEmptyReply => None,
+			AskUserResumeContract::NoAutomaticResume
+			| AskUserResumeContract::MissingRequiredInput { .. } => None,
 		}
 	}
 }
@@ -174,6 +191,17 @@ pub(crate) fn ask_user_from_observation(
 		.unwrap_or_default();
 
 	match observation.error_type.as_deref() {
+		Some("needs_more_information") => {
+			let missing_information = missing_information_fields(observation);
+			if missing_information.is_empty() {
+				AskUserPayload::freeform(observation.message.clone())
+			} else {
+				AskUserPayload::missing_required_input(
+					observation.message.clone(),
+					missing_information,
+				)
+			}
+		}
 		Some("multiple_candidates") => {
 			let final_message = if !goal.is_ascii() {
 				if matches.is_empty() {
@@ -200,6 +228,16 @@ pub(crate) fn ask_user_from_observation(
 		}
 		_ => AskUserPayload::freeform(observation.message.clone()),
 	}
+}
+
+fn missing_information_fields(observation: &ToolObservation) -> Vec<String> {
+	observation
+		.data
+		.get("completion")
+		.cloned()
+		.and_then(|value| serde_json::from_value::<GeneralExecuteCompletion>(value).ok())
+		.map(|completion| completion.missing_information)
+		.unwrap_or_default()
 }
 
 fn resume_directive_for_observation(
@@ -269,5 +307,38 @@ mod tests {
 
 		assert!(payload.can_resume("/workspace/Cargo.toml"));
 		assert!(!payload.can_resume("随便那个"));
+	}
+
+	#[test]
+	fn freeform_payload_does_not_auto_resume() {
+		let payload = AskUserPayload::freeform("请补充更多上下文");
+		assert!(!payload.can_resume("项目里有几行代码？"));
+	}
+
+	#[test]
+	fn needs_more_information_observation_creates_missing_input_contract() {
+		let observation = ToolObservation {
+			ok: false,
+			tool_name: "general.execute".to_string(),
+			error_type: Some("needs_more_information".to_string()),
+			terminal: false,
+			data: json!({
+				"completion": {
+					"final_message": "请提供 project_path。",
+					"completion_kind": "needs_more_information",
+					"evidence_status": "missing_required_input",
+					"missing_information": ["project_path"]
+				}
+			}),
+			message: "请提供 project_path。".to_string(),
+		};
+
+		let payload = ask_user_from_observation("统计代码行数", &observation);
+		assert_eq!(
+			payload.resume_contract,
+			AskUserResumeContract::MissingRequiredInput {
+				fields: vec!["project_path".to_string()]
+			}
+		);
 	}
 }
