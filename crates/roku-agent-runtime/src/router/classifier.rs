@@ -108,8 +108,8 @@ use crate::runtime_loop::{
 	extract_glob_pattern as shared_extract_glob_pattern,
 	extract_path_candidates as shared_extract_path_candidates, extract_skill_source_url,
 	extract_web_query, goal_requests_directory_listing, goal_requests_file_read,
-	goal_requests_filesystem_inspect, ground_tool_arguments, grounded_python_code_allows_execution,
-	grounded_shell_command_allows_execution,
+	goal_requests_filesystem_inspect, goal_requests_web_lookup, ground_tool_arguments,
+	grounded_python_code_allows_execution, grounded_shell_command_allows_execution,
 	preferred_grounded_filesystem_tool as shared_preferred_grounded_filesystem_tool,
 	preferred_grounded_table_tool, tool_required_argument_keys,
 };
@@ -373,6 +373,30 @@ fn classify_contract_level_grounded_hint(
 		));
 	}
 
+	if goal_requests_web_lookup(&request.goal)
+		&& let Some(query) = extract_web_query(&request.goal)
+		&& let Some(selector) = tool_selector(context.catalog, "web.search")
+	{
+		let decision = RouteDecision::new(
+			IntentFamily::WebLookup,
+			0.9,
+			false,
+			RouteRisk::Low,
+			vec!["web.search".to_string()],
+			candidate_plugins_for_tool(context.plugin_snapshot, "web.search"),
+			Vec::new(),
+			"contract-level grounded web lookup provides a non-authoritative `web.search` hint",
+		);
+		let _ = selector;
+		let _ = query;
+		return Some(build_tool_loop_route(
+			context,
+			decision,
+			Some("web.search"),
+			Vec::new(),
+		));
+	}
+
 	if extract_glob_pattern(&request.goal).is_some()
 		&& tool_selector(context.catalog, "fs.glob").is_some()
 	{
@@ -467,7 +491,7 @@ fn explicit_tool_hint_is_grounded(tool_name: &str, goal: &str) -> bool {
 		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
 			extract_table_path(goal).is_some()
 		}
-		"web.search" => extract_web_query(goal).is_some(),
+		"web.search" => goal_requests_web_lookup(goal) && extract_web_query(goal).is_some(),
 		"command.run" => grounded_shell_command_allows_execution(goal),
 		"python.run" => grounded_python_code_allows_execution(goal),
 		"skill.install" | "skill.ensure_installed" => extract_skill_source_url(goal).is_some(),
@@ -717,6 +741,12 @@ fn classify_structural_fallback(
 			"explicit shell command was provided, but `command.run` is not enabled in the current runtime inventory",
 		));
 	}
+	if goal_requests_web_lookup(goal) && tool_selector(context.catalog, "web.search").is_none() {
+		return Some(unavailable_family_route(
+			IntentFamily::WebLookup,
+			"an explicit web lookup request was provided, but `web.search` is not enabled in the current runtime inventory",
+		));
+	}
 	if extract_table_path(goal).is_some()
 		&& !has_enabled_tool_with_prefix(context.catalog, "table.")
 	{
@@ -837,6 +867,9 @@ fn deterministic_grounded_intent(goal: &str) -> Option<IntentFamily> {
 	if grounded_python_code_allows_execution(goal) || grounded_shell_command_allows_execution(goal)
 	{
 		return Some(IntentFamily::CodeExec);
+	}
+	if goal_requests_web_lookup(goal) && extract_web_query(goal).is_some() {
+		return Some(IntentFamily::WebLookup);
 	}
 	if extract_table_path(goal).is_some() {
 		return Some(IntentFamily::TableRead);
@@ -1140,12 +1173,37 @@ fn looks_like_path_candidate(token: &str) -> bool {
 	}
 	token.contains('/')
 		|| token.contains('\\')
-		|| token.rsplit_once('.').is_some_and(|(_, ext)| {
+		|| token.rsplit_once('.').is_some_and(|(stem, ext)| {
 			!ext.is_empty()
 				&& ext
 					.chars()
 					.all(|character| character.is_ascii_alphanumeric())
+				&& (looks_like_known_file_extension(ext)
+					|| stem.contains('-')
+					|| stem.contains('_')
+					|| stem.chars().any(|character| character.is_ascii_uppercase())
+					|| stem.chars().any(|character| character.is_ascii_digit()))
 		})
+}
+
+fn looks_like_known_file_extension(extension: &str) -> bool {
+	matches!(
+		extension.to_ascii_lowercase().as_str(),
+		"txt"
+			| "md" | "markdown"
+			| "rs" | "toml"
+			| "json" | "yaml"
+			| "yml" | "csv"
+			| "tsv" | "xlsx"
+			| "xls" | "env"
+			| "lock" | "log"
+			| "py" | "js"
+			| "ts" | "jsx"
+			| "tsx" | "html"
+			| "css" | "sh"
+			| "bash" | "zsh"
+			| "sql"
+	)
 }
 
 fn skill_descriptor_is_executable(descriptor: &CatalogDescriptor) -> bool {

@@ -130,11 +130,15 @@ fn summarize_failure(goal: &str, observation: &ToolObservation) -> Option<String
 		"tool_timeout" => Some(if is_non_ascii {
 			if observation.tool_name == "command.run" {
 				format!("命令 `{command}` 超时了，请换一个更短、更窄的命令再试。")
+			} else if observation.tool_name == "python.run" {
+				"这段 Python 代码执行超时了，请缩小代码范围后再试。".to_string()
 			} else {
 				"这次文件系统操作超时了，请缩小范围后再试。".to_string()
 			}
 		} else if observation.tool_name == "command.run" {
 			format!("The command `{command}` timed out. Please try a shorter, narrower command.")
+		} else if observation.tool_name == "python.run" {
+			"The Python code timed out. Please try a smaller, bounded snippet.".to_string()
 		} else {
 			"The filesystem operation timed out. Please try a narrower target.".to_string()
 		}),
@@ -151,10 +155,28 @@ fn summarize_failure(goal: &str, observation: &ToolObservation) -> Option<String
 			)
 		}),
 		"non_zero_exit" => Some(if is_non_ascii {
-			format!("命令 `{command}` 已执行，但以非零状态退出。")
+			if observation.tool_name == "python.run" {
+				"这段 Python 代码已执行，但以非零状态退出。".to_string()
+			} else {
+				format!("命令 `{command}` 已执行，但以非零状态退出。")
+			}
+		} else if observation.tool_name == "python.run" {
+			"The Python code ran but exited with a non-zero status.".to_string()
 		} else {
 			format!("The command `{command}` ran but exited with a non-zero status.")
 		}),
+		"endpoint_not_configured" => Some(if is_non_ascii {
+			"当前没有配置 web.search 的搜索后端，因此我现在不能执行联网搜索。".to_string()
+		} else {
+			"The web.search backend is not configured, so I can't run an external web lookup right now.".to_string()
+		}),
+		"backend_request_failed" | "backend_http_error" | "backend_invalid_json" => {
+			Some(if is_non_ascii {
+				"当前 web.search 后端没有返回可用结果，请稍后再试。".to_string()
+			} else {
+				"The web.search backend did not return a usable result right now. Please try again later.".to_string()
+			})
+		}
 		_ => None,
 	}
 }
