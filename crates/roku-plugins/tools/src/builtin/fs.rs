@@ -17,14 +17,19 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use crate::contract::{
+	contract_input_schema, contract_tool_schema, input_contract, input_field, output_contract,
+	runtime_contract, selection_contract,
+};
 use crate::runtime_config::{
 	FsToolRuntimeConfig, HARD_MAX_DESCENDANT_SCAN_ENTRIES, HARD_MAX_READ_BYTES,
 };
 use glob::glob;
+use roku_common_types::{ToolContract, ToolOutputEnvelope, ToolRetryPolicy, ToolSideEffectPolicy};
 use roku_plugin_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
 use roku_plugin_host::{
 	RuntimeConstraints, SandboxProfile, Tool, ToolDescriptor, ToolFailure, ToolInvocationRequest,
-	ToolRuntime, ToolRuntimeError, ToolSchema,
+	ToolRuntime, ToolRuntimeError,
 };
 use serde_json::{Value, json};
 
@@ -491,16 +496,115 @@ fn observation_like_output(
 	terminal: bool,
 	data: Value,
 ) -> Value {
-	let mut object = data.as_object().cloned().unwrap_or_default();
-	object.insert("message".to_string(), Value::String(message));
-	object.insert("ok".to_string(), Value::Bool(ok));
-	object.insert(
-		"error_type".to_string(),
-		error_type.map(Value::from).unwrap_or(Value::Null),
+	ToolOutputEnvelope::new(ok, error_type, terminal, message, data).into_value()
+}
+
+fn fs_tool_contract(name: &str) -> Option<ToolContract> {
+	let runtime_constraints = RuntimeConstraints {
+		timeout_ms: 10_000,
+		max_retries: 0,
+		retry_backoff_ms: 0,
+		sandbox_profile: SandboxProfile::ReadOnlyFs,
+		deterministic_hooks: true,
+		allowed_read_roots: default_allowed_roots(),
+		allowed_write_roots: Vec::new(),
+	};
+	let runtime = runtime_contract(
+		&runtime_constraints,
+		ToolSideEffectPolicy::ReadOnly,
+		ToolRetryPolicy::Never,
 	);
-	object.insert("terminal".to_string(), Value::Bool(terminal));
-	object.insert("data".to_string(), data);
-	Value::Object(object)
+	match name {
+		"fs.find" => Some(ToolContract {
+			selection: selection_contract(
+				&[
+					"Use when only a basename or fuzzy workspace reference is known and a grounded path must be resolved first.",
+				],
+				&[
+					"Do not use when a concrete path is already available.",
+					"Do not use for recursive file counting or glob-style pattern expansion.",
+				],
+				&[
+					"Commonly confused with fs.glob when the request already contains a wildcard pattern.",
+					"Commonly confused with fs.read_text when the path is already concrete.",
+				],
+			),
+			input: input_contract(
+				vec![
+					input_field(
+						"name",
+						true,
+						"The basename or fuzzy filesystem reference to resolve inside the allowed workspace roots.",
+						&["Reject when empty."],
+					),
+					input_field(
+						"kind",
+						false,
+						"Optional kind filter such as file, dir, or any.",
+						&["Reject when the filter is unsupported."],
+					),
+				],
+				&["Search stays inside allowed read roots and returns bounded candidate lists."],
+			),
+			output: output_contract(
+				"Returns zero, one, or many grounded candidate paths plus an optional resolved_path when there is exactly one match.",
+				"Zero matches surface as an explicit path_not_found observation.",
+				&[
+					"multiple_candidates is a non-terminal observation that may require ask_user disambiguation.",
+					"path_not_found remains a failed observation and does not claim task completion.",
+				],
+				false,
+				false,
+			),
+			runtime: runtime.clone(),
+		}),
+		"fs.read_text" => Some(ToolContract {
+			selection: selection_contract(
+				&[
+					"Use when the path is already grounded and the user needs textual file contents.",
+				],
+				&[
+					"Do not use for binary files or directory listings.",
+					"Do not use when the path is still fuzzy and fs.find should run first.",
+				],
+				&[
+					"Commonly confused with fs.inspect when the user wants metadata instead of contents.",
+					"Commonly confused with command.run for shell-based cat requests that a direct read can answer safely.",
+				],
+			),
+			input: input_contract(
+				vec![
+					input_field(
+						"path",
+						true,
+						"The concrete path to read under the allowed workspace roots.",
+						&[
+							"Reject when the path resolves to a directory or outside the allowed roots.",
+						],
+					),
+					input_field(
+						"max_bytes",
+						false,
+						"Optional byte cap for the read, clamped by the runtime hard limit.",
+						&["Reject when zero or larger than the hard read ceiling."],
+					),
+				],
+				&["Reads are bounded by max_bytes and never write to the workspace."],
+			),
+			output: output_contract(
+				"Returns file content, bytes_read, truncation state, and encoding metadata for a grounded text file.",
+				"Empty files still return ok=true with a message that the file is empty.",
+				&[
+					"Non-text paths and missing paths surface as explicit failed observations.",
+					"Successful reads are non-terminal observations that may feed a later synthesis step.",
+				],
+				true,
+				false,
+			),
+			runtime,
+		}),
+		_ => None,
+	}
 }
 
 fn descriptor_catalog(
@@ -513,6 +617,11 @@ fn descriptor_catalog(
 	key_commands: &[&str],
 	use_cases: &[&str],
 ) -> CatalogDescriptor {
+	let contract = fs_tool_contract(name);
+	let fallback_input_schema = input_schema
+		.iter()
+		.map(|value| (*value).to_string())
+		.collect::<Vec<_>>();
 	CatalogDescriptor {
 		selector: roku_common_types::ResourceSelector::tool(name),
 		kind: ResourceKind::Tool,
@@ -522,10 +631,7 @@ fn descriptor_catalog(
 		discoverable: true,
 		tags: tags.iter().map(|value| (*value).to_string()).collect(),
 		examples: examples.iter().map(|value| (*value).to_string()).collect(),
-		input_schema: input_schema
-			.iter()
-			.map(|value| (*value).to_string())
-			.collect(),
+		input_schema: contract_input_schema(contract.as_ref(), &fallback_input_schema),
 		risk: ResourceRisk::Low,
 		cost: ResourceCost {
 			estimated_tokens: 0,
@@ -541,6 +647,7 @@ fn descriptor_catalog(
 			.map(|value| (*value).to_string())
 			.collect(),
 		use_cases: use_cases.iter().map(|value| (*value).to_string()).collect(),
+		contract,
 	}
 }
 
@@ -549,42 +656,49 @@ fn tool_descriptor(
 	required_fields: &[&str],
 	required_capabilities: &[&str],
 ) -> ToolDescriptor {
+	let runtime_constraints = RuntimeConstraints {
+		timeout_ms: 10_000,
+		max_retries: 0,
+		retry_backoff_ms: 0,
+		sandbox_profile: SandboxProfile::ReadOnlyFs,
+		deterministic_hooks: true,
+		allowed_read_roots: default_allowed_roots(),
+		allowed_write_roots: Vec::new(),
+	};
+	let contract = fs_tool_contract(name);
 	ToolDescriptor {
 		name: name.to_string(),
 		version: "1.0.0".to_string(),
-		input_schema: ToolSchema {
-			required_fields: base_required_fields(required_fields),
-		},
-		output_schema: "result.v1".to_string(),
+		input_schema: contract_tool_schema(
+			contract.as_ref(),
+			&base_required_field_names(required_fields),
+		),
+		output_schema: contract
+			.as_ref()
+			.map(|contract| contract.output.observation_schema.clone())
+			.unwrap_or_else(|| "result.v1".to_string()),
 		required_capabilities: required_capabilities
 			.iter()
 			.map(|value| (*value).to_string())
 			.collect(),
-		runtime_constraints: RuntimeConstraints {
-			timeout_ms: 10_000,
-			max_retries: 0,
-			retry_backoff_ms: 0,
-			sandbox_profile: SandboxProfile::ReadOnlyFs,
-			deterministic_hooks: true,
-			allowed_read_roots: default_allowed_roots(),
-			allowed_write_roots: Vec::new(),
-		},
+		runtime_constraints,
+		contract,
 	}
 }
 
-fn base_required_fields(extra: &[&str]) -> Vec<String> {
+fn base_required_field_names<'a>(extra: &'a [&'a str]) -> Vec<&'a str> {
 	let mut fields = vec![
-		"task_id".to_string(),
-		"node_id".to_string(),
-		"goal".to_string(),
-		"summary".to_string(),
-		"conversation_history".to_string(),
-		"budget_tokens".to_string(),
-		"time_budget_ms".to_string(),
+		"task_id",
+		"node_id",
+		"goal",
+		"summary",
+		"conversation_history",
+		"budget_tokens",
+		"time_budget_ms",
 	];
 	for field in extra {
 		if !fields.iter().any(|existing| existing == field) {
-			fields.push((*field).to_string());
+			fields.push(field);
 		}
 	}
 	fields
