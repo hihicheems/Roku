@@ -95,6 +95,7 @@ pub trait SessionPreferenceRepository {
 		preferences: SessionPreferences,
 	) -> Result<(), StoreError>;
 	fn load_preferences(&self, session_id: &str) -> Result<Option<SessionPreferences>, StoreError>;
+	fn delete_preferences(&mut self, session_id: &str) -> Result<(), StoreError>;
 }
 
 pub trait ConversationRepository {
@@ -104,6 +105,7 @@ pub trait ConversationRepository {
 		session_id: &str,
 		limit: usize,
 	) -> Result<Vec<ConversationTurn>, StoreError>;
+	fn delete_conversation(&mut self, session_id: &str) -> Result<(), StoreError>;
 }
 
 #[derive(Debug, Default)]
@@ -216,6 +218,11 @@ impl SessionPreferenceRepository for InMemorySessionPreferenceRepository {
 	fn load_preferences(&self, session_id: &str) -> Result<Option<SessionPreferences>, StoreError> {
 		Ok(self.preferences.get(session_id).cloned())
 	}
+
+	fn delete_preferences(&mut self, session_id: &str) -> Result<(), StoreError> {
+		self.preferences.remove(session_id);
+		Ok(())
+	}
 }
 
 #[derive(Debug, Default)]
@@ -242,6 +249,11 @@ impl ConversationRepository for InMemoryConversationRepository {
 		};
 		let start = turns.len().saturating_sub(limit);
 		Ok(turns[start..].to_vec())
+	}
+
+	fn delete_conversation(&mut self, session_id: &str) -> Result<(), StoreError> {
+		self.turns_by_session.remove(session_id);
+		Ok(())
 	}
 }
 
@@ -443,6 +455,12 @@ impl SessionPreferenceRepository for FileSessionPreferenceRepository {
 		let all_preferences = self.read_all()?;
 		Ok(all_preferences.get(session_id).cloned())
 	}
+
+	fn delete_preferences(&mut self, session_id: &str) -> Result<(), StoreError> {
+		let mut all_preferences = self.read_all()?;
+		all_preferences.remove(session_id);
+		self.write_all(&all_preferences)
+	}
 }
 
 #[derive(Debug, Clone)]
@@ -498,6 +516,12 @@ impl ConversationRepository for FileConversationRepository {
 		};
 		let start = turns.len().saturating_sub(limit);
 		Ok(turns[start..].to_vec())
+	}
+
+	fn delete_conversation(&mut self, session_id: &str) -> Result<(), StoreError> {
+		let mut conversations = self.read_all()?;
+		conversations.remove(session_id);
+		self.write_all(&conversations)
 	}
 }
 
@@ -705,6 +729,25 @@ mod tests {
 			Some(PlanningModeHint::TreeSearch)
 		);
 		assert_eq!(loaded_turns.len(), 1);
+
+		session_repo
+			.delete_preferences("session-1")
+			.expect("delete session preferences should succeed");
+		conversation_repo
+			.delete_conversation("session-1")
+			.expect("delete conversation should succeed");
+		assert!(
+			session_repo
+				.load_preferences("session-1")
+				.expect("load deleted preferences should succeed")
+				.is_none()
+		);
+		assert!(
+			conversation_repo
+				.load_recent_turns("session-1", 8)
+				.expect("load deleted conversation should succeed")
+				.is_empty()
+		);
 	}
 
 	#[test]
@@ -787,6 +830,25 @@ mod tests {
 			Some(PlanningModeHint::ReAct)
 		);
 		assert_eq!(loaded_turns.len(), 1);
+
+		session_repo
+			.delete_preferences("session-1")
+			.expect("delete session preferences should succeed");
+		conversation_repo
+			.delete_conversation("session-1")
+			.expect("delete conversation should succeed");
+		assert!(
+			session_repo
+				.load_preferences("session-1")
+				.expect("load deleted preferences should succeed")
+				.is_none()
+		);
+		assert!(
+			conversation_repo
+				.load_recent_turns("session-1", 8)
+				.expect("load deleted conversation should succeed")
+				.is_empty()
+		);
 
 		let _ = fs::remove_file(task_path);
 		let _ = fs::remove_file(event_path);

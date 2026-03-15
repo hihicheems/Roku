@@ -16,14 +16,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use roku_common_types::{
-	ApprovalDecision, ApprovalId, ConversationRole, ConversationTurn, PlanningModeHint,
-	RequestEnvelope, RequestId, ResponseEnvelope, RuntimeError, SessionPreferences,
+	ApprovalDecision, ApprovalId, ConversationRole, ConversationTurn, RequestEnvelope, RequestId,
+	ResponseEnvelope, ResponseStatus, RuntimeError, SessionPreferences,
 };
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_telegram::{
-	TelegramBotConfig, TelegramInteractionHandler, TelegramOutboundMessage, TelegramParseMode,
-	TelegramRuntimeConfig,
+	TelegramBotConfig, TelegramChat, TelegramConnector, TelegramControlCommand,
+	TelegramControlCommandRequest, TelegramInteraction, TelegramInteractionHandler,
+	TelegramMessage, TelegramOutboundMessage, TelegramParseMode, TelegramRuntimeConfig,
+	TelegramUpdate, TelegramUser,
 };
+use roku_runtime_service::{RuntimeExecutionMode, RuntimeModeReport};
 use roku_state_store::{
 	ConversationRepository, InMemoryConversationRepository, InMemorySessionPreferenceRepository,
 	SessionPreferenceRepository, SqliteConversationRepository, SqliteSessionPreferenceRepository,
@@ -71,16 +74,48 @@ pub(crate) fn run_telegram_once_with_options_from_env(
 ) -> Result<String, CommandError> {
 	apply_request_env_overrides(&options);
 	let handler = build_live_telegram_handler_from_env()?;
-	render_telegram_preview(
-		1,
-		handler.handle_request(RequestEnvelope {
-			request_id: RequestId(format!("tg-cli-{}", now_unix_ms())),
-			session_id: options.session_id,
-			goal: options.goal,
-			planning_mode_hint: options.planning_mode_hint,
-			conversation_history: Vec::new(),
-		}),
-	)
+	let chat_id = 1;
+	let interaction = TelegramConnector
+		.interaction_from_update(TelegramUpdate {
+			update_id: 1,
+			message: Some(TelegramMessage {
+				message_id: 1,
+				chat: TelegramChat {
+					id: chat_id,
+					title: None,
+					kind: "private".to_string(),
+				},
+				from: Some(TelegramUser {
+					id: 1,
+					is_bot: false,
+					username: Some("telegram-once".to_string()),
+				}),
+				text: Some(options.goal.clone()),
+			}),
+			callback_query: None,
+		})
+		.map_err(|error| {
+			CommandError::Usage(format!("failed to build telegram preview: {error}"))
+		})?;
+
+	match interaction {
+		TelegramInteraction::Request {
+			chat_id,
+			mut request,
+		} => {
+			request.request_id = RequestId(format!("tg-cli-{}", now_unix_ms()));
+			request.session_id = options.session_id;
+			request.planning_mode_hint = options.planning_mode_hint;
+			render_telegram_preview(chat_id, handler.handle_request(request))
+		}
+		TelegramInteraction::ControlCommand(mut command) => {
+			command.session_id = options.session_id;
+			render_telegram_preview(chat_id, handler.handle_control_command(command))
+		}
+		TelegramInteraction::ApprovalDecision(_) => Err(CommandError::Usage(
+			"telegram-once preview should not produce approval callbacks".to_string(),
+		)),
+	}
 }
 
 fn build_live_telegram_handler_from_env() -> Result<RuntimeServiceTelegramHandler, CommandError> {
@@ -116,6 +151,14 @@ fn telegram_bot_config_from_env(
 struct RuntimeServiceTelegramHandler {
 	service: Arc<roku_runtime_service::RuntimeService>,
 	session_state: Arc<TelegramSessionState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TelegramSessionSnapshot {
+	session_id: String,
+	pending_run_id: Option<String>,
+	recent_turn_count: usize,
+	latest_activity: Option<String>,
 }
 
 impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegramHandler {
@@ -163,18 +206,75 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 		}
 	}
 
-	fn update_session_planning_mode(
+	fn handle_control_command(
 		&self,
-		session_id: &str,
-		_planning_mode: Option<PlanningModeHint>,
-	) -> Result<(), RuntimeError> {
-		self.session_state.save_preferences(
-			session_id,
-			SessionPreferences {
-				planning_mode: None,
-				pending_loop: None,
-			},
-		)
+		command: TelegramControlCommandRequest,
+	) -> Result<ResponseEnvelope, RuntimeError> {
+		if command.argument.is_some() && !command.command.allows_inline_argument() {
+			return Ok(self.control_command_response(
+				command.command,
+				ResponseStatus::Failed,
+				format!(
+					"`/{}` does not accept extra arguments. Use it on its own.",
+					command.command.as_str()
+				),
+			));
+		}
+
+		match command.command {
+			TelegramControlCommand::Help => Ok(self.control_command_response(
+				command.command,
+				ResponseStatus::Succeeded,
+				self.help_message(),
+			)),
+			TelegramControlCommand::Status => {
+				self.refresh_session_pending_state(&command.session_id)?;
+				let snapshot = self.session_state.status_snapshot(&command.session_id)?;
+				Ok(self.control_command_response(
+					command.command,
+					ResponseStatus::Succeeded,
+					self.status_message(&snapshot),
+				))
+			}
+			TelegramControlCommand::Sessions => {
+				self.refresh_session_pending_state(&command.session_id)?;
+				let snapshot = self.session_state.status_snapshot(&command.session_id)?;
+				Ok(self.control_command_response(
+					command.command,
+					ResponseStatus::Succeeded,
+					self.sessions_message(&snapshot),
+				))
+			}
+			TelegramControlCommand::Cancel => {
+				self.refresh_session_pending_state(&command.session_id)?;
+				let snapshot = self.session_state.status_snapshot(&command.session_id)?;
+				if snapshot.pending_run_id.is_none() {
+					return Ok(self.control_command_response(
+						command.command,
+						ResponseStatus::Succeeded,
+						self.cancel_message(&snapshot, false),
+					));
+				}
+				self.service.clear_pending_loop(&command.session_id)?;
+				self.session_state.clear_pending_loop(&command.session_id)?;
+				let snapshot = self.session_state.status_snapshot(&command.session_id)?;
+				Ok(self.control_command_response(
+					command.command,
+					ResponseStatus::Succeeded,
+					self.cancel_message(&snapshot, true),
+				))
+			}
+			TelegramControlCommand::Clear => {
+				self.service.clear_pending_loop(&command.session_id)?;
+				self.session_state.clear_session(&command.session_id)?;
+				let snapshot = self.session_state.status_snapshot(&command.session_id)?;
+				Ok(self.control_command_response(
+					command.command,
+					ResponseStatus::Succeeded,
+					self.clear_message(&snapshot),
+				))
+			}
+		}
 	}
 
 	fn handle_approval_decision(
@@ -183,6 +283,137 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 		decision: ApprovalDecision,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		self.service.decide_approval(&approval_id, decision)
+	}
+}
+
+impl RuntimeServiceTelegramHandler {
+	fn refresh_session_pending_state(&self, session_id: &str) -> Result<(), RuntimeError> {
+		restore_pending_loop_from_session(&self.service, &self.session_state, session_id)?;
+		sync_pending_loop_to_session(&self.service, &self.session_state, session_id)
+	}
+
+	fn control_command_response(
+		&self,
+		command: TelegramControlCommand,
+		status: ResponseStatus,
+		message: impl Into<String>,
+	) -> ResponseEnvelope {
+		ResponseEnvelope {
+			request_id: RequestId(format!("tg-control-{}-{}", command.as_str(), now_unix_ms())),
+			status,
+			message: message.into(),
+			artifacts: Vec::new(),
+		}
+	}
+
+	fn help_message(&self) -> String {
+		[
+			"Telegram control commands:".to_string(),
+			"/help - Show available control commands.".to_string(),
+			"/status - Show the current chat session status.".to_string(),
+			"/sessions - Show the current active session overview.".to_string(),
+			"/cancel - Cancel the current pending loop without clearing chat history.".to_string(),
+			"/clear - Clear the current chat session state and pending loop.".to_string(),
+			"".to_string(),
+			"Send natural language directly to start a task.".to_string(),
+		]
+		.join("\n")
+	}
+
+	fn status_message(&self, snapshot: &TelegramSessionSnapshot) -> String {
+		let mut lines = vec!["Current chat session status".to_string()];
+		append_session_snapshot_lines(&mut lines, snapshot);
+		append_runtime_mode_lines(&mut lines, &self.service.runtime_mode_report());
+		lines.join("\n")
+	}
+
+	fn sessions_message(&self, snapshot: &TelegramSessionSnapshot) -> String {
+		let mut lines = vec!["Active session".to_string()];
+		append_session_snapshot_lines(&mut lines, snapshot);
+		append_runtime_mode_lines(&mut lines, &self.service.runtime_mode_report());
+		lines.push(
+			"Multi-session switching is not enabled yet. `/new` will arrive later.".to_string(),
+		);
+		lines.join("\n")
+	}
+
+	fn cancel_message(&self, snapshot: &TelegramSessionSnapshot, cancelled: bool) -> String {
+		let mut lines = if cancelled {
+			vec![
+				"Cancelled the pending runtime loop for this chat session.".to_string(),
+				"Conversation history, approvals, tasks, artifacts, and completed observations were left untouched."
+					.to_string(),
+			]
+		} else {
+			vec!["No pending runtime loop is currently stored for this chat session.".to_string()]
+		};
+		append_session_snapshot_lines(&mut lines, snapshot);
+		lines.join("\n")
+	}
+
+	fn clear_message(&self, snapshot: &TelegramSessionSnapshot) -> String {
+		let mut lines = vec!["Cleared the current chat session state.".to_string()];
+		append_session_snapshot_lines(&mut lines, snapshot);
+		lines.push(
+			"Only Telegram session state was cleared. Runtime global config and cross-channel shared state were left untouched."
+				.to_string(),
+		);
+		lines.push("Stored task records and artifacts were not deleted.".to_string());
+		lines.join("\n")
+	}
+}
+
+fn append_session_snapshot_lines(lines: &mut Vec<String>, snapshot: &TelegramSessionSnapshot) {
+	lines.push(format!("Session: {}", snapshot.session_id));
+	match snapshot.pending_run_id.as_deref() {
+		Some(run_id) => {
+			lines.push("Pending loop: yes".to_string());
+			lines.push(format!("Pending run: {run_id}"));
+		}
+		None => {
+			lines.push("Pending loop: no".to_string());
+			lines.push("Pending run: none".to_string());
+		}
+	}
+	lines.push(format!("Recent turns: {}", snapshot.recent_turn_count));
+	if let Some(activity) = snapshot.latest_activity.as_deref() {
+		lines.push(format!("Latest activity: {activity}"));
+	}
+}
+
+fn append_runtime_mode_lines(lines: &mut Vec<String>, report: &RuntimeModeReport) {
+	lines.push(format!(
+		"Runtime mode: requested={}, effective={}",
+		runtime_execution_mode_label(report.requested),
+		runtime_execution_mode_label(report.effective)
+	));
+	if let Some(reason) = report.fallback_reason.as_deref() {
+		lines.push(format!("Runtime fallback: {reason}"));
+	}
+}
+
+fn runtime_execution_mode_label(mode: RuntimeExecutionMode) -> &'static str {
+	mode.as_str()
+}
+
+fn latest_activity_summary(turn: &ConversationTurn) -> String {
+	format!(
+		"{}: {}",
+		match turn.role {
+			ConversationRole::User => "user",
+			ConversationRole::Assistant => "assistant",
+			ConversationRole::System => "system",
+		},
+		truncate_preview(&turn.content, 96)
+	)
+}
+
+fn truncate_preview(value: &str, max_chars: usize) -> String {
+	let truncated: String = value.chars().take(max_chars).collect();
+	if value.chars().count() > max_chars {
+		format!("{truncated}...")
+	} else {
+		truncated
 	}
 }
 
@@ -303,6 +534,33 @@ impl TelegramSessionState {
 			.map_err(runtime_store_error)
 	}
 
+	fn clear_pending_loop(&self, session_id: &str) -> Result<(), RuntimeError> {
+		let mut preferences = self.load_preferences_or_default(session_id)?;
+		preferences.pending_loop = None;
+		self.save_preferences(session_id, preferences)
+	}
+
+	fn clear_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+		self.lock_preferences()?
+			.delete_preferences(session_id)
+			.map_err(runtime_store_error)?;
+		self.lock_conversation()?
+			.delete_conversation(session_id)
+			.map_err(runtime_store_error)?;
+		Ok(())
+	}
+
+	fn status_snapshot(&self, session_id: &str) -> Result<TelegramSessionSnapshot, RuntimeError> {
+		let preferences = self.load_preferences_or_default(session_id)?;
+		let turns = self.load_recent_turns(session_id, 12)?;
+		Ok(TelegramSessionSnapshot {
+			session_id: session_id.to_string(),
+			pending_run_id: preferences.pending_loop.map(|binding| binding.run_id),
+			recent_turn_count: turns.len(),
+			latest_activity: turns.last().map(latest_activity_summary),
+		})
+	}
+
 	fn lock_preferences(
 		&self,
 	) -> Result<std::sync::MutexGuard<'_, Box<dyn SessionPreferenceRepository + Send>>, RuntimeError>
@@ -348,8 +606,11 @@ mod tests {
 	use std::io::{Cursor, Write};
 	use std::sync::Arc;
 
-	use roku_agent_runtime::GenericAgentRuntime;
-	use roku_common_types::{PlanningModeHint, RequestEnvelope, RequestId, ResponseStatus};
+	use roku_agent_runtime::{
+		AskUserPayload, GenericAgentRuntime, IntentFamily, LoopContext, LoopState, LoopStatus,
+		RouteDecision, RouteRisk,
+	};
+	use roku_common_types::{RequestEnvelope, RequestId, ResourceSelector, ResponseStatus};
 	use roku_plugin_llm::{
 		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderCallError,
 		ProviderResponse, RiskTier, RoutingPolicy,
@@ -446,7 +707,7 @@ mod tests {
 	}
 
 	#[test]
-	fn telegram_handler_keeps_memory_without_inheriting_session_planning_mode() {
+	fn telegram_handler_keeps_memory_across_regular_requests() {
 		let mut router = LlmRouter::new(RoutingPolicy {
 			max_request_cost_usd: 1.0,
 			max_latency_ms: 5_000,
@@ -467,19 +728,12 @@ mod tests {
 			session_state: Arc::new(TelegramSessionState::default()),
 		};
 		let session_id = "telegram-session-1";
-		handler
-			.update_session_planning_mode(session_id, Some(PlanningModeHint::ReAct))
-			.expect("session mode update should succeed");
 
 		let first = handler
 			.handle_request(request(session_id, "今天周几？"))
 			.expect("first request should succeed");
 		assert_eq!(first.status, ResponseStatus::Succeeded);
 		assert_eq!(first.message, "今天是星期三。");
-
-		handler
-			.update_session_planning_mode(session_id, None)
-			.expect("session mode clear should succeed");
 
 		let second = handler
 			.handle_request(request(session_id, "沙县小吃是什么？"))
@@ -507,6 +761,251 @@ mod tests {
 		assert_eq!(turns[0].content, "今天周几？");
 		assert_eq!(turns[2].content, "沙县小吃是什么？");
 		assert_eq!(turns[4].content, "我刚问了你什么？");
+	}
+
+	#[test]
+	fn telegram_control_cancel_clears_pending_loop_without_clearing_memory() {
+		let handler = test_handler();
+		let session_id = "telegram-control-cancel";
+		handler
+			.session_state
+			.append_turn(
+				session_id,
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: "hello".to_string(),
+					created_at_unix_ms: 1,
+				},
+			)
+			.expect("conversation turn should save");
+		let loop_state = awaiting_user_loop_state(session_id, "loop-cancel-1");
+		handler
+			.service
+			.restore_pending_loop(loop_state)
+			.expect("pending loop should restore");
+		sync_pending_loop_to_session(&handler.service, &handler.session_state, session_id)
+			.expect("pending loop should sync");
+
+		let response = handler
+			.handle_control_command(control_command(session_id, TelegramControlCommand::Cancel))
+			.expect("cancel command should succeed");
+		assert_eq!(response.status, ResponseStatus::Succeeded);
+		assert!(
+			response
+				.message
+				.contains("Cancelled the pending runtime loop")
+		);
+		assert!(
+			handler
+				.service
+				.pending_loop(session_id)
+				.expect("pending lookup should succeed")
+				.is_none()
+		);
+		assert!(
+			handler
+				.session_state
+				.load_preferences_or_default(session_id)
+				.expect("preferences should load")
+				.pending_loop
+				.is_none()
+		);
+		assert_eq!(
+			handler
+				.session_state
+				.load_recent_turns(session_id, 8)
+				.expect("turns should load")
+				.len(),
+			1
+		);
+	}
+
+	#[test]
+	fn telegram_control_clear_clears_session_state() {
+		let handler = test_handler();
+		let session_id = "telegram-control-clear";
+		handler
+			.session_state
+			.save_preferences(
+				session_id,
+				SessionPreferences {
+					planning_mode: None,
+					pending_loop: None,
+				},
+			)
+			.expect("preferences should save");
+		handler
+			.session_state
+			.append_turn(
+				session_id,
+				ConversationTurn {
+					role: ConversationRole::Assistant,
+					content: "hi".to_string(),
+					created_at_unix_ms: 2,
+				},
+			)
+			.expect("conversation should save");
+		let loop_state = awaiting_user_loop_state(session_id, "loop-clear-1");
+		handler
+			.service
+			.restore_pending_loop(loop_state)
+			.expect("pending loop should restore");
+		sync_pending_loop_to_session(&handler.service, &handler.session_state, session_id)
+			.expect("pending loop should sync");
+
+		let response = handler
+			.handle_control_command(control_command(session_id, TelegramControlCommand::Clear))
+			.expect("clear command should succeed");
+		assert_eq!(response.status, ResponseStatus::Succeeded);
+		assert!(
+			response
+				.message
+				.contains("Cleared the current chat session state.")
+		);
+		assert!(
+			handler
+				.service
+				.pending_loop(session_id)
+				.expect("pending loop lookup should succeed")
+				.is_none()
+		);
+		assert_eq!(
+			handler
+				.session_state
+				.load_recent_turns(session_id, 8)
+				.expect("turns should load")
+				.len(),
+			0
+		);
+		assert!(
+			handler
+				.session_state
+				.load_preferences_or_default(session_id)
+				.expect("preferences should load")
+				.pending_loop
+				.is_none()
+		);
+	}
+
+	#[test]
+	fn telegram_control_status_reports_current_snapshot() {
+		let handler = test_handler();
+		let session_id = "telegram-control-status";
+		handler
+			.session_state
+			.append_turn(
+				session_id,
+				ConversationTurn {
+					role: ConversationRole::Assistant,
+					content: "ready".to_string(),
+					created_at_unix_ms: 3,
+				},
+			)
+			.expect("conversation should save");
+		let loop_state = awaiting_user_loop_state(session_id, "loop-status-1");
+		handler
+			.service
+			.restore_pending_loop(loop_state)
+			.expect("pending loop should restore");
+		sync_pending_loop_to_session(&handler.service, &handler.session_state, session_id)
+			.expect("pending loop should sync");
+
+		let response = handler
+			.handle_control_command(control_command(session_id, TelegramControlCommand::Status))
+			.expect("status command should succeed");
+		assert_eq!(response.status, ResponseStatus::Succeeded);
+		assert!(response.message.contains("Current chat session status"));
+		assert!(
+			response
+				.message
+				.contains("Session: telegram-control-status")
+		);
+		assert!(response.message.contains("Pending loop: yes"));
+		assert!(response.message.contains("Pending run: loop-status-1"));
+		assert!(response.message.contains("Recent turns: 1"));
+		assert!(response.message.contains("Runtime mode: requested="));
+	}
+
+	#[test]
+	fn telegram_control_sessions_reports_single_active_session() {
+		let handler = test_handler();
+		let session_id = "telegram-control-sessions";
+
+		let response = handler
+			.handle_control_command(control_command(
+				session_id,
+				TelegramControlCommand::Sessions,
+			))
+			.expect("sessions command should succeed");
+		assert_eq!(response.status, ResponseStatus::Succeeded);
+		assert!(response.message.contains("Active session"));
+		assert!(
+			response
+				.message
+				.contains("Session: telegram-control-sessions")
+		);
+		assert!(
+			response
+				.message
+				.contains("Multi-session switching is not enabled yet.")
+		);
+	}
+
+	#[test]
+	fn telegram_control_help_lists_supported_commands() {
+		let handler = test_handler();
+
+		let response = handler
+			.handle_control_command(control_command(
+				"session-help",
+				TelegramControlCommand::Help,
+			))
+			.expect("help command should succeed");
+		assert_eq!(response.status, ResponseStatus::Succeeded);
+		assert!(response.message.contains("/cancel"));
+		assert!(response.message.contains("/clear"));
+		assert!(response.message.contains("/status"));
+		assert!(response.message.contains("/help"));
+		assert!(response.message.contains("/sessions"));
+		assert!(response.message.contains("Send natural language directly"));
+	}
+
+	#[test]
+	fn recognized_control_commands_do_not_pollute_memory() {
+		let handler = test_handler();
+		let session_id = "telegram-control-memory";
+		handler
+			.handle_request(request(session_id, "今天周几？"))
+			.expect("request should succeed");
+		let turns_before = handler
+			.session_state
+			.load_recent_turns(session_id, 8)
+			.expect("turns should load");
+
+		handler
+			.handle_control_command(control_command(session_id, TelegramControlCommand::Status))
+			.expect("status command should succeed");
+
+		let turns_after = handler
+			.session_state
+			.load_recent_turns(session_id, 8)
+			.expect("turns should load");
+		assert_eq!(turns_before, turns_after);
+	}
+
+	#[test]
+	fn control_commands_reject_inline_arguments() {
+		let handler = test_handler();
+		let response = handler
+			.handle_control_command(TelegramControlCommandRequest {
+				chat_id: 1,
+				session_id: "session-inline".to_string(),
+				command: TelegramControlCommand::Clear,
+				argument: Some("now".to_string()),
+			})
+			.expect("command should return a response");
+		assert_eq!(response.status, ResponseStatus::Failed);
+		assert!(response.message.contains("does not accept extra arguments"));
 	}
 
 	#[test]
@@ -556,6 +1055,54 @@ mod tests {
 			planning_mode_hint: None,
 			conversation_history: Vec::new(),
 		}
+	}
+
+	fn control_command(
+		session_id: &str,
+		command: TelegramControlCommand,
+	) -> TelegramControlCommandRequest {
+		TelegramControlCommandRequest {
+			chat_id: 1,
+			session_id: session_id.to_string(),
+			command,
+			argument: None,
+		}
+	}
+
+	fn test_handler() -> RuntimeServiceTelegramHandler {
+		RuntimeServiceTelegramHandler {
+			service: Arc::new(RuntimeService::in_memory()),
+			session_state: Arc::new(TelegramSessionState::default()),
+		}
+	}
+
+	fn awaiting_user_loop_state(session_id: &str, run_id: &str) -> LoopState {
+		let context = LoopContext {
+			request_id: format!("req-{run_id}"),
+			session_id: session_id.to_string(),
+			goal: "Need a clarification".to_string(),
+			workspace_root: "/workspace".to_string(),
+			working_directory: "/workspace".to_string(),
+			visible_tools: vec!["general.execute".to_string()],
+			bound_resources: vec![ResourceSelector::tool("general.execute".to_string())],
+			route_decision: RouteDecision::new(
+				IntentFamily::Unknown,
+				0.8,
+				false,
+				RouteRisk::Low,
+				vec!["general.execute".to_string()],
+				Vec::new(),
+				Vec::new(),
+				"telegram command test",
+			),
+			last_observation: None,
+		};
+		let mut loop_state = LoopState::new(run_id, &context);
+		loop_state.status = LoopStatus::AwaitingUser;
+		loop_state.awaiting_user = Some(AskUserPayload::freeform(
+			"Please clarify what you want to do next.".to_string(),
+		));
+		loop_state
 	}
 
 	fn extract_last_user_turn(prompt: &str) -> Option<String> {

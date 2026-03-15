@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_common_types::{
-	ApprovalDecision, ApprovalId, PlanningModeHint, RequestEnvelope, RequestId,
-};
+use roku_common_types::{ApprovalDecision, ApprovalId, RequestEnvelope, RequestId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -69,8 +67,7 @@ pub enum TelegramInteraction {
 		chat_id: i64,
 		request: RequestEnvelope,
 	},
-	SessionCommand(TelegramSessionCommand),
-	SessionCommandRequest(TelegramSessionCommandRequest),
+	ControlCommand(TelegramControlCommandRequest),
 	ApprovalDecision(TelegramApprovalAction),
 }
 
@@ -82,17 +79,22 @@ pub struct TelegramApprovalAction {
 	pub decision: ApprovalDecision,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TelegramSessionCommand {
-	pub chat_id: i64,
-	pub session_id: String,
-	pub planning_mode: Option<PlanningModeHint>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelegramControlCommand {
+	Cancel,
+	Clear,
+	Status,
+	Help,
+	Sessions,
 }
 
-#[derive(Debug, Clone)]
-pub struct TelegramSessionCommandRequest {
-	pub command: TelegramSessionCommand,
-	pub request: RequestEnvelope,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramControlCommandRequest {
+	pub chat_id: i64,
+	pub session_id: String,
+	pub command: TelegramControlCommand,
+	pub argument: Option<String>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -125,22 +127,8 @@ impl TelegramConnector {
 			return self.approval_action_from_callback(callback_query);
 		}
 
-		if let Some((command, inline_goal)) = self.session_command_from_message(&update)? {
-			if let Some(goal) = inline_goal {
-				let request = self.request_from_message(
-					update.update_id,
-					update
-						.message
-						.ok_or(TelegramConnectorError::MissingMessage)?,
-					goal,
-					command.planning_mode,
-				)?;
-				return Ok(TelegramInteraction::SessionCommandRequest(
-					TelegramSessionCommandRequest { command, request },
-				));
-			}
-
-			return Ok(TelegramInteraction::SessionCommand(command));
+		if let Some(command) = self.control_command_from_message(&update)? {
+			return Ok(TelegramInteraction::ControlCommand(command));
 		}
 
 		let chat_id = update.message.as_ref().map(|message| message.chat.id);
@@ -161,7 +149,7 @@ impl TelegramConnector {
 			.text
 			.clone()
 			.ok_or(TelegramConnectorError::MissingText)?;
-		self.request_from_message(update.update_id, message, text, None)
+		self.request_from_message(update.update_id, message, text)
 	}
 
 	fn request_from_message(
@@ -169,7 +157,6 @@ impl TelegramConnector {
 		update_id: u64,
 		message: TelegramMessage,
 		goal: String,
-		planning_mode_hint: Option<PlanningModeHint>,
 	) -> Result<RequestEnvelope, TelegramConnectorError> {
 		if message.from.as_ref().is_some_and(|user| user.is_bot) {
 			return Err(TelegramConnectorError::BotOriginIgnored);
@@ -178,15 +165,15 @@ impl TelegramConnector {
 			request_id: RequestId(format!("tg-{update_id}")),
 			session_id: message.chat.id.to_string(),
 			goal,
-			planning_mode_hint,
+			planning_mode_hint: None,
 			conversation_history: Vec::new(),
 		})
 	}
 
-	fn session_command_from_message(
+	fn control_command_from_message(
 		&self,
 		update: &TelegramUpdate,
-	) -> Result<Option<(TelegramSessionCommand, Option<String>)>, TelegramConnectorError> {
+	) -> Result<Option<TelegramControlCommandRequest>, TelegramConnectorError> {
 		let message = update
 			.message
 			.as_ref()
@@ -199,7 +186,7 @@ impl TelegramConnector {
 			.as_deref()
 			.ok_or(TelegramConnectorError::MissingText)?;
 
-		Ok(session_command_from_text(message.chat.id, text))
+		Ok(parse_control_command(message.chat.id, text))
 	}
 
 	fn approval_action_from_callback(
@@ -271,39 +258,80 @@ fn callback_actor(user: &TelegramUser) -> String {
 	format!("telegram-user-{}", user.id)
 }
 
-fn session_command_from_text(
-	chat_id: i64,
-	text: &str,
-) -> Option<(TelegramSessionCommand, Option<String>)> {
+#[derive(Debug, Clone, Copy)]
+struct TelegramControlCommandSpec {
+	name: &'static str,
+	command: TelegramControlCommand,
+	allows_inline_argument: bool,
+}
+
+const TELEGRAM_CONTROL_COMMANDS: &[TelegramControlCommandSpec] = &[
+	TelegramControlCommandSpec {
+		name: "cancel",
+		command: TelegramControlCommand::Cancel,
+		allows_inline_argument: false,
+	},
+	TelegramControlCommandSpec {
+		name: "clear",
+		command: TelegramControlCommand::Clear,
+		allows_inline_argument: false,
+	},
+	TelegramControlCommandSpec {
+		name: "status",
+		command: TelegramControlCommand::Status,
+		allows_inline_argument: false,
+	},
+	TelegramControlCommandSpec {
+		name: "help",
+		command: TelegramControlCommand::Help,
+		allows_inline_argument: false,
+	},
+	TelegramControlCommandSpec {
+		name: "sessions",
+		command: TelegramControlCommand::Sessions,
+		allows_inline_argument: false,
+	},
+];
+
+impl TelegramControlCommand {
+	pub fn as_str(self) -> &'static str {
+		control_command_spec(self).name
+	}
+
+	pub fn allows_inline_argument(self) -> bool {
+		control_command_spec(self).allows_inline_argument
+	}
+}
+
+fn control_command_spec(command: TelegramControlCommand) -> &'static TelegramControlCommandSpec {
+	TELEGRAM_CONTROL_COMMANDS
+		.iter()
+		.find(|spec| spec.command == command)
+		.expect("control command spec should exist")
+}
+
+fn parse_control_command(chat_id: i64, text: &str) -> Option<TelegramControlCommandRequest> {
 	let trimmed = text.trim();
-	let command = trimmed.split_whitespace().next()?;
-	let command = command.strip_prefix('/')?;
-	let normalized = normalize_command(command);
-	let planning_mode = match normalized.as_str() {
-		"react" => Some(PlanningModeHint::ReAct),
-		"taskdecomposition" | "decomposition" => Some(PlanningModeHint::TaskDecomposition),
-		"treesearch" | "tree" => Some(PlanningModeHint::TreeSearch),
-		"iterativerefinement" | "refinement" | "refine" => {
-			Some(PlanningModeHint::IterativeRefinement)
-		}
-		"auto" => None,
-		_ => return None,
-	};
-	let command_prefix_len = command.len().saturating_add(1);
-	let inline_goal = trimmed
+	let slash_command = trimmed.split_whitespace().next()?;
+	let slash_command = slash_command.strip_prefix('/')?;
+	let command_name = slash_command.split('@').next().unwrap_or(slash_command);
+	let normalized = normalize_command(command_name);
+	let spec = TELEGRAM_CONTROL_COMMANDS
+		.iter()
+		.find(|candidate| candidate.name == normalized)?;
+	let command_prefix_len = slash_command.len().saturating_add(1);
+	let argument = trimmed
 		.get(command_prefix_len..)
 		.map(str::trim)
 		.filter(|value| !value.is_empty())
 		.map(std::string::ToString::to_string);
 
-	Some((
-		TelegramSessionCommand {
-			chat_id,
-			session_id: chat_id.to_string(),
-			planning_mode,
-		},
-		inline_goal,
-	))
+	Some(TelegramControlCommandRequest {
+		chat_id,
+		session_id: chat_id.to_string(),
+		command: spec.command,
+		argument,
+	})
 }
 
 fn normalize_command(command: &str) -> String {
@@ -421,11 +449,8 @@ mod tests {
 			TelegramInteraction::Request { .. } => {
 				panic!("callback query should not become a request")
 			}
-			TelegramInteraction::SessionCommand(_) => {
-				panic!("callback query should not become a session command")
-			}
-			TelegramInteraction::SessionCommandRequest(_) => {
-				panic!("callback query should not become an inline session command request")
+			TelegramInteraction::ControlCommand(_) => {
+				panic!("callback query should not become a control command")
 			}
 		}
 	}
@@ -463,7 +488,7 @@ mod tests {
 	}
 
 	#[test]
-	fn into_interaction_maps_case_insensitive_session_command() {
+	fn into_interaction_maps_case_insensitive_control_command() {
 		let connector = TelegramConnector;
 		let interaction = connector
 			.interaction_from_update(TelegramUpdate {
@@ -480,24 +505,25 @@ mod tests {
 						is_bot: false,
 						username: Some("jojo".to_string()),
 					}),
-					text: Some("/ReAcT".to_string()),
+					text: Some("/StAtUs".to_string()),
 				}),
 				callback_query: None,
 			})
-			.expect("session command should be recognized");
+			.expect("control command should be recognized");
 
 		match interaction {
-			TelegramInteraction::SessionCommand(command) => {
+			TelegramInteraction::ControlCommand(command) => {
 				assert_eq!(command.chat_id, 1001);
 				assert_eq!(command.session_id, "1001");
-				assert_eq!(command.planning_mode, Some(PlanningModeHint::ReAct));
+				assert_eq!(command.command, TelegramControlCommand::Status);
+				assert_eq!(command.argument, None);
 			}
-			other => panic!("expected session command, got {other:?}"),
+			other => panic!("expected control command, got {other:?}"),
 		}
 	}
 
 	#[test]
-	fn into_interaction_maps_auto_command_to_cleared_override() {
+	fn recognized_control_commands_preserve_inline_arguments_for_handler_validation() {
 		let connector = TelegramConnector;
 		let interaction = connector
 			.interaction_from_update(TelegramUpdate {
@@ -514,22 +540,23 @@ mod tests {
 						is_bot: false,
 						username: None,
 					}),
-					text: Some("/auto".to_string()),
+					text: Some("/clear now".to_string()),
 				}),
 				callback_query: None,
 			})
-			.expect("auto command should be recognized");
+			.expect("control command should be recognized");
 
 		match interaction {
-			TelegramInteraction::SessionCommand(command) => {
-				assert_eq!(command.planning_mode, None);
+			TelegramInteraction::ControlCommand(command) => {
+				assert_eq!(command.command, TelegramControlCommand::Clear);
+				assert_eq!(command.argument.as_deref(), Some("now"));
 			}
-			other => panic!("expected session command, got {other:?}"),
+			other => panic!("expected control command, got {other:?}"),
 		}
 	}
 
 	#[test]
-	fn into_interaction_maps_inline_session_command_to_request() {
+	fn control_commands_support_group_bot_mentions() {
 		let connector = TelegramConnector;
 		let interaction = connector
 			.interaction_from_update(TelegramUpdate {
@@ -546,33 +573,25 @@ mod tests {
 						is_bot: false,
 						username: Some("jojo".to_string()),
 					}),
-					text: Some("/react 你好".to_string()),
+					text: Some("/sessions@roku_bot".to_string()),
 				}),
 				callback_query: None,
 			})
-			.expect("inline command request should be recognized");
+			.expect("control command should be recognized");
 
 		match interaction {
-			TelegramInteraction::SessionCommandRequest(command_request) => {
-				assert_eq!(command_request.command.chat_id, 1003);
-				assert_eq!(command_request.command.session_id, "1003");
-				assert_eq!(
-					command_request.command.planning_mode,
-					Some(PlanningModeHint::ReAct)
-				);
-				assert_eq!(command_request.request.request_id.0, "tg-45");
-				assert_eq!(command_request.request.goal, "你好");
-				assert_eq!(
-					command_request.request.planning_mode_hint,
-					Some(PlanningModeHint::ReAct)
-				);
+			TelegramInteraction::ControlCommand(command) => {
+				assert_eq!(command.chat_id, 1003);
+				assert_eq!(command.session_id, "1003");
+				assert_eq!(command.command, TelegramControlCommand::Sessions);
+				assert_eq!(command.argument, None);
 			}
-			other => panic!("expected inline session command request, got {other:?}"),
+			other => panic!("expected control command, got {other:?}"),
 		}
 	}
 
 	#[test]
-	fn inline_auto_command_clears_session_and_executes_message() {
+	fn removed_planning_commands_fall_back_to_plain_requests() {
 		let connector = TelegramConnector;
 		let interaction = connector
 			.interaction_from_update(TelegramUpdate {
@@ -589,19 +608,51 @@ mod tests {
 						is_bot: false,
 						username: None,
 					}),
-					text: Some("/auto 继续刚才的话题".to_string()),
+					text: Some("/react".to_string()),
 				}),
 				callback_query: None,
 			})
-			.expect("inline auto command should be recognized");
+			.expect("unknown slash text should fall back to a plain request");
 
 		match interaction {
-			TelegramInteraction::SessionCommandRequest(command_request) => {
-				assert_eq!(command_request.command.planning_mode, None);
-				assert_eq!(command_request.request.goal, "继续刚才的话题");
-				assert_eq!(command_request.request.planning_mode_hint, None);
+			TelegramInteraction::Request { request, .. } => {
+				assert_eq!(request.goal, "/react");
+				assert_eq!(request.planning_mode_hint, None);
 			}
-			other => panic!("expected inline auto command request, got {other:?}"),
+			other => panic!("expected plain request, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn unknown_slash_commands_also_fall_back_to_plain_requests() {
+		let connector = TelegramConnector;
+		let interaction = connector
+			.interaction_from_update(TelegramUpdate {
+				update_id: 47,
+				message: Some(TelegramMessage {
+					message_id: 12,
+					chat: TelegramChat {
+						id: 1005,
+						title: None,
+						kind: "private".to_string(),
+					},
+					from: Some(TelegramUser {
+						id: 14,
+						is_bot: false,
+						username: None,
+					}),
+					text: Some("/foo bar".to_string()),
+				}),
+				callback_query: None,
+			})
+			.expect("unknown slash text should fall back to a plain request");
+
+		match interaction {
+			TelegramInteraction::Request { request, .. } => {
+				assert_eq!(request.goal, "/foo bar");
+				assert_eq!(request.planning_mode_hint, None);
+			}
+			other => panic!("expected plain request, got {other:?}"),
 		}
 	}
 }
