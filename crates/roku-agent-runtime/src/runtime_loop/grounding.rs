@@ -23,7 +23,6 @@
 //! - table file hints
 //! - explicit shell or Python snippets
 //! - skill source URLs
-//! - simple "what kind of resource is the user asking for" predicates
 //! - user reply disambiguation against previously offered candidates
 //!
 //! The helpers here intentionally stay lexical and local. They should be reusable from both
@@ -37,7 +36,6 @@
 //! - extract grounded arguments from the current request text
 //! - recognize explicit resource/modality signals such as paths, glob patterns, table files,
 //!   inline commands, code blocks, and skill URLs
-//! - provide weak family-level preference hints for already grounded requests
 //! - help resume disambiguation when the runtime has already asked the user to pick one candidate
 //!
 //! ## Non-Goals
@@ -50,8 +48,9 @@
 //! - own retry, recovery, or budget policy
 //! - encode multi-step follow-up flow or hidden planning state
 //!
-//! In other words, this module may produce **grounding signals** and **weak ordering hints**, but
-//! it must not become a hidden semantic router or "static decision center".
+//! In other words, this module may produce **grounding signals** for explicit resources and
+//! argument alignment, but it must not become a hidden semantic router or "static decision
+//! center".
 //!
 //! ## Design Constraints
 //!
@@ -59,8 +58,9 @@
 //! - Prefer reusable helpers over duplicating similar logic in classifier/loop callers.
 //! - When adding a new helper, ensure it describes observable input structure rather than a
 //!   hard-coded follow-up workflow.
-//! - `preferred_*` helpers should remain hint-level ranking utilities. They are not authoritative
-//!   tool bindings and must stay easy to override by later loop decisions.
+//! - Prefer explicit-resource extractors over natural-language intent predicates.
+//! - If a helper starts deciding "which tool should go first" for a vague request, it belongs in
+//!   the classifier or the live loop instead.
 //!
 use std::collections::BTreeSet;
 use std::fs;
@@ -109,13 +109,34 @@ pub(crate) fn extract_path_candidates(goal: &str) -> Vec<String> {
 	paths
 }
 
-pub(crate) fn extract_table_path(goal: &str) -> Option<String> {
-	extract_path_candidates(goal).into_iter().find(|path| {
-		let normalized = path.to_ascii_lowercase();
-		normalized.ends_with(".csv")
-			|| normalized.ends_with(".tsv")
-			|| normalized.ends_with(".xlsx")
-	})
+pub(crate) fn extract_explicit_path_candidates(goal: &str) -> Vec<String> {
+	let mut paths = Vec::new();
+	for token in goal.split_whitespace().map(clean_token) {
+		if token.is_empty() || token.starts_with("http://") || token.starts_with("https://") {
+			continue;
+		}
+		if is_standalone_path_candidate(&token) {
+			paths.push(token.clone());
+		}
+		for fragment in embedded_path_fragments(&token, &[]) {
+			if !paths.iter().any(|existing| existing == &fragment) {
+				paths.push(fragment);
+			}
+		}
+	}
+	paths.dedup();
+	paths
+}
+
+pub(crate) fn extract_explicit_table_path(goal: &str) -> Option<String> {
+	extract_explicit_path_candidates(goal)
+		.into_iter()
+		.find(|path| {
+			let normalized = path.to_ascii_lowercase();
+			normalized.ends_with(".csv")
+				|| normalized.ends_with(".tsv")
+				|| normalized.ends_with(".xlsx")
+		})
 }
 
 pub(crate) fn extract_glob_pattern(goal: &str) -> Option<String> {
@@ -181,91 +202,6 @@ pub(crate) fn extract_row_limit(goal: &str) -> Option<u64> {
 		.split_whitespace()
 		.find_map(|part| clean_token(part).parse::<u64>().ok())?;
 	Some(digits.clamp(1, 50))
-}
-
-pub(crate) fn goal_requests_file_read(goal: &str) -> bool {
-	let lower = goal.to_ascii_lowercase();
-	lower.contains("read")
-		|| lower.contains("open")
-		|| lower.contains("first part")
-		|| lower.contains("first lines")
-		|| lower.contains("contents")
-		|| lower.contains("show me")
-}
-
-pub(crate) fn goal_requests_directory_listing(goal: &str) -> bool {
-	let lower = goal.to_ascii_lowercase();
-	(lower.contains("list ")
-		|| lower.contains("show files")
-		|| lower.contains("show directories")
-		|| lower.contains("contents of"))
-		&& (lower.contains("directory")
-			|| lower.contains("folder")
-			|| lower.contains("files")
-			|| lower.contains("directories"))
-}
-
-pub(crate) fn goal_requests_filesystem_inspect(goal: &str) -> bool {
-	let lower = goal.to_ascii_lowercase();
-	lower.contains("inspect") || lower.contains("metadata") || lower.contains("stat ")
-}
-
-pub(crate) fn goal_requests_exists_check(goal: &str) -> bool {
-	let lower = goal.to_ascii_lowercase();
-	lower.contains("exist") || lower.contains("exists")
-}
-
-pub(crate) fn goal_requests_filesystem_search(goal: &str) -> bool {
-	let lower = goal.to_ascii_lowercase();
-	lower.contains("find ")
-		|| lower.contains("locate ")
-		|| lower.contains("search for ")
-		|| lower.starts_with("find ")
-}
-
-type GoalPredicate = fn(&str) -> bool;
-
-const FILESYSTEM_PREFERRED_TOOL_RULES: &[(&str, GoalPredicate)] = &[
-	("fs.find", goal_requests_filesystem_search),
-	("fs.exists", goal_requests_exists_check),
-	("fs.list_dir", goal_requests_directory_listing),
-	("fs.inspect", goal_requests_filesystem_inspect),
-	("fs.read_text", goal_requests_file_read),
-];
-
-pub(crate) fn preferred_grounded_filesystem_tool(goal: &str) -> Option<&'static str> {
-	if extract_path_candidates(goal).is_empty() {
-		return None;
-	}
-	first_matching_preferred_tool(goal, FILESYSTEM_PREFERRED_TOOL_RULES)
-}
-
-pub(crate) fn goal_requests_table_preview(goal: &str) -> bool {
-	let lower = goal.to_ascii_lowercase();
-	lower.contains("preview")
-		|| lower.contains("first rows")
-		|| lower.contains("top rows")
-		|| lower.contains("rows of")
-}
-
-pub(crate) fn goal_requests_table_schema(goal: &str) -> bool {
-	let lower = goal.to_ascii_lowercase();
-	lower.contains("schema") || lower.contains("columns")
-}
-
-pub(crate) fn goal_requests_table_sheet_listing(goal: &str) -> bool {
-	let lower = goal.to_ascii_lowercase();
-	lower.contains("sheet") && (lower.contains("list") || lower.contains("show"))
-}
-
-const TABLE_PREFERRED_TOOL_RULES: &[(&str, GoalPredicate)] = &[
-	("table.schema", goal_requests_table_schema),
-	("table.list_sheets", goal_requests_table_sheet_listing),
-	("table.preview", goal_requests_table_preview),
-];
-
-pub(crate) fn preferred_grounded_table_tool(goal: &str) -> &'static str {
-	first_matching_preferred_tool(goal, TABLE_PREFERRED_TOOL_RULES).unwrap_or("table.inspect")
 }
 
 pub(crate) fn extract_web_query(goal: &str) -> Option<String> {
@@ -391,15 +327,6 @@ pub(crate) fn file_name_from_path(path: &str) -> Option<String> {
 		.file_name()
 		.and_then(|name| name.to_str())
 		.map(str::to_string)
-}
-
-fn first_matching_preferred_tool(
-	goal: &str,
-	rules: &[(&'static str, GoalPredicate)],
-) -> Option<&'static str> {
-	rules
-		.iter()
-		.find_map(|(tool_name, predicate)| predicate(goal).then_some(*tool_name))
 }
 
 pub(crate) fn reply_selects_candidate(reply: &str, candidates: &[String]) -> Option<String> {
