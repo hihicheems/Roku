@@ -21,6 +21,7 @@ mod policy;
 mod provenance;
 mod schema;
 mod semantic;
+mod trace;
 
 pub use config::ValidationConfig;
 pub use pipeline::ValidationPipeline;
