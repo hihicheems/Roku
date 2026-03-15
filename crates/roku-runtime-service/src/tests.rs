@@ -103,7 +103,7 @@ fn compact_approval_id_stays_short_for_telegram_callbacks() {
 fn new_requests_execute_without_graph_compilation() {
 	let service = RuntimeService::default();
 	let response = service
-		.execute(request("Read the first part of Cargo.toml."))
+		.execute(request("What skills and tools do you have right now?"))
 		.expect("direct request should succeed");
 
 	assert_eq!(
@@ -306,7 +306,12 @@ fn pending_filesystem_tool_loops_resume_through_the_generic_loop_driver() {
 		.execute(request("Cargo.toml"))
 		.expect("pending loop should resume");
 
-	assert_eq!(response.status, ResponseStatus::Succeeded);
+	assert_eq!(response.status, ResponseStatus::Failed);
+	assert!(
+		response
+			.message
+			.contains("general execution did not use a live runtime")
+	);
 	assert!(
 		service
 			.pending_loop("session-1")
@@ -318,13 +323,9 @@ fn pending_filesystem_tool_loops_resume_through_the_generic_loop_driver() {
 		.get_task(&TaskId("task-req-1".to_string()))
 		.expect("task lookup should succeed")
 		.expect("task should be persisted");
-	assert_eq!(task.state, TaskState::Succeeded);
-	assert!(task.last_result.is_some());
-	assert!(
-		!response
-			.message
-			.contains("non-terminal `fs.read_text` observation")
-	);
+	assert_eq!(task.state, TaskState::Failed);
+	assert!(task.last_result.is_none());
+	assert!(!response.artifacts.is_empty());
 }
 
 #[test]

@@ -25,8 +25,9 @@ use crate::builtin::{
 use crate::config::{BuiltinToolRole, ConfiguredTool, ToolCatalogConfig};
 use crate::runtime_config::{ToolWorkerRuntimeConfig, ToolsRuntimeConfig};
 use roku_common_types::{
-	ResourceSelector, SkillExecutionMode, SkillExecutionPlan, SkillExecutionRequest,
-	SkillExecutionResult, ToolOutputEnvelope,
+	GeneralCompletionKind, GeneralEvidenceStatus, GeneralExecuteCompletion, ResourceSelector,
+	SkillExecutionMode, SkillExecutionPlan, SkillExecutionRequest, SkillExecutionResult,
+	ToolOutputEnvelope,
 };
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_catalog::{CatalogDescriptor, ResourceCatalog, ResourceKind};
@@ -631,6 +632,27 @@ impl Tool for WorkerReportTool {
 
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
 		let input = request_input(&request)?;
+		if self.worker_id == "generic-worker" {
+			let completion =
+				GeneralExecuteCompletion::insufficient_evidence(self.message.to_string());
+			return Ok(general_execute_tool_output(
+				self.terminal_output,
+				&completion,
+				json!({
+					"worker_id": self.worker_id,
+					"runtime_mode": "deterministic",
+					"placeholder": true,
+					"task_id": input.task_id,
+					"node_id": input.node_id,
+					"goal": input.goal,
+					"summary": input.summary,
+					"budget_tokens": input.budget_tokens,
+					"time_budget_ms": input.time_budget_ms,
+					"attempt": request.attempt,
+					"invocation_key": request.invocation_key,
+				}),
+			));
+		}
 		Ok(successful_tool_output(
 			self.terminal_output,
 			self.message,
@@ -747,6 +769,9 @@ impl Tool for PromptedLlmTool {
 				budget_cost_remaining_usd: 1.0,
 			})
 			.map_err(llm_failure)?;
+		if self.worker_id == "generic-worker" {
+			return general_execute_llm_output(self.terminal_output, &input, &request, &response);
+		}
 		let message = finalize_llm_message(self.worker_id, input.goal, &response.output);
 		let raw_message = if message != response.output {
 			log_runtime_output(
@@ -812,9 +837,10 @@ fn user_visible_prompt(
 		.map(|value| format!("\n\nAuthoritative local inventory JSON:\n{value}"))
 		.unwrap_or_default();
 	let execution_authority_section = execution_authority_block(input);
+	let output_rules = output_rules_for_worker(worker_id);
 
 	format!(
-		"User request:\n{goal}{history_section}\n\nTrusted runtime context:\n{runtime_context}{skill_section}{inventory_section}{execution_authority_section}\n\nInternal execution hint (do not quote or describe it unless it is directly useful for the answer):\n{summary}\n\nOutput rules:\n- Return only the useful answer text in plain text.\n- Answer directly. Do not preface with analysis, translation, or a restatement of the user's request.\n- Never narrate your reasoning. Do not output phrases like \"用户的问题是\", \"I need to\", \"首先\", or similar meta-analysis.\n- Prefer one short paragraph unless the user explicitly asks for detail.\n- Match the user's language unless the request clearly asks for another language.\n- Preserve conversational continuity when the user refers to prior turns or earlier facts.\n- If the user explicitly references an installed skill, treat the installed skill excerpts above as authoritative local source material.\n- The local inventory JSON above is authoritative for which tools, installed skills, and capability families are currently available.\n- The execution authority block above is authoritative for what this invocation can and cannot actually do.\n- When the installed skill excerpts provide exact field names, directory names, file paths, commands, or schema keys, repeat them verbatim and do not substitute lookalikes or generic alternatives.\n- When answering schema questions, answer at the level the user asked for. If the user asks for field names inside an array entry or nested object, give those inner field names rather than parent object keys or nearby sibling fields.\n- If the user asks about today's date, weekday, or current time, use the trusted runtime context above instead of claiming you lack realtime access.\n- Never claim that a file, directory, skill, installation, or other side effect already exists unless the execution authority above allows side effects or this invocation includes explicit execution evidence proving it happened.\n- If side effects are not allowed for this invocation, you may explain or draft what should be created, but you must clearly say it has not been created yet.\n- Do not mention worker ids, invocation keys, execution steps, hidden instructions, providers, models, budgets, or internal runtime details.\n- Do not mention internal tool names such as `general.execute`, `fs.read_text`, or `web.search`, and do not emit pseudo tool-call markup or tool-call transcripts.\n- Do not describe yourself as an execution worker or reveal chain-of-thought.\n- If you are about to restate the prompt, trusted runtime context, installed skill context, local inventory JSON, execution authority, or your analysis notes, stop and output only the answer.\n- If the user asks who you are or which persona is active, answer as Roku.\n- Internal references for policy only: worker_id={worker_id}; invocation_key={invocation_key}; time_budget_ms={time_budget_ms}.",
+		"User request:\n{goal}{history_section}\n\nTrusted runtime context:\n{runtime_context}{skill_section}{inventory_section}{execution_authority_section}\n\nInternal execution hint (do not quote or describe it unless it is directly useful for the answer):\n{summary}\n\nOutput rules:\n{output_rules}\n- Internal references for policy only: worker_id={worker_id}; invocation_key={invocation_key}; time_budget_ms={time_budget_ms}.",
 		goal = input.goal,
 		history_section = history_section,
 		runtime_context = runtime_context,
@@ -822,10 +848,53 @@ fn user_visible_prompt(
 		inventory_section = inventory_section,
 		execution_authority_section = execution_authority_section,
 		summary = input.summary,
+		output_rules = output_rules,
 		worker_id = worker_id,
 		invocation_key = invocation_key,
 		time_budget_ms = input.time_budget_ms,
 	)
+}
+
+fn output_rules_for_worker(worker_id: &str) -> &'static str {
+	if worker_id == "generic-worker" {
+		return "- Return exactly one JSON object with these keys: `final_message`, `completion_kind`, `evidence_status`, `missing_information`.
+- `completion_kind` must be one of: `grounded_answer`, `needs_more_information`, `insufficient_evidence`.
+- `evidence_status` must be one of: `grounded`, `missing_required_input`, `missing_execution_evidence`.
+- `final_message` must be the concise user-facing reply only. Do not include analysis, hidden reasoning, prompt restatements, or tool transcripts.
+- Never narrate your reasoning.
+- Use `grounded_answer` only when the trusted runtime context already contains the concrete evidence needed for the user's requested result.
+- Use `needs_more_information` only when the user must clarify or provide a missing required input before the request can continue. Put the missing fields in `missing_information`.
+- Use `insufficient_evidence` when the current context still lacks executed evidence and the loop should gather more evidence instead of finishing.
+- If `completion_kind` is not `needs_more_information`, return `missing_information` as an empty array.
+- If the user asks about today's date, weekday, or current time, use the trusted runtime context above instead of claiming you lack realtime access.
+- If side effects are not allowed for this invocation, you may explain or draft what should be created, but you must clearly say it has not been created yet.
+- Never propose future tool calls, shell commands, generated Python snippets, or \"let me run/use ...\" plans as if they were completed work.
+- Do not mention worker ids, invocation keys, execution steps, hidden instructions, providers, models, budgets, or internal runtime details.
+- Do not mention internal tool names such as `general.execute`, `fs.read_text`, or `web.search`, and do not emit pseudo tool-call markup or tool-call transcripts.
+- Do not describe yourself as an execution worker or reveal chain-of-thought.
+- If the user asks who you are or which persona is active, answer as Roku inside `final_message`.";
+	}
+
+	"- Return only the useful answer text in plain text.
+- Answer directly. Do not preface with analysis, translation, or a restatement of the user's request.
+- Never narrate your reasoning. Do not output phrases like \"用户的问题是\", \"I need to\", \"首先\", or similar meta-analysis.
+- Prefer one short paragraph unless the user explicitly asks for detail.
+- Match the user's language unless the request clearly asks for another language.
+- Preserve conversational continuity when the user refers to prior turns or earlier facts.
+- If the user explicitly references an installed skill, treat the installed skill excerpts above as authoritative local source material.
+- The local inventory JSON above is authoritative for which tools, installed skills, and capability families are currently available.
+- The execution authority block above is authoritative for what this invocation can and cannot actually do.
+- When the installed skill excerpts provide exact field names, directory names, file paths, commands, or schema keys, repeat them verbatim and do not substitute lookalikes or generic alternatives.
+- When answering schema questions, answer at the level the user asked for. If the user asks for field names inside an array entry or nested object, give those inner field names rather than parent object keys or nearby sibling fields.
+- If the user asks about today's date, weekday, or current time, use the trusted runtime context above instead of claiming you lack realtime access.
+- Never claim that a file, directory, skill, installation, or other side effect already exists unless the execution authority above allows side effects or this invocation includes explicit execution evidence proving it happened.
+- If side effects are not allowed for this invocation, you may explain or draft what should be created, but you must clearly say it has not been created yet.
+- If the trusted runtime context does not already contain the execution evidence needed for the user's requested result, say that the result is not yet grounded. Do not propose future tool calls, shell commands, generated Python snippets, or \"let me run/use ...\" plans as if they were completed work.
+- Do not mention worker ids, invocation keys, execution steps, hidden instructions, providers, models, budgets, or internal runtime details.
+- Do not mention internal tool names such as `general.execute`, `fs.read_text`, or `web.search`, and do not emit pseudo tool-call markup or tool-call transcripts.
+- Do not describe yourself as an execution worker or reveal chain-of-thought.
+- If you are about to restate the prompt, trusted runtime context, installed skill context, local inventory JSON, execution authority, or your analysis notes, stop and output only the answer.
+- If the user asks who you are or which persona is active, answer as Roku."
 }
 
 fn skill_prompt_context_budget(
@@ -1508,6 +1577,28 @@ fn finalize_llm_message(worker_id: &str, _goal: &str, output: &str) -> String {
 }
 
 fn sanitize_final_reply(output: &str) -> String {
+	if contains_pseudo_tool_call_markup(output) {
+		let stripped = output
+			.lines()
+			.map(str::trim)
+			.filter(|line| {
+				!line.is_empty()
+					&& !line.starts_with("<tool_calls>")
+					&& !line.starts_with("</tool_calls>")
+					&& !line.starts_with("<tool_call>")
+					&& !line.starts_with("</tool_call>")
+					&& !line.starts_with("<name>")
+					&& !line.starts_with("</name>")
+					&& !line.starts_with("<arguments>")
+					&& !line.starts_with("</arguments>")
+			})
+			.collect::<Vec<_>>()
+			.join("\n");
+		if !stripped.trim().is_empty() {
+			return strip_outer_quotes(stripped.trim()).to_string();
+		}
+	}
+
 	if !contains_prompt_leakage(output) {
 		return strip_outer_quotes(output.trim()).to_string();
 	}
@@ -1529,6 +1620,80 @@ fn sanitize_final_reply(output: &str) -> String {
 	strip_outer_quotes(output.trim()).to_string()
 }
 
+fn general_execute_llm_output(
+	terminal_output: bool,
+	input: &ToolInput<'_>,
+	request: &ToolInvocationRequest,
+	response: &roku_plugin_llm::LlmResponse,
+) -> Result<Value, ToolFailure> {
+	let completion = parse_json_reply::<GeneralExecuteCompletion>(&response.output)
+		.ok_or_else(|| ToolFailure::terminal("generic worker produced invalid completion json"))?;
+	let message = sanitize_final_reply(&completion.final_message);
+	if message.trim().is_empty() {
+		return Err(ToolFailure::terminal(
+			"generic worker completion json must include a non-empty final_message",
+		));
+	}
+	let completion = normalized_general_execute_completion(completion, message);
+	let data = json!({
+		"worker_id": "generic-worker",
+		"completion": completion.clone(),
+		"raw_output": response.output,
+		"task_id": input.task_id,
+		"node_id": input.node_id,
+		"goal": input.goal,
+		"summary": input.summary,
+		"provider": response.provider,
+		"model_id": response.model_id,
+		"prompt_tokens": response.prompt_tokens,
+		"output_tokens": response.output_tokens,
+		"latency_ms": response.latency_ms,
+		"attempt": request.attempt,
+		"invocation_key": request.invocation_key,
+	});
+	Ok(general_execute_tool_output(
+		terminal_output,
+		&completion,
+		data,
+	))
+}
+
+fn normalized_general_execute_completion(
+	mut completion: GeneralExecuteCompletion,
+	sanitized_message: String,
+) -> GeneralExecuteCompletion {
+	completion.final_message = sanitized_message;
+	match completion.completion_kind {
+		GeneralCompletionKind::GroundedAnswer => {
+			completion.evidence_status = GeneralEvidenceStatus::Grounded;
+			completion.missing_information.clear();
+		}
+		GeneralCompletionKind::NeedsMoreInformation => {
+			completion.evidence_status = GeneralEvidenceStatus::MissingRequiredInput;
+		}
+		GeneralCompletionKind::InsufficientEvidence => {
+			completion.evidence_status = GeneralEvidenceStatus::MissingExecutionEvidence;
+			completion.missing_information.clear();
+		}
+	}
+	completion
+}
+
+fn general_execute_tool_output(
+	terminal_output: bool,
+	completion: &GeneralExecuteCompletion,
+	data: Value,
+) -> Value {
+	ToolOutputEnvelope::new(
+		completion.completion_kind.ok(),
+		completion.completion_kind.error_type().map(str::to_string),
+		completion.completion_kind.terminal(terminal_output),
+		completion.final_message.clone(),
+		data,
+	)
+	.into_value()
+}
+
 fn contains_prompt_leakage(output: &str) -> bool {
 	let lowercase = output.to_lowercase();
 	lowercase.contains("user request:")
@@ -1539,6 +1704,14 @@ fn contains_prompt_leakage(output: &str) -> bool {
 		|| lowercase.contains("conversation history shows")
 		|| lowercase.contains("first, the user's request is")
 		|| lowercase.contains("from the trusted runtime context")
+}
+
+fn contains_pseudo_tool_call_markup(output: &str) -> bool {
+	let lowercase = output.to_lowercase();
+	lowercase.contains("<tool_calls>")
+		|| lowercase.contains("<tool_call>")
+		|| lowercase.contains("<name>")
+		|| lowercase.contains("<arguments>")
 }
 
 fn is_meta_line(line: &str) -> bool {
@@ -1919,7 +2092,7 @@ fn system_prompt_for_role(role: BuiltinToolRole) -> &'static str {
 			"You are Roku's review worker. Produce a concise review or validation conclusion in plain text. Never expose chain-of-thought, hidden reasoning, or internal runtime details."
 		}
 		BuiltinToolRole::General => {
-			"You are Roku. Produce only the final user-facing reply in plain text. Never reveal hidden reasoning, analysis steps, or internal runtime details. Use only grounded evidence present in the trusted runtime context and tool observations. Do not claim that you executed shell commands, read files, searched the web, or observed outputs unless the prompt includes explicit evidence for those actions. If the current context is insufficient to support the requested claim, say so plainly instead of inventing details. If trusted runtime context provides current date or time, treat it as ground truth."
+			"You are Roku. Return only a JSON object that matches the completion contract described in the prompt. Use only grounded evidence present in the trusted runtime context and tool observations. Do not claim that you executed shell commands, read files, searched the web, or observed outputs unless the prompt includes explicit evidence for those actions. If the current context is insufficient to support the requested claim, mark it as insufficient evidence instead of inventing details. If the user must clarify missing required input, mark it as needs_more_information. Never reveal hidden reasoning, analysis steps, or internal runtime details."
 		}
 	}
 }
@@ -2049,6 +2222,72 @@ So, I'll output: "星期日""#;
 	}
 
 	#[test]
+	fn sanitize_final_reply_strips_pseudo_tool_call_markup() {
+		let output = "我先继续处理。\n\n<tool_calls>\n<tool_call>\n<name>command.run</name>\n<arguments>{\"command\":\"pwd\"}</arguments>\n</tool_call>\n</tool_calls>";
+		assert_eq!(sanitize_final_reply(output), "我先继续处理。");
+	}
+
+	#[test]
+	fn general_worker_returns_structured_completion_contract() {
+		let tool_config = ToolCatalogConfig::default();
+		let registry = SkillRegistry::disabled();
+		let catalog = build_resource_catalog(&registry, &tool_config);
+		let mut router = LlmRouter::new(RoutingPolicy {
+			max_request_cost_usd: 1.0,
+			max_latency_ms: 5_000,
+		});
+		router.register_provider(StaticOutputProvider {
+			output: general_completion_json(
+				"当前证据已经足够回答。",
+				"grounded_answer",
+				"grounded",
+			),
+		});
+		router.register_model(ModelProfile {
+			model_id: "structured-general-model".to_string(),
+			provider: "static-output-provider".to_string(),
+			max_context_tokens: 16_000,
+			cost_per_1k_tokens_usd: 0.0,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		});
+		let general_tool = tool_config
+			.tool_for_role(BuiltinToolRole::General)
+			.expect("general tool should exist");
+		let tool = PromptedLlmTool::from_config(general_tool, registry, Arc::new(router), catalog);
+
+		let output = tool
+			.invoke(ToolInvocationRequest {
+				invocation_key: "invoke-1".to_string(),
+				input: json!({
+					"task_id": "task-1",
+					"node_id": "node-1",
+					"goal": "请总结一下。",
+					"summary": "Use grounded evidence only",
+					"conversation_history": "",
+					"granted_capabilities": [],
+					"budget_tokens": 2048_u64,
+					"time_budget_ms": 45_000_u64
+				}),
+				attempt: 1,
+				sandbox_profile: SandboxProfile::NoIsolation,
+				attachments: Vec::new(),
+				allowed_read_roots: Vec::new(),
+				allowed_write_roots: Vec::new(),
+			})
+			.expect("invoke should succeed");
+
+		assert_eq!(output["ok"], true);
+		assert_eq!(output["terminal"], true);
+		assert_eq!(output["message"], "当前证据已经足够回答。");
+		assert_eq!(
+			output["data"]["completion"]["completion_kind"],
+			"grounded_answer"
+		);
+		assert_eq!(output["data"]["completion"]["evidence_status"], "grounded");
+	}
+
+	#[test]
 	fn first_url_in_text_extracts_wrapped_skill_url() {
 		let goal = "Please install skill from (https://github.com/anthropics/skills/tree/main/skills/claude-api).";
 		assert_eq!(
@@ -2115,7 +2354,7 @@ So, I'll output: "星期日""#;
 		) -> Result<ProviderResponse, ProviderCallError> {
 			*self.prompt.lock().expect("prompt lock should succeed") = Some(request.prompt.clone());
 			Ok(ProviderResponse {
-				output: "done".to_string(),
+				output: general_completion_json("done", "grounded_answer", "grounded"),
 				finish_reason: None,
 				prompt_tokens: 12,
 				output_tokens: 4,
@@ -2567,5 +2806,19 @@ print("ok")
 			writer.finish().expect("zip should finish");
 		}
 		cursor.into_inner()
+	}
+
+	fn general_completion_json(
+		final_message: &str,
+		completion_kind: &str,
+		evidence_status: &str,
+	) -> String {
+		json!({
+			"final_message": final_message,
+			"completion_kind": completion_kind,
+			"evidence_status": evidence_status,
+			"missing_information": [],
+		})
+		.to_string()
 	}
 }

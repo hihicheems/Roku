@@ -402,6 +402,27 @@ mod tests {
 					"reason": "plain conversational request"
 				})
 				.to_string()
+			} else if request.system_prompt.as_deref().is_some_and(|prompt| {
+				prompt.contains("Return only a JSON object that matches the completion contract")
+			}) {
+				let final_message = if request.prompt.contains("User request:\n今天周几？") {
+					"今天是星期三。".to_string()
+				} else if request.prompt.contains("User request:\n沙县小吃是什么？") {
+					"沙县小吃是福建沙县起源的一类大众化中式快餐小吃。".to_string()
+				} else if request.prompt.contains("User request:\n我刚问了你什么？") {
+					let last_user_turn = extract_last_user_turn(&request.prompt)
+						.unwrap_or_else(|| "我没有看到上一条用户消息。".to_string());
+					format!("你刚才问的是：{last_user_turn}")
+				} else {
+					"我是Roku。".to_string()
+				};
+				serde_json::json!({
+					"final_message": final_message,
+					"completion_kind": "grounded_answer",
+					"evidence_status": "grounded",
+					"missing_information": [],
+				})
+				.to_string()
 			} else if request.prompt.contains("User request:\n今天周几？") {
 				"今天是星期三。".to_string()
 			} else if request.prompt.contains("User request:\n沙县小吃是什么？") {

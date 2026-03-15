@@ -747,6 +747,81 @@ impl ToolOutputEnvelope {
 	}
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GeneralCompletionKind {
+	GroundedAnswer,
+	NeedsMoreInformation,
+	InsufficientEvidence,
+}
+
+impl GeneralCompletionKind {
+	pub fn error_type(self) -> Option<&'static str> {
+		match self {
+			Self::GroundedAnswer => None,
+			Self::NeedsMoreInformation => Some("needs_more_information"),
+			Self::InsufficientEvidence => Some("insufficient_evidence"),
+		}
+	}
+
+	pub fn terminal(self, terminal_output: bool) -> bool {
+		matches!(self, Self::GroundedAnswer) && terminal_output
+	}
+
+	pub fn ok(self) -> bool {
+		matches!(self, Self::GroundedAnswer)
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GeneralEvidenceStatus {
+	Grounded,
+	MissingRequiredInput,
+	MissingExecutionEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeneralExecuteCompletion {
+	pub final_message: String,
+	pub completion_kind: GeneralCompletionKind,
+	pub evidence_status: GeneralEvidenceStatus,
+	#[serde(default)]
+	pub missing_information: Vec<String>,
+}
+
+impl GeneralExecuteCompletion {
+	pub fn grounded(final_message: impl Into<String>) -> Self {
+		Self {
+			final_message: final_message.into(),
+			completion_kind: GeneralCompletionKind::GroundedAnswer,
+			evidence_status: GeneralEvidenceStatus::Grounded,
+			missing_information: Vec::new(),
+		}
+	}
+
+	pub fn needs_more_information(
+		final_message: impl Into<String>,
+		missing_information: Vec<String>,
+	) -> Self {
+		Self {
+			final_message: final_message.into(),
+			completion_kind: GeneralCompletionKind::NeedsMoreInformation,
+			evidence_status: GeneralEvidenceStatus::MissingRequiredInput,
+			missing_information,
+		}
+	}
+
+	pub fn insufficient_evidence(final_message: impl Into<String>) -> Self {
+		Self {
+			final_message: final_message.into(),
+			completion_kind: GeneralCompletionKind::InsufficientEvidence,
+			evidence_status: GeneralEvidenceStatus::MissingExecutionEvidence,
+			missing_information: Vec::new(),
+		}
+	}
+}
+
 fn default_tool_observation_schema() -> String {
 	"tool_observation.v1".to_string()
 }

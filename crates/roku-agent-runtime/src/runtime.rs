@@ -41,9 +41,10 @@ use crate::workers::{
 	skill_worker_with_config,
 };
 use roku_common_types::{
-	AgentContext, AggregationMode, ConversationRole, ConversationTurn, EvidenceItem, JoinPolicy,
-	NodeBudgetSnapshot, NodeId, PolicyBindings, RequestEnvelope, RerunPolicy, ResourceSelector,
-	ResultStatus, RetryPolicy, TaskId, TaskNodeDispatchPolicy, TaskNodeKind,
+	AgentContext, AggregationMode, ConversationRole, ConversationTurn, EvidenceItem,
+	GeneralExecuteCompletion, JoinPolicy, NodeBudgetSnapshot, NodeId, PolicyBindings,
+	RequestEnvelope, RerunPolicy, ResourceSelector, ResultStatus, RetryPolicy, TaskId,
+	TaskNodeDispatchPolicy, TaskNodeKind,
 };
 use roku_common_types::{AgentInstanceSpec, ResultEnvelope, TaskNode};
 use roku_plugin_catalog::{ResourceCatalog, ResourceKind};
@@ -1200,10 +1201,12 @@ impl GenericAgentRuntime {
 	) -> ToolObservation {
 		let payload = serde_json::from_str::<Value>(&result.payload)
 			.unwrap_or_else(|_| json!({ "message": result.payload.clone() }));
-		if result.status == ResultStatus::Ok {
-			return ToolObservation::from_result_payload(tool_name, &payload);
-		}
-		ToolObservation::from_error_payload(tool_name, &payload)
+		let observation = if result.status == ResultStatus::Ok {
+			ToolObservation::from_result_payload(tool_name, &payload)
+		} else {
+			ToolObservation::from_error_payload(tool_name, &payload)
+		};
+		normalize_tool_loop_observation(observation)
 	}
 
 	fn synthetic_loop_terminal_result(
@@ -1430,6 +1433,30 @@ fn limited_planning_compatibility_message(goal: &str, reason: &str) -> String {
 	}
 }
 
+fn normalize_tool_loop_observation(observation: ToolObservation) -> ToolObservation {
+	if observation.tool_name != "general.execute" {
+		return observation;
+	}
+
+	let Some(completion) = observation
+		.data
+		.get("completion")
+		.cloned()
+		.and_then(|value| serde_json::from_value::<GeneralExecuteCompletion>(value).ok())
+	else {
+		return observation;
+	};
+
+	ToolObservation {
+		ok: completion.completion_kind.ok(),
+		tool_name: observation.tool_name,
+		error_type: completion.completion_kind.error_type().map(str::to_string),
+		terminal: completion.completion_kind.terminal(true),
+		data: observation.data,
+		message: completion.final_message,
+	}
+}
+
 fn summarized_tool_loop_message(goal: &str, observation: &ToolObservation) -> String {
 	summarize_observation(goal, observation).final_message
 }
@@ -1597,6 +1624,35 @@ mod tests {
 		serde_json::from_str(&result.payload).expect("payload should be valid json")
 	}
 
+	fn runtime_with_fixed_general_llm() -> GenericAgentRuntime {
+		runtime_with_fixed_general_llm_and_tools_config(ToolsRuntimeConfig::default())
+	}
+
+	fn runtime_with_fixed_general_llm_and_tools_config(
+		tools_runtime_config: ToolsRuntimeConfig,
+	) -> GenericAgentRuntime {
+		let mut router = LlmRouter::new(RoutingPolicy {
+			max_request_cost_usd: 1.0,
+			max_latency_ms: 5_000,
+		});
+		router.register_provider(FixedLlmProvider);
+		router.register_model(ModelProfile {
+			model_id: "test-model".to_string(),
+			provider: "test-provider".to_string(),
+			max_context_tokens: 16_000,
+			cost_per_1k_tokens_usd: 0.0,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		});
+		GenericAgentRuntime::with_llm_router_skill_registry_tool_config_and_plugin_snapshot(
+			router,
+			SkillRegistry::disabled(),
+			ToolCatalogConfig::default(),
+			roku_plugin_core::PluginRegistrySnapshot::permissive(),
+			tools_runtime_config,
+		)
+	}
+
 	fn runtime_loop_trace_for_goal(runtime: &GenericAgentRuntime, goal: &str) -> RuntimeLoopTrace {
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId(format!(
@@ -1648,15 +1704,6 @@ mod tests {
 
 	fn cleanup_fixture(path: &str) {
 		let _ = fs::remove_file(path);
-	}
-
-	fn runtime_with_tools_config(tools_runtime_config: ToolsRuntimeConfig) -> GenericAgentRuntime {
-		GenericAgentRuntime::with_skill_registry_tool_config_and_plugin_snapshot(
-			SkillRegistry::disabled(),
-			ToolCatalogConfig::default(),
-			roku_plugin_core::PluginRegistrySnapshot::permissive(),
-			tools_runtime_config,
-		)
 	}
 
 	fn spawn_mock_web_search_server(body: &'static str) -> String {
@@ -1867,7 +1914,11 @@ mod tests {
 			_request: &GenerationRequest,
 		) -> Result<ProviderResponse, ProviderCallError> {
 			Ok(ProviderResponse {
-				output: "live answer from llm".to_string(),
+				output: general_completion_json(
+					"live answer from llm",
+					"grounded_answer",
+					"grounded",
+				),
 				finish_reason: None,
 				prompt_tokens: 32,
 				output_tokens: 8,
@@ -1923,13 +1974,7 @@ mod tests {
 			_request: &GenerationRequest,
 		) -> Result<ProviderResponse, ProviderCallError> {
 			Ok(ProviderResponse {
-				output: r#"First, the user's request is: "今天周几？"
-
-From the trusted runtime context:
-- local_weekday: Sunday
-
-So, I'll output: "星期日""#
-					.to_string(),
+				output: general_completion_json("星期日", "grounded_answer", "grounded"),
 				finish_reason: None,
 				prompt_tokens: 48,
 				output_tokens: 64,
@@ -2832,11 +2877,14 @@ So, I'll output: "星期日""#
 
 	#[test]
 	fn runtime_loop_confusion_suite_covers_grounded_and_quoted_requests() {
-		let runtime = GenericAgentRuntime::default();
+		let runtime = runtime_with_fixed_general_llm();
+		let deterministic_runtime = GenericAgentRuntime::default();
 		let csv_path = regression_fixture_path(".csv", "name,count\nalpha,1\nbeta,2\n");
 
-		let inventory_trace =
-			runtime_loop_trace_for_goal(&runtime, "What skills and tools do you have right now?");
+		let inventory_trace = runtime_loop_trace_for_goal(
+			&deterministic_runtime,
+			"What skills and tools do you have right now?",
+		);
 		assert_regression_case(
 			"inventory-question",
 			crate::runtime_loop::RegressionSuiteKind::Confusion,
@@ -3071,7 +3119,8 @@ So, I'll output: "星期日""#
 
 	#[test]
 	fn runtime_loop_output_interpretation_suite_covers_terminal_and_non_terminal_success() {
-		let runtime = GenericAgentRuntime::default();
+		let runtime = runtime_with_fixed_general_llm();
+		let deterministic_runtime = GenericAgentRuntime::default();
 		let text_path = regression_fixture_path(".txt", "phase3 interpretation smoke\n");
 
 		let command_trace = runtime_loop_trace_for_goal(&runtime, "Run this command: `pwd`");
@@ -3122,8 +3171,10 @@ So, I'll output: "星期日""#
 			},
 		);
 
-		let inventory_trace =
-			runtime_loop_trace_for_goal(&runtime, "What skills and tools do you have right now?");
+		let inventory_trace = runtime_loop_trace_for_goal(
+			&deterministic_runtime,
+			"What skills and tools do you have right now?",
+		);
 		assert_regression_case(
 			"inventory-terminal-success",
 			crate::runtime_loop::RegressionSuiteKind::OutputInterpretation,
@@ -3150,7 +3201,7 @@ So, I'll output: "星期日""#
 		);
 		let mut tools_runtime_config = ToolsRuntimeConfig::default();
 		tools_runtime_config.web.endpoint = Some(endpoint);
-		let web_runtime = runtime_with_tools_config(tools_runtime_config);
+		let web_runtime = runtime_with_fixed_general_llm_and_tools_config(tools_runtime_config);
 		let web_trace = runtime_loop_trace_for_goal(
 			&web_runtime,
 			"Search the web for the latest Rust edition.",
@@ -3222,7 +3273,7 @@ So, I'll output: "星期日""#
 
 	#[test]
 	fn execute_tool_loop_can_switch_tools_after_an_insufficient_lookup_observation() {
-		let runtime = GenericAgentRuntime::default();
+		let runtime = runtime_with_fixed_general_llm();
 		let text_path = regression_fixture_path(".txt", "react recovery fixture\n");
 		let file_name = PathBuf::from(&text_path)
 			.file_name()
@@ -3440,6 +3491,98 @@ So, I'll output: "星期日""#
 			loop_state.status,
 			crate::runtime_loop::LoopStatus::Succeeded
 		);
+	}
+
+	#[test]
+	fn general_execute_structured_insufficient_evidence_becomes_non_terminal() {
+		let normalized = normalize_tool_loop_observation(ToolObservation {
+			ok: true,
+			tool_name: "general.execute".to_string(),
+			error_type: None,
+			terminal: true,
+			data: json!({
+				"completion": {
+					"final_message": "当前还没有得到完成这个请求所需的实际执行证据。",
+					"completion_kind": "insufficient_evidence",
+					"evidence_status": "missing_execution_evidence",
+					"missing_information": [],
+				}
+			}),
+			message: "placeholder".to_string(),
+		});
+
+		assert!(!normalized.ok);
+		assert_eq!(
+			normalized.error_type.as_deref(),
+			Some("insufficient_evidence")
+		);
+		assert!(!normalized.terminal);
+	}
+
+	#[test]
+	fn general_execute_structured_grounded_answer_stays_terminal() {
+		let normalized = normalize_tool_loop_observation(ToolObservation {
+			ok: false,
+			tool_name: "general.execute".to_string(),
+			error_type: Some("insufficient_evidence".to_string()),
+			terminal: false,
+			data: json!({
+				"completion": {
+					"final_message": "它负责从当前请求里提取显式资源线索并做参数对齐。",
+					"completion_kind": "grounded_answer",
+					"evidence_status": "grounded",
+					"missing_information": [],
+				}
+			}),
+			message: "placeholder".to_string(),
+		});
+
+		assert!(normalized.ok);
+		assert!(normalized.terminal);
+		assert_eq!(
+			normalized.message,
+			"它负责从当前请求里提取显式资源线索并做参数对齐。"
+		);
+	}
+
+	#[test]
+	fn general_execute_structured_clarification_becomes_needs_more_information() {
+		let normalized = normalize_tool_loop_observation(ToolObservation {
+			ok: true,
+			tool_name: "general.execute".to_string(),
+			error_type: None,
+			terminal: true,
+			data: json!({
+				"completion": {
+					"final_message": "我需要知道您想统计哪个项目的代码行数。请提供项目的目录路径或项目名称。",
+					"completion_kind": "needs_more_information",
+					"evidence_status": "missing_required_input",
+					"missing_information": ["project_path"],
+				}
+			}),
+			message: "placeholder".to_string(),
+		});
+
+		assert!(!normalized.ok);
+		assert_eq!(
+			normalized.error_type.as_deref(),
+			Some("needs_more_information")
+		);
+		assert!(!normalized.terminal);
+	}
+
+	fn general_completion_json(
+		final_message: &str,
+		completion_kind: &str,
+		evidence_status: &str,
+	) -> String {
+		json!({
+			"final_message": final_message,
+			"completion_kind": completion_kind,
+			"evidence_status": evidence_status,
+			"missing_information": [],
+		})
+		.to_string()
 	}
 
 	fn test_skill_archive_bytes() -> Vec<u8> {
