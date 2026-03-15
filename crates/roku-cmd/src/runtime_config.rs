@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Startup-side runtime configuration loading and composition.
+//!
+//! This module is intentionally narrow: it reads `runtime.toml`, applies env overrides, and hands
+//! typed config bundles back to the crates that actually enforce runtime semantics.
+
 use std::fs;
 
 use roku_agent_runtime::{
@@ -66,6 +71,10 @@ struct LlmSections {
 	openrouter: OpenRouterRuntimeConfigPatch,
 }
 
+/// Loads the effective runtime config bundle from disk and env for this process.
+///
+/// Parsing lives here so startup surfaces share one composition path. Validation and clamping stay
+/// in the owning runtime crates, which keeps this layer from re-implementing per-subsystem policy.
 pub(crate) fn load_runtime_configs(
 	layout: &LocalStorageLayout,
 ) -> Result<RuntimeConfigs, CommandError> {

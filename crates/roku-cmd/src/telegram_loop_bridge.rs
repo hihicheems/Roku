@@ -12,12 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Bridge between runtime pending-loop state and Telegram session persistence.
+//!
+//! Telegram stores pause/resume bindings in chat-scoped session preferences, while the runtime
+//! service owns the in-memory loop state used to continue execution. This module is the explicit
+//! adapter between those two representations.
+
 use roku_agent_runtime::LoopState;
 use roku_common_types::{PendingLoopBinding, RuntimeError};
 use roku_runtime_service::RuntimeService;
 
 use crate::bot::TelegramSessionState;
 
+/// Restores a persisted Telegram pending-loop binding into the live runtime service.
+///
+/// Corrupt serialized loop state is treated as stale session residue: the broken binding is
+/// dropped instead of failing the whole request path.
 pub(crate) fn restore_pending_loop_from_session(
 	service: &RuntimeService,
 	session_state: &TelegramSessionState,
@@ -38,6 +48,10 @@ pub(crate) fn restore_pending_loop_from_session(
 	service.restore_pending_loop(loop_state)
 }
 
+/// Persists the runtime service's current pending-loop state back into Telegram session storage.
+///
+/// This keeps Telegram control commands and resume handling keyed off the same loop snapshot the
+/// runtime most recently exposed.
 pub(crate) fn sync_pending_loop_to_session(
 	service: &RuntimeService,
 	session_state: &TelegramSessionState,

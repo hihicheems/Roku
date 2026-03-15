@@ -12,10 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Local filesystem layout used by command-owned startup surfaces.
+//!
+//! This type centralizes where CLI/bootstrap code expects config, state, logs, and generated
+//! assets to live. It is a process-local layout contract, not a claim that every path is a shared
+//! workspace-wide API.
+
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+/// Resolved local storage layout for one command process.
+///
+/// The layout is shared across command surfaces so Telegram, HTTP, and one-shot CLI paths all
+/// point at the same on-disk state roots by default.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LocalStorageLayout {
 	pub home_dir: PathBuf,
@@ -40,6 +50,10 @@ pub(crate) struct LocalStorageLayout {
 }
 
 impl LocalStorageLayout {
+	/// Resolves the effective local storage layout from env overrides and stable defaults.
+	///
+	/// Relative config paths remain relative on purpose so the command surface tracks the current
+	/// workspace checkout, while mutable data roots default under `ROKU_HOME`.
 	pub fn from_env() -> Self {
 		let roku_home = env_path("ROKU_HOME").unwrap_or_else(default_roku_home);
 		let state_dir = env_path("ROKU_STATE_DIR").unwrap_or_else(|| roku_home.join("state"));
@@ -96,6 +110,10 @@ impl LocalStorageLayout {
 		}
 	}
 
+	/// Creates the directory roots that command-owned startup expects to exist before bootstrap.
+	///
+	/// This only materializes directories that the CLI/runtime stack owns locally; it does not
+	/// create config files or mutate shared runtime state beyond the filesystem roots themselves.
 	pub fn ensure_dirs(&self) -> std::io::Result<()> {
 		for directory in [
 			&self.home_dir,
