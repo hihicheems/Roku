@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::MutexGuard;
 
-use roku_agent_runtime::{LoopState, should_resume_awaiting_user};
+use roku_agent_runtime::LoopState;
 use roku_common_types::{RequestEnvelope, ResponseEnvelope, RuntimeError, Task};
 use roku_observability::LogLevel;
 
@@ -65,7 +65,10 @@ impl RuntimeService {
 			pending.remove(&request.session_id);
 			return Ok(None);
 		}
-		if should_resume_awaiting_user(&existing, &request.goal) {
+		let assessment = self
+			.runtime
+			.assess_awaiting_user_resume(&existing, &request.goal);
+		if assessment.should_resume {
 			pending.remove(&request.session_id);
 			log_runtime(
 				LogLevel::Info,
@@ -74,6 +77,7 @@ impl RuntimeService {
 					("request_id", request.request_id.0.clone()),
 					("session_id", request.session_id.clone()),
 					("run_id", existing.run_id.clone()),
+					("reason", assessment.reason.clone()),
 				],
 			);
 			return Ok(Some(existing));
@@ -87,6 +91,7 @@ impl RuntimeService {
 				("session_id", request.session_id.clone()),
 				("run_id", existing.run_id.clone()),
 				("goal", truncate_for_log(&request.goal, 120)),
+				("reason", assessment.reason),
 			],
 		);
 		Ok(None)

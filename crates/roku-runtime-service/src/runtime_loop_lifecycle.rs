@@ -163,6 +163,27 @@ impl RuntimeService {
 		self.record_runtime_loop_step_with_action(loop_state, step_action, response_status, message)
 	}
 
+	pub(super) fn record_runtime_loop_ask_user_payload_step(
+		&self,
+		loop_state: &mut LoopState,
+		response_status: ResponseStatus,
+		payload: AskUserPayload,
+	) -> StepRecord {
+		let reason = match response_status {
+			ResponseStatus::Succeeded => "runtime loop captured direct route completion",
+			ResponseStatus::PendingApproval => {
+				"runtime loop captured pending approval terminal state"
+			}
+			ResponseStatus::Failed => "runtime loop captured direct route failure",
+		};
+		let step = self
+			.runtime
+			.record_ask_user_step(loop_state, reason, payload);
+		self.record_runtime_loop_history(loop_state, loop_state.history.len().saturating_sub(1));
+		self.log_runtime_loop_terminated(loop_state);
+		step
+	}
+
 	fn record_runtime_loop_step_with_action(
 		&self,
 		loop_state: &mut LoopState,

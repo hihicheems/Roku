@@ -23,11 +23,12 @@ use crate::router::{
 };
 use crate::runtime_config::AgentRuntimeConfig;
 use crate::runtime_loop::{
-	AskUserPayload, ContextProjection, LoopContext, LoopState, StepAction, StepObservation,
-	StepRecord, ToolObservation, VisibleToolHint, attachments_for_tool, build_context_projection,
-	build_loop_context, decide_tool_loop_next_step, effective_ask_user_payload, intake_request,
-	interpret_observation, next_working_directory_from_observation, runtime_loop_trace,
-	summarize_observation, tool_required_argument_keys,
+	AskUserPayload, AskUserResumeContract, ContextProjection, LoopContext, LoopState, LoopStatus,
+	StepAction, StepObservation, StepRecord, ToolObservation, VisibleToolHint,
+	attachments_for_tool, build_context_projection, build_loop_context, decide_tool_loop_next_step,
+	effective_ask_user_payload, intake_request, interpret_observation,
+	next_working_directory_from_observation, runtime_loop_trace, summarize_observation,
+	tool_required_argument_keys,
 };
 use crate::tool_config::{ToolCatalogConfig, ToolsRuntimeConfig};
 use crate::tools::{
@@ -50,8 +51,9 @@ use roku_common_types::{AgentInstanceSpec, ResultEnvelope, TaskNode};
 use roku_plugin_catalog::{ResourceCatalog, ResourceKind};
 use roku_plugin_core::PluginRegistrySnapshot;
 use roku_plugin_host::{ToolExecutionResult, ToolInvocation, ToolRuntime, ToolRuntimeError};
-use roku_plugin_llm::LlmRouter;
+use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier};
 use roku_plugin_skills::SkillRegistry;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub trait AgentWorker {
@@ -67,6 +69,18 @@ pub trait RuntimeWorker: Send + Sync {
 struct WorkerRegistryEntry {
 	priority: u8,
 	worker: Arc<dyn RuntimeWorker>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwaitingUserResumeAssessment {
+	pub should_resume: bool,
+	pub reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AwaitingUserResumeDecision {
+	resume_existing_loop: bool,
+	reason: String,
 }
 
 pub struct GenericAgentRuntime {
@@ -392,6 +406,61 @@ impl GenericAgentRuntime {
 		)
 	}
 
+	fn assess_missing_required_input_resume(
+		&self,
+		loop_state: &LoopState,
+		payload: &AskUserPayload,
+		user_input: &str,
+		fields: &[String],
+	) -> AwaitingUserResumeAssessment {
+		let Some(router) = self.route_router.as_deref() else {
+			return AwaitingUserResumeAssessment {
+				should_resume: false,
+				reason:
+					"missing-input clarification requires a live router to distinguish resume from a fresh request"
+						.to_string(),
+			};
+		};
+		let context_projection = build_context_projection(loop_state);
+		let response = match router.generate_json_value(&GenerationRequest {
+			system_prompt: Some(
+				"You are Roku's paused-loop resume gate. Return only valid JSON.".to_string(),
+			),
+			prompt: awaiting_user_resume_prompt(
+				&context_projection,
+				&payload.final_message,
+				fields,
+				user_input,
+			),
+			expected_output_tokens: 96,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: self.agent_runtime_config.router.budget_tokens_remaining,
+			budget_cost_remaining_usd: self.agent_runtime_config.router.budget_cost_remaining_usd,
+		}) {
+			Ok(response) => response,
+			Err(error) => {
+				return AwaitingUserResumeAssessment {
+					should_resume: false,
+					reason: format!("resume gate could not produce a structured decision: {error}"),
+				};
+			}
+		};
+		let decision = match serde_json::from_value::<AwaitingUserResumeDecision>(response.value) {
+			Ok(decision) => decision,
+			Err(error) => {
+				return AwaitingUserResumeAssessment {
+					should_resume: false,
+					reason: format!("resume gate returned an invalid decision payload: {error}"),
+				};
+			}
+		};
+		AwaitingUserResumeAssessment {
+			should_resume: decision.resume_existing_loop,
+			reason: decision.reason,
+		}
+	}
+
 	pub fn build_loop_context(
 		&self,
 		request: &RequestEnvelope,
@@ -422,6 +491,56 @@ impl GenericAgentRuntime {
 			self.agent_runtime_config.r#loop.initial_step_budget,
 			self.agent_runtime_config.r#loop.initial_recovery_budget,
 		)
+	}
+
+	pub fn assess_awaiting_user_resume(
+		&self,
+		loop_state: &LoopState,
+		user_input: &str,
+	) -> AwaitingUserResumeAssessment {
+		let trimmed = user_input.trim();
+		if loop_state.status != LoopStatus::AwaitingUser {
+			return AwaitingUserResumeAssessment {
+				should_resume: false,
+				reason: "loop is not currently awaiting user input".to_string(),
+			};
+		}
+		if trimmed.is_empty() {
+			return AwaitingUserResumeAssessment {
+				should_resume: false,
+				reason: "empty replies cannot resume a paused loop".to_string(),
+			};
+		}
+		let Some(payload) = loop_state.awaiting_user.as_ref() else {
+			return AwaitingUserResumeAssessment {
+				should_resume: false,
+				reason: "paused loop is missing an awaiting-user payload".to_string(),
+			};
+		};
+		match &payload.resume_contract {
+			AskUserResumeContract::CandidateSelection { .. } => {
+				let should_resume = payload.can_resume(trimmed);
+				AwaitingUserResumeAssessment {
+					should_resume,
+					reason: if should_resume {
+						"user reply selected one of the grounded candidates for the paused loop"
+							.to_string()
+					} else {
+						"user reply did not explicitly select one of the grounded candidates"
+							.to_string()
+					},
+				}
+			}
+			AskUserResumeContract::NoAutomaticResume => AwaitingUserResumeAssessment {
+				should_resume: false,
+				reason:
+					"freeform clarification pauses do not auto-resume; treat the next message as a fresh intake"
+						.to_string(),
+			},
+			AskUserResumeContract::MissingRequiredInput { fields } => {
+				self.assess_missing_required_input_resume(loop_state, payload, trimmed, fields)
+			}
+		}
 	}
 
 	pub fn record_terminal_step(
@@ -1457,6 +1576,48 @@ fn normalize_tool_loop_observation(observation: ToolObservation) -> ToolObservat
 	}
 }
 
+fn awaiting_user_resume_prompt(
+	context_projection: &ContextProjection,
+	final_message: &str,
+	missing_fields: &[String],
+	user_input: &str,
+) -> String {
+	let projection_json = serde_json::to_string_pretty(context_projection)
+		.unwrap_or_else(|_| "{\"error\":\"context_projection_unavailable\"}".to_string());
+	format!(
+		r#"Decide whether the latest user message should resume an existing paused runtime loop or start a fresh request.
+
+Return only JSON with this shape:
+{{
+  "resume_existing_loop": true,
+  "reason": "short explanation"
+}}
+
+Rules:
+- Resume only if the latest user message is best interpreted as answering the current paused clarification for the same task.
+- Do not resume if the latest user message appears to start a new task, switch topics, or issue a fresh standalone request.
+- When unsure, prefer `resume_existing_loop=false`.
+- The paused loop still needs these required fields: {missing_fields}.
+
+Paused ask-user message:
+{final_message}
+
+Latest user reply:
+{user_input}
+
+Paused loop context projection:
+{projection_json}"#,
+		missing_fields = if missing_fields.is_empty() {
+			"(none)".to_string()
+		} else {
+			missing_fields.join(", ")
+		},
+		final_message = final_message,
+		user_input = user_input,
+		projection_json = projection_json,
+	)
+}
+
 fn summarized_tool_loop_message(goal: &str, observation: &ToolObservation) -> String {
 	summarize_observation(goal, observation).final_message
 }
@@ -1680,6 +1841,79 @@ mod tests {
 		let task_id = TaskId(format!("task-{}", request.request_id.0));
 		let _ = runtime.execute_tool_loop(&task_id, &request, &mut loop_state, None);
 		crate::runtime_loop::runtime_loop_trace(&loop_state)
+	}
+
+	fn awaiting_user_loop_state(goal: &str, payload: AskUserPayload) -> LoopState {
+		let context = LoopContext {
+			request_id: "req-awaiting-user".to_string(),
+			session_id: "session-awaiting-user".to_string(),
+			goal: goal.to_string(),
+			workspace_root: "/workspace".to_string(),
+			working_directory: "/workspace".to_string(),
+			visible_tools: vec![
+				"general.execute".to_string(),
+				"inventory.describe".to_string(),
+				"fs.find".to_string(),
+				"web.search".to_string(),
+			],
+			bound_resources: vec![ResourceSelector::tool("general.execute".to_string())],
+			route_decision: crate::router::RouteDecision::new(
+				IntentFamily::Chat,
+				0.82,
+				false,
+				crate::router::RouteRisk::Low,
+				vec!["general.execute".to_string()],
+				Vec::new(),
+				Vec::new(),
+				"paused runtime loop test",
+			),
+			last_observation: None,
+		};
+		let mut loop_state = LoopState::new("loop-awaiting-user", &context);
+		loop_state.status = LoopStatus::AwaitingUser;
+		loop_state.awaiting_user = Some(payload);
+		loop_state
+	}
+
+	#[test]
+	fn freeform_awaiting_user_pauses_do_not_auto_resume() {
+		let runtime = GenericAgentRuntime::with_skill_registry(SkillRegistry::disabled());
+		let loop_state = awaiting_user_loop_state(
+			"继续之前的任务",
+			AskUserPayload::freeform("您想继续什么任务？"),
+		);
+
+		let assessment = runtime.assess_awaiting_user_resume(&loop_state, "项目里有几行代码？");
+
+		assert!(!assessment.should_resume);
+		assert!(assessment.reason.contains("fresh intake"));
+	}
+
+	#[test]
+	fn missing_required_input_resume_uses_router_gate() {
+		let (router, prompts) = router_with_json_responses(vec![serde_json::json!({
+			"resume_existing_loop": true,
+			"reason": "The reply supplies the missing project_path for the paused request."
+		})]);
+		let runtime = GenericAgentRuntime::with_llm_router(router);
+		let loop_state = awaiting_user_loop_state(
+			"统计项目代码行数",
+			AskUserPayload::missing_required_input(
+				"请提供 project_path。",
+				vec!["project_path".to_string()],
+			),
+		);
+
+		let assessment =
+			runtime.assess_awaiting_user_resume(&loop_state, "/Users/jojo/cjj_project/Roku");
+
+		assert!(assessment.should_resume);
+		assert!(assessment.reason.contains("project_path"));
+		let prompts = prompts.lock().expect("prompt lock should succeed");
+		assert_eq!(prompts.len(), 1);
+		assert!(prompts[0].contains("project_path"));
+		assert!(prompts[0].contains("请提供 project_path"));
+		assert!(prompts[0].contains("/Users/jojo/cjj_project/Roku"));
 	}
 
 	fn regression_fixture_path(suffix: &str, contents: &str) -> String {

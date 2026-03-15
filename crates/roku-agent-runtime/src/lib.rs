@@ -28,7 +28,7 @@ pub use router::{
 	DirectRouteExecutionResult, DirectRoutePlan, EscalationAction, EscalationReason, IntentFamily,
 	RouteDecision, RouteDecisionResult, RouteEscalationPlan, RouteRisk,
 };
-pub use runtime::{AgentWorker, GenericAgentRuntime, RuntimeWorker};
+pub use runtime::{AgentWorker, AwaitingUserResumeAssessment, GenericAgentRuntime, RuntimeWorker};
 pub use runtime_config::{
 	AgentRuntimeConfig, AgentRuntimeConfigError, AgentRuntimeConfigPatch,
 	HARD_MAX_CANDIDATE_DESCRIPTION_MAX_CHARS, HARD_MAX_CANDIDATE_INVENTORY_LIMIT,
@@ -48,7 +48,7 @@ pub use runtime_loop::{
 	RuntimeLoopRegressionCaseReport, RuntimeLoopRegressionExpectation, RuntimeLoopTraceCheckReport,
 	StepAction, StepObservation, StepRecord, ToolObservation, ToolProbeCheckReport,
 	check_runtime_loop_trace, check_seed_tool_probe, evaluate_runtime_loop_regression_case,
-	interpret_observation, runtime_loop_trace, should_resume_awaiting_user,
+	interpret_observation, runtime_loop_trace,
 };
 pub use tool_config::{
 	BuiltinToolRole, CommandToolRuntimeConfig, CommandToolRuntimeConfigPatch, ConfiguredTool,
