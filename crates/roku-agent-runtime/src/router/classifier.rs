@@ -108,8 +108,9 @@ use crate::runtime_loop::{
 	extract_glob_pattern as shared_extract_glob_pattern,
 	extract_path_candidates as shared_extract_path_candidates, extract_skill_source_url,
 	extract_web_query, goal_requests_directory_listing, goal_requests_file_read,
-	goal_requests_filesystem_inspect, goal_requests_web_lookup, ground_tool_arguments,
-	grounded_python_code_allows_execution, grounded_shell_command_allows_execution,
+	goal_requests_filesystem_inspect, goal_requests_python_execution, goal_requests_web_lookup,
+	ground_tool_arguments, grounded_python_code_allows_execution,
+	grounded_shell_command_allows_execution,
 	preferred_grounded_filesystem_tool as shared_preferred_grounded_filesystem_tool,
 	preferred_grounded_table_tool, tool_required_argument_keys,
 };
@@ -190,6 +191,28 @@ fn deterministic_pre_classify(
 			decision,
 			Some("general.execute"),
 			Vec::new(),
+		));
+	}
+
+	if goal_requests_python_execution(&request.goal)
+		&& tool_selector(context.catalog, "python.run").is_some()
+		&& extract_explicit_python_code(&request.goal).is_none()
+	{
+		return Some(missing_argument_route(
+			IntentFamily::CodeExec,
+			vec!["code".to_string()],
+			"the request clearly asks to run Python code, but no explicit Python snippet is present in the current turn",
+		));
+	}
+
+	if goal_requests_web_lookup(&request.goal)
+		&& tool_selector(context.catalog, "web.search").is_some()
+		&& extract_web_query(&request.goal).is_none()
+	{
+		return Some(missing_argument_route(
+			IntentFamily::WebLookup,
+			vec!["query".to_string()],
+			"the request clearly asks for a web lookup, but no concrete search query is present in the current turn",
 		));
 	}
 
@@ -783,6 +806,27 @@ fn unavailable_family_route(
 		),
 		reason: EscalationReason::NoEnabledRouteTarget,
 		action: EscalationAction::FallbackAnswer,
+	})
+}
+
+fn missing_argument_route(
+	intent_family: IntentFamily,
+	missing_arguments: Vec<String>,
+	reason: impl Into<String>,
+) -> RouteDecisionResult {
+	RouteDecisionResult::Escalate(RouteEscalationPlan {
+		decision: RouteDecision::new(
+			intent_family,
+			0.78,
+			false,
+			RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			missing_arguments,
+			reason,
+		),
+		reason: EscalationReason::MissingArguments,
+		action: EscalationAction::AskForMoreInfo,
 	})
 }
 

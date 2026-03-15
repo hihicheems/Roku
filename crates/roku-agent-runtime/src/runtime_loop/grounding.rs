@@ -143,6 +143,29 @@ pub(crate) fn goal_requests_web_lookup(goal: &str) -> bool {
 	.any(|marker| lower.contains(marker))
 }
 
+pub(crate) fn goal_requests_python_execution(goal: &str) -> bool {
+	let lower = goal.trim().to_ascii_lowercase();
+	if contains_blocked_execution_marker(&lower) {
+		return false;
+	}
+	[
+		"run this python code",
+		"execute this python code",
+		"run the python code",
+		"execute the python code",
+		"run this code",
+		"execute this code",
+		"run this snippet",
+		"execute this snippet",
+		"运行这段python代码",
+		"执行这段python代码",
+		"运行这段代码",
+		"执行这段代码",
+	]
+	.iter()
+	.any(|marker| lower.contains(marker))
+}
+
 pub(crate) fn extract_sheet_name(goal: &str) -> Option<String> {
 	let lower = goal.to_ascii_lowercase();
 	let marker = "sheet ";
@@ -252,10 +275,10 @@ pub(crate) fn extract_web_query(goal: &str) -> Option<String> {
 	let trimmed = goal.trim();
 	let lower = trimmed.to_ascii_lowercase();
 	for marker in [
-		"search the web for",
-		"search web for",
-		"search online for",
-		"web search for",
+		"search the web",
+		"search web",
+		"search online",
+		"web search",
 		"look up",
 		"lookup",
 		"google",
@@ -269,7 +292,15 @@ pub(crate) fn extract_web_query(goal: &str) -> Option<String> {
 				.get(index + marker.len()..)
 				.unwrap_or_default()
 				.trim()
-				.trim_start_matches([':', '-', ' ']);
+				.trim_start_matches([':', '-', ' '])
+				.strip_prefix("for ")
+				.unwrap_or_else(|| {
+					trimmed
+						.get(index + marker.len()..)
+						.unwrap_or_default()
+						.trim()
+						.trim_start_matches([':', '-', ' '])
+				});
 			let query = suffix.trim_matches(|character: char| {
 				matches!(character, '"' | '\'' | '`' | '.' | '!' | '?' | ' ')
 			});
@@ -278,10 +309,7 @@ pub(crate) fn extract_web_query(goal: &str) -> Option<String> {
 			}
 		}
 	}
-	let query = trimmed.trim_matches(|character: char| {
-		matches!(character, '"' | '\'' | '`' | '.' | '!' | '?' | ' ')
-	});
-	(!query.is_empty()).then(|| query.to_string())
+	None
 }
 
 pub(crate) fn extract_explicit_python_code(goal: &str) -> Option<String> {
@@ -298,26 +326,7 @@ pub(crate) fn grounded_python_code_allows_execution(goal: &str) -> bool {
 	if extract_explicit_python_code(goal).is_none() {
 		return false;
 	}
-	let lower = goal.trim().to_ascii_lowercase();
-	if contains_blocked_execution_marker(&lower) {
-		return false;
-	}
-	[
-		"run this python code",
-		"execute this python code",
-		"run the python code",
-		"execute the python code",
-		"run this code",
-		"execute this code",
-		"run this snippet",
-		"execute this snippet",
-		"运行这段python代码",
-		"执行这段python代码",
-		"运行这段代码",
-		"执行这段代码",
-	]
-	.iter()
-	.any(|marker| lower.contains(marker))
+	goal_requests_python_execution(goal)
 }
 
 pub(crate) fn explanatory_python_code_request(goal: &str) -> bool {

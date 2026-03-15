@@ -47,6 +47,7 @@ pub(crate) use grounding::file_name_from_path;
 pub(crate) use grounding::goal_requests_directory_listing;
 pub(crate) use grounding::goal_requests_file_read;
 pub(crate) use grounding::goal_requests_filesystem_inspect;
+pub(crate) use grounding::goal_requests_python_execution;
 pub(crate) use grounding::goal_requests_web_lookup;
 pub(crate) use grounding::grounded_python_code_allows_execution;
 pub(crate) use grounding::grounded_shell_command_allows_execution;
