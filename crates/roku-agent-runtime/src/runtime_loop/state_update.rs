@@ -40,6 +40,8 @@ use crate::runtime_loop::{LoopState, ToolObservation};
 /// ## Invariants
 /// - This struct interprets tool facts; it does not replace them.
 /// - `continue_allowed` is false whenever any explicit terminal branch is selected.
+/// - `multiple_candidates` remains a recoverable observation so the live loop may still choose a
+///   better tool before pausing for user clarification.
 /// - Non-`multiple_candidates` tool failures are treated as loop-failing observations today.
 ///
 /// ## Non-Goals
@@ -74,10 +76,11 @@ pub fn interpret_observation(
 	let terminal = raw_observation.terminal;
 	let budget_exhausted = remaining_step_budget == 0;
 	let recovery_exhausted = !raw_observation.ok && !terminal && remaining_recovery_budget == 0;
-	let should_ask_user = !raw_observation.ok
-		&& !terminal
-		&& raw_observation.error_type.as_deref() == Some("multiple_candidates");
-	let unhandled_failure = !raw_observation.ok && !terminal && !should_ask_user;
+	let is_multiple_candidates =
+		raw_observation.error_type.as_deref() == Some("multiple_candidates");
+	let should_ask_user = false;
+	let unhandled_failure =
+		!raw_observation.ok && !terminal && !should_ask_user && !is_multiple_candidates;
 	let should_emit_final_answer = raw_observation.ok && terminal;
 	let should_fail = (!raw_observation.ok && terminal)
 		|| unhandled_failure

@@ -520,6 +520,8 @@ impl GenericAgentRuntime {
 		loop_state: &mut LoopState,
 		user_reply: Option<&str>,
 	) -> DirectRouteExecutionResult {
+		let grounding_input = user_reply.unwrap_or(&loop_state.goal).to_string();
+		loop_state.note_grounding_input(&grounding_input);
 		loop {
 			let context_projection = self.refresh_tool_loop_projection(loop_state);
 			let next_step = decide_tool_loop_next_step(

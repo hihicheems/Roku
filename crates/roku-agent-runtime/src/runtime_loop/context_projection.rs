@@ -187,12 +187,18 @@ fn render_step_digest_line(step: &crate::runtime_loop::StepRecord) -> String {
 
 fn render_observation_digest(observation: &StepObservation) -> String {
 	match observation {
-		StepObservation::Tool(observation) => format!(
-			"observation=tool ok={} terminal={} message={}",
-			observation.ok,
-			observation.terminal,
-			compact_text(&observation.message)
-		),
+		StepObservation::Tool(observation) => {
+			let lookup_summary = lookup_observation_summary(observation)
+				.map(|summary| format!(" lookup={summary}"))
+				.unwrap_or_default();
+			format!(
+				"observation=tool ok={} terminal={}{} message={}",
+				observation.ok,
+				observation.terminal,
+				lookup_summary,
+				compact_text(&observation.message)
+			)
+		}
 		StepObservation::AskUser { final_message } => {
 			format!(
 				"observation=ask_user message={}",
@@ -215,9 +221,13 @@ fn unresolved_blockers(loop_state: &LoopState) -> Vec<String> {
 		&& !observation.terminal
 	{
 		let error_type = observation.error_type.as_deref().unwrap_or("unknown_error");
+		let lookup_summary = lookup_observation_summary(observation)
+			.map(|summary| format!(" {summary}"))
+			.unwrap_or_default();
 		blockers.push(format!(
-			"Latest observation may need follow-up: error_type={} message={}",
+			"Latest observation may need follow-up: error_type={}{} message={}",
 			error_type,
+			lookup_summary,
 			compact_text(&observation.message)
 		));
 	}
@@ -257,6 +267,36 @@ fn working_assumptions(loop_state: &LoopState) -> Vec<String> {
 		));
 	}
 	assumptions
+}
+
+fn lookup_observation_summary(observation: &ToolObservation) -> Option<String> {
+	let match_count = observation
+		.data
+		.get("match_count")
+		.and_then(serde_json::Value::as_u64)?;
+	let exact_match_count = observation
+		.data
+		.get("exact_match_count")
+		.and_then(serde_json::Value::as_u64)
+		.unwrap_or_default();
+	let fuzzy_match_count = observation
+		.data
+		.get("fuzzy_match_count")
+		.and_then(serde_json::Value::as_u64)
+		.unwrap_or_default();
+	let match_mode = observation
+		.data
+		.get("match_mode")
+		.and_then(serde_json::Value::as_str)
+		.unwrap_or("unknown");
+	let resolved_path = observation
+		.data
+		.get("resolved_path")
+		.and_then(serde_json::Value::as_str)
+		.unwrap_or("none");
+	Some(format!(
+		"match_mode={match_mode} match_count={match_count} exact_match_count={exact_match_count} fuzzy_match_count={fuzzy_match_count} resolved_path={resolved_path}"
+	))
 }
 
 fn compact_text(text: &str) -> String {

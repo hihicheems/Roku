@@ -104,15 +104,12 @@ use crate::router::{
 };
 use crate::runtime_loop::{
 	explanatory_python_code_request, explanatory_shell_command_request,
+	extract_explicit_path_candidates as shared_extract_explicit_path_candidates,
 	extract_explicit_shell_command as shared_extract_explicit_shell_command,
-	extract_glob_pattern as shared_extract_glob_pattern,
-	extract_path_candidates as shared_extract_path_candidates, extract_skill_source_url,
-	extract_web_query, goal_requests_directory_listing, goal_requests_file_read,
-	goal_requests_filesystem_inspect, goal_requests_python_execution, goal_requests_web_lookup,
-	ground_tool_arguments, grounded_python_code_allows_execution,
-	grounded_shell_command_allows_execution,
-	preferred_grounded_filesystem_tool as shared_preferred_grounded_filesystem_tool,
-	preferred_grounded_table_tool, tool_required_argument_keys,
+	extract_explicit_table_path, extract_glob_pattern as shared_extract_glob_pattern,
+	extract_skill_source_url, extract_web_query, goal_requests_python_execution,
+	goal_requests_web_lookup, ground_tool_arguments, grounded_python_code_allows_execution,
+	grounded_shell_command_allows_execution, tool_required_argument_keys,
 };
 use crate::tool_config::{BuiltinToolRole, ToolCatalogConfig};
 
@@ -293,7 +290,7 @@ fn classify_structured_multi_step_request(
 	context: &RouteClassifierContext<'_>,
 	request: &RequestEnvelope,
 ) -> Option<RouteDecisionResult> {
-	let explicit_paths = extract_path_candidates(&request.goal);
+	let explicit_paths = extract_explicit_path_candidates(&request.goal);
 	let has_explicit_code = extract_explicit_python_code(&request.goal).is_some();
 	let has_glob_pattern = extract_glob_pattern(&request.goal).is_some();
 	let looks_multi_step = has_shell_command_chain(&request.goal)
@@ -423,24 +420,50 @@ fn classify_contract_level_grounded_hint(
 	if extract_glob_pattern(&request.goal).is_some()
 		&& tool_selector(context.catalog, "fs.glob").is_some()
 	{
-		let candidate_tools = grounded_filesystem_candidate_tools(&request.goal);
 		let decision = RouteDecision::new(
 			IntentFamily::FilesystemRead,
 			0.92,
 			false,
 			RouteRisk::Low,
-			candidate_tools,
+			vec!["fs.glob".to_string()],
 			candidate_plugins_for_tool(context.plugin_snapshot, "fs.glob"),
 			Vec::new(),
 			"contract-level grounded glob pattern provides a non-authoritative `fs.glob` hint",
 		);
-		return Some(build_loop_hint_route(context, decision));
+		return Some(build_tool_loop_route(
+			context,
+			decision,
+			Some("fs.glob"),
+			Vec::new(),
+		));
 	}
 
-	if extract_table_path(&request.goal).is_some()
+	if extract_explicit_table_path(&request.goal).is_some()
 		&& has_enabled_tool_with_prefix(context.catalog, "table.")
 	{
-		let candidate_tools = grounded_table_candidate_tools(&request.goal);
+		if let Some(tool_name) = explicit_table_action_tool(&request.goal)
+			&& tool_selector(context.catalog, tool_name).is_some()
+		{
+			let decision = RouteDecision::new(
+				IntentFamily::TableRead,
+				0.9,
+				false,
+				RouteRisk::Low,
+				vec![tool_name.to_string()],
+				candidate_plugins_for_tool(context.plugin_snapshot, tool_name),
+				Vec::new(),
+				format!(
+					"explicit table path plus a concrete `{tool_name}` action provides a grounded direct start"
+				),
+			);
+			return Some(build_tool_loop_route(
+				context,
+				decision,
+				Some(tool_name),
+				Vec::new(),
+			));
+		}
+		let candidate_tools = broad_table_candidate_tools();
 		let decision = RouteDecision::new(
 			IntentFamily::TableRead,
 			0.86,
@@ -454,19 +477,40 @@ fn classify_contract_level_grounded_hint(
 		return Some(build_loop_hint_route(context, decision));
 	}
 
-	if !extract_path_candidates(&request.goal).is_empty()
+	if !extract_explicit_path_candidates(&request.goal).is_empty()
 		&& has_enabled_tool_with_prefix(context.catalog, "fs.")
 	{
-		let candidate_tools = grounded_filesystem_candidate_tools(&request.goal);
+		if let Some(tool_name) = explicit_filesystem_action_tool(&request.goal)
+			&& tool_selector(context.catalog, tool_name).is_some()
+		{
+			let decision = RouteDecision::new(
+				IntentFamily::FilesystemRead,
+				0.89,
+				false,
+				RouteRisk::Low,
+				vec![tool_name.to_string()],
+				candidate_plugins_for_tool(context.plugin_snapshot, tool_name),
+				Vec::new(),
+				format!(
+					"explicit filesystem path plus a concrete `{tool_name}` action provides a grounded direct start"
+				),
+			);
+			return Some(build_tool_loop_route(
+				context,
+				decision,
+				Some(tool_name),
+				Vec::new(),
+			));
+		}
 		let decision = RouteDecision::new(
 			IntentFamily::FilesystemRead,
-			0.84,
+			0.82,
 			false,
 			RouteRisk::Low,
-			candidate_tools,
+			broad_filesystem_candidate_tools(&request.goal),
 			Vec::new(),
 			Vec::new(),
-			"contract-level grounded filesystem input provides a non-authoritative filesystem-family hint",
+			"explicit filesystem resource is present, but the requested action is still broad enough that the live loop should choose among a controlled starter set",
 		);
 		return Some(build_loop_hint_route(context, decision));
 	}
@@ -508,11 +552,11 @@ fn coarse_intent_hint_for_tool(tool_name: &str) -> IntentFamily {
 fn explicit_tool_hint_is_grounded(tool_name: &str, goal: &str) -> bool {
 	match tool_name {
 		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" | "fs.find" => {
-			!extract_path_candidates(goal).is_empty()
+			!extract_explicit_path_candidates(goal).is_empty()
 		}
 		"fs.glob" => extract_glob_pattern(goal).is_some(),
 		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
-			extract_table_path(goal).is_some()
+			extract_explicit_table_path(goal).is_some()
 		}
 		"web.search" => goal_requests_web_lookup(goal) && extract_web_query(goal).is_some(),
 		"command.run" => grounded_shell_command_allows_execution(goal),
@@ -557,7 +601,7 @@ fn classify_with_llm(
 			return llm_classifier_failure_route(context, error);
 		}
 	};
-	let decision = match RouteDecision::from_json_value(&value) {
+	let mut decision = match RouteDecision::from_json_value(&value) {
 		Ok(decision) => decision,
 		Err(error) => {
 			return build_loop_hint_route(
@@ -593,6 +637,7 @@ fn classify_with_llm(
 	if decision.requires_multi_step || decision.intent_family == IntentFamily::MultiStep {
 		return build_loop_hint_route(context, decision);
 	}
+	normalize_direct_route_seed(&request.goal, &mut decision);
 	build_tool_loop_route(context, decision, None, Vec::new())
 }
 
@@ -702,6 +747,7 @@ Rules:
 - Use `multi_step` when the request obviously needs a planning-heavy workflow.
 - Use `skill.execute` only when the user is asking to actually run an installed script-backed skill and perform side effects.
 - If the user is asking to summarize, explain, describe, list, or quote guidance from an installed skill, do not select `skill.execute`; prefer an advisory route with no execution tool.
+- For natural-language filesystem or table requests that do not already contain one explicit tool-ready resource argument, avoid collapsing the route to one narrow tool path. Prefer an empty shortlist or a broad family shortlist instead of pre-binding to a single finder/reader tool.
 - Leave `candidate_tools` empty if no current direct tool is safe.
 - `missing_arguments` should be empty unless the user must provide something concrete first.
 
@@ -770,7 +816,7 @@ fn classify_structural_fallback(
 			"an explicit web lookup request was provided, but `web.search` is not enabled in the current runtime inventory",
 		));
 	}
-	if extract_table_path(goal).is_some()
+	if extract_explicit_table_path(goal).is_some()
 		&& !has_enabled_tool_with_prefix(context.catalog, "table.")
 	{
 		return Some(unavailable_family_route(
@@ -778,7 +824,7 @@ fn classify_structural_fallback(
 			"explicit table input was provided, but core table tools are not enabled in the current runtime inventory",
 		));
 	}
-	if (extract_glob_pattern(goal).is_some() || !extract_path_candidates(goal).is_empty())
+	if (extract_glob_pattern(goal).is_some() || !extract_explicit_path_candidates(goal).is_empty())
 		&& !has_enabled_tool_with_prefix(context.catalog, "fs.")
 	{
 		return Some(unavailable_family_route(
@@ -863,6 +909,8 @@ fn classify_deterministic_contract_tool_match(
 			"deterministic catalog retrieval matched contract-backed tool `{tool_name}` and the current goal can already ground its required inputs"
 		),
 	);
+	let mut decision = decision;
+	normalize_direct_route_seed(&request.goal, &mut decision);
 	Some(build_loop_hint_route(context, decision))
 }
 
@@ -900,6 +948,44 @@ fn deterministic_match_can_start(tool_name: &str, goal: &str) -> bool {
 			grounded_shell_command_allows_execution(goal)
 				&& ground_tool_arguments(tool_name, goal).is_some()
 		}
+		"web.search" => goal_requests_web_lookup(goal) && extract_web_query(goal).is_some(),
+		"fs.glob" => extract_glob_pattern(goal).is_some(),
+		"fs.find" => {
+			!extract_explicit_path_candidates(goal).is_empty()
+				&& explicit_filesystem_action_tool(goal) == Some("fs.find")
+		}
+		"fs.exists" => {
+			!extract_explicit_path_candidates(goal).is_empty()
+				&& explicit_filesystem_action_tool(goal) == Some("fs.exists")
+		}
+		"fs.inspect" => {
+			!extract_explicit_path_candidates(goal).is_empty()
+				&& explicit_filesystem_action_tool(goal) == Some("fs.inspect")
+		}
+		"fs.list_dir" => {
+			!extract_explicit_path_candidates(goal).is_empty()
+				&& explicit_filesystem_action_tool(goal) == Some("fs.list_dir")
+		}
+		"fs.read_text" => {
+			!extract_explicit_path_candidates(goal).is_empty()
+				&& explicit_filesystem_action_tool(goal) == Some("fs.read_text")
+		}
+		"table.inspect" => {
+			extract_explicit_table_path(goal).is_some()
+				&& explicit_table_action_tool(goal) == Some("table.inspect")
+		}
+		"table.list_sheets" => {
+			extract_explicit_table_path(goal).is_some()
+				&& explicit_table_action_tool(goal) == Some("table.list_sheets")
+		}
+		"table.preview" => {
+			extract_explicit_table_path(goal).is_some()
+				&& explicit_table_action_tool(goal) == Some("table.preview")
+		}
+		"table.schema" => {
+			extract_explicit_table_path(goal).is_some()
+				&& explicit_table_action_tool(goal) == Some("table.schema")
+		}
 		_ => {
 			tool_required_argument_keys(tool_name).is_empty()
 				|| ground_tool_arguments(tool_name, goal).is_some()
@@ -915,67 +1001,212 @@ fn deterministic_grounded_intent(goal: &str) -> Option<IntentFamily> {
 	if goal_requests_web_lookup(goal) && extract_web_query(goal).is_some() {
 		return Some(IntentFamily::WebLookup);
 	}
-	if extract_table_path(goal).is_some() {
+	if extract_explicit_table_path(goal).is_some() {
 		return Some(IntentFamily::TableRead);
 	}
-	if extract_glob_pattern(goal).is_some() || !extract_path_candidates(goal).is_empty() {
+	if extract_glob_pattern(goal).is_some() || !extract_explicit_path_candidates(goal).is_empty() {
 		return Some(IntentFamily::FilesystemRead);
 	}
 	None
 }
 
-fn grounded_filesystem_candidate_tools(goal: &str) -> Vec<String> {
-	let mut tools = Vec::new();
-	if extract_glob_pattern(goal).is_some() {
-		tools.push("fs.glob".to_string());
+fn explicit_filesystem_action_tool(goal: &str) -> Option<&'static str> {
+	let lower = action_text_without_explicit_paths(goal);
+	if contains_any(
+		&lower,
+		&[
+			"does ",
+			" exist",
+			"exists",
+			"is there ",
+			"whether ",
+			"存在吗",
+			"是否存在",
+		],
+	) {
+		return Some("fs.exists");
 	}
-	if let Some(preferred_tool) = shared_preferred_grounded_filesystem_tool(goal) {
-		tools.push(preferred_tool.to_string());
+	if contains_any(
+		&lower,
+		&[
+			"find ",
+			"locate ",
+			"where is",
+			"where are",
+			"在哪",
+			"在哪里",
+			"path to",
+			"路径",
+		],
+	) {
+		return Some("fs.find");
 	}
-	if goal_requests_file_read(goal) {
-		tools.push("fs.find".to_string());
-		tools.push("fs.inspect".to_string());
+	if contains_any(
+		&lower,
+		&[
+			"inspect",
+			"metadata",
+			"stat ",
+			"file info",
+			"details for",
+			"元数据",
+		],
+	) {
+		return Some("fs.inspect");
 	}
-	if goal_requests_directory_listing(goal) {
-		tools.push("fs.inspect".to_string());
-		tools.push("fs.find".to_string());
+	if contains_any(
+		&lower,
+		&[
+			"list ",
+			"show files",
+			"show directories",
+			"directory contents",
+			"folder contents",
+			"contents of the directory",
+			"列出",
+			"目录内容",
+		],
+	) {
+		return Some("fs.list_dir");
 	}
-	if goal_requests_filesystem_inspect(goal) {
-		tools.push("fs.find".to_string());
-		tools.push("fs.read_text".to_string());
+	if contains_any(
+		&lower,
+		&[
+			"read ",
+			"open ",
+			"print ",
+			"output ",
+			"contents of",
+			"file contents",
+			"first part",
+			"first lines",
+			"line ",
+			"读取",
+			"打开",
+			"输出",
+			"内容",
+		],
+	) || (goal.contains('第') && goal.contains('行'))
+	{
+		return Some("fs.read_text");
 	}
-	for fallback in [
-		"fs.glob",
-		"fs.find",
-		"fs.read_text",
-		"fs.inspect",
-		"fs.list_dir",
-		"fs.exists",
-	] {
-		tools.push(fallback.to_string());
-	}
-	dedup_tools(tools)
+	None
 }
 
-fn grounded_table_candidate_tools(goal: &str) -> Vec<String> {
-	let mut tools = vec![preferred_grounded_table_tool(goal).to_string()];
-	for fallback in [
-		"table.preview",
-		"table.inspect",
-		"table.schema",
-		"table.list_sheets",
-	] {
-		tools.push(fallback.to_string());
+fn explicit_table_action_tool(goal: &str) -> Option<&'static str> {
+	let lower = action_text_without_explicit_paths(goal);
+	if contains_any(&lower, &["schema", "columns", "column names", "列", "表头"]) {
+		return Some("table.schema");
 	}
-	dedup_tools(tools)
+	if contains_any(
+		&lower,
+		&[
+			"list sheets",
+			"show sheets",
+			"which sheets",
+			"sheet names",
+			"工作表",
+		],
+	) {
+		return Some("table.list_sheets");
+	}
+	if contains_any(
+		&lower,
+		&[
+			"preview",
+			"first rows",
+			"top rows",
+			"rows of",
+			"前几行",
+			"预览",
+		],
+	) {
+		return Some("table.preview");
+	}
+	if contains_any(
+		&lower,
+		&["inspect", "metadata", "details", "summary of the table"],
+	) {
+		return Some("table.inspect");
+	}
+	None
+}
+
+fn contains_any(goal: &str, markers: &[&str]) -> bool {
+	markers.iter().any(|marker| goal.contains(marker))
+}
+
+fn action_text_without_explicit_paths(goal: &str) -> String {
+	let mut lowered = goal.to_ascii_lowercase();
+	for path in extract_explicit_path_candidates(goal) {
+		let path = path.to_ascii_lowercase();
+		lowered = lowered.replace(&path, " ");
+	}
+	lowered
+}
+
+fn broad_filesystem_candidate_tools(goal: &str) -> Vec<String> {
+	if extract_glob_pattern(goal).is_some() {
+		return vec![
+			"fs.glob".to_string(),
+			"fs.find".to_string(),
+			"fs.inspect".to_string(),
+		];
+	}
+	if !extract_explicit_path_candidates(goal).is_empty() {
+		return vec![
+			"fs.inspect".to_string(),
+			"fs.read_text".to_string(),
+			"fs.list_dir".to_string(),
+		];
+	}
+	vec![
+		"fs.find".to_string(),
+		"fs.glob".to_string(),
+		"fs.inspect".to_string(),
+	]
+}
+
+fn broad_table_candidate_tools() -> Vec<String> {
+	vec![
+		"table.inspect".to_string(),
+		"table.preview".to_string(),
+		"table.list_sheets".to_string(),
+	]
 }
 
 fn deterministic_seed_candidate_tools(tool_name: &str, goal: &str) -> Vec<String> {
 	match tool_name {
-		name if name.starts_with("fs.") => grounded_filesystem_candidate_tools(goal),
-		name if name.starts_with("table.") => grounded_table_candidate_tools(goal),
+		name if name.starts_with("fs.") || name.starts_with("table.") => {
+			let _ = goal;
+			vec![tool_name.to_string()]
+		}
 		_ => vec![tool_name.to_string()],
 	}
+}
+
+fn normalize_direct_route_seed(goal: &str, decision: &mut RouteDecision) {
+	match decision.intent_family {
+		IntentFamily::FilesystemRead => {
+			decision.candidate_tools = merge_preserving_seed(
+				decision.candidate_tools.clone(),
+				broad_filesystem_candidate_tools(goal),
+			);
+		}
+		IntentFamily::TableRead => {
+			decision.candidate_tools = merge_preserving_seed(
+				decision.candidate_tools.clone(),
+				broad_table_candidate_tools(),
+			);
+		}
+		_ => {}
+	}
+}
+
+fn merge_preserving_seed(seeds: Vec<String>, starter_set: Vec<String>) -> Vec<String> {
+	let mut tools = dedup_tools([seeds, starter_set].concat());
+	tools.truncate(3);
+	tools
 }
 
 fn dedup_tools(tools: Vec<String>) -> Vec<String> {
@@ -1147,8 +1378,8 @@ fn best_skill_selector(
 		.then(|| skill.descriptor.selector.clone())
 }
 
-fn extract_path_candidates(goal: &str) -> Vec<String> {
-	shared_extract_path_candidates(goal)
+fn extract_explicit_path_candidates(goal: &str) -> Vec<String> {
+	shared_extract_explicit_path_candidates(goal)
 }
 
 fn extract_explicit_shell_command(goal: &str) -> Option<String> {
@@ -1167,15 +1398,6 @@ fn explicit_skill_tokens(goal: &str) -> Vec<String> {
 		.collect::<Vec<_>>();
 	tokens.dedup();
 	tokens
-}
-
-fn extract_table_path(goal: &str) -> Option<String> {
-	extract_path_candidates(goal).into_iter().find(|path| {
-		let normalized = path.to_ascii_lowercase();
-		normalized.ends_with(".csv")
-			|| normalized.ends_with(".tsv")
-			|| normalized.ends_with(".xlsx")
-	})
 }
 
 fn extract_glob_pattern(goal: &str) -> Option<String> {

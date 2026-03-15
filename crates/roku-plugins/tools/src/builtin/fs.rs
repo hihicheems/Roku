@@ -254,9 +254,9 @@ impl Tool for FsFindTool {
 			.and_then(Value::as_str)
 			.unwrap_or("any");
 		let roots = allowed_read_roots(&request)?;
-		let matches =
+		let match_summary =
 			find_descendant_matches(name, kind, &roots, self.config.max_descendant_scan_entries)?;
-		let (ok, error_type, message) = match matches.len() {
+		let (ok, error_type, message) = match match_summary.matches.len() {
 			0 => (
 				false,
 				Some("path_not_found"),
@@ -273,13 +273,17 @@ impl Tool for FsFindTool {
 				format!("Found {count} matching candidates for `{name}`."),
 			),
 		};
-		let resolved_path = (matches.len() == 1).then(|| matches[0].clone());
+		let resolved_path =
+			(match_summary.matches.len() == 1).then(|| match_summary.matches[0].clone());
 		let data = json!({
 			"name": name,
 			"kind": kind,
-			"match_count": matches.len(),
-			"matches": matches,
+			"match_count": match_summary.matches.len(),
+			"matches": match_summary.matches,
 			"resolved_path": resolved_path,
+			"exact_match_count": match_summary.exact_match_count,
+			"fuzzy_match_count": match_summary.fuzzy_match_count,
+			"match_mode": match_summary.match_mode,
 		});
 		Ok(observation_like_output(
 			message, ok, error_type, false, data,
@@ -553,7 +557,7 @@ fn fs_tool_contract(name: &str) -> Option<ToolContract> {
 				&["Search stays inside allowed read roots and returns bounded candidate lists."],
 			),
 			output: output_contract(
-				"Returns zero, one, or many grounded candidate paths plus an optional resolved_path when there is exactly one match.",
+				"Returns zero, one, or many grounded candidate paths plus structured match_count, exact/fuzzy counters, match_mode, and an optional resolved_path when there is exactly one match.",
 				"Zero matches surface as an explicit path_not_found observation.",
 				&[
 					"multiple_candidates is a non-terminal observation that may require ask_user disambiguation.",
@@ -815,12 +819,12 @@ fn find_unique_descendant_match(
 	descendant_scan_limit: usize,
 ) -> Result<Option<PathBuf>, ToolFailure> {
 	let matches = find_descendant_matches(target_name, "any", roots, descendant_scan_limit)?;
-	if matches.len() > 1 {
+	if matches.matches.len() > 1 {
 		return Err(ToolFailure::terminal(format!(
 			"`{target_name}` is ambiguous under the allowed read roots; please provide a more specific path"
 		)));
 	}
-	Ok(matches.into_iter().next().map(PathBuf::from))
+	Ok(matches.matches.into_iter().next().map(PathBuf::from))
 }
 
 fn should_skip_workspace_search_dir(name: &str) -> bool {
@@ -830,12 +834,20 @@ fn should_skip_workspace_search_dir(name: &str) -> bool {
 	)
 }
 
+#[derive(Debug, Clone)]
+struct DescendantMatchSummary {
+	matches: Vec<String>,
+	exact_match_count: usize,
+	fuzzy_match_count: usize,
+	match_mode: &'static str,
+}
+
 fn find_descendant_matches(
 	target_name: &str,
 	kind: &str,
 	roots: &[PathBuf],
 	descendant_scan_limit: usize,
-) -> Result<Vec<String>, ToolFailure> {
+) -> Result<DescendantMatchSummary, ToolFailure> {
 	let mut exact_matches = Vec::new();
 	let mut fuzzy_matches = Vec::new();
 	let mut visited = 0_usize;
@@ -851,7 +863,7 @@ fn find_descendant_matches(
 			for entry in entries.filter_map(Result::ok) {
 				visited += 1;
 				if visited > descendant_scan_limit.min(HARD_MAX_DESCENDANT_SCAN_ENTRIES) {
-					return Ok(select_best_descendant_matches(exact_matches, fuzzy_matches));
+					return Ok(summarize_descendant_matches(exact_matches, fuzzy_matches));
 				}
 				let path = entry.path();
 				let name = entry.file_name().to_string_lossy().to_string();
@@ -880,26 +892,52 @@ fn find_descendant_matches(
 			}
 		}
 	}
-	Ok(select_best_descendant_matches(exact_matches, fuzzy_matches))
+	Ok(summarize_descendant_matches(exact_matches, fuzzy_matches))
 }
 
-fn select_best_descendant_matches(
+fn summarize_descendant_matches(
 	exact_matches: Vec<String>,
 	mut fuzzy_matches: Vec<(u8, String)>,
-) -> Vec<String> {
+) -> DescendantMatchSummary {
+	let exact_match_count = exact_matches.len();
+	let fuzzy_match_count = fuzzy_matches.len();
 	if !exact_matches.is_empty() {
-		return exact_matches;
+		let match_mode = match exact_match_count {
+			1 => "unique_exact",
+			_ => "ambiguous_exact",
+		};
+		return DescendantMatchSummary {
+			matches: exact_matches,
+			exact_match_count,
+			fuzzy_match_count: 0,
+			match_mode,
+		};
 	}
 	if fuzzy_matches.is_empty() {
-		return Vec::new();
+		return DescendantMatchSummary {
+			matches: Vec::new(),
+			exact_match_count: 0,
+			fuzzy_match_count: 0,
+			match_mode: "none",
+		};
 	}
 	fuzzy_matches.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
 	let best_score = fuzzy_matches.first().map(|(score, _)| *score).unwrap_or(0);
-	fuzzy_matches
+	let matches = fuzzy_matches
 		.into_iter()
 		.filter(|(score, _)| *score == best_score)
 		.map(|(_, path)| path)
-		.collect()
+		.collect::<Vec<_>>();
+	let match_mode = match matches.len() {
+		1 => "unique_fuzzy",
+		_ => "ambiguous_mixed",
+	};
+	DescendantMatchSummary {
+		matches,
+		exact_match_count,
+		fuzzy_match_count,
+		match_mode,
+	}
 }
 
 fn fuzzy_basename_match_score(target_name: &str, candidate_name: &str) -> Option<u8> {
