@@ -31,10 +31,8 @@ candidate_inventory_limit = 10
 [runtime.agent.prompts]
 # Maximum characters kept from one visible tool hint inside ContextProjection.
 visible_tool_hint_max_chars = 180
-# Maximum characters kept from one route-candidate description.
+# Maximum characters kept from one route-candidate selection hint.
 candidate_description_max_chars = 180
-# Maximum characters kept from one route-candidate example.
-candidate_example_max_chars = 96
 
 [runtime.agent.next_step]
 # Target size of one generic loop next-step JSON decision.

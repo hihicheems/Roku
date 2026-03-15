@@ -98,10 +98,8 @@ pub struct RouteClassifierRuntimeConfigPatch {
 pub struct PromptCompactionRuntimeConfig {
 	/// Maximum characters kept from one visible-tool hint in `ContextProjection`.
 	pub visible_tool_hint_max_chars: usize,
-	/// Maximum characters kept from one route-candidate description.
+	/// Maximum characters kept from one route-candidate selection hint.
 	pub candidate_description_max_chars: usize,
-	/// Maximum characters kept from one route-candidate example.
-	pub candidate_example_max_chars: usize,
 }
 
 /// Partial overrides for [`PromptCompactionRuntimeConfig`].
@@ -110,7 +108,6 @@ pub struct PromptCompactionRuntimeConfig {
 pub struct PromptCompactionRuntimeConfigPatch {
 	pub visible_tool_hint_max_chars: Option<usize>,
 	pub candidate_description_max_chars: Option<usize>,
-	pub candidate_example_max_chars: Option<usize>,
 }
 
 /// Effective next-step model generation budgets for the generic tool loop.
@@ -151,8 +148,6 @@ pub enum AgentRuntimeConfigError {
 	InvalidVisibleToolHintMaxChars,
 	#[error("runtime.agent.prompts.candidate_description_max_chars must be greater than zero")]
 	InvalidCandidateDescriptionMaxChars,
-	#[error("runtime.agent.prompts.candidate_example_max_chars must be greater than zero")]
-	InvalidCandidateExampleMaxChars,
 	#[error("runtime.agent.next_step.expected_output_tokens must be greater than zero")]
 	InvalidNextStepExpectedOutputTokens,
 	#[error("runtime.agent.next_step.budget_tokens_remaining must be greater than zero")]
@@ -181,8 +176,6 @@ pub const HARD_MAX_CANDIDATE_INVENTORY_LIMIT: usize = 64;
 pub const HARD_MAX_VISIBLE_TOOL_HINT_MAX_CHARS: usize = 1_024;
 /// Final ceiling for `runtime.agent.prompts.candidate_description_max_chars`.
 pub const HARD_MAX_CANDIDATE_DESCRIPTION_MAX_CHARS: usize = 1_024;
-/// Final ceiling for `runtime.agent.prompts.candidate_example_max_chars`.
-pub const HARD_MAX_CANDIDATE_EXAMPLE_MAX_CHARS: usize = 512;
 /// Final ceiling for `runtime.agent.next_step.expected_output_tokens`.
 pub const HARD_MAX_NEXT_STEP_EXPECTED_OUTPUT_TOKENS: u64 = 2_048;
 /// Final ceiling for `runtime.agent.next_step.budget_tokens_remaining`.
@@ -215,7 +208,6 @@ impl Default for PromptCompactionRuntimeConfig {
 		Self {
 			visible_tool_hint_max_chars: 180,
 			candidate_description_max_chars: 180,
-			candidate_example_max_chars: 96,
 		}
 	}
 }
@@ -375,9 +367,6 @@ impl PromptCompactionRuntimeConfig {
 		if let Some(value) = patch.candidate_description_max_chars {
 			self.candidate_description_max_chars = value;
 		}
-		if let Some(value) = patch.candidate_example_max_chars {
-			self.candidate_example_max_chars = value;
-		}
 	}
 
 	pub fn apply_env_overrides(&mut self) -> Result<(), AgentRuntimeConfigError> {
@@ -391,11 +380,6 @@ impl PromptCompactionRuntimeConfig {
 		{
 			self.candidate_description_max_chars = value?;
 		}
-		if let Some(value) =
-			env_override_usize("ROKU_RUNTIME__AGENT__PROMPTS__CANDIDATE_EXAMPLE_MAX_CHARS")
-		{
-			self.candidate_example_max_chars = value?;
-		}
 		Ok(())
 	}
 
@@ -406,18 +390,12 @@ impl PromptCompactionRuntimeConfig {
 		if self.candidate_description_max_chars == 0 {
 			return Err(AgentRuntimeConfigError::InvalidCandidateDescriptionMaxChars);
 		}
-		if self.candidate_example_max_chars == 0 {
-			return Err(AgentRuntimeConfigError::InvalidCandidateExampleMaxChars);
-		}
 		self.visible_tool_hint_max_chars = self
 			.visible_tool_hint_max_chars
 			.min(HARD_MAX_VISIBLE_TOOL_HINT_MAX_CHARS);
 		self.candidate_description_max_chars = self
 			.candidate_description_max_chars
 			.min(HARD_MAX_CANDIDATE_DESCRIPTION_MAX_CHARS);
-		self.candidate_example_max_chars = self
-			.candidate_example_max_chars
-			.min(HARD_MAX_CANDIDATE_EXAMPLE_MAX_CHARS);
 		Ok(())
 	}
 }
@@ -526,9 +504,6 @@ fn invalid_env_key(key: &'static str) -> AgentRuntimeConfigError {
 		"ROKU_RUNTIME__AGENT__PROMPTS__CANDIDATE_DESCRIPTION_MAX_CHARS" => {
 			AgentRuntimeConfigError::InvalidCandidateDescriptionMaxChars
 		}
-		"ROKU_RUNTIME__AGENT__PROMPTS__CANDIDATE_EXAMPLE_MAX_CHARS" => {
-			AgentRuntimeConfigError::InvalidCandidateExampleMaxChars
-		}
 		"ROKU_RUNTIME__AGENT__NEXT_STEP__EXPECTED_OUTPUT_TOKENS" => {
 			AgentRuntimeConfigError::InvalidNextStepExpectedOutputTokens
 		}
@@ -572,7 +547,6 @@ mod tests {
 			prompts: Some(PromptCompactionRuntimeConfigPatch {
 				visible_tool_hint_max_chars: Some(HARD_MAX_VISIBLE_TOOL_HINT_MAX_CHARS * 4),
 				candidate_description_max_chars: Some(HARD_MAX_CANDIDATE_DESCRIPTION_MAX_CHARS * 4),
-				candidate_example_max_chars: Some(HARD_MAX_CANDIDATE_EXAMPLE_MAX_CHARS * 4),
 			}),
 			next_step: Some(NextStepRuntimeConfigPatch {
 				expected_output_tokens: Some(HARD_MAX_NEXT_STEP_EXPECTED_OUTPUT_TOKENS * 4),
