@@ -67,17 +67,18 @@ pub fn interpret_observation(
 	raw_observation: ToolObservation,
 	new_working_directory: Option<String>,
 ) -> InterpretedObservation {
+	let is_multiple_candidates =
+		raw_observation.error_type.as_deref() == Some("multiple_candidates");
 	let remaining_step_budget = state.remaining_step_budget.saturating_sub(1);
-	let remaining_recovery_budget = if raw_observation.ok || raw_observation.terminal {
-		state.remaining_recovery_budget
-	} else {
-		state.remaining_recovery_budget.saturating_sub(1)
-	};
+	let remaining_recovery_budget =
+		if raw_observation.ok || raw_observation.terminal || is_multiple_candidates {
+			state.remaining_recovery_budget
+		} else {
+			state.remaining_recovery_budget.saturating_sub(1)
+		};
 	let terminal = raw_observation.terminal;
 	let budget_exhausted = remaining_step_budget == 0;
 	let recovery_exhausted = !raw_observation.ok && !terminal && remaining_recovery_budget == 0;
-	let is_multiple_candidates =
-		raw_observation.error_type.as_deref() == Some("multiple_candidates");
 	let should_ask_user = false;
 	let unhandled_failure =
 		!raw_observation.ok && !terminal && !should_ask_user && !is_multiple_candidates;
@@ -247,6 +248,32 @@ mod tests {
 		assert!(interpreted.continue_allowed);
 		assert!(!interpreted.should_ask_user);
 		assert!(!interpreted.should_emit_final_answer);
+		assert!(!interpreted.should_fail);
+	}
+
+	#[test]
+	fn multiple_candidates_does_not_consume_recovery_budget() {
+		let mut state = loop_state();
+		state.remaining_recovery_budget = 1;
+		let interpreted = interpret_observation(
+			&state,
+			ToolObservation {
+				ok: false,
+				tool_name: "fs.find".to_string(),
+				error_type: Some("multiple_candidates".to_string()),
+				terminal: false,
+				data: json!({
+					"match_count": 2,
+					"matches": ["/workspace/a/runtime.rs", "/workspace/b/runtime.rs"]
+				}),
+				message: "Found 2 matching candidates.".to_string(),
+			},
+			None,
+		);
+
+		assert_eq!(interpreted.remaining_recovery_budget, 1);
+		assert!(!interpreted.recovery_exhausted);
+		assert!(interpreted.continue_allowed);
 		assert!(!interpreted.should_fail);
 	}
 }

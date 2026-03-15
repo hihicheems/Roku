@@ -19,10 +19,11 @@ use serde_json::{Value, json};
 use crate::runtime_config::NextStepRuntimeConfig;
 use crate::runtime_loop::grounding::{
 	explanatory_python_code_request, explanatory_shell_command_request,
+	extract_concrete_path_candidates, extract_concrete_table_path,
 	extract_explicit_path_candidates, extract_explicit_python_code, extract_explicit_shell_command,
-	extract_explicit_table_path, extract_glob_pattern, extract_path_candidates, extract_row_limit,
-	extract_sheet_name, extract_skill_source_url, extract_web_query,
-	grounded_python_code_allows_execution, grounded_shell_command_allows_execution,
+	extract_glob_pattern, extract_path_candidates, extract_row_limit, extract_sheet_name,
+	extract_skill_source_url, extract_web_query, grounded_python_code_allows_execution,
+	grounded_shell_command_allows_execution,
 };
 use crate::runtime_loop::{
 	ContextProjection, LoopState, NextStepAction, NextStepDecision, ToolObservation,
@@ -125,6 +126,7 @@ fn decide_with_router(
 			return None;
 		}
 	};
+	let decision = align_router_tool_arguments(decision, user_reply.unwrap_or(&loop_state.goal));
 	match validate_router_decision(loop_state, decision) {
 		Ok(decision) => Some(decision),
 		Err(reason) => {
@@ -145,6 +147,72 @@ fn decide_with_router(
 			);
 			None
 		}
+	}
+}
+
+fn align_router_tool_arguments(
+	mut decision: NextStepDecision,
+	grounding_input: &str,
+) -> NextStepDecision {
+	if !matches!(decision.action, NextStepAction::CallTool) {
+		return decision;
+	}
+	let Some(tool_name) = decision.tool_name.as_deref() else {
+		return decision;
+	};
+	let Some(grounded_arguments) = uniquely_grounded_arguments(tool_name, grounding_input) else {
+		return decision;
+	};
+	let mut merged_arguments = decision
+		.arguments
+		.take()
+		.and_then(|value| value.as_object().cloned())
+		.unwrap_or_default();
+	if let Some(grounded_object) = grounded_arguments.as_object() {
+		for (key, value) in grounded_object {
+			merged_arguments.insert(key.clone(), value.clone());
+		}
+	}
+	decision.arguments = Some(Value::Object(merged_arguments));
+	decision
+}
+
+fn uniquely_grounded_arguments(tool_name: &str, grounding_input: &str) -> Option<Value> {
+	match tool_name {
+		"fs.find" => {
+			let explicit_paths = extract_explicit_path_candidates(grounding_input);
+			(explicit_paths.len() == 1)
+				.then(|| json!({ "name": explicit_paths[0].clone(), "kind": "any" }))
+		}
+		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => {
+			let concrete_paths = extract_concrete_path_candidates(grounding_input);
+			(concrete_paths.len() == 1).then(|| json!({ "path": concrete_paths[0].clone() }))
+		}
+		"fs.glob" => {
+			extract_glob_pattern(grounding_input).map(|pattern| json!({ "pattern": pattern }))
+		}
+		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
+			let path = extract_concrete_table_path(grounding_input)?;
+			let mut arguments = json!({ "path": path });
+			if tool_name == "table.preview" {
+				arguments["rows"] =
+					Value::from(extract_row_limit(grounding_input).unwrap_or(5_u64));
+			}
+			if let Some(sheet) = extract_sheet_name(grounding_input) {
+				arguments["sheet"] = Value::String(sheet);
+			}
+			Some(arguments)
+		}
+		"web.search" => extract_web_query(grounding_input)
+			.map(|query| json!({ "query": query, "top_k": 5_u64 })),
+		"command.run" => extract_explicit_shell_command(grounding_input)
+			.map(|command| json!({ "command": command })),
+		"python.run" => {
+			extract_explicit_python_code(grounding_input).map(|code| json!({ "code": code }))
+		}
+		"skill.install" | "skill.ensure_installed" => extract_skill_source_url(grounding_input)
+			.map(|source_url| json!({ "source_url": source_url })),
+		_ => None,
 	}
 }
 
@@ -382,12 +450,16 @@ fn bootstrap_tool_matches_request(tool_name: &str, grounding_input: &str) -> boo
 		"python.run" => grounded_python_code_allows_execution(grounding_input),
 		"command.run" => grounded_shell_command_allows_execution(grounding_input),
 		"fs.glob" => extract_glob_pattern(grounding_input).is_some(),
-		"fs.exists" | "fs.find" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => {
+		"fs.find" => {
 			!extract_explicit_path_candidates(grounding_input).is_empty()
 				&& ground_tool_arguments(tool_name, grounding_input).is_some()
 		}
+		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => {
+			!extract_concrete_path_candidates(grounding_input).is_empty()
+				&& ground_tool_arguments(tool_name, grounding_input).is_some()
+		}
 		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
-			extract_explicit_table_path(grounding_input).is_some()
+			extract_concrete_table_path(grounding_input).is_some()
 				&& ground_tool_arguments(tool_name, grounding_input).is_some()
 		}
 		_ => bootstrap_tool_is_groundable(tool_name, grounding_input),
@@ -397,12 +469,16 @@ fn bootstrap_tool_matches_request(tool_name: &str, grounding_input: &str) -> boo
 fn bootstrap_tool_is_groundable(tool_name: &str, grounding_input: &str) -> bool {
 	match tool_name {
 		"fs.glob" => extract_glob_pattern(grounding_input).is_some(),
-		"fs.exists" | "fs.find" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => {
+		"fs.find" => {
 			!extract_explicit_path_candidates(grounding_input).is_empty()
 				&& ground_tool_arguments(tool_name, grounding_input).is_some()
 		}
+		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => {
+			!extract_concrete_path_candidates(grounding_input).is_empty()
+				&& ground_tool_arguments(tool_name, grounding_input).is_some()
+		}
 		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
-			extract_explicit_table_path(grounding_input).is_some()
+			extract_concrete_table_path(grounding_input).is_some()
 				&& ground_tool_arguments(tool_name, grounding_input).is_some()
 		}
 		_ => {
@@ -451,7 +527,7 @@ fn bootstrap_tool_call(
 pub(crate) fn ground_tool_arguments(tool_name: &str, grounding_input: &str) -> Option<Value> {
 	match tool_name {
 		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => {
-			extract_explicit_path_candidates(grounding_input)
+			extract_concrete_path_candidates(grounding_input)
 				.into_iter()
 				.next()
 				.map(|path| json!({ "path": path }))
@@ -464,7 +540,7 @@ pub(crate) fn ground_tool_arguments(tool_name: &str, grounding_input: &str) -> O
 			extract_glob_pattern(grounding_input).map(|pattern| json!({ "pattern": pattern }))
 		}
 		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
-			let path = extract_explicit_table_path(grounding_input)?;
+			let path = extract_concrete_table_path(grounding_input)?;
 			let mut arguments = json!({ "path": path });
 			if tool_name == "table.preview" {
 				arguments["rows"] =
@@ -743,7 +819,7 @@ mod tests {
 		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderCallError,
 		ProviderResponse, RiskTier, RoutingPolicy,
 	};
-	use serde_json::json;
+	use serde_json::{Value, json};
 
 	use super::{decide_tool_loop_next_step, tool_loop_prompt};
 	use crate::NextStepRuntimeConfig;
@@ -1213,6 +1289,75 @@ mod tests {
 			crate::runtime_loop::NextStepAction::CallTool
 		);
 		assert_eq!(decision.tool_name.as_deref(), Some("fs.inspect"));
+	}
+
+	#[test]
+	fn bootstrap_uses_lookup_first_seed_for_non_concrete_basenames() {
+		let loop_state = sample_bootstrap_loop_state(
+			"我是说，帮我看看cmd那个crate下的runtime.rs，里面的第100行是什么内容？输出出来",
+			vec!["fs.find", "fs.glob", "fs.inspect"],
+			vec!["fs.find", "fs.glob", "fs.inspect", "general.execute"],
+		);
+		let projection = build_context_projection(&loop_state);
+
+		let decision = decide_tool_loop_next_step(
+			&loop_state,
+			&projection,
+			None,
+			None,
+			&NextStepRuntimeConfig::default(),
+		);
+
+		assert_eq!(
+			decision.action,
+			crate::runtime_loop::NextStepAction::CallTool
+		);
+		assert_eq!(decision.tool_name.as_deref(), Some("fs.find"));
+	}
+
+	#[test]
+	fn router_aligned_lookup_arguments_prefer_explicit_resource_tokens() {
+		let loop_state = sample_bootstrap_loop_state(
+			"我是说，帮我看看cmd那个crate下的runtime.rs，里面的第100行是什么内容？输出出来",
+			vec!["fs.find", "fs.glob", "fs.inspect"],
+			vec![
+				"fs.find",
+				"fs.glob",
+				"fs.inspect",
+				"fs.read_text",
+				"general.execute",
+			],
+		);
+		let projection = build_context_projection(&loop_state);
+		let (router, _prompts) = router_with_responses(vec![json!({
+			"action": "call_tool",
+			"tool_name": "fs.find",
+			"arguments": { "name": "cmd", "kind": "any" },
+			"reason": "Find the cmd crate path first.",
+			"final_message": null
+		})]);
+
+		let decision = decide_tool_loop_next_step(
+			&loop_state,
+			&projection,
+			Some(&router),
+			None,
+			&NextStepRuntimeConfig::default(),
+		);
+
+		assert_eq!(
+			decision.action,
+			crate::runtime_loop::NextStepAction::CallTool
+		);
+		assert_eq!(decision.tool_name.as_deref(), Some("fs.find"));
+		assert_eq!(
+			decision
+				.arguments
+				.as_ref()
+				.and_then(|value| value.get("name"))
+				.and_then(Value::as_str),
+			Some("runtime.rs")
+		);
 	}
 
 	#[test]

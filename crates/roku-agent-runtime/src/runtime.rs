@@ -2476,6 +2476,38 @@ So, I'll output: "星期日""#
 	}
 
 	#[test]
+	fn classify_route_uses_lookup_first_family_seed_for_non_concrete_basenames() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-fs-non-concrete-basename".to_string()),
+			session_id: "session-fs-non-concrete-basename".to_string(),
+			goal: "我是说，帮我看看cmd那个crate下的runtime.rs，里面的第100行是什么内容？输出出来"
+				.to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+
+		match route {
+			crate::router::RouteDecisionResult::Direct(plan) => {
+				assert_eq!(plan.decision.intent_family, IntentFamily::FilesystemRead);
+				assert_eq!(
+					plan.decision.candidate_tools,
+					vec![
+						"fs.find".to_string(),
+						"fs.glob".to_string(),
+						"fs.inspect".to_string()
+					]
+				);
+			}
+			other => panic!(
+				"expected non-concrete basename requests to keep a lookup-first starter set, got {other:?}"
+			),
+		}
+	}
+
+	#[test]
 	fn classify_route_starts_fs_inspect_for_explicit_inspect_actions() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
