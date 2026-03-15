@@ -2,6 +2,54 @@
 
 # Changelog
 
+## [v0.0.5] - 2026-03-15
+
+### Features
+
+- **(deploy)** add docker build scripts and shell checks (by @[itscheems](https://github.com/itscheems)) - ([4581354](https://github.com/itscheems/Roku/commit/45813541a01292e79a07eae6939ee282cf27d2c3))
+- **(deploy)** support multi-arch docker builds (by @[itscheems](https://github.com/itscheems)) - ([8480367](https://github.com/itscheems/Roku/commit/84803671358003f52276c02d530aa1b141a0f12b))
+- **(roku-plugin-telegram)** add session control commands (by @[itscheems](https://github.com/itscheems)) - ([391ad29](https://github.com/itscheems/Roku/commit/391ad2927210149855615dd1bc7eff42acd2aa86))
+- **(roku-plugin-tools)** unify python and web tool contracts (by @[itscheems](https://github.com/itscheems)) - ([ddfe3b6](https://github.com/itscheems/Roku/commit/ddfe3b6d7c2bfaaf4e8a413ec05f9989bde6fd75))
+- **(roku-runtime)** add constrained command execution probe (by @[itscheems](https://github.com/itscheems)) - ([afb1645](https://github.com/itscheems/Roku/commit/afb1645ae8d87bfeb63b8cea0199df9f8e4f3301))
+
+### Bug Fixes
+
+- **(roku-cmd)** use unique request ids for probe runs (by @[itscheems](https://github.com/itscheems)) - ([d9bfc48](https://github.com/itscheems/Roku/commit/d9bfc48440c651b92600d4a592c3b3569a244d2e))
+- **(roku-runtime)** harden loop fallbacks and budgets (by @[itscheems](https://github.com/itscheems)) - ([9278a4a](https://github.com/itscheems/Roku/commit/9278a4a1cd87448089f56b98453ef8e2bac873c9))
+- **(roku-runtime)** tighten explicit resource grounding (by @[itscheems](https://github.com/itscheems)) - ([6a46ddb](https://github.com/itscheems/Roku/commit/6a46ddb0dd01f7d72a0d1e93f3e35758a2c95aa1))
+- **(roku-runtime)** ask for missing direct tool inputs (by @[itscheems](https://github.com/itscheems)) - ([7f61a7e](https://github.com/itscheems/Roku/commit/7f61a7e62aa56e97ade4da8a61b456910a2d1686))
+- **(roku-runtime)** tighten entry-stage tool binding (by @[itscheems](https://github.com/itscheems)) - ([4270300](https://github.com/itscheems/Roku/commit/4270300b1d9b5351032674ca0f11145064446156))
+- **(roku-runtime)** align tool routing with contract semantics (by @[itscheems](https://github.com/itscheems)) - ([e5c9e20](https://github.com/itscheems/Roku/commit/e5c9e205c1f40e81eb34003f56cef8145d193d19))
+
+### Refactor
+
+- **(roku-common-types)** freeze shared tool contracts (by @[itscheems](https://github.com/itscheems)) - ([841754f](https://github.com/itscheems/Roku/commit/841754feafe384f9d5435f54d23f7597850e3a0a))
+- **(roku-plugin-tools)** migrate builtins to unified contracts (by @[itscheems](https://github.com/itscheems)) - ([5b07cee](https://github.com/itscheems/Roku/commit/5b07ceebcb85fa301207a3ccb6c87d8559ddb440))
+- **(roku-plugins)** separate canonical descriptors from selection hints (by @[itscheems](https://github.com/itscheems)) - ([d80aaf8](https://github.com/itscheems/Roku/commit/d80aaf86fe9604f4d60e518c2155531a5764e9e0))
+- **(roku-runtime)** tighten paused loop resume contracts (by @[itscheems](https://github.com/itscheems)) - ([55da7ca](https://github.com/itscheems/Roku/commit/55da7caeea260069ad30ab9035c2224cf1173c48))
+- **(roku-runtime)** use structured general completion contracts (by @[itscheems](https://github.com/itscheems)) - ([ea3389d](https://github.com/itscheems/Roku/commit/ea3389d508f41b054721ae2e8e64ae1aa5264594))
+- **(roku-runtime)** demote grounding to explicit resource alignment (by @[itscheems](https://github.com/itscheems)) - ([c887043](https://github.com/itscheems/Roku/commit/c887043fea66d0ffe667686921aafb484e098a56))
+- **(roku-runtime)** compact selection hint consumption (by @[itscheems](https://github.com/itscheems)) - ([3577b28](https://github.com/itscheems/Roku/commit/3577b283fcde17bfd7cde7bd4145df051d76a33a))
+- **(roku-runtime)** formalize loop trace contracts (by @[itscheems](https://github.com/itscheems)) - ([b42ae57](https://github.com/itscheems/Roku/commit/b42ae57c052705a5bb734af6e4f2dcc1075274a8))
+
+### Documentation
+
+- **(deploy)** add bilingual deployment guides (by @[itscheems](https://github.com/itscheems)) - ([6c0d389](https://github.com/itscheems/Roku/commit/6c0d389bee7c0a43f4eda0bc3a8f7c208f88fba1))
+- **(roku-cmd)** document bootstrap and storage boundaries (by @[itscheems](https://github.com/itscheems)) - ([711b11d](https://github.com/itscheems/Roku/commit/711b11d85acb8be080abfccd37f6187ec76f14be))
+- **(roku-plugin-telegram)** document control command boundaries (by @[itscheems](https://github.com/itscheems)) - ([0a9ceb7](https://github.com/itscheems/Roku/commit/0a9ceb76efcc8215d362f5e2d970d5afb9f09935))
+
+### Testing
+
+- **(roku-runtime)** cover controlled family seeds and ambiguity recovery (by @[itscheems](https://github.com/itscheems)) - ([a1fd4e8](https://github.com/itscheems/Roku/commit/a1fd4e8d24c4440ebcaba98f2dfa01e0f7494f47))
+- **(roku-runtime)** cover missing-input direct tool routes (by @[itscheems](https://github.com/itscheems)) - ([3a6d999](https://github.com/itscheems/Roku/commit/3a6d999acab3288dfdcf8888837a4b52d90dd1dd))
+- **(roku-runtime)** cover python and web tool admission (by @[itscheems](https://github.com/itscheems)) - ([260a42b](https://github.com/itscheems/Roku/commit/260a42b61dc09f6e778657b106e84687936423ef))
+- **(roku-runtime-service)** cover stale freeform loop recovery (by @[itscheems](https://github.com/itscheems)) - ([6e251b5](https://github.com/itscheems/Roku/commit/6e251b50991df8cee2a2343f078b321cc2c50b71))
+- **(roku-validation-plane)** grade runtime loop trace payloads (by @[itscheems](https://github.com/itscheems)) - ([52794e3](https://github.com/itscheems/Roku/commit/52794e3afca9b1ee858a30448a678d0da5cec211))
+
+### Miscellaneous Tasks
+
+- **(repo)** ignore codex workspace state (by @[itscheems](https://github.com/itscheems)) - ([bfc123f](https://github.com/itscheems/Roku/commit/bfc123f4dfc325bc5aa0a489521375592f9652a7))
+
 ## [v0.0.4] - 2026-03-14
 
 ### Features
