@@ -51,6 +51,6 @@ pub use step_record::{StepAction, StepRecord};
 pub use summarizer::FinalAnswerPayload;
 pub(crate) use summarizer::summarize_observation;
 pub(crate) use tool_loop::{
-	attachments_for_tool, decide_tool_loop_next_step, next_working_directory_from_observation,
-	tool_required_argument_keys,
+	attachments_for_tool, decide_tool_loop_next_step, ground_tool_arguments,
+	next_working_directory_from_observation, tool_required_argument_keys,
 };

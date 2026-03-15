@@ -14,12 +14,13 @@
 
 use std::sync::Arc;
 
+use crate::runtime_loop::extract_skill_source_url;
 use crate::tool_config::{BuiltinToolRole, ToolCatalogConfig};
 use roku_common_types::{
 	AgentInstanceSpec, ConversationRole, ConversationTurn, ResultEnvelope, TaskNode,
 };
 use roku_plugin_host::{ToolInvocation, ToolRuntime};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::result::{tool_failure_result, tool_success_result};
 use crate::runtime::RuntimeWorker;
@@ -51,25 +52,34 @@ impl ToolBackedWorker {
 
 	fn invocation(&self, spec: &AgentInstanceSpec, node: &TaskNode) -> ToolInvocation {
 		let (goal, step_summary) = goal_and_step(&node.description);
+		let mut input = json!({
+			"task_id": spec.context.task_id.0,
+			"node_id": node.node_id.0,
+			"goal": goal,
+			"summary": step_summary,
+			"granted_capabilities": spec.capabilities.clone(),
+			"resource_selectors": spec
+				.context
+				.resources
+				.iter()
+				.map(|resource| resource.display_key())
+				.collect::<Vec<_>>(),
+			"conversation_history": render_conversation_history(&spec.context.conversation_history),
+			"budget_tokens": spec.policy_bindings.budget_tokens,
+			"time_budget_ms": spec.policy_bindings.time_budget_ms,
+			"worker_id": self.worker_id,
+		});
+		if matches!(
+			self.tool_name.as_str(),
+			"skill.install" | "skill.ensure_installed"
+		) && let Some(source_url) =
+			extract_skill_source_url(&goal).or_else(|| extract_skill_source_url(&step_summary))
+		{
+			input["source_url"] = Value::String(source_url);
+		}
 		ToolInvocation {
 			tool_name: self.tool_name.clone(),
-			input: json!({
-				"task_id": spec.context.task_id.0,
-				"node_id": node.node_id.0,
-				"goal": goal,
-				"summary": step_summary,
-				"granted_capabilities": spec.capabilities.clone(),
-				"resource_selectors": spec
-					.context
-					.resources
-					.iter()
-					.map(|resource| resource.display_key())
-					.collect::<Vec<_>>(),
-				"conversation_history": render_conversation_history(&spec.context.conversation_history),
-				"budget_tokens": spec.policy_bindings.budget_tokens,
-				"time_budget_ms": spec.policy_bindings.time_budget_ms,
-				"worker_id": self.worker_id,
-			}),
+			input,
 			granted_capabilities: spec.capabilities.clone(),
 			invocation_key: Some(format!(
 				"{}:{}:{}",

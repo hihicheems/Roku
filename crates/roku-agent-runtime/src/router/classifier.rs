@@ -26,12 +26,14 @@ use crate::router::{
 use crate::runtime_loop::{
 	extract_explicit_shell_command as shared_extract_explicit_shell_command,
 	extract_path_candidates as shared_extract_path_candidates, extract_skill_source_url,
-	extract_web_query,
+	extract_web_query, ground_tool_arguments, tool_required_argument_keys,
 };
 use crate::tool_config::{BuiltinToolRole, ToolCatalogConfig};
 
 const MIN_SKILL_SCORE: f32 = 0.72;
 const ROUTE_CONFIDENCE_FLOOR: f32 = 0.65;
+const DETERMINISTIC_TOOL_MATCH_SCORE_FLOOR: f32 = 0.18;
+const DETERMINISTIC_TOOL_MATCH_MARGIN_RATIO: f32 = 1.05;
 
 pub(crate) struct RouteClassifierContext<'a> {
 	pub(crate) catalog: &'a ResourceCatalog,
@@ -107,6 +109,10 @@ fn deterministic_pre_classify(
 	}
 
 	if let Some(result) = classify_structural_fallback(context, request) {
+		return Some(result);
+	}
+
+	if let Some(result) = classify_deterministic_contract_tool_match(context, request) {
 		return Some(result);
 	}
 
@@ -261,12 +267,17 @@ fn classify_contract_level_grounded_hint(
 	if extract_table_path(&request.goal).is_some()
 		&& has_enabled_tool_with_prefix(context.catalog, "table.")
 	{
+		let candidate_tools = deterministic_contract_tool_candidates(
+			context,
+			&request.goal,
+			Some(IntentFamily::TableRead),
+		);
 		let decision = RouteDecision::new(
 			IntentFamily::TableRead,
 			0.86,
 			false,
 			RouteRisk::Low,
-			Vec::new(),
+			candidate_tools,
 			Vec::new(),
 			Vec::new(),
 			"contract-level grounded table input provides a non-authoritative table-family hint",
@@ -277,12 +288,17 @@ fn classify_contract_level_grounded_hint(
 	if !extract_path_candidates(&request.goal).is_empty()
 		&& has_enabled_tool_with_prefix(context.catalog, "fs.")
 	{
+		let candidate_tools = deterministic_contract_tool_candidates(
+			context,
+			&request.goal,
+			Some(IntentFamily::FilesystemRead),
+		);
 		let decision = RouteDecision::new(
 			IntentFamily::FilesystemRead,
 			0.84,
 			false,
 			RouteRisk::Low,
-			Vec::new(),
+			candidate_tools,
 			Vec::new(),
 			Vec::new(),
 			"contract-level grounded filesystem input provides a non-authoritative filesystem-family hint",
@@ -336,7 +352,7 @@ fn explicit_tool_hint_is_grounded(tool_name: &str, goal: &str) -> bool {
 		"web.search" => extract_web_query(goal).is_some(),
 		"command.run" => extract_explicit_shell_command(goal).is_some(),
 		"python.run" => extract_explicit_python_code(goal).is_some(),
-		"skill.install" => extract_skill_source_url(goal).is_some(),
+		"skill.install" | "skill.ensure_installed" => extract_skill_source_url(goal).is_some(),
 		_ => false,
 	}
 }
@@ -629,6 +645,106 @@ fn unavailable_family_route(
 		reason: EscalationReason::NoEnabledRouteTarget,
 		action: EscalationAction::FallbackAnswer,
 	})
+}
+
+fn classify_deterministic_contract_tool_match(
+	context: &RouteClassifierContext<'_>,
+	request: &RequestEnvelope,
+) -> Option<RouteDecisionResult> {
+	if context.route_router.is_some() {
+		return None;
+	}
+
+	let tool_matches = discoverable_tool_matches(context.catalog.retrieve(
+		&request.goal,
+		Some(ResourceKind::Tool),
+		6,
+	));
+	let best_match = select_deterministic_contract_tool_match(&tool_matches, &request.goal, None)?;
+	if let Some(selector) = explicit_tool_selector(context.catalog, &request.goal)
+		&& let Some(descriptor) = context.catalog.descriptor(&selector)
+		&& !explicit_tool_hint_is_grounded(&descriptor.name, &request.goal)
+	{
+		return None;
+	}
+	let tool_name = best_match.descriptor.name.clone();
+	let decision = RouteDecision::new(
+		coarse_intent_hint_for_tool(&tool_name),
+		0.82,
+		false,
+		resource_risk(&best_match.descriptor),
+		vec![tool_name.clone()],
+		candidate_plugins_for_tool(context.plugin_snapshot, &tool_name),
+		Vec::new(),
+		format!(
+			"deterministic catalog retrieval matched contract-backed tool `{tool_name}` and the current goal can already ground its required inputs"
+		),
+	);
+	Some(build_tool_loop_route(
+		context,
+		decision,
+		Some(&tool_name),
+		Vec::new(),
+	))
+}
+
+fn deterministic_contract_tool_candidates(
+	context: &RouteClassifierContext<'_>,
+	goal: &str,
+	intent_family: Option<IntentFamily>,
+) -> Vec<String> {
+	if context.route_router.is_some() {
+		return Vec::new();
+	}
+	let tool_matches =
+		discoverable_tool_matches(context.catalog.retrieve(goal, Some(ResourceKind::Tool), 6));
+	select_deterministic_contract_tool_match(&tool_matches, goal, intent_family)
+		.map(|entry| vec![entry.descriptor.name.clone()])
+		.unwrap_or_default()
+}
+
+fn select_deterministic_contract_tool_match<'a>(
+	tool_matches: &'a [CatalogMatch],
+	goal: &str,
+	intent_family: Option<IntentFamily>,
+) -> Option<&'a CatalogMatch> {
+	let grounded_intent = intent_family.or_else(|| deterministic_grounded_intent(goal));
+	let grounded_matches = tool_matches
+		.iter()
+		.filter(|entry| entry.descriptor.contract.is_some())
+		.filter(|entry| deterministic_match_can_start(&entry.descriptor.name, goal))
+		.filter(|entry| {
+			grounded_intent
+				.is_none_or(|intent| coarse_intent_hint_for_tool(&entry.descriptor.name) == intent)
+		})
+		.collect::<Vec<_>>();
+	let [best_match, rest @ ..] = grounded_matches.as_slice() else {
+		return None;
+	};
+	let next_score = rest.first().map(|entry| entry.score).unwrap_or_default();
+	let margin_ok =
+		next_score == 0.0 || best_match.score >= next_score * DETERMINISTIC_TOOL_MATCH_MARGIN_RATIO;
+	(best_match.score >= DETERMINISTIC_TOOL_MATCH_SCORE_FLOOR && margin_ok).then_some(*best_match)
+}
+
+fn deterministic_match_can_start(tool_name: &str, goal: &str) -> bool {
+	tool_required_argument_keys(tool_name).is_empty()
+		|| ground_tool_arguments(tool_name, goal).is_some()
+}
+
+fn deterministic_grounded_intent(goal: &str) -> Option<IntentFamily> {
+	if extract_explicit_python_code(goal).is_some()
+		|| extract_explicit_shell_command(goal).is_some()
+	{
+		return Some(IntentFamily::CodeExec);
+	}
+	if extract_table_path(goal).is_some() {
+		return Some(IntentFamily::TableRead);
+	}
+	if extract_glob_pattern(goal).is_some() || !extract_path_candidates(goal).is_empty() {
+		return Some(IntentFamily::FilesystemRead);
+	}
+	None
 }
 
 fn has_enabled_tool_with_prefix(catalog: &ResourceCatalog, prefix: &str) -> bool {

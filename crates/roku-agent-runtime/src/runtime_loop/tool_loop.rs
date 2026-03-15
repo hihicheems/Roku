@@ -285,7 +285,7 @@ fn bootstrap_tool_call(
 			"Use the currently visible tool hint without adding any extra semantic routing.",
 		);
 	}
-	match ground_required_arguments(tool_name, grounding_input) {
+	match ground_tool_arguments(tool_name, grounding_input) {
 		Some(arguments) => call_tool(
 			tool_name,
 			arguments,
@@ -295,7 +295,7 @@ fn bootstrap_tool_call(
 	}
 }
 
-fn ground_required_arguments(tool_name: &str, grounding_input: &str) -> Option<Value> {
+pub(crate) fn ground_tool_arguments(tool_name: &str, grounding_input: &str) -> Option<Value> {
 	match tool_name {
 		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => {
 			extract_path_candidates(grounding_input)
@@ -329,7 +329,7 @@ fn ground_required_arguments(tool_name: &str, grounding_input: &str) -> Option<V
 		"python.run" => {
 			extract_explicit_python_code(grounding_input).map(|code| json!({ "code": code }))
 		}
-		"skill.install" => extract_skill_source_url(grounding_input)
+		"skill.install" | "skill.ensure_installed" => extract_skill_source_url(grounding_input)
 			.map(|source_url| json!({ "source_url": source_url })),
 		_ => None,
 	}
@@ -362,7 +362,7 @@ fn missing_argument_message(tool_name: &str) -> String {
 		"python.run" => {
 			"Please send explicit Python code in a fenced block or inline code snippet.".to_string()
 		}
-		"skill.install" => {
+		"skill.install" | "skill.ensure_installed" => {
 			"I need a concrete skill source URL before I can install that skill.".to_string()
 		}
 		other => {
@@ -405,7 +405,7 @@ pub(crate) fn tool_required_argument_keys(tool_name: &str) -> &'static [&'static
 		"web.search" => &["query"],
 		"command.run" => &["command"],
 		"python.run" => &["code"],
-		"skill.install" => &["source_url"],
+		"skill.install" | "skill.ensure_installed" => &["source_url"],
 		"inventory.describe" | "general.execute" | "skill.execute" => &[],
 		_ => &[],
 	}
