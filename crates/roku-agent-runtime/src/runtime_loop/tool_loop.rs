@@ -18,13 +18,17 @@ use serde_json::{Value, json};
 
 use crate::runtime_config::NextStepRuntimeConfig;
 use crate::runtime_loop::grounding::{
-	extract_explicit_python_code, extract_explicit_shell_command, extract_path_candidates,
-	extract_row_limit, extract_sheet_name, extract_skill_source_url, extract_table_path,
-	extract_web_query,
+	explanatory_python_code_request, explanatory_shell_command_request,
+	extract_explicit_python_code, extract_explicit_shell_command, extract_glob_pattern,
+	extract_path_candidates, extract_row_limit, extract_sheet_name, extract_skill_source_url,
+	extract_table_path, extract_web_query, grounded_python_code_allows_execution,
+	grounded_shell_command_allows_execution,
 };
 use crate::runtime_loop::{
 	ContextProjection, LoopState, NextStepAction, NextStepDecision, ToolObservation,
-	ask_user::ask_user_from_observation, summarize_observation,
+	ask_user::ask_user_from_observation, file_name_from_path, goal_requests_directory_listing,
+	goal_requests_file_read, goal_requests_filesystem_inspect, preferred_grounded_filesystem_tool,
+	preferred_grounded_table_tool, summarize_observation,
 };
 
 pub(crate) fn decide_tool_loop_next_step(
@@ -193,11 +197,13 @@ Rules:
 - Keep `final_message` concise. Do not paste large grounded documents, search dumps, or long synthesized answers into the JSON decision.
 - Use the current user follow-up if it is present; do not inherit concrete code, paths, or queries from prior conversation turns unless they already exist in the current context projection.
 - For `chat`, prefer `general.execute` when it is visible.
-- For `code_exec`, only call `python.run` when explicit Python code is present in the grounding context, and only call `command.run` when the request includes one explicit shell command.
+- For `code_exec`, only call `python.run` when explicit Python code is present and the user is clearly asking to run it; only call `command.run` when the request includes one explicit shell command and the user is asking to execute it.
 - For `table_read`, prefer the first shortlisted `table.*` tool that matches the grounded table path.
 - For `web_lookup`, use `web.search` when a concrete query is available.
 - When the current request references concrete local files, directories, workspace paths, or shell-style inspection goals and `fs.*` tools are visible, gather grounded filesystem evidence before using `general.execute`.
 - Do not call `general.execute` only to speculate about which filesystem tools could be used. Prefer `fs.inspect`, `fs.list_dir`, `fs.read_text`, `fs.find`, or `fs.glob` when the current context already grounds one of them.
+- If a filesystem or table consumer tool fails with `path_not_found` and `fs.find` is visible, prefer locating the target before failing the loop.
+- If `fs.find` resolves exactly one path and the user still needs to read, inspect, list, or preview that resource, continue with the corresponding consumer tool instead of stopping at the lookup step.
 - When a filesystem, table, web, or python observation provides raw evidence but the user still needs explanation, comparison, or synthesis, prefer `general.execute` before emitting `final_answer`.
 - When the latest observation already directly satisfies a bounded inspection or listing request, emit `final_answer` with a concise grounded reply that reuses the observation message instead of copying large raw payloads into JSON.
 - Use `ask_user` when the current information is still insufficient.
@@ -222,7 +228,7 @@ fn deterministic_next_step(loop_state: &LoopState, user_reply: Option<&str>) -> 
 }
 
 fn initial_next_step(loop_state: &LoopState, grounding_input: &str) -> NextStepDecision {
-	let Some(tool_name) = bootstrap_tool_name(loop_state) else {
+	let Some(tool_name) = bootstrap_tool_name(loop_state, grounding_input) else {
 		return fail("tool loop cannot start without any visible tool".to_string());
 	};
 	bootstrap_tool_call(loop_state, tool_name, grounding_input)
@@ -238,6 +244,9 @@ fn next_step_from_observation(
 			return final_answer(
 				summarize_observation(&loop_state.goal, observation).final_message,
 			);
+		}
+		if let Some(next_decision) = follow_up_tool_after_observation(loop_state, observation) {
+			return next_decision;
 		}
 		if observation.tool_name != "general.execute" && tool_visible(loop_state, "general.execute")
 		{
@@ -255,17 +264,171 @@ fn next_step_from_observation(
 		}
 		return ask_user(ask_user_from_observation(&loop_state.goal, observation).final_message);
 	}
+	if let Some(next_decision) = recovery_tool_after_observation(loop_state, observation) {
+		return next_decision;
+	}
 	fail(summarize_observation(&loop_state.goal, observation).final_message)
 }
 
-fn bootstrap_tool_name(loop_state: &LoopState) -> Option<&str> {
-	loop_state
+fn follow_up_tool_after_observation(
+	loop_state: &LoopState,
+	observation: &ToolObservation,
+) -> Option<NextStepDecision> {
+	match observation.tool_name.as_str() {
+		"fs.find" => follow_up_after_fs_find(loop_state, observation),
+		_ => None,
+	}
+}
+
+fn follow_up_after_fs_find(
+	loop_state: &LoopState,
+	observation: &ToolObservation,
+) -> Option<NextStepDecision> {
+	let resolved_path = observation
+		.data
+		.get("resolved_path")
+		.and_then(Value::as_str)?;
+	if extract_table_path(&loop_state.goal).is_some() {
+		let table_tool = preferred_grounded_table_tool(&loop_state.goal);
+		if tool_visible(loop_state, table_tool) {
+			let mut arguments = json!({ "path": resolved_path });
+			if table_tool == "table.preview" {
+				arguments["rows"] =
+					Value::from(extract_row_limit(&loop_state.goal).unwrap_or(5_u64));
+			}
+			if let Some(sheet) = extract_sheet_name(&loop_state.goal) {
+				arguments["sheet"] = Value::String(sheet);
+			}
+			return Some(call_tool(
+				table_tool,
+				arguments,
+				"Use the resolved filesystem match to continue with the grounded table tool instead of stopping after lookup.",
+			));
+		}
+	}
+	if goal_requests_file_read(&loop_state.goal) && tool_visible(loop_state, "fs.read_text") {
+		return Some(call_tool(
+			"fs.read_text",
+			json!({ "path": resolved_path }),
+			"Use the resolved filesystem match to continue reading the requested file contents.",
+		));
+	}
+	if goal_requests_directory_listing(&loop_state.goal) && tool_visible(loop_state, "fs.list_dir")
+	{
+		return Some(call_tool(
+			"fs.list_dir",
+			json!({ "path": resolved_path }),
+			"Use the resolved filesystem match to continue listing the requested directory.",
+		));
+	}
+	if goal_requests_filesystem_inspect(&loop_state.goal) && tool_visible(loop_state, "fs.inspect")
+	{
+		return Some(call_tool(
+			"fs.inspect",
+			json!({ "path": resolved_path }),
+			"Use the resolved filesystem match to continue inspecting the requested path metadata.",
+		));
+	}
+	None
+}
+
+fn recovery_tool_after_observation(
+	loop_state: &LoopState,
+	observation: &ToolObservation,
+) -> Option<NextStepDecision> {
+	let error_type = observation.error_type.as_deref()?;
+	match error_type {
+		"path_not_found" => recover_path_not_found_with_fs_find(loop_state, observation),
+		_ => None,
+	}
+}
+
+fn recover_path_not_found_with_fs_find(
+	loop_state: &LoopState,
+	observation: &ToolObservation,
+) -> Option<NextStepDecision> {
+	if observation.tool_name == "fs.find" || !tool_visible(loop_state, "fs.find") {
+		return None;
+	}
+	let requested_name = extract_path_candidates(&loop_state.goal)
+		.into_iter()
+		.next()
+		.and_then(|path| file_name_from_path(&path).or(Some(path)))?;
+	Some(call_tool(
+		"fs.find",
+		json!({ "name": requested_name, "kind": "any" }),
+		"Recover from a missing concrete path by locating the requested file inside the current workspace before giving up.",
+	))
+}
+
+fn bootstrap_tool_name<'a>(loop_state: &'a LoopState, grounding_input: &str) -> Option<&'a str> {
+	let shortlisted_tools = loop_state
 		.route_decision
 		.candidate_tools
 		.iter()
 		.map(String::as_str)
-		.find(|tool_name| tool_visible(loop_state, tool_name))
+		.filter(|tool_name| tool_visible(loop_state, tool_name))
+		.collect::<Vec<_>>();
+	if let Some(tool_name) = shortlisted_tools
+		.iter()
+		.copied()
+		.find(|tool_name| bootstrap_tool_matches_request(tool_name, grounding_input))
+	{
+		return Some(tool_name);
+	}
+	if prefers_advisory_bootstrap(grounding_input) && tool_visible(loop_state, "general.execute") {
+		return Some("general.execute");
+	}
+	if prefers_advisory_bootstrap(grounding_input) {
+		return shortlisted_tools
+			.iter()
+			.copied()
+			.find(|tool_name| !is_execution_tool(tool_name))
+			.or_else(|| {
+				loop_state
+					.visible_tools
+					.iter()
+					.map(String::as_str)
+					.find(|tool_name| !is_execution_tool(tool_name))
+			});
+	}
+	shortlisted_tools
+		.into_iter()
+		.find(|tool_name| bootstrap_tool_is_groundable(tool_name, grounding_input))
+		.or_else(|| tool_visible(loop_state, "general.execute").then_some("general.execute"))
 		.or_else(|| loop_state.visible_tools.first().map(String::as_str))
+}
+
+fn bootstrap_tool_matches_request(tool_name: &str, grounding_input: &str) -> bool {
+	match tool_name {
+		"python.run" => grounded_python_code_allows_execution(grounding_input),
+		"command.run" => grounded_shell_command_allows_execution(grounding_input),
+		"fs.glob" => extract_glob_pattern(grounding_input).is_some(),
+		"fs.exists" | "fs.find" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => {
+			preferred_grounded_filesystem_tool(grounding_input)
+				.is_some_and(|preferred_tool| preferred_tool == tool_name)
+				&& ground_tool_arguments(tool_name, grounding_input).is_some()
+		}
+		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
+			extract_table_path(grounding_input).is_some()
+				&& preferred_grounded_table_tool(grounding_input) == tool_name
+		}
+		_ => bootstrap_tool_is_groundable(tool_name, grounding_input),
+	}
+}
+
+fn bootstrap_tool_is_groundable(tool_name: &str, grounding_input: &str) -> bool {
+	tool_required_argument_keys(tool_name).is_empty()
+		|| ground_tool_arguments(tool_name, grounding_input).is_some()
+}
+
+fn prefers_advisory_bootstrap(grounding_input: &str) -> bool {
+	explanatory_shell_command_request(grounding_input)
+		|| explanatory_python_code_request(grounding_input)
+}
+
+fn is_execution_tool(tool_name: &str) -> bool {
+	matches!(tool_name, "command.run" | "python.run")
 }
 
 fn bootstrap_tool_call(
@@ -458,12 +621,6 @@ fn fail(message: String) -> NextStepDecision {
 	}
 }
 
-fn extract_glob_pattern(value: &str) -> Option<String> {
-	extract_path_candidates(value)
-		.into_iter()
-		.find(|candidate| candidate.contains('*') || candidate.contains('?'))
-}
-
 fn log_tool_loop_warning(message: &str, fields: impl IntoIterator<Item = (&'static str, String)>) {
 	let mut record = LogRecord::new("roku-agent-runtime", LogLevel::Warn, message);
 	for (key, value) in fields {
@@ -632,6 +789,38 @@ mod tests {
 		LoopState::new("loop-fs-1", &context)
 	}
 
+	fn sample_bootstrap_loop_state(
+		goal: &str,
+		candidate_tools: Vec<&str>,
+		visible_tools: Vec<&str>,
+	) -> LoopState {
+		let cwd = env::current_dir()
+			.expect("cwd should resolve for tests")
+			.display()
+			.to_string();
+		let context = LoopContext {
+			request_id: "req-bootstrap-1".to_string(),
+			session_id: "session-bootstrap-1".to_string(),
+			goal: goal.to_string(),
+			workspace_root: cwd.clone(),
+			working_directory: cwd,
+			visible_tools: visible_tools.into_iter().map(str::to_string).collect(),
+			bound_resources: Vec::new(),
+			route_decision: RouteDecision::new(
+				IntentFamily::Unknown,
+				0.81,
+				false,
+				RouteRisk::Low,
+				candidate_tools.into_iter().map(str::to_string).collect(),
+				Vec::new(),
+				Vec::new(),
+				"bootstrap bias test",
+			),
+			last_observation: None,
+		};
+		LoopState::new("loop-bootstrap-1", &context)
+	}
+
 	fn router_with_responses(
 		responses: Vec<serde_json::Value>,
 	) -> (LlmRouter, Arc<Mutex<Vec<String>>>) {
@@ -746,7 +935,7 @@ mod tests {
 	}
 
 	#[test]
-	fn resolved_filesystem_find_requires_an_explicit_next_step_decision() {
+	fn resolved_filesystem_find_can_continue_into_the_consumer_tool() {
 		let mut loop_state = sample_filesystem_loop_state();
 		let resolved_path = env::current_dir()
 			.expect("cwd should resolve for tests")
@@ -778,11 +967,11 @@ mod tests {
 			decision.action,
 			crate::runtime_loop::NextStepAction::CallTool
 		);
-		assert_eq!(decision.tool_name.as_deref(), Some("general.execute"));
+		assert_eq!(decision.tool_name.as_deref(), Some("fs.read_text"));
 		assert!(
 			decision
 				.reason
-				.contains("synthesize the latest grounded observation")
+				.contains("continue reading the requested file contents")
 		);
 	}
 
@@ -826,5 +1015,101 @@ mod tests {
 				.as_deref()
 				.is_some_and(|message| message.contains("Cargo.toml"))
 		);
+	}
+
+	#[test]
+	fn bootstrap_prefers_grounded_read_tool_over_misordered_lookup_seed() {
+		let loop_state = sample_bootstrap_loop_state(
+			"Read Cargo.toml and summarize the workspace layout.",
+			vec!["fs.find", "fs.read_text"],
+			vec!["fs.find", "fs.read_text", "general.execute"],
+		);
+		let projection = build_context_projection(&loop_state);
+
+		let decision = decide_tool_loop_next_step(
+			&loop_state,
+			&projection,
+			None,
+			None,
+			&NextStepRuntimeConfig::default(),
+		);
+
+		assert_eq!(
+			decision.action,
+			crate::runtime_loop::NextStepAction::CallTool
+		);
+		assert_eq!(decision.tool_name.as_deref(), Some("fs.read_text"));
+	}
+
+	#[test]
+	fn bootstrap_does_not_amplify_explanatory_python_seed_into_execution() {
+		let loop_state = sample_bootstrap_loop_state(
+			"Explain what this Python code does: `print(1)`",
+			vec!["python.run"],
+			vec!["python.run", "general.execute"],
+		);
+		let projection = build_context_projection(&loop_state);
+
+		let decision = decide_tool_loop_next_step(
+			&loop_state,
+			&projection,
+			None,
+			None,
+			&NextStepRuntimeConfig::default(),
+		);
+
+		assert_eq!(
+			decision.action,
+			crate::runtime_loop::NextStepAction::CallTool
+		);
+		assert_eq!(decision.tool_name.as_deref(), Some("general.execute"));
+	}
+
+	#[test]
+	fn bootstrap_keeps_python_run_for_explicit_execution_requests() {
+		let loop_state = sample_bootstrap_loop_state(
+			"Run this Python code: `print(1)`",
+			vec!["python.run"],
+			vec!["python.run", "general.execute"],
+		);
+		let projection = build_context_projection(&loop_state);
+
+		let decision = decide_tool_loop_next_step(
+			&loop_state,
+			&projection,
+			None,
+			None,
+			&NextStepRuntimeConfig::default(),
+		);
+
+		assert_eq!(
+			decision.action,
+			crate::runtime_loop::NextStepAction::CallTool
+		);
+		assert_eq!(decision.tool_name.as_deref(), Some("python.run"));
+	}
+
+	#[test]
+	fn bootstrap_does_not_amplify_explanatory_shell_seed_into_execution() {
+		let loop_state = sample_bootstrap_loop_state(
+			"Explain what the shell command `pwd` does, but do not run it.",
+			vec!["command.run"],
+			vec!["command.run", "general.execute"],
+		);
+		let projection = build_context_projection(&loop_state);
+
+		let decision = decide_tool_loop_next_step(
+			&loop_state,
+			&projection,
+			None,
+			None,
+			&NextStepRuntimeConfig::default(),
+		);
+
+		assert_eq!(
+			decision.action,
+			crate::runtime_loop::NextStepAction::CallTool
+		);
+		assert_eq!(decision.tool_name.as_deref(), Some("general.execute"));
 	}
 }

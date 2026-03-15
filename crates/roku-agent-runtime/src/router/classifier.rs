@@ -12,6 +12,85 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Request-level route classification for the direct runtime entry path.
+//!
+//! ## Overview
+//!
+//! This module decides how a **new user request** should enter the runtime:
+//!
+//! - which coarse intent family it belongs to
+//! - whether the request should start as a direct tool-loop route or an escalation
+//! - which tools are safe to expose as initial `candidate_tools`
+//! - which weak inventory / plugin signals should accompany that initial route seed
+//!
+//! The classifier is intentionally an **entry-stage router**, not the ReAct loop itself. Its
+//! output is a [`RouteDecision`] / [`RouteDecisionResult`] that seeds the runtime. After that
+//! point, the loop, grounded observations, and next-step logic own the round-by-round behavior.
+//!
+//! ## Responsibilities
+//!
+//! This module is responsible for:
+//!
+//! - detecting coarse request families such as chat, filesystem, table, web, code, or multi-step
+//! - applying deterministic pre-classification when the current turn already contains strong,
+//!   explicit grounding signals
+//! - falling back to an LLM route classifier when deterministic hints are insufficient
+//! - filtering route seeds against the currently enabled inventory
+//! - emitting **weak** tool shortlists (`candidate_tools`) that the runtime loop can start from
+//! - surfacing unavailable-family and route-model failure conditions as explicit escalations
+//!
+//! ## Non-Goals
+//!
+//! This module must **not**:
+//!
+//! - decide the loop's later follow-up steps after a tool observation
+//! - interpret `ToolObservation` or `InterpretedObservation`
+//! - decide terminal branches such as `ask_user`, `final_answer`, or `fail`
+//! - own recovery, retry, or budget policy
+//! - encode a hidden multi-round workflow for specific tools
+//! - turn `candidate_tools` into authoritative single-tool bindings unless the request is already
+//!   explicitly grounded to a concrete one-shot capability
+//!
+//! In particular, this module should not become a "static decision center" that steals semantic
+//! control from the unified ReAct loop. If a behavior depends on **what happened after a tool
+//! call**, it belongs somewhere downstream of classification.
+//!
+//! ## Design Constraints
+//!
+//! - Prefer family-level or weak tool-level hints over hard-coded execution flows.
+//! - Keep deterministic rules scoped to observable current-turn structure: paths, code blocks,
+//!   shell commands, URLs, explicit installed tool references, and similar grounded signals.
+//! - Treat `candidate_tools` as an initial shortlist for visibility and bootstrap, not as proof
+//!   that no later tool switch should happen.
+//! - When adding tool-specific logic here, it should stay in the category of **grounded hint
+//!   extraction**, not runtime semantic recovery.
+//!
+//! ## Position in the Runtime Chain
+//!
+//! This module sits at the **request-entry classification stage** of the direct runtime path.
+//! A simplified chain looks like:
+//!
+//! 1. request intake
+//! 2. route classification (**this module**)
+//! 3. loop initialization / visible tool seeding
+//! 4. tool execution
+//! 5. `ToolObservation` / `InterpretedObservation` consumption
+//! 6. next-step decision, including tool switching, `ask_user`, `fail`, or `final_answer`
+//!
+//! That means this module is **upstream of the ReAct loop**. It is allowed to shape the initial
+//! entry conditions, but it is downstream modules that own live observation-driven adaptation.
+//!
+//! ## Interaction with the Runtime Loop
+//!
+//! The intended control split is:
+//!
+//! 1. `classifier.rs` decides how the request enters the runtime.
+//! 2. `runtime_loop` consumes that seed plus live observations.
+//! 3. `tool_loop` decides whether to continue, switch tools, ask the user, fail, or finish.
+//!
+//! If a future change starts making this module answer step 3, that is a design smell and should
+//! be treated as architecture drift.
+//!
 use roku_common_types::{RequestEnvelope, ResourceSelector};
 use roku_plugin_catalog::{CatalogDescriptor, CatalogMatch, ResourceCatalog, ResourceKind};
 use roku_plugin_core::PluginRegistrySnapshot;
@@ -24,9 +103,15 @@ use crate::router::{
 	RouteDecisionResult, RouteEscalationPlan, RouteRisk,
 };
 use crate::runtime_loop::{
+	explanatory_python_code_request, explanatory_shell_command_request,
 	extract_explicit_shell_command as shared_extract_explicit_shell_command,
+	extract_glob_pattern as shared_extract_glob_pattern,
 	extract_path_candidates as shared_extract_path_candidates, extract_skill_source_url,
-	extract_web_query, ground_tool_arguments, tool_required_argument_keys,
+	extract_web_query, goal_requests_directory_listing, goal_requests_file_read,
+	goal_requests_filesystem_inspect, ground_tool_arguments, grounded_python_code_allows_execution,
+	grounded_shell_command_allows_execution,
+	preferred_grounded_filesystem_tool as shared_preferred_grounded_filesystem_tool,
+	preferred_grounded_table_tool, tool_required_argument_keys,
 };
 use crate::tool_config::{BuiltinToolRole, ToolCatalogConfig};
 
@@ -78,6 +163,27 @@ fn deterministic_pre_classify(
 			candidate_plugins_for_tool(context.plugin_snapshot, "general.execute"),
 			Vec::new(),
 			"explicit shell command is referenced for explanation rather than execution; keep the request on the general assistant path",
+		);
+		return Some(build_tool_loop_route(
+			context,
+			decision,
+			Some("general.execute"),
+			Vec::new(),
+		));
+	}
+
+	if explanatory_python_code_request(&request.goal)
+		&& tool_selector(context.catalog, "general.execute").is_some()
+	{
+		let decision = RouteDecision::new(
+			IntentFamily::Chat,
+			0.8,
+			false,
+			RouteRisk::Low,
+			vec!["general.execute".to_string()],
+			candidate_plugins_for_tool(context.plugin_snapshot, "general.execute"),
+			Vec::new(),
+			"explicit Python code is referenced for explanation rather than execution; keep the request on the general assistant path",
 		);
 		return Some(build_tool_loop_route(
 			context,
@@ -166,8 +272,9 @@ fn classify_structured_multi_step_request(
 ) -> Option<RouteDecisionResult> {
 	let explicit_paths = extract_path_candidates(&request.goal);
 	let has_explicit_code = extract_explicit_python_code(&request.goal).is_some();
-	let looks_multi_step =
-		has_shell_command_chain(&request.goal) || (!has_explicit_code && explicit_paths.len() > 1);
+	let has_glob_pattern = extract_glob_pattern(&request.goal).is_some();
+	let looks_multi_step = has_shell_command_chain(&request.goal)
+		|| (!has_explicit_code && !has_glob_pattern && explicit_paths.len() > 1);
 	if !looks_multi_step {
 		return None;
 	}
@@ -218,7 +325,8 @@ fn classify_contract_level_grounded_hint(
 		));
 	}
 
-	if let Some(code) = extract_explicit_python_code(&request.goal)
+	if grounded_python_code_allows_execution(&request.goal)
+		&& let Some(code) = extract_explicit_python_code(&request.goal)
 		&& let Some(selector) = tool_selector(context.catalog, "python.run")
 	{
 		let decision = RouteDecision::new(
@@ -268,32 +376,24 @@ fn classify_contract_level_grounded_hint(
 	if extract_glob_pattern(&request.goal).is_some()
 		&& tool_selector(context.catalog, "fs.glob").is_some()
 	{
+		let candidate_tools = grounded_filesystem_candidate_tools(&request.goal);
 		let decision = RouteDecision::new(
 			IntentFamily::FilesystemRead,
 			0.92,
 			false,
 			RouteRisk::Low,
-			vec!["fs.glob".to_string()],
+			candidate_tools,
 			candidate_plugins_for_tool(context.plugin_snapshot, "fs.glob"),
 			Vec::new(),
 			"contract-level grounded glob pattern provides a non-authoritative `fs.glob` hint",
 		);
-		return Some(build_tool_loop_route(
-			context,
-			decision,
-			Some("fs.glob"),
-			Vec::new(),
-		));
+		return Some(build_loop_hint_route(context, decision));
 	}
 
 	if extract_table_path(&request.goal).is_some()
 		&& has_enabled_tool_with_prefix(context.catalog, "table.")
 	{
-		let candidate_tools = deterministic_contract_tool_candidates(
-			context,
-			&request.goal,
-			Some(IntentFamily::TableRead),
-		);
+		let candidate_tools = grounded_table_candidate_tools(&request.goal);
 		let decision = RouteDecision::new(
 			IntentFamily::TableRead,
 			0.86,
@@ -307,39 +407,10 @@ fn classify_contract_level_grounded_hint(
 		return Some(build_loop_hint_route(context, decision));
 	}
 
-	if let Some(preferred_tool) = preferred_grounded_filesystem_tool(&request.goal)
-		&& let Some(selector) = tool_selector(context.catalog, preferred_tool)
-		&& ground_tool_arguments(preferred_tool, &request.goal).is_some()
-	{
-		let descriptor = context.catalog.descriptor(&selector)?;
-		let decision = RouteDecision::new(
-			IntentFamily::FilesystemRead,
-			0.87,
-			false,
-			resource_risk(descriptor),
-			vec![preferred_tool.to_string()],
-			candidate_plugins_for_tool(context.plugin_snapshot, preferred_tool),
-			Vec::new(),
-			format!(
-				"contract-level grounded filesystem input provides a non-authoritative `{preferred_tool}` hint"
-			),
-		);
-		return Some(build_tool_loop_route(
-			context,
-			decision,
-			Some(preferred_tool),
-			Vec::new(),
-		));
-	}
-
 	if !extract_path_candidates(&request.goal).is_empty()
 		&& has_enabled_tool_with_prefix(context.catalog, "fs.")
 	{
-		let candidate_tools = deterministic_contract_tool_candidates(
-			context,
-			&request.goal,
-			Some(IntentFamily::FilesystemRead),
-		);
+		let candidate_tools = grounded_filesystem_candidate_tools(&request.goal);
 		let decision = RouteDecision::new(
 			IntentFamily::FilesystemRead,
 			0.84,
@@ -398,7 +469,7 @@ fn explicit_tool_hint_is_grounded(tool_name: &str, goal: &str) -> bool {
 		}
 		"web.search" => extract_web_query(goal).is_some(),
 		"command.run" => grounded_shell_command_allows_execution(goal),
-		"python.run" => extract_explicit_python_code(goal).is_some(),
+		"python.run" => grounded_python_code_allows_execution(goal),
 		"skill.install" | "skill.ensure_installed" => extract_skill_source_url(goal).is_some(),
 		_ => false,
 	}
@@ -639,7 +710,7 @@ fn classify_structural_fallback(
 	request: &RequestEnvelope,
 ) -> Option<RouteDecisionResult> {
 	let goal = request.goal.trim();
-	if extract_explicit_python_code(goal).is_some()
+	if grounded_python_code_allows_execution(goal)
 		&& tool_selector(context.catalog, "python.run").is_none()
 	{
 		return Some(unavailable_family_route(
@@ -647,7 +718,7 @@ fn classify_structural_fallback(
 			"explicit Python code was provided, but `python.run` is not enabled in the current runtime inventory",
 		));
 	}
-	if extract_explicit_shell_command(goal).is_some()
+	if grounded_shell_command_allows_execution(goal)
 		&& tool_selector(context.catalog, "command.run").is_none()
 	{
 		return Some(unavailable_family_route(
@@ -720,34 +791,14 @@ fn classify_deterministic_contract_tool_match(
 		0.82,
 		false,
 		resource_risk(&best_match.descriptor),
-		vec![tool_name.clone()],
+		deterministic_seed_candidate_tools(&tool_name, &request.goal),
 		candidate_plugins_for_tool(context.plugin_snapshot, &tool_name),
 		Vec::new(),
 		format!(
 			"deterministic catalog retrieval matched contract-backed tool `{tool_name}` and the current goal can already ground its required inputs"
 		),
 	);
-	Some(build_tool_loop_route(
-		context,
-		decision,
-		Some(&tool_name),
-		Vec::new(),
-	))
-}
-
-fn deterministic_contract_tool_candidates(
-	context: &RouteClassifierContext<'_>,
-	goal: &str,
-	intent_family: Option<IntentFamily>,
-) -> Vec<String> {
-	if context.route_router.is_some() {
-		return Vec::new();
-	}
-	let tool_matches =
-		discoverable_tool_matches(context.catalog.retrieve(goal, Some(ResourceKind::Tool), 6));
-	select_deterministic_contract_tool_match(&tool_matches, goal, intent_family)
-		.map(|entry| vec![entry.descriptor.name.clone()])
-		.unwrap_or_default()
+	Some(build_loop_hint_route(context, decision))
 }
 
 fn select_deterministic_contract_tool_match<'a>(
@@ -776,6 +827,10 @@ fn select_deterministic_contract_tool_match<'a>(
 
 fn deterministic_match_can_start(tool_name: &str, goal: &str) -> bool {
 	match tool_name {
+		"python.run" => {
+			grounded_python_code_allows_execution(goal)
+				&& ground_tool_arguments(tool_name, goal).is_some()
+		}
 		"command.run" => {
 			grounded_shell_command_allows_execution(goal)
 				&& ground_tool_arguments(tool_name, goal).is_some()
@@ -788,7 +843,7 @@ fn deterministic_match_can_start(tool_name: &str, goal: &str) -> bool {
 }
 
 fn deterministic_grounded_intent(goal: &str) -> Option<IntentFamily> {
-	if extract_explicit_python_code(goal).is_some() || grounded_shell_command_allows_execution(goal)
+	if grounded_python_code_allows_execution(goal) || grounded_shell_command_allows_execution(goal)
 	{
 		return Some(IntentFamily::CodeExec);
 	}
@@ -801,79 +856,68 @@ fn deterministic_grounded_intent(goal: &str) -> Option<IntentFamily> {
 	None
 }
 
-fn grounded_shell_command_allows_execution(goal: &str) -> bool {
-	if extract_explicit_shell_command(goal).is_none() {
-		return false;
+fn grounded_filesystem_candidate_tools(goal: &str) -> Vec<String> {
+	let mut tools = Vec::new();
+	if extract_glob_pattern(goal).is_some() {
+		tools.push("fs.glob".to_string());
 	}
-	let lower = goal.trim().to_ascii_lowercase();
-	let blocked_markers = [
-		"do not run",
-		"don't run",
-		"dont run",
-		"without running",
-		"without executing",
-		"不要运行",
-		"不要执行",
-	];
-	if blocked_markers.iter().any(|marker| lower.contains(marker)) {
-		return false;
+	if let Some(preferred_tool) = shared_preferred_grounded_filesystem_tool(goal) {
+		tools.push(preferred_tool.to_string());
 	}
-	![
-		"explain what the shell command",
-		"explain what the command",
-		"what does the shell command",
-		"what does the command",
-		"describe what the shell command",
-		"describe what the command",
-	]
-	.iter()
-	.any(|prefix| lower.starts_with(prefix))
+	if goal_requests_file_read(goal) {
+		tools.push("fs.find".to_string());
+		tools.push("fs.inspect".to_string());
+	}
+	if goal_requests_directory_listing(goal) {
+		tools.push("fs.inspect".to_string());
+		tools.push("fs.find".to_string());
+	}
+	if goal_requests_filesystem_inspect(goal) {
+		tools.push("fs.find".to_string());
+		tools.push("fs.read_text".to_string());
+	}
+	for fallback in [
+		"fs.glob",
+		"fs.find",
+		"fs.read_text",
+		"fs.inspect",
+		"fs.list_dir",
+		"fs.exists",
+	] {
+		tools.push(fallback.to_string());
+	}
+	dedup_tools(tools)
 }
 
-fn explanatory_shell_command_request(goal: &str) -> bool {
-	extract_explicit_shell_command(goal).is_some() && !grounded_shell_command_allows_execution(goal)
+fn grounded_table_candidate_tools(goal: &str) -> Vec<String> {
+	let mut tools = vec![preferred_grounded_table_tool(goal).to_string()];
+	for fallback in [
+		"table.preview",
+		"table.inspect",
+		"table.schema",
+		"table.list_sheets",
+	] {
+		tools.push(fallback.to_string());
+	}
+	dedup_tools(tools)
 }
 
-fn preferred_grounded_filesystem_tool(goal: &str) -> Option<&'static str> {
-	let path_candidates = extract_path_candidates(goal);
-	if path_candidates.is_empty() {
-		return None;
+fn deterministic_seed_candidate_tools(tool_name: &str, goal: &str) -> Vec<String> {
+	match tool_name {
+		name if name.starts_with("fs.") => grounded_filesystem_candidate_tools(goal),
+		name if name.starts_with("table.") => grounded_table_candidate_tools(goal),
+		_ => vec![tool_name.to_string()],
 	}
-	let lower = goal.to_ascii_lowercase();
-	if lower.contains("find ")
-		|| lower.contains("locate ")
-		|| lower.contains("search for ")
-		|| lower.starts_with("find ")
-	{
-		return Some("fs.find");
+}
+
+fn dedup_tools(tools: Vec<String>) -> Vec<String> {
+	let mut deduped = Vec::new();
+	for tool in tools {
+		if !deduped.iter().any(|existing| existing == &tool) {
+			deduped.push(tool);
+		}
 	}
-	if lower.contains("exist") || lower.contains("exists") {
-		return Some("fs.exists");
-	}
-	if (lower.contains("list ")
-		|| lower.contains("show files")
-		|| lower.contains("show directories")
-		|| lower.contains("contents of"))
-		&& (lower.contains("directory")
-			|| lower.contains("folder")
-			|| lower.contains("files")
-			|| lower.contains("directories"))
-	{
-		return Some("fs.list_dir");
-	}
-	if lower.contains("inspect") || lower.contains("metadata") || lower.contains("stat ") {
-		return Some("fs.inspect");
-	}
-	if lower.contains("read")
-		|| lower.contains("open")
-		|| lower.contains("first part")
-		|| lower.contains("first lines")
-		|| lower.contains("contents")
-		|| lower.contains("show me")
-	{
-		return Some("fs.read_text");
-	}
-	None
+	deduped
 }
 
 fn has_enabled_tool_with_prefix(catalog: &ResourceCatalog, prefix: &str) -> bool {
@@ -1067,9 +1111,7 @@ fn extract_table_path(goal: &str) -> Option<String> {
 }
 
 fn extract_glob_pattern(goal: &str) -> Option<String> {
-	goal.split_whitespace()
-		.map(clean_token)
-		.find(|token| token.contains('*') || token.contains('?') || token.contains('['))
+	shared_extract_glob_pattern(goal)
 }
 
 fn extract_explicit_python_code(goal: &str) -> Option<String> {

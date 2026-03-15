@@ -2369,8 +2369,13 @@ So, I'll output: "星期日""#
 			crate::router::RouteDecisionResult::Direct(plan) => {
 				assert_eq!(plan.decision.intent_family, IntentFamily::FilesystemRead);
 				assert_eq!(
-					plan.decision.candidate_tools,
-					vec!["fs.read_text".to_string()]
+					plan.decision.candidate_tools.first().map(String::as_str),
+					Some("fs.read_text")
+				);
+				assert!(
+					plan.decision
+						.candidate_tools
+						.contains(&"fs.find".to_string())
 				);
 			}
 			other => {
@@ -2396,8 +2401,13 @@ So, I'll output: "星期日""#
 			crate::router::RouteDecisionResult::Direct(plan) => {
 				assert_eq!(plan.decision.intent_family, IntentFamily::FilesystemRead);
 				assert_eq!(
-					plan.decision.candidate_tools,
-					vec!["fs.read_text".to_string()]
+					plan.decision.candidate_tools.first().map(String::as_str),
+					Some("fs.read_text")
+				);
+				assert!(
+					plan.decision
+						.candidate_tools
+						.contains(&"fs.find".to_string())
 				);
 			}
 			other => {
@@ -2465,6 +2475,89 @@ So, I'll output: "星期日""#
 	}
 
 	#[test]
+	fn executable_shell_command_requests_can_shortlist_command_run() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-command-run".to_string()),
+			session_id: "session-command-run".to_string(),
+			goal: "Run this command: `pwd`".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+
+		match route {
+			crate::router::RouteDecisionResult::Direct(plan) => {
+				assert_eq!(plan.decision.intent_family, IntentFamily::CodeExec);
+				assert_eq!(
+					plan.decision.candidate_tools.first().map(String::as_str),
+					Some("command.run")
+				);
+			}
+			other => {
+				panic!("expected runnable shell command to shortlist command.run, got {other:?}")
+			}
+		}
+	}
+
+	#[test]
+	fn explanatory_python_code_requests_do_not_shortlist_python_run() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-python-explain".to_string()),
+			session_id: "session-python-explain".to_string(),
+			goal: "Explain what this Python code does: `print(1)`".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+
+		match route {
+			crate::router::RouteDecisionResult::Direct(plan) => {
+				assert_eq!(plan.decision.intent_family, IntentFamily::Chat);
+				assert_eq!(
+					plan.decision.candidate_tools,
+					vec!["general.execute".to_string()]
+				);
+			}
+			other => {
+				panic!(
+					"expected explanatory Python code request to stay on chat route, got {other:?}"
+				)
+			}
+		}
+	}
+
+	#[test]
+	fn executable_python_code_requests_can_shortlist_python_run() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-python-run".to_string()),
+			session_id: "session-python-run".to_string(),
+			goal: "Run this Python code: `print(1)`".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+
+		match route {
+			crate::router::RouteDecisionResult::Direct(plan) => {
+				assert_eq!(plan.decision.intent_family, IntentFamily::CodeExec);
+				assert_eq!(
+					plan.decision.candidate_tools.first().map(String::as_str),
+					Some("python.run")
+				);
+			}
+			other => {
+				panic!("expected runnable Python code to shortlist python.run, got {other:?}")
+			}
+		}
+	}
+
+	#[test]
 	fn classify_route_shortlists_table_preview_for_grounded_table_requests() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
@@ -2481,13 +2574,43 @@ So, I'll output: "星期日""#
 			crate::router::RouteDecisionResult::Direct(plan) => {
 				assert_eq!(plan.decision.intent_family, IntentFamily::TableRead);
 				assert_eq!(
-					plan.decision.candidate_tools,
-					vec!["table.preview".to_string()]
+					plan.decision.candidate_tools.first().map(String::as_str),
+					Some("table.preview")
+				);
+				assert!(
+					plan.decision
+						.candidate_tools
+						.contains(&"table.inspect".to_string())
 				);
 			}
 			other => {
 				panic!("expected grounded table request to shortlist table.preview, got {other:?}")
 			}
+		}
+	}
+
+	#[test]
+	fn classify_route_shortlists_fs_glob_for_explicit_glob_requests() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-glob-tool-loop".to_string()),
+			session_id: "session-glob-tool-loop".to_string(),
+			goal: "Match `src/*.rs` in this workspace.".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+
+		match route {
+			crate::router::RouteDecisionResult::Direct(plan) => {
+				assert_eq!(plan.decision.intent_family, IntentFamily::FilesystemRead);
+				assert_eq!(
+					plan.decision.candidate_tools.first().map(String::as_str),
+					Some("fs.glob")
+				);
+			}
+			other => panic!("expected explicit glob request to shortlist fs.glob, got {other:?}"),
 		}
 	}
 
@@ -2550,6 +2673,23 @@ So, I'll output: "星期日""#
 				}],
 			},
 		);
+		let python_explanation_trace =
+			runtime_loop_trace_for_goal(&runtime, "Explain what this Python code does: `print(1)`");
+		assert_regression_case(
+			"quoted-python-code-explanation",
+			crate::runtime_loop::RegressionSuiteKind::Confusion,
+			&python_explanation_trace,
+			crate::runtime_loop::RuntimeLoopRegressionExpectation {
+				expected_tool: Some("general.execute".to_string()),
+				forbidden_tools: vec!["python.run".to_string()],
+				expected_terminal_action: Some("final_answer".to_string()),
+				expected_error_type: None,
+				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
+					field: "should_emit_final_answer".to_string(),
+					expected: true,
+				}],
+			},
+		);
 
 		let table_trace = runtime_loop_trace_for_goal(
 			&runtime,
@@ -2577,16 +2717,26 @@ So, I'll output: "星期日""#
 	#[test]
 	fn runtime_loop_boundary_suite_covers_contract_edges() {
 		let runtime = GenericAgentRuntime::default();
-		let duplicate_name = "phase3-duplicate-target.txt";
 		let duplicate_root = env::current_dir()
 			.expect("cwd should resolve for regression fixtures")
 			.join("tmp");
-		let duplicate_a_dir = duplicate_root.join("phase3-duplicate-a");
-		let duplicate_b_dir = duplicate_root.join("phase3-duplicate-b");
+		fs::create_dir_all(&duplicate_root).expect("tmp fixture directory should exist");
+		let duplicate_scope = Builder::new()
+			.prefix("phase3-duplicate-")
+			.tempdir_in(&duplicate_root)
+			.expect("duplicate fixture root should exist");
+		let scope_name = duplicate_scope
+			.path()
+			.file_name()
+			.and_then(|value| value.to_str())
+			.expect("duplicate fixture directory should expose a name");
+		let duplicate_name = format!("{scope_name}-target.txt");
+		let duplicate_a_dir = duplicate_scope.path().join("a");
+		let duplicate_b_dir = duplicate_scope.path().join("b");
 		fs::create_dir_all(&duplicate_a_dir).expect("duplicate fixture dir A should exist");
 		fs::create_dir_all(&duplicate_b_dir).expect("duplicate fixture dir B should exist");
-		let duplicate_a_path = duplicate_a_dir.join(duplicate_name);
-		let duplicate_b_path = duplicate_b_dir.join(duplicate_name);
+		let duplicate_a_path = duplicate_a_dir.join(&duplicate_name);
+		let duplicate_b_path = duplicate_b_dir.join(&duplicate_name);
 		fs::write(&duplicate_a_path, "duplicate a\n").expect("duplicate fixture A should write");
 		fs::write(&duplicate_b_path, "duplicate b\n").expect("duplicate fixture B should write");
 
@@ -2650,8 +2800,6 @@ So, I'll output: "星期日""#
 
 		cleanup_fixture(duplicate_a_path.to_string_lossy().as_ref());
 		cleanup_fixture(duplicate_b_path.to_string_lossy().as_ref());
-		let _ = fs::remove_dir(&duplicate_a_dir);
-		let _ = fs::remove_dir(&duplicate_b_dir);
 	}
 
 	#[test]
@@ -2746,6 +2894,55 @@ So, I'll output: "星期日""#
 			},
 		);
 
+		cleanup_fixture(&text_path);
+	}
+
+	#[test]
+	fn execute_tool_loop_can_switch_tools_after_an_insufficient_lookup_observation() {
+		let runtime = GenericAgentRuntime::default();
+		let text_path = regression_fixture_path(".txt", "react recovery fixture\n");
+		let file_name = PathBuf::from(&text_path)
+			.file_name()
+			.and_then(|value| value.to_str())
+			.expect("fixture file name should resolve")
+			.to_string();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-react-recovery".to_string()),
+			session_id: "session-react-recovery".to_string(),
+			goal: format!("Find and read {file_name}."),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::FilesystemRead,
+			0.8,
+			false,
+			crate::router::RouteRisk::Low,
+			vec!["fs.find".to_string(), "fs.read_text".to_string()],
+			vec!["core-fs".to_string()],
+			Vec::new(),
+			"seed the loop with a lookup-first filesystem hint",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+		let task_id = TaskId("task-react-recovery".to_string());
+		let result = runtime.execute_tool_loop(&task_id, &request, &mut loop_state, None);
+
+		let tool_sequence = loop_state
+			.history
+			.iter()
+			.filter_map(|step| step.tool_name.clone())
+			.collect::<Vec<_>>();
+
+		assert_eq!(
+			tool_sequence,
+			vec![
+				"fs.find".to_string(),
+				"fs.read_text".to_string(),
+				"general.execute".to_string(),
+			]
+		);
+		assert_eq!(result.terminal_step_action, Some(StepAction::FinalAnswer));
 		cleanup_fixture(&text_path);
 	}
 
