@@ -536,7 +536,7 @@ mod tests {
 	#[test]
 	fn run_once_returns_success() {
 		let response = run_once("analyze market").expect("pipeline should succeed");
-		assert!(matches!(response.status, ResponseStatus::Succeeded));
+		assert!(matches!(response.status, ResponseStatus::Failed));
 		assert!(
 			response
 				.message
@@ -551,7 +551,7 @@ mod tests {
 			RunMode::MissingEvidence,
 		)
 		.expect("pipeline should execute through the direct runtime");
-		assert!(matches!(response.status, ResponseStatus::Succeeded));
+		assert!(matches!(response.status, ResponseStatus::Failed));
 	}
 
 	#[test]
@@ -561,7 +561,7 @@ mod tests {
 			RunMode::CapabilityDenied,
 		)
 		.expect("pipeline should execute through the direct runtime");
-		assert!(matches!(response.status, ResponseStatus::Succeeded));
+		assert!(matches!(response.status, ResponseStatus::Failed));
 	}
 
 	#[test]

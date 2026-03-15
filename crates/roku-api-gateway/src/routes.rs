@@ -347,7 +347,7 @@ mod tests {
 			.execute(RequestEnvelope {
 				request_id: RequestId("req-1".to_string()),
 				session_id: "session-1".to_string(),
-				goal: "inspect replay route".to_string(),
+				goal: "What skills and tools do you have right now?".to_string(),
 				planning_mode_hint: None,
 				conversation_history: Vec::new(),
 			})
