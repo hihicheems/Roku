@@ -12,6 +12,56 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Deterministic grounding helpers shared by the route classifier and runtime loop.
+//!
+//! ## Overview
+//!
+//! This module performs shallow, best-effort grounding from the current natural-language turn
+//! into concrete runtime hints such as:
+//!
+//! - local path candidates
+//! - table file hints
+//! - explicit shell or Python snippets
+//! - skill source URLs
+//! - simple "what kind of resource is the user asking for" predicates
+//! - user reply disambiguation against previously offered candidates
+//!
+//! The helpers here intentionally stay lexical and local. They should be reusable from both
+//! [`crate::router::classifier`] and [`crate::runtime_loop::tool_loop`] so that the runtime does
+//! not grow multiple drifting copies of the same grounding heuristics.
+//!
+//! ## Responsibilities
+//!
+//! This module is allowed to:
+//!
+//! - extract grounded arguments from the current request text
+//! - recognize explicit resource/modality signals such as paths, glob patterns, table files,
+//!   inline commands, code blocks, and skill URLs
+//! - provide weak family-level preference hints for already grounded requests
+//! - help resume disambiguation when the runtime has already asked the user to pick one candidate
+//!
+//! ## Non-Goals
+//!
+//! This module must **not**:
+//!
+//! - choose the final route for a request
+//! - decide terminal branches such as `ask_user`, `final_answer`, or `fail`
+//! - interpret `ToolObservation`
+//! - own retry, recovery, or budget policy
+//! - encode multi-step follow-up flow or hidden planning state
+//!
+//! In other words, this module may produce **grounding signals** and **weak ordering hints**, but
+//! it must not become a hidden semantic router or "static decision center".
+//!
+//! ## Design Constraints
+//!
+//! - Keep heuristics current-turn scoped and cheap to evaluate.
+//! - Prefer reusable helpers over duplicating similar logic in classifier/loop callers.
+//! - When adding a new helper, ensure it describes observable input structure rather than a
+//!   hard-coded follow-up workflow.
+//! - `preferred_*` helpers should remain hint-level ranking utilities. They are not authoritative
+//!   tool bindings and must stay easy to override by later loop decisions.
+//!
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
@@ -26,7 +76,12 @@ pub(crate) fn clean_token(token: &str) -> String {
 		.trim_matches(|character: char| {
 			matches!(
 				character,
-				'"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';' | '!' | '?'
+				'"' | '\''
+					| '`' | '(' | ')'
+					| '[' | ']' | '{'
+					| '}' | '<' | '>'
+					| ',' | ';' | '!'
+					| '?'
 			)
 		})
 		.trim_end_matches(':')
@@ -63,6 +118,12 @@ pub(crate) fn extract_table_path(goal: &str) -> Option<String> {
 	})
 }
 
+pub(crate) fn extract_glob_pattern(goal: &str) -> Option<String> {
+	goal.split_whitespace()
+		.map(clean_token)
+		.find(|token| token.contains('*') || token.contains('?') || token.contains('['))
+}
+
 pub(crate) fn extract_sheet_name(goal: &str) -> Option<String> {
 	let lower = goal.to_ascii_lowercase();
 	let marker = "sheet ";
@@ -78,6 +139,91 @@ pub(crate) fn extract_row_limit(goal: &str) -> Option<u64> {
 		.split_whitespace()
 		.find_map(|part| clean_token(part).parse::<u64>().ok())?;
 	Some(digits.clamp(1, 50))
+}
+
+pub(crate) fn goal_requests_file_read(goal: &str) -> bool {
+	let lower = goal.to_ascii_lowercase();
+	lower.contains("read")
+		|| lower.contains("open")
+		|| lower.contains("first part")
+		|| lower.contains("first lines")
+		|| lower.contains("contents")
+		|| lower.contains("show me")
+}
+
+pub(crate) fn goal_requests_directory_listing(goal: &str) -> bool {
+	let lower = goal.to_ascii_lowercase();
+	(lower.contains("list ")
+		|| lower.contains("show files")
+		|| lower.contains("show directories")
+		|| lower.contains("contents of"))
+		&& (lower.contains("directory")
+			|| lower.contains("folder")
+			|| lower.contains("files")
+			|| lower.contains("directories"))
+}
+
+pub(crate) fn goal_requests_filesystem_inspect(goal: &str) -> bool {
+	let lower = goal.to_ascii_lowercase();
+	lower.contains("inspect") || lower.contains("metadata") || lower.contains("stat ")
+}
+
+pub(crate) fn goal_requests_exists_check(goal: &str) -> bool {
+	let lower = goal.to_ascii_lowercase();
+	lower.contains("exist") || lower.contains("exists")
+}
+
+pub(crate) fn goal_requests_filesystem_search(goal: &str) -> bool {
+	let lower = goal.to_ascii_lowercase();
+	lower.contains("find ")
+		|| lower.contains("locate ")
+		|| lower.contains("search for ")
+		|| lower.starts_with("find ")
+}
+
+type GoalPredicate = fn(&str) -> bool;
+
+const FILESYSTEM_PREFERRED_TOOL_RULES: &[(&str, GoalPredicate)] = &[
+	("fs.find", goal_requests_filesystem_search),
+	("fs.exists", goal_requests_exists_check),
+	("fs.list_dir", goal_requests_directory_listing),
+	("fs.inspect", goal_requests_filesystem_inspect),
+	("fs.read_text", goal_requests_file_read),
+];
+
+pub(crate) fn preferred_grounded_filesystem_tool(goal: &str) -> Option<&'static str> {
+	if extract_path_candidates(goal).is_empty() {
+		return None;
+	}
+	first_matching_preferred_tool(goal, FILESYSTEM_PREFERRED_TOOL_RULES)
+}
+
+pub(crate) fn goal_requests_table_preview(goal: &str) -> bool {
+	let lower = goal.to_ascii_lowercase();
+	lower.contains("preview")
+		|| lower.contains("first rows")
+		|| lower.contains("top rows")
+		|| lower.contains("rows of")
+}
+
+pub(crate) fn goal_requests_table_schema(goal: &str) -> bool {
+	let lower = goal.to_ascii_lowercase();
+	lower.contains("schema") || lower.contains("columns")
+}
+
+pub(crate) fn goal_requests_table_sheet_listing(goal: &str) -> bool {
+	let lower = goal.to_ascii_lowercase();
+	lower.contains("sheet") && (lower.contains("list") || lower.contains("show"))
+}
+
+const TABLE_PREFERRED_TOOL_RULES: &[(&str, GoalPredicate)] = &[
+	("table.schema", goal_requests_table_schema),
+	("table.list_sheets", goal_requests_table_sheet_listing),
+	("table.preview", goal_requests_table_preview),
+];
+
+pub(crate) fn preferred_grounded_table_tool(goal: &str) -> &'static str {
+	first_matching_preferred_tool(goal, TABLE_PREFERRED_TOOL_RULES).unwrap_or("table.inspect")
 }
 
 pub(crate) fn extract_web_query(goal: &str) -> Option<String> {
@@ -97,6 +243,36 @@ pub(crate) fn extract_explicit_python_code(goal: &str) -> Option<String> {
 	extract_line_or_block_python_code(goal)
 }
 
+pub(crate) fn grounded_python_code_allows_execution(goal: &str) -> bool {
+	if extract_explicit_python_code(goal).is_none() {
+		return false;
+	}
+	let lower = goal.trim().to_ascii_lowercase();
+	if contains_blocked_execution_marker(&lower) {
+		return false;
+	}
+	[
+		"run this python code",
+		"execute this python code",
+		"run the python code",
+		"execute the python code",
+		"run this code",
+		"execute this code",
+		"run this snippet",
+		"execute this snippet",
+		"运行这段python代码",
+		"执行这段python代码",
+		"运行这段代码",
+		"执行这段代码",
+	]
+	.iter()
+	.any(|marker| lower.contains(marker))
+}
+
+pub(crate) fn explanatory_python_code_request(goal: &str) -> bool {
+	extract_explicit_python_code(goal).is_some() && !grounded_python_code_allows_execution(goal)
+}
+
 pub(crate) fn extract_explicit_shell_command(goal: &str) -> Option<String> {
 	if let Some(command) = extract_fenced_shell_command(goal) {
 		return Some(command);
@@ -111,6 +287,30 @@ pub(crate) fn extract_explicit_shell_command(goal: &str) -> Option<String> {
 		return Some(command);
 	}
 	extract_command_suffix_after_separator(goal)
+}
+
+pub(crate) fn grounded_shell_command_allows_execution(goal: &str) -> bool {
+	if extract_explicit_shell_command(goal).is_none() {
+		return false;
+	}
+	let lower = goal.trim().to_ascii_lowercase();
+	if contains_blocked_execution_marker(&lower) {
+		return false;
+	}
+	![
+		"explain what the shell command",
+		"explain what the command",
+		"what does the shell command",
+		"what does the command",
+		"describe what the shell command",
+		"describe what the command",
+	]
+	.iter()
+	.any(|prefix| lower.starts_with(prefix))
+}
+
+pub(crate) fn explanatory_shell_command_request(goal: &str) -> bool {
+	extract_explicit_shell_command(goal).is_some() && !grounded_shell_command_allows_execution(goal)
 }
 
 pub(crate) fn extract_skill_source_url(goal: &str) -> Option<String> {
@@ -131,6 +331,15 @@ pub(crate) fn file_name_from_path(path: &str) -> Option<String> {
 		.file_name()
 		.and_then(|name| name.to_str())
 		.map(str::to_string)
+}
+
+fn first_matching_preferred_tool(
+	goal: &str,
+	rules: &[(&'static str, GoalPredicate)],
+) -> Option<&'static str> {
+	rules
+		.iter()
+		.find_map(|(tool_name, predicate)| predicate(goal).then_some(*tool_name))
 }
 
 pub(crate) fn reply_selects_candidate(reply: &str, candidates: &[String]) -> Option<String> {
@@ -251,6 +460,20 @@ fn embedded_path_fragments(token: &str, workspace_entries: &[String]) -> Vec<Str
 	}
 	push_grounded_path_fragment(&mut fragments, &mut current, workspace_entries);
 	fragments
+}
+
+fn contains_blocked_execution_marker(lower_goal: &str) -> bool {
+	[
+		"do not run",
+		"don't run",
+		"dont run",
+		"without running",
+		"without executing",
+		"不要运行",
+		"不要执行",
+	]
+	.iter()
+	.any(|marker| lower_goal.contains(marker))
 }
 
 fn candidate_reply_fragments(reply: &str, candidates: &[String]) -> Vec<String> {
