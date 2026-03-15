@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 # Copyright 2025 itscheems
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,10 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# ────────────────────────────────
-# Basic image
-# ────────────────────────────────
-FROM lukemathwalker/cargo-chef:0.1.77-rust-1.94.0-alpine AS chef
+# Build with the repository root as context:
+#   docker build -f deploy/Dockerfile .
+FROM --platform=$TARGETPLATFORM rust:1.92-alpine AS chef
+RUN apk add --no-cache build-base musl-dev && \
+    cargo install --locked cargo-chef --version 0.1.77
 WORKDIR /app
 
 # ────────────────────────────────
@@ -29,34 +32,38 @@ RUN cargo chef prepare --recipe-path recipe.json
 # ────────────────────────────────
 # Builder stage
 # ────────────────────────────────
-FROM chef AS builder 
+FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json --locked
 COPY . .
-RUN cargo build --release --package cmd
+RUN cargo build --release --locked --package roku-cmd
 
 # ────────────────────────────────
 # Runtime stage
 # ────────────────────────────────
-FROM alpine:3.23 AS runtime
+FROM --platform=$TARGETPLATFORM alpine:3.23 AS runtime
 
 # Install CA certificates for HTTPS
 RUN apk add --no-cache ca-certificates
 
 # Create non-root user
-RUN addgroup -g 1000 appuser && \
-    adduser -D -u 1000 -G appuser appuser
+RUN addgroup -S -g 1000 appuser && \
+    adduser -S -D -H -u 1000 -G appuser appuser
 
 WORKDIR /app
-COPY --from=builder /app/target/release/cmd /app/cmd
+ENV HOME=/app
+ENV ROKU_HOME=/app/.roku
+ENV ROKU_API_BIND_ADDR=0.0.0.0:8787
+
+COPY --from=builder /app/target/release/roku-cmd /app/roku-cmd
+COPY --from=builder /app/config /app/config
 
 # Set ownership
-RUN chown -R appuser:appuser /app
+RUN mkdir -p /app/.roku && chown -R appuser:appuser /app
 # Switch to non-root user
 USER appuser
 
-# TODO:
-# Expose port
-# Other configurations
+EXPOSE 8787
 
-ENTRYPOINT ["/app/cmd"]
+ENTRYPOINT ["/app/roku-cmd"]
+CMD ["--help"]
