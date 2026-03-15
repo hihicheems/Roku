@@ -47,6 +47,8 @@ pub(crate) fn catalog_descriptors_with_config(
 		role: Some("core_command".to_string()),
 		description: "Use this only when the request already includes one explicit shell-style command to run, such as a fenced bash snippet or inline command. Do not use it for multi-step scripts, shell metacharacters, or commands that would modify the workspace. It returns grounded command execution facts such as argv, cwd, exit code, stdout, stderr, truncation, and scope metadata."
 			.to_string(),
+		selection_hint: "Run one explicit read-only shell command that is already present in the request."
+			.to_string(),
 		discoverable: true,
 		tags: vec![
 			"command".to_string(),

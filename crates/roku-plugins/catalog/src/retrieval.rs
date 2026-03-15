@@ -51,13 +51,15 @@ pub struct ResourceCost {
 ///
 /// Built from builtin modules (e.g. `fs::catalog_descriptors()`, `table::catalog_descriptors()`)
 /// and skill registry; merged into a [`ResourceCatalog`] so the router/classifier can:
-/// - **Retrieve** by user goal (BM25 + embedding over [`searchable_text`](CatalogDescriptor::searchable_text));
-/// - **Prompt** the route LLM with name, description, summary, examples as "Current inventory";
+/// - **Retrieve** by user goal using a compact selection-oriented index via
+///   [`selection_searchable_text`](CatalogDescriptor::selection_searchable_text);
+/// - **Prompt** the route LLM with a compact selection inventory rather than full descriptors;
 /// - **Resolve** a chosen tool name to a [`ResourceSelector`] and use risk/cost for routing.
 ///
 /// Field groups:
 /// - **Identity:** `selector`, `kind`, `name`, `role`
-/// - **Discovery text:** `description`, `summary`, `tags`, `examples`, `key_commands`, `use_cases`, `input_schema` (all contribute to retrieval and LLM inventory)
+/// - **Canonical descriptor:** `description`, `summary`, `examples`, `use_cases`, `contract`
+/// - **Hot-path selection hint:** `selection_hint`, `tags`, `key_commands`
 /// - **Routing:** `risk`, `cost`, `discoverable`, `required_capabilities`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogDescriptor {
@@ -67,6 +69,8 @@ pub struct CatalogDescriptor {
 	#[serde(default)]
 	pub role: Option<String>,
 	pub description: String,
+	#[serde(default)]
+	pub selection_hint: String,
 	#[serde(default = "default_discoverable")]
 	pub discoverable: bool,
 	#[serde(default)]
@@ -92,28 +96,43 @@ pub struct CatalogDescriptor {
 }
 
 impl CatalogDescriptor {
-	/// Single blob of text used for lexical (BM25) and embedding retrieval.
+	/// Compact selection hint consumed by hot-path routing prompts and retrieval.
+	///
+	/// Descriptors should author this explicitly so selection paths do not silently depend on the
+	/// longer canonical description. If it is missing, `summary` and then `description` are used as
+	/// conservative fallbacks.
+	pub fn effective_selection_hint(&self) -> &str {
+		let selection_hint = self.selection_hint.trim();
+		if !selection_hint.is_empty() {
+			return selection_hint;
+		}
+		let summary = self.summary.trim();
+		if !summary.is_empty() {
+			return summary;
+		}
+		self.description.trim()
+	}
+
+	/// Single blob of text used for lexical (BM25) and embedding retrieval on the hot selection
+	/// path.
 	///
 	/// [`ResourceCatalog::new`] tokenizes this for each entry and builds term stats and embeddings;
-	/// [`ResourceCatalog::retrieve`] matches the user goal against these. Concatenating all
-	/// discovery-related fields ensures queries like "list files" or "read xlsx" can match
-	/// the right tool even when the match is in tags/examples/key_commands rather than description.
-	pub fn searchable_text(&self) -> String {
+	/// [`ResourceCatalog::retrieve`] matches the user goal against these. Phase 4 intentionally
+	/// keeps this text compact and selection-oriented so retrieval does not depend on full
+	/// descriptors, `summary`, output semantics, or examples.
+	pub fn selection_searchable_text(&self) -> String {
+		let contract_selection_text = self
+			.contract
+			.as_ref()
+			.map(|contract| contract.selection.searchable_text())
+			.unwrap_or_default();
 		[
 			self.name.as_str(),
 			self.role.as_deref().unwrap_or_default(),
-			self.description.as_str(),
-			self.summary.as_str(),
+			self.effective_selection_hint(),
 			&self.tags.join(" "),
-			&self.examples.join(" "),
-			&self.input_schema.join(" "),
 			&self.key_commands.join(" "),
-			&self.use_cases.join(" "),
-			self.contract
-				.as_ref()
-				.map(ToolContract::searchable_text)
-				.as_deref()
-				.unwrap_or_default(),
+			&contract_selection_text,
 		]
 		.join(" ")
 	}
@@ -152,7 +171,8 @@ impl ResourceCatalog {
 			.iter()
 			.enumerate()
 			.map(|(index, descriptor)| {
-				let tokens = tokenize(&descriptor.searchable_text());
+				let selection_text = descriptor.selection_searchable_text();
+				let tokens = tokenize(&selection_text);
 				let mut terms = HashMap::new();
 				for token in &tokens {
 					*terms.entry(token.clone()).or_insert(0) += 1;
@@ -162,7 +182,7 @@ impl ResourceCatalog {
 					index,
 					terms,
 					length: tokens.len().max(1),
-					embedding: embed_text(&descriptor.searchable_text()),
+					embedding: embed_text(&selection_text),
 				}
 			})
 			.collect::<Vec<_>>();
@@ -401,6 +421,7 @@ mod tests {
 			name: name.to_string(),
 			role: None,
 			description: description.to_string(),
+			selection_hint: description.to_string(),
 			discoverable: true,
 			tags: Vec::new(),
 			examples: Vec::new(),
@@ -435,6 +456,7 @@ mod tests {
 				name: "postgres-backup".to_string(),
 				role: None,
 				description: "Back up postgres databases".to_string(),
+				selection_hint: "Back up postgres databases".to_string(),
 				discoverable: true,
 				..tool_descriptor("ignored", "ignored")
 			},
@@ -444,5 +466,55 @@ mod tests {
 		let matches = catalog.retrieve("postgres backup", Some(ResourceKind::Skill), 5);
 		assert_eq!(matches.len(), 1);
 		assert_eq!(matches[0].descriptor.kind, ResourceKind::Skill);
+	}
+
+	#[test]
+	fn selection_index_excludes_cold_examples_and_full_contract_text() {
+		let descriptor = CatalogDescriptor {
+			selector: ResourceSelector::tool("command.run"),
+			kind: ResourceKind::Tool,
+			name: "command.run".to_string(),
+			role: Some("core_command".to_string()),
+			description: "Canonical descriptor with long prose that should stay off the hot path."
+				.to_string(),
+			selection_hint: "Run one explicit read-only shell command.".to_string(),
+			discoverable: true,
+			tags: vec!["command".to_string()],
+			examples: vec!["Run this command: `pwd`".to_string()],
+			input_schema: vec!["command".to_string()],
+			risk: ResourceRisk::Low,
+			cost: ResourceCost::default(),
+			required_capabilities: Vec::new(),
+			summary: "Long canonical summary that should also stay off the hot selection path."
+				.to_string(),
+			key_commands: vec!["pwd".to_string()],
+			use_cases: vec!["cold-path usage example".to_string()],
+			contract: Some(ToolContract {
+				selection: roku_common_types::ToolSelectionContract {
+					use_when: vec!["Explicit shell command already present.".to_string()],
+					avoid_when: Vec::new(),
+					common_confusions: Vec::new(),
+				},
+				input: roku_common_types::ToolInputContract::default(),
+				output: roku_common_types::ToolOutputContract {
+					observation_schema: "tool_output_envelope.v1".to_string(),
+					success_semantics: "Output-only semantics should stay cold.".to_string(),
+					empty_result_semantics: String::new(),
+					error_semantics: Vec::new(),
+					non_terminal_success: false,
+					terminal_success: false,
+				},
+				runtime: roku_common_types::ToolRuntimeContract::default(),
+			}),
+		};
+
+		let selection_text = descriptor.selection_searchable_text();
+
+		assert!(selection_text.contains("Run one explicit read-only shell command."));
+		assert!(selection_text.contains("Explicit shell command already present."));
+		assert!(!selection_text.contains("Run this command: `pwd`"));
+		assert!(!selection_text.contains("Long canonical summary"));
+		assert!(!selection_text.contains("Output-only semantics should stay cold."));
+		assert!(!selection_text.contains("Canonical descriptor with long prose"));
 	}
 }

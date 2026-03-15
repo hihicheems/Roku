@@ -39,6 +39,8 @@ pub(crate) fn catalog_descriptors_with_config(
 		role: Some("core_web".to_string()),
 		description: "Use this when you have a concrete search query and need fresh external search results from the configured backend. Do not use it for filesystem questions, broad research planning without a query, or as a substitute for final synthesis. It returns structured result summaries that usually need a follow-up explanation or comparison before the final answer."
 			.to_string(),
+		selection_hint: "Run a concrete web search query to gather fresh external results."
+			.to_string(),
 		discoverable: true,
 		tags: vec!["web".to_string(), "search".to_string(), "lookup".to_string()],
 		examples: vec!["Search the web for the latest Rust edition.".to_string()],

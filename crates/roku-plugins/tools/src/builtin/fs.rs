@@ -38,9 +38,9 @@ use serde_json::{Value, json};
 ///
 /// Used when the core-fs plugin is enabled: [`build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities`]
 /// in `builders` extends its tool entries with this list, then builds a [`ResourceCatalog`]. That catalog is
-/// used by the router/classifier for: retrieval over descriptor text (BM25 + embedding), building the LLM
-/// "Current inventory" in the route classifier prompt, resolving a chosen tool name to a [`ResourceSelector`],
-/// and risk/cost for routing decisions. Tool names here must match the tools registered for execution via
+/// used by the router/classifier for: retrieval over compact selection text (BM25 + embedding), building the
+/// route classifier's compact selection inventory, resolving a chosen tool name to a [`ResourceSelector`], and
+/// risk/cost for routing decisions. Tool names here must match the tools registered for execution via
 /// [`register_tools`] in this module.
 #[allow(dead_code)]
 pub(crate) fn catalog_descriptors() -> Vec<CatalogDescriptor> {
@@ -54,6 +54,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		descriptor_catalog(
 			"fs.find",
 			"Use this when you only know one basename or fuzzy filesystem reference inside the workspace and need grounded candidates before doing anything else. Do not use it when you already have a concrete path, when you expect many repeated matches, or when the task is counting files across directories; `fs.glob` is the right tool for that. It returns zero, one, or many candidate paths that the agent can disambiguate or feed into a later tool call.",
+			"Resolve one fuzzy workspace file or directory name before a follow-up filesystem step.",
 			&[
 				"find file",
 				"basename grounding",
@@ -74,6 +75,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		descriptor_catalog(
 			"fs.inspect",
 			"Use this when you need metadata about a known path or need to ground the current working directory. Do not use it to list directory entries or read file contents. It returns bounded path facts like kind, size, and timestamps.",
+			"Inspect metadata for a known path or the current working directory.",
 			&[
 				"file metadata",
 				"path inspection",
@@ -102,6 +104,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		descriptor_catalog(
 			"fs.list_dir",
 			"Use this when you already know the directory path and need its immediate entries, including hidden ones, in bounded form. Do not use it when the path is still fuzzy or when you need file contents instead of a listing. It returns a truncated-safe entry list plus enough metadata to answer listing questions or choose a follow-up path.",
+			"List the immediate entries in a known directory.",
 			&[
 				"list files",
 				"directory contents",
@@ -128,6 +131,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		descriptor_catalog(
 			"fs.read_text",
 			"Use this when you already have a concrete text file path and need its contents or the first bounded chunk of it. Do not use it for directories, binary inspection, or fuzzy names; resolve those first with `fs.find` or `fs.inspect`. It returns lossy UTF-8 text plus truncation metadata that can be quoted, summarized, or passed to another worker.",
+			"Read text content from a known file path.",
 			&[
 				"read file",
 				"open text",
@@ -149,6 +153,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		descriptor_catalog(
 			"fs.glob",
 			"Use this when the task is about many matching paths at once, especially wildcard searches, repeated filenames across directories, or counts like 'how many Cargo.toml files are there'. Do not use it for a single fuzzy basename or a path you expect to resolve to one best candidate; `fs.find` is better for that. It returns a bounded match set that is good for counting, enumerating, or selecting follow-up files.",
+			"Find many workspace paths that match one glob pattern.",
 			&["glob", "pattern match", "find matching files"],
 			&[
 				"Find all Rust files under crates/roku-plugins/**/*.rs.",
@@ -165,6 +170,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		descriptor_catalog(
 			"fs.exists",
 			"Use this for a yes/no existence check on a concrete path. Do not use it when you also need metadata, directory contents, or file contents. It returns existence plus kind when present.",
+			"Check whether a known path exists.",
 			&["path exists", "does file exist", "check directory", "存在"],
 			&["Does tmp/test-excel.xlsx exist?"],
 			&["path"],
@@ -610,6 +616,7 @@ fn fs_tool_contract(name: &str) -> Option<ToolContract> {
 fn descriptor_catalog(
 	name: &str,
 	description: &str,
+	selection_hint: &str,
 	tags: &[&str],
 	examples: &[&str],
 	input_schema: &[&str],
@@ -628,6 +635,7 @@ fn descriptor_catalog(
 		name: name.to_string(),
 		role: Some("core_fs".to_string()),
 		description: description.to_string(),
+		selection_hint: selection_hint.to_string(),
 		discoverable: true,
 		tags: tags.iter().map(|value| (*value).to_string()).collect(),
 		examples: examples.iter().map(|value| (*value).to_string()).collect(),
@@ -641,7 +649,7 @@ fn descriptor_catalog(
 			.iter()
 			.map(|value| (*value).to_string())
 			.collect(),
-		summary: description.to_string(),
+		summary: selection_hint.to_string(),
 		key_commands: key_commands
 			.iter()
 			.map(|value| (*value).to_string())
