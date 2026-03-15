@@ -536,8 +536,8 @@ mod tests {
 	use crate::NextStepRuntimeConfig;
 	use crate::router::{IntentFamily, RouteDecision, RouteRisk};
 	use crate::runtime_loop::{
-		ContextProjection, LoopContext, LoopState, StepObservation, ToolObservation,
-		build_context_projection, step_record::StepRecord,
+		ContextProjection, LoopContext, LoopState, NextStepAction, NextStepDecision,
+		StepObservation, ToolObservation, build_context_projection, step_record::StepRecord,
 	};
 
 	struct PromptRecordingProvider {
@@ -675,8 +675,14 @@ mod tests {
 			crate::runtime_loop::interpret_observation(&loop_state, observation.clone(), None);
 		loop_state.record_step(StepRecord::tool_call(
 			1,
-			"inventory.describe",
-			"Use the inventory tool first.",
+			NextStepDecision {
+				action: NextStepAction::CallTool,
+				tool_name: Some("inventory.describe".to_string()),
+				arguments: Some(json!({})),
+				reason: "Use the inventory tool first.".to_string(),
+				final_message: None,
+			},
+			loop_state.visible_tools.clone(),
 			json!({
 				"ok": true,
 				"terminal": false,

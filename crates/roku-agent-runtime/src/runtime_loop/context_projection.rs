@@ -274,7 +274,8 @@ mod tests {
 	use super::build_context_projection;
 	use crate::router::{IntentFamily, RouteDecision, RouteRisk};
 	use crate::runtime_loop::{
-		LoopContext, LoopState, StepObservation, ToolObservation, step_record::StepRecord,
+		LoopContext, LoopState, NextStepAction, NextStepDecision, StepObservation, ToolObservation,
+		step_record::StepRecord,
 	};
 
 	fn sample_loop_state() -> LoopState {
@@ -311,8 +312,14 @@ mod tests {
 			crate::runtime_loop::interpret_observation(&state, observation.clone(), None);
 		state.record_step(StepRecord::tool_call(
 			1,
-			"inventory.describe",
-			"Use the inventory tool first.",
+			NextStepDecision {
+				action: NextStepAction::CallTool,
+				tool_name: Some("inventory.describe".to_string()),
+				arguments: Some(serde_json::json!({})),
+				reason: "Use the inventory tool first.".to_string(),
+				final_message: None,
+			},
+			state.visible_tools.clone(),
 			serde_json::json!({
 				"ok": true,
 				"terminal": false,

@@ -108,8 +108,8 @@ mod tests {
 	use super::check_seed_tool_probe;
 	use crate::router::{IntentFamily, RouteDecision, RouteRisk};
 	use crate::runtime_loop::{
-		InterpretedObservation, LoopContext, LoopState, StepAction, StepObservation, StepRecord,
-		ToolObservation,
+		InterpretedObservation, LoopContext, LoopState, NextStepAction, NextStepDecision,
+		StepObservation, StepRecord, ToolObservation,
 	};
 
 	fn loop_state() -> LoopState {
@@ -163,8 +163,14 @@ mod tests {
 		};
 		state.record_step(StepRecord::tool_call(
 			1,
-			"command.run",
-			"run explicit command",
+			NextStepDecision {
+				action: NextStepAction::CallTool,
+				tool_name: Some("command.run".to_string()),
+				arguments: Some(json!({ "command": "pwd" })),
+				reason: "run explicit command".to_string(),
+				final_message: None,
+			},
+			state.visible_tools.clone(),
 			json!({"ok": true}),
 			StepObservation::Tool(observation),
 			interpreted,
@@ -175,8 +181,14 @@ mod tests {
 		));
 		state.record_step(StepRecord::terminal(
 			2,
-			StepAction::FinalAnswer,
-			"answer from grounded command",
+			NextStepDecision {
+				action: NextStepAction::FinalAnswer,
+				tool_name: None,
+				arguments: None,
+				reason: "answer from grounded command".to_string(),
+				final_message: Some("/workspace".to_string()),
+			},
+			state.visible_tools.clone(),
 			Some(StepObservation::FinalMessage {
 				final_message: "/workspace".to_string(),
 			}),

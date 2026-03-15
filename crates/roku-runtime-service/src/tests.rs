@@ -16,7 +16,7 @@ use std::env;
 
 use roku_agent_runtime::{
 	AskUserPayload, AskUserResumeContract, AskUserResumeDirective, IntentFamily, LoopContext,
-	LoopState, RouteDecision, RouteRisk, StepAction, StepObservation, StepRecord, ToolObservation,
+	LoopState, RouteDecision, RouteRisk, StepObservation, StepRecord, ToolObservation,
 };
 use roku_common_types::ResourceSelector;
 use roku_common_types::{
@@ -243,8 +243,14 @@ fn pending_filesystem_tool_loops_resume_through_the_generic_loop_driver() {
 		roku_agent_runtime::interpret_observation(&loop_state, observation.clone(), None);
 	loop_state.record_step(StepRecord::tool_call(
 		1,
-		"fs.read_text",
-		"Read the grounded workspace manifest first.",
+		roku_agent_runtime::NextStepDecision {
+			action: roku_agent_runtime::NextStepAction::CallTool,
+			tool_name: Some("fs.read_text".to_string()),
+			arguments: Some(serde_json::json!({ "path": "Cargo.toml" })),
+			reason: "Read the grounded workspace manifest first.".to_string(),
+			final_message: None,
+		},
+		loop_state.visible_tools.clone(),
 		serde_json::json!({
 			"ok": false,
 			"error_type": "multiple_candidates",
@@ -261,8 +267,15 @@ fn pending_filesystem_tool_loops_resume_through_the_generic_loop_driver() {
 	));
 	loop_state.record_step(StepRecord::terminal(
 		2,
-		StepAction::AskUser,
-		"Runtime paused for user clarification after the latest tool observation.",
+		roku_agent_runtime::NextStepDecision {
+			action: roku_agent_runtime::NextStepAction::AskUser,
+			tool_name: None,
+			arguments: None,
+			reason: "Runtime paused for user clarification after the latest tool observation."
+				.to_string(),
+			final_message: Some("你想看哪一个 Cargo.toml？".to_string()),
+		},
+		loop_state.visible_tools.clone(),
 		Some(StepObservation::AskUser {
 			final_message: "你想看哪一个 Cargo.toml？".to_string(),
 		}),

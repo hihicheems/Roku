@@ -66,6 +66,27 @@ fn deterministic_pre_classify(
 		return Some(result);
 	}
 
+	if explanatory_shell_command_request(&request.goal)
+		&& tool_selector(context.catalog, "general.execute").is_some()
+	{
+		let decision = RouteDecision::new(
+			IntentFamily::Chat,
+			0.81,
+			false,
+			RouteRisk::Low,
+			vec!["general.execute".to_string()],
+			candidate_plugins_for_tool(context.plugin_snapshot, "general.execute"),
+			Vec::new(),
+			"explicit shell command is referenced for explanation rather than execution; keep the request on the general assistant path",
+		);
+		return Some(build_tool_loop_route(
+			context,
+			decision,
+			Some("general.execute"),
+			Vec::new(),
+		));
+	}
+
 	if let Some(result) = classify_contract_level_grounded_hint(context, request) {
 		return Some(result);
 	}
@@ -220,7 +241,8 @@ fn classify_contract_level_grounded_hint(
 		));
 	}
 
-	if let Some(command) = extract_explicit_shell_command(&request.goal)
+	if grounded_shell_command_allows_execution(&request.goal)
+		&& let Some(command) = extract_explicit_shell_command(&request.goal)
 		&& let Some(selector) = tool_selector(context.catalog, "command.run")
 	{
 		let decision = RouteDecision::new(
@@ -283,6 +305,31 @@ fn classify_contract_level_grounded_hint(
 			"contract-level grounded table input provides a non-authoritative table-family hint",
 		);
 		return Some(build_loop_hint_route(context, decision));
+	}
+
+	if let Some(preferred_tool) = preferred_grounded_filesystem_tool(&request.goal)
+		&& let Some(selector) = tool_selector(context.catalog, preferred_tool)
+		&& ground_tool_arguments(preferred_tool, &request.goal).is_some()
+	{
+		let descriptor = context.catalog.descriptor(&selector)?;
+		let decision = RouteDecision::new(
+			IntentFamily::FilesystemRead,
+			0.87,
+			false,
+			resource_risk(descriptor),
+			vec![preferred_tool.to_string()],
+			candidate_plugins_for_tool(context.plugin_snapshot, preferred_tool),
+			Vec::new(),
+			format!(
+				"contract-level grounded filesystem input provides a non-authoritative `{preferred_tool}` hint"
+			),
+		);
+		return Some(build_tool_loop_route(
+			context,
+			decision,
+			Some(preferred_tool),
+			Vec::new(),
+		));
 	}
 
 	if !extract_path_candidates(&request.goal).is_empty()
@@ -350,7 +397,7 @@ fn explicit_tool_hint_is_grounded(tool_name: &str, goal: &str) -> bool {
 			extract_table_path(goal).is_some()
 		}
 		"web.search" => extract_web_query(goal).is_some(),
-		"command.run" => extract_explicit_shell_command(goal).is_some(),
+		"command.run" => grounded_shell_command_allows_execution(goal),
 		"python.run" => extract_explicit_python_code(goal).is_some(),
 		"skill.install" | "skill.ensure_installed" => extract_skill_source_url(goal).is_some(),
 		_ => false,
@@ -728,13 +775,20 @@ fn select_deterministic_contract_tool_match<'a>(
 }
 
 fn deterministic_match_can_start(tool_name: &str, goal: &str) -> bool {
-	tool_required_argument_keys(tool_name).is_empty()
-		|| ground_tool_arguments(tool_name, goal).is_some()
+	match tool_name {
+		"command.run" => {
+			grounded_shell_command_allows_execution(goal)
+				&& ground_tool_arguments(tool_name, goal).is_some()
+		}
+		_ => {
+			tool_required_argument_keys(tool_name).is_empty()
+				|| ground_tool_arguments(tool_name, goal).is_some()
+		}
+	}
 }
 
 fn deterministic_grounded_intent(goal: &str) -> Option<IntentFamily> {
-	if extract_explicit_python_code(goal).is_some()
-		|| extract_explicit_shell_command(goal).is_some()
+	if extract_explicit_python_code(goal).is_some() || grounded_shell_command_allows_execution(goal)
 	{
 		return Some(IntentFamily::CodeExec);
 	}
@@ -743,6 +797,81 @@ fn deterministic_grounded_intent(goal: &str) -> Option<IntentFamily> {
 	}
 	if extract_glob_pattern(goal).is_some() || !extract_path_candidates(goal).is_empty() {
 		return Some(IntentFamily::FilesystemRead);
+	}
+	None
+}
+
+fn grounded_shell_command_allows_execution(goal: &str) -> bool {
+	if extract_explicit_shell_command(goal).is_none() {
+		return false;
+	}
+	let lower = goal.trim().to_ascii_lowercase();
+	let blocked_markers = [
+		"do not run",
+		"don't run",
+		"dont run",
+		"without running",
+		"without executing",
+		"不要运行",
+		"不要执行",
+	];
+	if blocked_markers.iter().any(|marker| lower.contains(marker)) {
+		return false;
+	}
+	![
+		"explain what the shell command",
+		"explain what the command",
+		"what does the shell command",
+		"what does the command",
+		"describe what the shell command",
+		"describe what the command",
+	]
+	.iter()
+	.any(|prefix| lower.starts_with(prefix))
+}
+
+fn explanatory_shell_command_request(goal: &str) -> bool {
+	extract_explicit_shell_command(goal).is_some() && !grounded_shell_command_allows_execution(goal)
+}
+
+fn preferred_grounded_filesystem_tool(goal: &str) -> Option<&'static str> {
+	let path_candidates = extract_path_candidates(goal);
+	if path_candidates.is_empty() {
+		return None;
+	}
+	let lower = goal.to_ascii_lowercase();
+	if lower.contains("find ")
+		|| lower.contains("locate ")
+		|| lower.contains("search for ")
+		|| lower.starts_with("find ")
+	{
+		return Some("fs.find");
+	}
+	if lower.contains("exist") || lower.contains("exists") {
+		return Some("fs.exists");
+	}
+	if (lower.contains("list ")
+		|| lower.contains("show files")
+		|| lower.contains("show directories")
+		|| lower.contains("contents of"))
+		&& (lower.contains("directory")
+			|| lower.contains("folder")
+			|| lower.contains("files")
+			|| lower.contains("directories"))
+	{
+		return Some("fs.list_dir");
+	}
+	if lower.contains("inspect") || lower.contains("metadata") || lower.contains("stat ") {
+		return Some("fs.inspect");
+	}
+	if lower.contains("read")
+		|| lower.contains("open")
+		|| lower.contains("first part")
+		|| lower.contains("first lines")
+		|| lower.contains("contents")
+		|| lower.contains("show me")
+	{
+		return Some("fs.read_text");
 	}
 	None
 }

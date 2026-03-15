@@ -21,12 +21,14 @@ mod next_step;
 mod observation;
 mod probe_check;
 mod recovery;
+mod regression;
 mod request_intake;
 mod route_classifier;
 mod state_update;
 mod step_record;
 mod summarizer;
 mod tool_loop;
+mod trace;
 
 pub(crate) use ask_user::effective_ask_user_payload;
 pub use ask_user::{AskUserPayload, AskUserResumeContract, AskUserResumeDirective};
@@ -43,6 +45,10 @@ pub use next_step::{NextStepAction, NextStepDecision, NextStepDecisionSchemaErro
 pub use observation::{StepObservation, ToolObservation};
 pub use probe_check::{ToolProbeCheckReport, check_seed_tool_probe};
 pub use recovery::should_resume_awaiting_user;
+pub use regression::{
+	InterpretedFlagExpectation, RegressionSuiteKind, RuntimeLoopRegressionCaseReport,
+	RuntimeLoopRegressionExpectation, evaluate_runtime_loop_regression_case,
+};
 pub use request_intake::LoopRequest;
 pub(crate) use request_intake::intake_request;
 pub(crate) use route_classifier::classify_existing_route;
@@ -54,3 +60,4 @@ pub(crate) use tool_loop::{
 	attachments_for_tool, decide_tool_loop_next_step, ground_tool_arguments,
 	next_working_directory_from_observation, tool_required_argument_keys,
 };
+pub use trace::{RuntimeLoopTraceCheckReport, check_runtime_loop_trace, runtime_loop_trace};
