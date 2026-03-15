@@ -751,6 +751,70 @@ fn default_tool_observation_schema() -> String {
 	"tool_observation.v1".to_string()
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeLoopTrace {
+	#[serde(default = "default_runtime_loop_trace_schema")]
+	pub schema_version: String,
+	pub run_id: String,
+	pub status: String,
+	pub step_count: usize,
+	#[serde(default)]
+	pub steps: Vec<RuntimeLoopTraceStep>,
+	pub final_outcome: RuntimeLoopTraceOutcome,
+}
+
+impl RuntimeLoopTrace {
+	pub fn schema_version() -> &'static str {
+		"runtime_loop_trace.v1"
+	}
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeLoopTraceStep {
+	pub step_index: u32,
+	pub decision: RuntimeLoopTraceDecision,
+	#[serde(default)]
+	pub visible_tools_before: Vec<String>,
+	pub started_at: String,
+	pub finished_at: String,
+	#[serde(default)]
+	pub tool_latency_ms: Option<u64>,
+	#[serde(default)]
+	pub raw_tool_output: Option<Value>,
+	#[serde(default)]
+	pub observation: Option<Value>,
+	#[serde(default)]
+	pub interpreted_observation: Option<Value>,
+	pub remaining_step_budget_after: u32,
+	pub remaining_recovery_budget_after: u32,
+	pub working_directory_after: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeLoopTraceDecision {
+	pub action: String,
+	#[serde(default)]
+	pub tool_name: Option<String>,
+	#[serde(default)]
+	pub arguments: Option<Value>,
+	pub reason: String,
+	#[serde(default)]
+	pub final_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeLoopTraceOutcome {
+	pub status: String,
+	#[serde(default)]
+	pub terminal_action: Option<String>,
+	#[serde(default)]
+	pub final_message: Option<String>,
+}
+
+fn default_runtime_loop_trace_schema() -> String {
+	RuntimeLoopTrace::schema_version().to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityToken {
 	pub token_id: String,

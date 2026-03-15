@@ -26,8 +26,8 @@ use crate::runtime_loop::{
 	AskUserPayload, ContextProjection, LoopContext, LoopState, StepAction, StepObservation,
 	StepRecord, ToolObservation, VisibleToolHint, attachments_for_tool, build_context_projection,
 	build_loop_context, decide_tool_loop_next_step, effective_ask_user_payload, intake_request,
-	interpret_observation, next_working_directory_from_observation, summarize_observation,
-	tool_required_argument_keys,
+	interpret_observation, next_working_directory_from_observation, runtime_loop_trace,
+	summarize_observation, tool_required_argument_keys,
 };
 use crate::tool_config::{ToolCatalogConfig, ToolsRuntimeConfig};
 use crate::tools::{
@@ -445,10 +445,11 @@ impl GenericAgentRuntime {
 				}
 			}
 		});
+		let reason = reason.into();
 		let step = StepRecord::terminal(
 			loop_state.step_index + 1,
-			action,
-			reason,
+			terminal_decision(action, &reason, observation.as_ref()),
+			loop_state.visible_tools.clone(),
 			observation,
 			match action {
 				StepAction::AskUser => loop_state.remaining_step_budget,
@@ -476,10 +477,17 @@ impl GenericAgentRuntime {
 		reason: impl Into<String>,
 		payload: AskUserPayload,
 	) -> StepRecord {
+		let reason = reason.into();
 		let step = StepRecord::terminal(
 			loop_state.step_index + 1,
-			StepAction::AskUser,
-			reason,
+			terminal_decision(
+				StepAction::AskUser,
+				&reason,
+				Some(&StepObservation::AskUser {
+					final_message: payload.final_message.clone(),
+				}),
+			),
+			loop_state.visible_tools.clone(),
 			Some(StepObservation::AskUser {
 				final_message: payload.final_message.clone(),
 			}),
@@ -557,8 +565,8 @@ impl GenericAgentRuntime {
 					);
 					let step = StepRecord::tool_call(
 						loop_state.step_index + 1,
-						tool_name,
-						next_step.reason,
+						next_step.clone(),
+						loop_state.visible_tools.clone(),
 						raw_tool_output,
 						StepObservation::Tool(observation.clone()),
 						interpreted.clone(),
@@ -1352,12 +1360,32 @@ fn raw_tool_output_from_result(result: &ResultEnvelope) -> Value {
 }
 
 fn loop_probe_trace_payload(loop_state: &LoopState) -> Value {
-	json!({
-		"run_id": loop_state.run_id.clone(),
-		"status": format!("{:?}", loop_state.status),
-		"step_count": loop_state.history.len(),
-		"history": loop_state.history.clone(),
-	})
+	serde_json::to_value(runtime_loop_trace(loop_state))
+		.unwrap_or_else(|_| json!({ "schema_version": "runtime_loop_trace.v1" }))
+}
+
+fn terminal_decision(
+	action: StepAction,
+	reason: &str,
+	observation: Option<&StepObservation>,
+) -> crate::runtime_loop::NextStepDecision {
+	let final_message = observation.map(|step_observation| match step_observation {
+		StepObservation::AskUser { final_message }
+		| StepObservation::FinalMessage { final_message } => final_message.clone(),
+		StepObservation::Tool(observation) => observation.message.clone(),
+	});
+	crate::runtime_loop::NextStepDecision {
+		action: match action {
+			StepAction::CallTool => crate::runtime_loop::NextStepAction::CallTool,
+			StepAction::AskUser => crate::runtime_loop::NextStepAction::AskUser,
+			StepAction::FinalAnswer => crate::runtime_loop::NextStepAction::FinalAnswer,
+			StepAction::Fail => crate::runtime_loop::NextStepAction::Fail,
+		},
+		tool_name: None,
+		arguments: None,
+		reason: reason.to_string(),
+		final_message,
+	}
 }
 
 fn ask_for_more_info_message(goal: &str, missing_arguments: &[String]) -> String {
@@ -1509,7 +1537,7 @@ fn tool_name_for_role(
 mod tests {
 	use roku_common_types::{
 		AgentContext, AggregationMode, EvidenceItem, JoinPolicy, NodeId, PolicyBindings,
-		ResultStatus, TaskId, TaskNode, TaskNodeKind,
+		ResultStatus, RuntimeLoopTrace, TaskId, TaskNode, TaskNodeKind,
 	};
 	use roku_plugin_llm::{
 		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderCallError,
@@ -1520,8 +1548,10 @@ mod tests {
 	};
 	use std::collections::VecDeque;
 	use std::env;
+	use std::fs;
 	use std::io::{Cursor, Write};
 	use std::sync::{Arc, Mutex};
+	use tempfile::Builder;
 
 	use super::*;
 
@@ -1561,6 +1591,74 @@ mod tests {
 
 	fn payload_value(result: &ResultEnvelope) -> serde_json::Value {
 		serde_json::from_str(&result.payload).expect("payload should be valid json")
+	}
+
+	fn runtime_loop_trace_for_goal(runtime: &GenericAgentRuntime, goal: &str) -> RuntimeLoopTrace {
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId(format!(
+				"req-{}",
+				goal.chars()
+					.filter(|character| character.is_ascii_alphanumeric())
+					.collect::<String>()
+					.to_ascii_lowercase()
+			)),
+			session_id: "session-regression".to_string(),
+			goal: goal.to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+		let route = runtime.classify_route(&request, &request.session_id);
+		let crate::router::RouteDecisionResult::Direct(plan) = route else {
+			panic!("expected direct route for regression goal `{goal}`");
+		};
+		let mut loop_state = runtime.initialize_runtime_loop(
+			&request,
+			&request.session_id,
+			&plan.decision,
+			plan.bound_resources.clone(),
+		);
+		let task_id = TaskId(format!("task-{}", request.request_id.0));
+		let _ = runtime.execute_tool_loop(&task_id, &request, &mut loop_state, None);
+		crate::runtime_loop::runtime_loop_trace(&loop_state)
+	}
+
+	fn regression_fixture_path(suffix: &str, contents: &str) -> String {
+		let root = env::current_dir()
+			.expect("cwd should resolve for regression fixtures")
+			.join("tmp");
+		fs::create_dir_all(&root).expect("tmp fixture directory should exist");
+		let mut fixture = Builder::new()
+			.suffix(suffix)
+			.tempfile_in(&root)
+			.expect("fixture file should be created");
+		fixture
+			.write_all(contents.as_bytes())
+			.expect("fixture contents should be written");
+		fixture
+			.into_temp_path()
+			.keep()
+			.expect("fixture path should persist")
+			.display()
+			.to_string()
+	}
+
+	fn cleanup_fixture(path: &str) {
+		let _ = fs::remove_file(path);
+	}
+
+	fn assert_regression_case(
+		case_id: &str,
+		suite: crate::runtime_loop::RegressionSuiteKind,
+		trace: &RuntimeLoopTrace,
+		expectation: crate::runtime_loop::RuntimeLoopRegressionExpectation,
+	) {
+		let report = crate::runtime_loop::evaluate_runtime_loop_regression_case(
+			case_id,
+			suite,
+			trace,
+			&expectation,
+		);
+		assert!(report.passed, "regression case failed: {report:?}");
 	}
 
 	#[test]
@@ -2282,6 +2380,35 @@ So, I'll output: "星期日""#
 	}
 
 	#[test]
+	fn classify_route_prefers_fs_read_text_for_explicit_relative_file_paths() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-fs-explicit-path".to_string()),
+			session_id: "session-fs-explicit-path".to_string(),
+			goal: "Read tmp/phase3-check-read.txt.".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+
+		match route {
+			crate::router::RouteDecisionResult::Direct(plan) => {
+				assert_eq!(plan.decision.intent_family, IntentFamily::FilesystemRead);
+				assert_eq!(
+					plan.decision.candidate_tools,
+					vec!["fs.read_text".to_string()]
+				);
+			}
+			other => {
+				panic!(
+					"expected explicit relative file path read to shortlist fs.read_text, got {other:?}"
+				)
+			}
+		}
+	}
+
+	#[test]
 	fn classify_route_shortlists_inventory_describe_for_inventory_questions() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
@@ -2304,6 +2431,35 @@ So, I'll output: "星期日""#
 			}
 			other => {
 				panic!("expected inventory question to shortlist inventory.describe, got {other:?}")
+			}
+		}
+	}
+
+	#[test]
+	fn explanatory_shell_command_requests_do_not_shortlist_command_run() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-command-explain".to_string()),
+			session_id: "session-command-explain".to_string(),
+			goal: "Explain what the shell command `pwd` does, but do not run it.".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+
+		match route {
+			crate::router::RouteDecisionResult::Direct(plan) => {
+				assert_eq!(plan.decision.intent_family, IntentFamily::Chat);
+				assert_eq!(
+					plan.decision.candidate_tools,
+					vec!["general.execute".to_string()]
+				);
+			}
+			other => {
+				panic!(
+					"expected explanatory shell command request to stay on chat route, got {other:?}"
+				)
 			}
 		}
 	}
@@ -2333,6 +2489,264 @@ So, I'll output: "星期日""#
 				panic!("expected grounded table request to shortlist table.preview, got {other:?}")
 			}
 		}
+	}
+
+	#[test]
+	fn runtime_loop_confusion_suite_covers_grounded_and_quoted_requests() {
+		let runtime = GenericAgentRuntime::default();
+		let csv_path = regression_fixture_path(".csv", "name,count\nalpha,1\nbeta,2\n");
+
+		let inventory_trace =
+			runtime_loop_trace_for_goal(&runtime, "What skills and tools do you have right now?");
+		assert_regression_case(
+			"inventory-question",
+			crate::runtime_loop::RegressionSuiteKind::Confusion,
+			&inventory_trace,
+			crate::runtime_loop::RuntimeLoopRegressionExpectation {
+				expected_tool: Some("inventory.describe".to_string()),
+				forbidden_tools: vec!["general.execute".to_string()],
+				expected_terminal_action: Some("final_answer".to_string()),
+				expected_error_type: None,
+				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
+					field: "should_emit_final_answer".to_string(),
+					expected: true,
+				}],
+			},
+		);
+
+		let quoted_trace = runtime_loop_trace_for_goal(
+			&runtime,
+			"你说的这个是什么意思？ task failed: The runtime loop needs an explicit next-step decision after the non-terminal fs.list_dir observation.",
+		);
+		let quoted_trace_ref = &quoted_trace;
+		assert_regression_case(
+			"quoted-tool-name",
+			crate::runtime_loop::RegressionSuiteKind::Confusion,
+			quoted_trace_ref,
+			crate::runtime_loop::RuntimeLoopRegressionExpectation {
+				expected_tool: Some("general.execute".to_string()),
+				forbidden_tools: vec!["inventory.describe".to_string()],
+				expected_terminal_action: Some("final_answer".to_string()),
+				expected_error_type: None,
+				interpreted_flags: Vec::new(),
+			},
+		);
+		let do_not_run_trace = runtime_loop_trace_for_goal(
+			&runtime,
+			"Explain what the shell command `pwd` does, but do not run it.",
+		);
+		assert_regression_case(
+			"quoted-shell-command-explanation",
+			crate::runtime_loop::RegressionSuiteKind::Confusion,
+			&do_not_run_trace,
+			crate::runtime_loop::RuntimeLoopRegressionExpectation {
+				expected_tool: Some("general.execute".to_string()),
+				forbidden_tools: vec!["command.run".to_string()],
+				expected_terminal_action: Some("final_answer".to_string()),
+				expected_error_type: None,
+				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
+					field: "should_emit_final_answer".to_string(),
+					expected: true,
+				}],
+			},
+		);
+
+		let table_trace = runtime_loop_trace_for_goal(
+			&runtime,
+			&format!("Preview the first rows of {csv_path}."),
+		);
+		assert_regression_case(
+			"grounded-table-preview",
+			crate::runtime_loop::RegressionSuiteKind::Confusion,
+			&table_trace,
+			crate::runtime_loop::RuntimeLoopRegressionExpectation {
+				expected_tool: Some("table.preview".to_string()),
+				forbidden_tools: Vec::new(),
+				expected_terminal_action: Some("final_answer".to_string()),
+				expected_error_type: None,
+				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
+					field: "continue_allowed".to_string(),
+					expected: true,
+				}],
+			},
+		);
+
+		cleanup_fixture(&csv_path);
+	}
+
+	#[test]
+	fn runtime_loop_boundary_suite_covers_contract_edges() {
+		let runtime = GenericAgentRuntime::default();
+		let duplicate_name = "phase3-duplicate-target.txt";
+		let duplicate_root = env::current_dir()
+			.expect("cwd should resolve for regression fixtures")
+			.join("tmp");
+		let duplicate_a_dir = duplicate_root.join("phase3-duplicate-a");
+		let duplicate_b_dir = duplicate_root.join("phase3-duplicate-b");
+		fs::create_dir_all(&duplicate_a_dir).expect("duplicate fixture dir A should exist");
+		fs::create_dir_all(&duplicate_b_dir).expect("duplicate fixture dir B should exist");
+		let duplicate_a_path = duplicate_a_dir.join(duplicate_name);
+		let duplicate_b_path = duplicate_b_dir.join(duplicate_name);
+		fs::write(&duplicate_a_path, "duplicate a\n").expect("duplicate fixture A should write");
+		fs::write(&duplicate_b_path, "duplicate b\n").expect("duplicate fixture B should write");
+
+		let command_trace =
+			runtime_loop_trace_for_goal(&runtime, "Run this command: `touch phase3-boundary.tmp`");
+		assert_regression_case(
+			"command-write-boundary",
+			crate::runtime_loop::RegressionSuiteKind::Boundary,
+			&command_trace,
+			crate::runtime_loop::RuntimeLoopRegressionExpectation {
+				expected_tool: Some("command.run".to_string()),
+				forbidden_tools: Vec::new(),
+				expected_terminal_action: Some("fail".to_string()),
+				expected_error_type: Some("command_not_allowed".to_string()),
+				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
+					field: "should_fail".to_string(),
+					expected: true,
+				}],
+			},
+		);
+
+		let ambiguous_find_trace = runtime_loop_trace_for_goal(
+			&runtime,
+			&format!("Find {duplicate_name} in this workspace."),
+		);
+		assert_regression_case(
+			"ambiguous-fs-find",
+			crate::runtime_loop::RegressionSuiteKind::Boundary,
+			&ambiguous_find_trace,
+			crate::runtime_loop::RuntimeLoopRegressionExpectation {
+				expected_tool: Some("fs.find".to_string()),
+				forbidden_tools: Vec::new(),
+				expected_terminal_action: Some("ask_user".to_string()),
+				expected_error_type: Some("multiple_candidates".to_string()),
+				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
+					field: "should_ask_user".to_string(),
+					expected: true,
+				}],
+			},
+		);
+
+		let missing_find_trace = runtime_loop_trace_for_goal(
+			&runtime,
+			"Find definitely-no-such-file-42.txt in this workspace.",
+		);
+		assert_regression_case(
+			"missing-fs-find",
+			crate::runtime_loop::RegressionSuiteKind::Boundary,
+			&missing_find_trace,
+			crate::runtime_loop::RuntimeLoopRegressionExpectation {
+				expected_tool: Some("fs.find".to_string()),
+				forbidden_tools: Vec::new(),
+				expected_terminal_action: Some("fail".to_string()),
+				expected_error_type: Some("path_not_found".to_string()),
+				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
+					field: "should_fail".to_string(),
+					expected: true,
+				}],
+			},
+		);
+
+		cleanup_fixture(duplicate_a_path.to_string_lossy().as_ref());
+		cleanup_fixture(duplicate_b_path.to_string_lossy().as_ref());
+		let _ = fs::remove_dir(&duplicate_a_dir);
+		let _ = fs::remove_dir(&duplicate_b_dir);
+	}
+
+	#[test]
+	fn runtime_loop_output_interpretation_suite_covers_terminal_and_non_terminal_success() {
+		let runtime = GenericAgentRuntime::default();
+		let text_path = regression_fixture_path(".txt", "phase3 interpretation smoke\n");
+
+		let command_trace = runtime_loop_trace_for_goal(&runtime, "Run this command: `pwd`");
+		assert_regression_case(
+			"command-non-terminal-success",
+			crate::runtime_loop::RegressionSuiteKind::OutputInterpretation,
+			&command_trace,
+			crate::runtime_loop::RuntimeLoopRegressionExpectation {
+				expected_tool: Some("command.run".to_string()),
+				forbidden_tools: Vec::new(),
+				expected_terminal_action: Some("final_answer".to_string()),
+				expected_error_type: None,
+				interpreted_flags: vec![
+					crate::runtime_loop::InterpretedFlagExpectation {
+						field: "continue_allowed".to_string(),
+						expected: true,
+					},
+					crate::runtime_loop::InterpretedFlagExpectation {
+						field: "should_emit_final_answer".to_string(),
+						expected: false,
+					},
+				],
+			},
+		);
+
+		let inventory_trace =
+			runtime_loop_trace_for_goal(&runtime, "What skills and tools do you have right now?");
+		assert_regression_case(
+			"inventory-terminal-success",
+			crate::runtime_loop::RegressionSuiteKind::OutputInterpretation,
+			&inventory_trace,
+			crate::runtime_loop::RuntimeLoopRegressionExpectation {
+				expected_tool: Some("inventory.describe".to_string()),
+				forbidden_tools: Vec::new(),
+				expected_terminal_action: Some("final_answer".to_string()),
+				expected_error_type: None,
+				interpreted_flags: vec![
+					crate::runtime_loop::InterpretedFlagExpectation {
+						field: "continue_allowed".to_string(),
+						expected: false,
+					},
+					crate::runtime_loop::InterpretedFlagExpectation {
+						field: "should_emit_final_answer".to_string(),
+						expected: true,
+					},
+				],
+			},
+		);
+
+		let read_trace =
+			runtime_loop_trace_for_goal(&runtime, &format!("Read the first part of {text_path}."));
+		assert_regression_case(
+			"fs-read-text-non-terminal-success",
+			crate::runtime_loop::RegressionSuiteKind::OutputInterpretation,
+			&read_trace,
+			crate::runtime_loop::RuntimeLoopRegressionExpectation {
+				expected_tool: Some("fs.read_text".to_string()),
+				forbidden_tools: Vec::new(),
+				expected_terminal_action: Some("final_answer".to_string()),
+				expected_error_type: None,
+				interpreted_flags: vec![
+					crate::runtime_loop::InterpretedFlagExpectation {
+						field: "continue_allowed".to_string(),
+						expected: true,
+					},
+					crate::runtime_loop::InterpretedFlagExpectation {
+						field: "should_emit_final_answer".to_string(),
+						expected: false,
+					},
+				],
+			},
+		);
+		let plain_read_trace = runtime_loop_trace_for_goal(&runtime, &format!("Read {text_path}."));
+		assert_regression_case(
+			"plain-read-text",
+			crate::runtime_loop::RegressionSuiteKind::OutputInterpretation,
+			&plain_read_trace,
+			crate::runtime_loop::RuntimeLoopRegressionExpectation {
+				expected_tool: Some("fs.read_text".to_string()),
+				forbidden_tools: vec!["fs.find".to_string()],
+				expected_terminal_action: Some("final_answer".to_string()),
+				expected_error_type: None,
+				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
+					field: "continue_allowed".to_string(),
+					expected: true,
+				}],
+			},
+		);
+
+		cleanup_fixture(&text_path);
 	}
 
 	#[test]
@@ -2437,8 +2851,14 @@ So, I'll output: "星期日""#
 			crate::runtime_loop::interpret_observation(&loop_state, observation.clone(), None);
 		loop_state.record_step(StepRecord::tool_call(
 			1,
-			"fs.read_text",
-			"Read the grounded workspace manifest first.",
+			crate::runtime_loop::NextStepDecision {
+				action: crate::runtime_loop::NextStepAction::CallTool,
+				tool_name: Some("fs.read_text".to_string()),
+				arguments: Some(serde_json::json!({ "path": "Cargo.toml" })),
+				reason: "Read the grounded workspace manifest first.".to_string(),
+				final_message: None,
+			},
+			loop_state.visible_tools.clone(),
 			serde_json::json!({
 				"ok": true,
 				"terminal": false,

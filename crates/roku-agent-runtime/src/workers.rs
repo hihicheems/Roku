@@ -14,13 +14,13 @@
 
 use std::sync::Arc;
 
-use crate::runtime_loop::extract_skill_source_url;
+use crate::runtime_loop::ground_tool_arguments;
 use crate::tool_config::{BuiltinToolRole, ToolCatalogConfig};
 use roku_common_types::{
 	AgentInstanceSpec, ConversationRole, ConversationTurn, ResultEnvelope, TaskNode,
 };
 use roku_plugin_host::{ToolInvocation, ToolRuntime};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::result::{tool_failure_result, tool_success_result};
 use crate::runtime::RuntimeWorker;
@@ -69,13 +69,13 @@ impl ToolBackedWorker {
 			"time_budget_ms": spec.policy_bindings.time_budget_ms,
 			"worker_id": self.worker_id,
 		});
-		if matches!(
-			self.tool_name.as_str(),
-			"skill.install" | "skill.ensure_installed"
-		) && let Some(source_url) =
-			extract_skill_source_url(&goal).or_else(|| extract_skill_source_url(&step_summary))
+		if let Some(arguments) = ground_tool_arguments(&self.tool_name, &goal)
+			.or_else(|| ground_tool_arguments(&self.tool_name, &step_summary))
+			.and_then(|value| value.as_object().cloned())
 		{
-			input["source_url"] = Value::String(source_url);
+			for (key, value) in arguments {
+				input[key] = value;
+			}
 		}
 		ToolInvocation {
 			tool_name: self.tool_name.clone(),
