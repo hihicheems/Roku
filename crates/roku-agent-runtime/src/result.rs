@@ -183,6 +183,7 @@ fn serialize_payload(payload: &Value) -> String {
 }
 
 fn derived_execution_evidence(output: &Value) -> Vec<EvidenceItem> {
+	let output = tool_output_data(output);
 	let mut evidence = Vec::new();
 	if let Some(selected_skill) = output.get("selected_skill").and_then(Value::as_str) {
 		evidence.push(EvidenceItem {
@@ -219,4 +220,8 @@ fn derived_execution_evidence(output: &Value) -> Vec<EvidenceItem> {
 		);
 	}
 	evidence
+}
+
+fn tool_output_data(output: &Value) -> &Value {
+	output.get("data").unwrap_or(output)
 }

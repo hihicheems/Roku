@@ -1581,8 +1581,8 @@ mod tests {
 			payload["message"],
 			"deterministic placeholder only: data processing was not executed by a live runtime"
 		);
-		assert_eq!(payload["output"]["runtime_mode"], "deterministic");
-		assert_eq!(payload["output"]["placeholder"], true);
+		assert_eq!(payload["output"]["data"]["runtime_mode"], "deterministic");
+		assert_eq!(payload["output"]["data"]["placeholder"], true);
 	}
 
 	#[test]
@@ -2255,7 +2255,7 @@ So, I'll output: "星期日""#
 	}
 
 	#[test]
-	fn classify_route_moves_grounded_filesystem_reads_into_generic_tool_loop() {
+	fn classify_route_shortlists_fs_read_text_for_grounded_filesystem_reads() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-fs-tool-loop".to_string()),
@@ -2270,9 +2270,68 @@ So, I'll output: "星期日""#
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
 				assert_eq!(plan.decision.intent_family, IntentFamily::FilesystemRead);
-				assert!(plan.decision.candidate_tools.is_empty());
+				assert_eq!(
+					plan.decision.candidate_tools,
+					vec!["fs.read_text".to_string()]
+				);
 			}
-			other => panic!("expected filesystem read to use generic tool loop, got {other:?}"),
+			other => {
+				panic!("expected grounded filesystem read to shortlist fs.read_text, got {other:?}")
+			}
+		}
+	}
+
+	#[test]
+	fn classify_route_shortlists_inventory_describe_for_inventory_questions() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-inventory-tool-loop".to_string()),
+			session_id: "session-inventory-tool-loop".to_string(),
+			goal: "What skills and tools do you have right now?".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+
+		match route {
+			crate::router::RouteDecisionResult::Direct(plan) => {
+				assert_eq!(plan.decision.intent_family, IntentFamily::Chat);
+				assert_eq!(
+					plan.decision.candidate_tools,
+					vec!["inventory.describe".to_string()]
+				);
+			}
+			other => {
+				panic!("expected inventory question to shortlist inventory.describe, got {other:?}")
+			}
+		}
+	}
+
+	#[test]
+	fn classify_route_shortlists_table_preview_for_grounded_table_requests() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-table-tool-loop".to_string()),
+			session_id: "session-table-tool-loop".to_string(),
+			goal: "Preview the first rows of tmp/example.csv.".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+
+		match route {
+			crate::router::RouteDecisionResult::Direct(plan) => {
+				assert_eq!(plan.decision.intent_family, IntentFamily::TableRead);
+				assert_eq!(
+					plan.decision.candidate_tools,
+					vec!["table.preview".to_string()]
+				);
+			}
+			other => {
+				panic!("expected grounded table request to shortlist table.preview, got {other:?}")
+			}
 		}
 	}
 

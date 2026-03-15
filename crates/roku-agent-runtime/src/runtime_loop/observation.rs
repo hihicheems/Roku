@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use roku_common_types::ToolOutputEnvelope;
 use roku_plugin_host::{ToolExecutionResult, ToolRuntimeError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -61,32 +62,18 @@ pub enum StepObservation {
 
 impl ToolObservation {
 	pub fn from_output_value(tool_name: &str, output: &Value) -> Self {
-		if let Some(ok) = output.get("ok").and_then(Value::as_bool) {
-			let error_type = output
-				.get("error_type")
-				.and_then(Value::as_str)
-				.map(str::to_string);
-			let terminal = output
-				.get("terminal")
-				.and_then(Value::as_bool)
-				.unwrap_or(false);
-			let data = output
-				.get("data")
-				.cloned()
-				.unwrap_or_else(|| output.clone());
-			let message = output
-				.get("message")
-				.and_then(Value::as_str)
-				.unwrap_or("tool invocation completed")
-				.to_string();
+		if let Ok(envelope) = serde_json::from_value::<ToolOutputEnvelope>(output.clone()) {
 			return Self {
-				ok,
+				ok: envelope.ok,
 				tool_name: tool_name.to_string(),
-				error_type,
-				terminal,
-				data,
-				message,
+				error_type: envelope.error_type,
+				terminal: envelope.terminal,
+				data: envelope.data,
+				message: envelope.message,
 			};
+		}
+		if let Some(observation) = Self::from_migration_legacy_output(tool_name, output) {
+			return observation;
 		}
 
 		let message = output
@@ -102,6 +89,38 @@ impl ToolObservation {
 			data: output.clone(),
 			message,
 		}
+	}
+
+	/// Temporary migration-only compatibility for tools that have not yet adopted
+	/// `ToolOutputEnvelope`. Remove this fallback after the remaining builtin and skill-backed
+	/// tools have moved onto the shared contract.
+	fn from_migration_legacy_output(tool_name: &str, output: &Value) -> Option<Self> {
+		let ok = output.get("ok").and_then(Value::as_bool)?;
+		let error_type = output
+			.get("error_type")
+			.and_then(Value::as_str)
+			.map(str::to_string);
+		let terminal = output
+			.get("terminal")
+			.and_then(Value::as_bool)
+			.unwrap_or(false);
+		let data = output
+			.get("data")
+			.cloned()
+			.unwrap_or_else(|| output.clone());
+		let message = output
+			.get("message")
+			.and_then(Value::as_str)
+			.unwrap_or("tool invocation completed")
+			.to_string();
+		Some(Self {
+			ok,
+			tool_name: tool_name.to_string(),
+			error_type,
+			terminal,
+			data,
+			message,
+		})
 	}
 
 	pub fn from_result_payload(tool_name: &str, payload: &Value) -> Self {

@@ -40,6 +40,7 @@ use crate::runtime_loop::{LoopState, ToolObservation};
 /// ## Invariants
 /// - This struct interprets tool facts; it does not replace them.
 /// - `continue_allowed` is false whenever any explicit terminal branch is selected.
+/// - Non-`multiple_candidates` tool failures are treated as loop-failing observations today.
 ///
 /// ## Non-Goals
 /// - This struct does not directly choose the next tool.
@@ -76,10 +77,18 @@ pub fn interpret_observation(
 	let should_ask_user = !raw_observation.ok
 		&& !terminal
 		&& raw_observation.error_type.as_deref() == Some("multiple_candidates");
+	let unhandled_failure = !raw_observation.ok && !terminal && !should_ask_user;
 	let should_emit_final_answer = raw_observation.ok && terminal;
-	let should_fail = (!raw_observation.ok && terminal) || budget_exhausted || recovery_exhausted;
+	let should_fail = (!raw_observation.ok && terminal)
+		|| unhandled_failure
+		|| budget_exhausted
+		|| recovery_exhausted;
 	InterpretedObservation {
-		continue_allowed: !terminal && !budget_exhausted && !recovery_exhausted && !should_ask_user,
+		continue_allowed: !terminal
+			&& !budget_exhausted
+			&& !recovery_exhausted
+			&& !should_ask_user
+			&& !unhandled_failure,
 		should_ask_user,
 		should_emit_final_answer,
 		should_fail,
@@ -190,5 +199,27 @@ mod tests {
 		assert!(!interpreted.continue_allowed);
 		assert!(interpreted.should_fail);
 		assert!(interpreted.recovery_exhausted);
+	}
+
+	#[test]
+	fn non_multiple_candidate_failures_stop_the_loop_immediately() {
+		let state = loop_state();
+		let interpreted = interpret_observation(
+			&state,
+			ToolObservation {
+				ok: false,
+				tool_name: "command.run".to_string(),
+				error_type: Some("non_zero_exit".to_string()),
+				terminal: false,
+				data: json!({}),
+				message: "command failed".to_string(),
+			},
+			None,
+		);
+
+		assert!(!interpreted.continue_allowed);
+		assert!(!interpreted.should_ask_user);
+		assert!(!interpreted.should_emit_final_answer);
+		assert!(interpreted.should_fail);
 	}
 }
