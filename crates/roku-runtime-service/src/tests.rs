@@ -329,6 +329,61 @@ fn pending_filesystem_tool_loops_resume_through_the_generic_loop_driver() {
 }
 
 #[test]
+fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
+	let service = RuntimeService::default();
+	let cwd = env::current_dir().expect("cwd should resolve");
+	let context = LoopContext {
+		request_id: "req-freeform-pending".to_string(),
+		session_id: "session-1".to_string(),
+		goal: "继续".to_string(),
+		workspace_root: cwd.display().to_string(),
+		working_directory: cwd.display().to_string(),
+		visible_tools: vec![
+			"general.execute".to_string(),
+			"inventory.describe".to_string(),
+			"fs.find".to_string(),
+		],
+		bound_resources: vec![ResourceSelector::tool("general.execute".to_string())],
+		route_decision: RouteDecision::new(
+			IntentFamily::Chat,
+			0.88,
+			false,
+			RouteRisk::Low,
+			vec!["general.execute".to_string()],
+			Vec::new(),
+			Vec::new(),
+			"freeform clarification request",
+		),
+		last_observation: None,
+	};
+	let mut loop_state = LoopState::new("loop-freeform-pending", &context);
+	loop_state.status = roku_agent_runtime::LoopStatus::AwaitingUser;
+	loop_state.awaiting_user = Some(AskUserPayload::freeform("您想继续什么任务？"));
+	service
+		.restore_pending_loop(loop_state)
+		.expect("pending loop should restore");
+
+	let response = service
+		.execute(request("What skills and tools do you have right now?"))
+		.expect("fresh intake should succeed");
+
+	assert_eq!(response.status, ResponseStatus::Succeeded);
+	assert_ne!(response.message, "您想继续什么任务？");
+	assert!(
+		service
+			.pending_loop("session-1")
+			.expect("pending loop lookup should succeed")
+			.is_none()
+	);
+	let task = service
+		.get_task(&TaskId("task-req-1".to_string()))
+		.expect("task lookup should succeed")
+		.expect("task should be persisted");
+	assert_eq!(task.state, TaskState::Succeeded);
+	assert!(task.last_result.is_some());
+}
+
+#[test]
 fn historical_graph_tasks_remain_resumable() {
 	let service = RuntimeService::default();
 	let task_id = TaskId("task-legacy-resume".to_string());
