@@ -12,7 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Roku command runtime bootstrap.
+//! Command-line bootstrap for local Roku runtimes and operator utilities.
+//!
+//! This crate is the process-owned edge of the workspace: it parses CLI arguments, resolves local
+//! storage/config layout, and boots the requested runtime surface such as one-shot execution,
+//! Telegram transport, or the HTTP gateway. It does not own task-planning semantics itself; those
+//! stay inside the runtime service and agent-runtime crates.
 
 mod api;
 mod bot;
@@ -48,6 +53,11 @@ use crate::runtime::{
 };
 use crate::storage::LocalStorageLayout;
 
+/// Top-level command error surface for CLI entrypoints.
+///
+/// This enum intentionally collapses lower-level bootstrap failures into command-oriented buckets
+/// so the binary can report operator-facing startup errors without exposing every internal crate
+/// boundary as its own CLI contract.
 #[derive(Debug, Error)]
 pub enum CommandError {
 	#[error("{0}")]
@@ -80,6 +90,10 @@ pub enum CommandError {
 	TelegramTransport(#[from] roku_plugin_telegram::TelegramTransportError),
 }
 
+/// Parses CLI arguments, dispatches to the requested command surface, and returns printable output.
+///
+/// `Ok(Some(...))` means the caller should print a response payload. `Ok(None)` is reserved for
+/// long-running commands that own their own stdout/stderr lifecycle after startup.
 pub fn execute_cli<I, S>(args: I) -> Result<Option<String>, CommandError>
 where
 	I: IntoIterator<Item = S>,
@@ -128,6 +142,10 @@ where
 	}
 }
 
+/// Returns the stable CLI help text used by usage errors and explicit help requests.
+///
+/// Keeping this in one place prevents subcommand parsers from drifting into slightly different
+/// operator guidance.
 pub fn help_text() -> &'static str {
 	"Usage:\n  roku-cmd once [--session-id <id>] [--planning-mode <mode>] [--generated-skill-root <path>] <goal>\n  roku-cmd live-once [--session-id <id>] [--planning-mode <mode>] [--generated-skill-root <path>] <goal>\n  roku-cmd telegram-once [--session-id <id>] [--planning-mode <mode>] [--generated-skill-root <path>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n  roku-cmd task show <task-id>\n  roku-cmd task replay <task-id>\n  roku-cmd task resume <task-id>\n  roku-cmd approval show <approval-id>\n  roku-cmd approval approve <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd approval reject <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd artifact list <task-id>\n  roku-cmd artifact content <task-id> <artifact-id>\n  roku-cmd artifact download <task-id> <artifact-id> --output <path>\n  roku-cmd experiment show <task-id>\n  roku-cmd skill install <source-url>\n  roku-cmd skill list\n  roku-cmd skill show <skill-name>\n\nCommands:\n  once              Run the deterministic in-process pipeline.\n  live-once         Run the OpenRouter-backed live pipeline from environment.\n  telegram-once     Run one live Telegram handler turn and print the outbound bot message.\n  telegram-bot      Start the Telegram polling bot using environment configuration.\n  api-gateway       Start the Actix HTTP gateway using environment configuration.\n  task show         Render a persisted task snapshot with its event timeline.\n  task replay       Rebuild a state-transition report from persisted task events.\n  task resume       Continue a resumable persisted task using the live runtime path.\n  approval          Show or decide an approval ticket from persisted state.\n  artifact          List artifacts, print artifact content, or download an artifact payload.\n  experiment show   Render the persisted experiment run for a task.\n  skill install     Install a skill package into the local file-backed registry.\n  skill list        List installed skills from the local registry.\n  skill show        Render installed skill metadata and prompt context.\n\nPlanning Modes:\n  react | taskdecomposition | treesearch | iterativerefinement\n\nNote:\n  --planning-mode is a deprecated compatibility hint. New requests stay on the direct-route runtime and produce a compatibility fallback instead of entering a planning-heavy workflow."
 }

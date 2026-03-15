@@ -12,6 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Runtime bootstrap and command-facing execution adapters.
+//!
+//! This module translates CLI/env inputs into concrete runtime-service instances and request
+//! envelopes. It owns process-local bootstrap concerns such as plugin discovery, config loading,
+//! state-store wiring, and mode selection. It does not decide agent behavior inside a run once the
+//! request has entered the runtime loop.
+
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -45,6 +52,10 @@ use crate::CommandError;
 use crate::runtime_config::{RuntimeConfigs, load_runtime_configs};
 use crate::storage::LocalStorageLayout;
 
+/// Canonical request options shared by CLI entrypoints before a runtime request is normalized.
+///
+/// This stays slightly above `RequestEnvelope`: CLI-only compatibility hints and env overrides can
+/// be represented here without leaking command-surface concerns into the gateway contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExecutionRequestOptions {
 	pub session_id: String,
@@ -53,6 +64,10 @@ pub(crate) struct ExecutionRequestOptions {
 	pub generated_skill_root: Option<std::path::PathBuf>,
 }
 
+/// Runs a single deterministic in-process request with default CLI session options.
+///
+/// This is the thinnest command-facing entrypoint and is used by tests and the default `once`
+/// command path.
 pub fn run_once(goal: &str) -> Result<ResponseEnvelope, RuntimeError> {
 	run_with_mode_and_options(
 		ExecutionRequestOptions {
@@ -65,6 +80,10 @@ pub fn run_once(goal: &str) -> Result<ResponseEnvelope, RuntimeError> {
 	)
 }
 
+/// Runs a single deterministic request while allowing the caller to choose the runtime mode.
+///
+/// The mode only affects service execution semantics after bootstrap; request normalization and
+/// env-derived overrides remain the same as `run_once`.
 pub fn run_with_mode(goal: &str, mode: RunMode) -> Result<ResponseEnvelope, RuntimeError> {
 	run_with_mode_and_options(
 		ExecutionRequestOptions {
@@ -77,6 +96,7 @@ pub fn run_with_mode(goal: &str, mode: RunMode) -> Result<ResponseEnvelope, Runt
 	)
 }
 
+/// Applies CLI-specific overrides, builds the deterministic service, and executes one request.
 pub(crate) fn run_with_mode_and_options(
 	options: ExecutionRequestOptions,
 	mode: RunMode,
@@ -89,6 +109,10 @@ pub(crate) fn run_with_mode_and_options(
 	execute_with_service_and_mode(service, request, mode)
 }
 
+/// Runs one live request using env-backed plugin/runtime bootstrap.
+///
+/// Unlike `run_once`, this path will attempt to boot the live OpenRouter-backed runtime and only
+/// falls back according to runtime bootstrap policy.
 pub fn run_live_once_from_env(goal: &str) -> Result<ResponseEnvelope, CommandError> {
 	run_live_once_with_options_from_env(ExecutionRequestOptions {
 		session_id: "session-1".to_string(),
@@ -108,6 +132,10 @@ pub(crate) fn run_live_once_with_options_from_env(
 	execute_with_service_and_mode(service, request, RunMode::Normal).map_err(CommandError::Runtime)
 }
 
+/// Builds the live runtime service using the process-local layout, plugin inventory, and configs.
+///
+/// This is the shared bootstrap entrypoint for CLI live-once, Telegram, and the HTTP gateway so
+/// those surfaces observe the same plugin policy and runtime-mode fallback behavior.
 pub(crate) fn build_live_runtime_service_from_env() -> Result<RuntimeService, CommandError> {
 	let (layout, bootstrap) = build_plugin_bootstrap_from_env()?;
 	build_live_runtime_service_from_layout_and_bootstrap(&layout, bootstrap)

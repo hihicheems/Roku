@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! HTTP gateway bootstrap for command-owned local deployments.
+//!
+//! The CLI crate only owns process startup and env parsing here. Request validation and runtime
+//! execution semantics stay inside the API gateway and runtime service crates.
+
 use std::env;
 use std::sync::Arc;
 
@@ -22,6 +27,10 @@ use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use crate::CommandError;
 use crate::runtime::build_live_runtime_service_from_env;
 
+/// Process-local server settings for the embedded API gateway.
+///
+/// These values are intentionally small and startup-scoped so the command surface can keep HTTP
+/// bootstrap concerns separate from runtime config owned by other crates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ApiGatewayServerConfig {
 	bind_addr: String,
@@ -55,6 +64,10 @@ impl ApiGatewayServerConfig {
 	}
 }
 
+/// Boots the HTTP gateway and blocks the current process until the server exits.
+///
+/// This command shares the same live runtime bootstrap path as Telegram and `live-once`, so all
+/// three surfaces observe the same plugin inventory and fallback mode report.
 pub(crate) fn run_api_gateway_from_env() -> Result<(), CommandError> {
 	let config = ApiGatewayServerConfig::from_env()?;
 	let service = Arc::new(build_live_runtime_service_from_env()?);
