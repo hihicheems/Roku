@@ -26,15 +26,22 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: docker/setup-buildx-action@v3
+      - name: Warm Docker base image cache
+        run: |
+          ensure_image() {
+            local image="$1"
+            if docker image inspect "$image" >/dev/null 2>&1; then
+              echo "Using cached image: $image"
+            else
+              echo "Pulling image: $image"
+              docker pull "$image"
+            fi
+          }
+
+          ensure_image rust:1.92-alpine
+          ensure_image alpine:3.23
 
       - name: Validate linux/amd64 Docker build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/Dockerfile
-          platforms: linux/amd64
-          push: false
-          load: false
-          cache-from: type=gha,scope=docker-validate-amd64
-          cache-to: type=gha,mode=max,scope=docker-validate-amd64
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: docker build --network host --platform linux/amd64 --file deploy/Dockerfile .
