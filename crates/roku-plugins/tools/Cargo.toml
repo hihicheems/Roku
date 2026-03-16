@@ -20,7 +20,7 @@ roku-plugin-skills = { path = "../skills" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 shlex = "1"
-toml = "0.9"
+toml = "1.0"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "local-offset"] }
 url = "2"
