@@ -1,4 +1,4 @@
-name: Docker Validate
+name: Docker Validation
 
 on:
   push:
@@ -18,7 +18,17 @@ permissions:
   contents: read
 
 jobs:
-  docker-build:
+  docker-validate:
+    # This job runs on our current self-hosted Linux runner, not on a standard
+    # GitHub-hosted machine. That runner sits behind extra network constraints:
+    #
+    # 1. Pulling uncached images through BuildKit/buildx has been unreliable.
+    # 2. Network access inside `docker build` RUN steps does not automatically
+    #    behave like the host daemon's network access.
+    #
+    # These workarounds are here specifically for this runner profile. A normal
+    # GitHub-hosted runner, or a self-hosted runner with direct outbound access
+    # and working container DNS/proxy settings, should not need these extras.
     runs-on:
       - self-hosted
       - linux
@@ -27,6 +37,15 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Warm Docker base image cache
+        # On this self-hosted runner, asking BuildKit to fetch uncached base
+        # images during the build has been flaky. We warm the daemon cache first
+        # so the later `docker build` can reuse local copies instead of hitting
+        # Docker Hub again in the middle of the validation step.
+        #
+        # If we remove this on the current runner, Docker validation can fail
+        # before the real build starts, usually while resolving/pulling base
+        # images. On a normal runner with stable Docker Hub access, this step is
+        # usually unnecessary.
         run: |
           ensure_image() {
             local image="$1"
@@ -41,7 +60,34 @@ jobs:
           ensure_image rust:1.92-alpine
           ensure_image alpine:3.23
 
-      - name: Validate linux/amd64 Docker build
+      - name: Validate linux/amd64 Dockerfile build
         env:
           DOCKER_BUILDKIT: "1"
-        run: docker build --network host --platform linux/amd64 --file deploy/Dockerfile .
+        run: |
+          # The current self-hosted runner already has working proxy settings at
+          # the host level, but those values are not implicitly forwarded into
+          # `docker build` RUN steps.
+          #
+          # Without the explicit build args below, commands inside the Dockerfile
+          # such as `apk add` and `cargo install` can fail with DNS/timeout
+          # errors even though plain `docker pull` works on the host.
+          #
+          # We also force `--network host` because this runner's container build
+          # network has not behaved like the host network by default.
+          #
+          # On a normal runner with direct outbound access and correct container
+          # DNS/proxy behavior, a plain `docker build` (or buildx action) should
+          # be enough and these workarounds can likely be removed.
+          build_args=()
+          for var in http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY no_proxy NO_PROXY; do
+            if [ -n "${!var:-}" ]; then
+              build_args+=(--build-arg "$var")
+            fi
+          done
+
+          docker build \
+            --network host \
+            "${build_args[@]}" \
+            --platform linux/amd64 \
+            --file deploy/Dockerfile \
+            .
