@@ -32,7 +32,11 @@ use roku_common_types::{
 	TaskId,
 };
 use roku_experiment_registry::ExperimentRegistry;
-use roku_memory::{ConservativeMemoryLifecyclePolicy, NoopLongTermMemoryBackend};
+use roku_memory::{
+	ConservativeMemoryLifecyclePolicy, LongTermMemoryBackend, MemoryBackendHealth,
+	MemoryDeleteSelector, MemoryError, MemoryLifecyclePolicy, MemoryQuery, MemoryRecallInput,
+	MemoryWriteRequest, NoopLongTermMemoryBackend,
+};
 use roku_observability::{InMemoryAuditSink, LogLevel, LogRecord, Metrics, emit_global_log};
 use roku_plugin_core::{PluginDisableReason, PluginPolicyConfig};
 use roku_plugin_host::{
@@ -50,10 +54,14 @@ use roku_state_store::{
 use serde_json::json;
 
 use crate::CommandError;
+use crate::memory_runtime_config::{MemoryBackend, MemoryRuntimeConfig};
 use crate::runtime_config::{
 	RuntimeConfigs, load_runtime_configs, prepare_runtime_generated_artifacts,
 };
 use crate::storage::LocalStorageLayout;
+
+#[cfg(feature = "memory-openviking")]
+use roku_plugin_memory_openviking::{OpenVikingBackendConfig, OpenVikingLongTermMemoryBackend};
 
 /// Canonical request options shared by CLI entrypoints before a runtime request is normalized.
 ///
@@ -65,6 +73,22 @@ pub(crate) struct ExecutionRequestOptions {
 	pub goal: String,
 	pub planning_mode_hint: Option<PlanningModeHint>,
 	pub generated_skill_root: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Default)]
+struct DisabledMemoryLifecyclePolicy;
+
+impl MemoryLifecyclePolicy for DisabledMemoryLifecyclePolicy {
+	fn build_recall_query(&self, _input: &MemoryRecallInput) -> Option<MemoryQuery> {
+		None
+	}
+
+	fn build_write_request(
+		&self,
+		_input: &roku_memory::MemoryWritePolicyInput,
+	) -> Option<MemoryWriteRequest> {
+		None
+	}
 }
 
 /// Runs a single deterministic in-process request with default CLI session options.
@@ -242,6 +266,80 @@ pub(crate) fn show_skill_from_env(skill_name: &str) -> Result<String, CommandErr
 	format_skill_detail(&registry, skill_name)
 }
 
+pub(crate) fn prepare_memory_artifacts_from_env() -> Result<String, CommandError> {
+	let layout = LocalStorageLayout::from_env();
+	layout.ensure_dirs().map_err(CommandError::Io)?;
+	let configs = load_runtime_configs(&layout)?;
+	let generated = prepare_runtime_generated_artifacts(&configs)?;
+	serde_json::to_string_pretty(&json!({
+		"enabled": configs.memory.enabled,
+		"backend": match configs.memory.backend {
+			MemoryBackend::OpenViking => "openviking",
+		},
+		"openviking": {
+			"client": {
+				"base_url": configs.memory.openviking.client.base_url,
+			},
+			"adapter": {
+				"resource_root_uri": configs.memory.openviking.adapter.resource_root_uri,
+				"staging_dir": configs
+					.memory
+					.openviking
+					.adapter
+					.staging_dir
+					.display()
+					.to_string(),
+				"write_wait_timeout_ms": configs.memory.openviking.adapter.write_wait_timeout_ms,
+				"strict": configs.memory.openviking.adapter.strict,
+			},
+			"process": {
+				"managed": configs.memory.openviking.process.managed,
+			},
+		},
+		"generated_openviking_config_path": generated
+			.as_ref()
+			.map(|path| path.display().to_string()),
+	}))
+	.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+}
+
+pub(crate) fn show_memory_health_from_env() -> Result<String, CommandError> {
+	let (_, backend) = build_enabled_memory_backend_from_env()?;
+	let health = backend.health().map_err(map_memory_error)?;
+	encode_memory_health(health)
+}
+
+pub(crate) fn search_memory_from_env(query: MemoryQuery) -> Result<String, CommandError> {
+	let (_, backend) = build_enabled_memory_backend_from_env()?;
+	let hits = backend.search(&query).map_err(map_memory_error)?;
+	serde_json::to_string_pretty(&hits)
+		.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+}
+
+pub(crate) fn write_memory_from_env(request: MemoryWriteRequest) -> Result<String, CommandError> {
+	let (_, backend) = build_enabled_memory_backend_from_env()?;
+	let ack = backend.write(&request).map_err(map_memory_error)?;
+	serde_json::to_string_pretty(&json!({
+		"accepted": ack.accepted,
+		"record_id": ack.record_id,
+	}))
+	.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+}
+
+pub(crate) fn delete_memory_from_env(record_id: &str) -> Result<String, CommandError> {
+	let (_, backend) = build_enabled_memory_backend_from_env()?;
+	backend
+		.delete(&MemoryDeleteSelector {
+			record_id: record_id.to_string(),
+		})
+		.map_err(map_memory_error)?;
+	serde_json::to_string_pretty(&json!({
+		"deleted": true,
+		"record_id": record_id,
+	}))
+	.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+}
+
 fn format_install_skill_report(
 	registry: &SkillRegistry,
 	source_url: &str,
@@ -264,6 +362,19 @@ fn format_skill_detail(registry: &SkillRegistry, skill_name: &str) -> Result<Str
 	serde_json::to_string_pretty(&json!({
 		"record": record,
 		"prompt_context": prompt_context,
+	}))
+	.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+}
+
+fn encode_memory_health(health: MemoryBackendHealth) -> Result<String, CommandError> {
+	serde_json::to_string_pretty(&json!({
+		"backend": health.backend,
+		"status": match health.status {
+			roku_memory::MemoryBackendStatus::Healthy => "healthy",
+			roku_memory::MemoryBackendStatus::Degraded => "degraded",
+			roku_memory::MemoryBackendStatus::Unavailable => "unavailable",
+		},
+		"detail": health.detail,
 	}))
 	.map_err(|error| CommandError::OutputEncoding(error.to_string()))
 }
@@ -316,7 +427,7 @@ fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandEr
 	let store_config = sqlite_store_config(&layout);
 	let (artifact_store, experiment_registry) = build_runtime_data_plane(&layout);
 
-	Ok(wire_default_long_term_memory(
+	wire_default_long_term_memory(
 		RuntimeService::new_with_runtime_data_plane_and_metrics(
 			roku_runtime_service::RuntimeDataPlane {
 				task_repo: Box::new(connect_sqlite_task_repository(&store_config)?),
@@ -331,7 +442,8 @@ fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandEr
 			runtime,
 			Arc::new(Metrics::default()),
 		),
-	))
+		&bootstrap.runtime_configs.memory,
+	)
 }
 
 fn build_skill_registry_from_env() -> Result<SkillRegistry, CommandError> {
@@ -524,10 +636,11 @@ fn build_deterministic_runtime_service_from_env() -> Result<RuntimeService, Comm
 			bootstrap.runtime_configs.agent,
 		);
 	log_runtime_bootstrap_mode(&RuntimeModeReport::deterministic());
-	Ok(wire_default_long_term_memory(
+	wire_default_long_term_memory(
 		RuntimeService::in_memory_with_agent_runtime(runtime)
 			.with_runtime_mode_report(RuntimeModeReport::deterministic()),
-	))
+		&bootstrap.runtime_configs.memory,
+	)
 }
 
 pub(crate) fn build_live_runtime_service_from_layout_and_bootstrap(
@@ -539,7 +652,7 @@ pub(crate) fn build_live_runtime_service_from_layout_and_bootstrap(
 	let store_config = sqlite_store_config(layout);
 	let (artifact_store, experiment_registry) = build_runtime_data_plane(layout);
 
-	Ok(wire_default_long_term_memory(
+	wire_default_long_term_memory(
 		RuntimeService::new_with_runtime_data_plane_and_metrics(
 			roku_runtime_service::RuntimeDataPlane {
 				task_repo: Box::new(connect_sqlite_task_repository(&store_config)?),
@@ -555,13 +668,86 @@ pub(crate) fn build_live_runtime_service_from_layout_and_bootstrap(
 			metrics,
 		)
 		.with_runtime_mode_report(runtime_mode),
+		&bootstrap.runtime_configs.memory,
+	)
+}
+
+fn wire_default_long_term_memory(
+	service: RuntimeService,
+	memory_config: &MemoryRuntimeConfig,
+) -> Result<RuntimeService, CommandError> {
+	let backend = build_long_term_memory_backend(memory_config)?;
+	let policy: Arc<dyn MemoryLifecyclePolicy> =
+		if memory_config.enabled && memory_config.recall.enabled {
+			Arc::new(ConservativeMemoryLifecyclePolicy {
+				recall_limit: memory_config.recall.top_k.max(1),
+			})
+		} else {
+			Arc::new(DisabledMemoryLifecyclePolicy)
+		};
+	Ok(service
+		.with_long_term_memory_backend(backend)
+		.with_memory_lifecycle_policy(policy))
+}
+
+fn build_enabled_memory_backend_from_env()
+-> Result<(RuntimeConfigs, Arc<dyn LongTermMemoryBackend>), CommandError> {
+	let layout = LocalStorageLayout::from_env();
+	layout.ensure_dirs().map_err(CommandError::Io)?;
+	let configs = load_runtime_configs(&layout)?;
+	let _ = prepare_runtime_generated_artifacts(&configs)?;
+	if !configs.memory.enabled {
+		return Err(CommandError::Usage(
+			"runtime.memory.enabled is false; enable memory before using memory commands"
+				.to_string(),
+		));
+	}
+	let backend = build_long_term_memory_backend(&configs.memory)?;
+	Ok((configs, backend))
+}
+
+fn build_long_term_memory_backend(
+	memory_config: &MemoryRuntimeConfig,
+) -> Result<Arc<dyn LongTermMemoryBackend>, CommandError> {
+	if !memory_config.enabled {
+		return Ok(Arc::new(NoopLongTermMemoryBackend));
+	}
+
+	match memory_config.backend {
+		MemoryBackend::OpenViking => build_openviking_memory_backend(memory_config),
+	}
+}
+
+#[cfg(feature = "memory-openviking")]
+fn build_openviking_memory_backend(
+	memory_config: &MemoryRuntimeConfig,
+) -> Result<Arc<dyn LongTermMemoryBackend>, CommandError> {
+	let config = OpenVikingBackendConfig {
+		base_url: memory_config.openviking.client.base_url.clone(),
+		api_key: memory_config.openviking.client.api_key.clone(),
+		connect_timeout_ms: memory_config.openviking.client.connect_timeout_ms,
+		request_timeout_ms: memory_config.openviking.client.request_timeout_ms,
+		resource_root_uri: memory_config.openviking.adapter.resource_root_uri.clone(),
+		staging_dir: memory_config.openviking.adapter.staging_dir.clone(),
+		write_wait_timeout_ms: memory_config.openviking.adapter.write_wait_timeout_ms,
+		strict: memory_config.openviking.adapter.strict,
+	};
+	let backend = OpenVikingLongTermMemoryBackend::new(config)
+		.map_err(|error| CommandError::MemoryBackend(error.to_string()))?;
+	Ok(Arc::new(backend))
+}
+
+#[cfg(not(feature = "memory-openviking"))]
+fn build_openviking_memory_backend(
+	_memory_config: &MemoryRuntimeConfig,
+) -> Result<Arc<dyn LongTermMemoryBackend>, CommandError> {
+	Err(CommandError::MemoryBackend(
+		"runtime.memory.backend=openviking requires the `memory-openviking` feature".to_string(),
 	))
 }
 
-fn wire_default_long_term_memory(service: RuntimeService) -> RuntimeService {
-	service
-		.with_long_term_memory_backend(Arc::new(NoopLongTermMemoryBackend))
-		.with_memory_lifecycle_policy(Arc::new(ConservativeMemoryLifecyclePolicy::default()))
+fn map_memory_error(error: MemoryError) -> CommandError {
+	CommandError::MemoryBackend(error.to_string())
 }
 
 fn build_live_runtime(

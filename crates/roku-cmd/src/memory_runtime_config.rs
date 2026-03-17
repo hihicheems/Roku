@@ -31,6 +31,7 @@ pub const HARD_MAX_MEMORY_CONNECT_TIMEOUT_MS: u64 = 30_000;
 pub const HARD_MAX_MEMORY_REQUEST_TIMEOUT_MS: u64 = 120_000;
 pub const HARD_MAX_OPENVIKING_EMBED_MAX_CONCURRENT: usize = 64;
 pub const HARD_MAX_OPENVIKING_VLM_MAX_CONCURRENT: usize = 64;
+pub const HARD_MAX_OPENVIKING_WRITE_WAIT_TIMEOUT_MS: u64 = 600_000;
 
 const DEFAULT_OPENVIKING_CLIENT_BASE_URL: &str = "http://127.0.0.1:1933";
 const DEFAULT_OPENVIKING_EMBEDDING_API_BASE: &str = "https://openrouter.ai/api/v1";
@@ -92,6 +93,7 @@ pub struct MemoryWriteConfigPatch {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OpenVikingRuntimeConfig {
 	pub client: OpenVikingClientConfig,
+	pub adapter: OpenVikingAdapterConfig,
 	pub process: OpenVikingProcessConfig,
 }
 
@@ -100,6 +102,8 @@ pub struct OpenVikingRuntimeConfig {
 pub struct OpenVikingRuntimeConfigPatch {
 	#[serde(default)]
 	pub client: Option<OpenVikingClientConfigPatch>,
+	#[serde(default)]
+	pub adapter: Option<OpenVikingAdapterConfigPatch>,
 	#[serde(default)]
 	pub process: Option<OpenVikingProcessConfigPatch>,
 }
@@ -118,6 +122,23 @@ pub struct OpenVikingClientConfigPatch {
 	pub base_url: Option<String>,
 	pub connect_timeout_ms: Option<u64>,
 	pub request_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenVikingAdapterConfig {
+	pub resource_root_uri: String,
+	pub staging_dir: PathBuf,
+	pub write_wait_timeout_ms: u64,
+	pub strict: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenVikingAdapterConfigPatch {
+	pub resource_root_uri: Option<String>,
+	pub staging_dir: Option<PathBuf>,
+	pub write_wait_timeout_ms: Option<u64>,
+	pub strict: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -309,6 +330,17 @@ impl Default for OpenVikingClientConfig {
 	}
 }
 
+impl Default for OpenVikingAdapterConfig {
+	fn default() -> Self {
+		Self {
+			resource_root_uri: "viking://resources/roku-memory".to_string(),
+			staging_dir: PathBuf::from(".roku").join("openviking").join("staging"),
+			write_wait_timeout_ms: 120_000,
+			strict: true,
+		}
+	}
+}
+
 impl Default for OpenVikingProcessConfig {
 	fn default() -> Self {
 		Self {
@@ -429,6 +461,25 @@ impl MemoryRuntimeConfig {
 			env_override_secret("ROKU_RUNTIME__MEMORY__OPENVIKING__CLIENT__API_KEY")
 		{
 			self.openviking.client.api_key = Some(value);
+		}
+		if let Some(value) =
+			env_override_string("ROKU_RUNTIME__MEMORY__OPENVIKING__ADAPTER__RESOURCE_ROOT_URI")
+		{
+			self.openviking.adapter.resource_root_uri = value;
+		}
+		if let Some(value) =
+			env_override_path("ROKU_RUNTIME__MEMORY__OPENVIKING__ADAPTER__STAGING_DIR")
+		{
+			self.openviking.adapter.staging_dir = value;
+		}
+		if let Some(value) =
+			env_override_u64("ROKU_RUNTIME__MEMORY__OPENVIKING__ADAPTER__WRITE_WAIT_TIMEOUT_MS")?
+		{
+			self.openviking.adapter.write_wait_timeout_ms = value;
+		}
+		if let Some(value) = env_override_bool("ROKU_RUNTIME__MEMORY__OPENVIKING__ADAPTER__STRICT")?
+		{
+			self.openviking.adapter.strict = value;
 		}
 		if let Some(value) =
 			env_override_bool("ROKU_RUNTIME__MEMORY__OPENVIKING__PROCESS__MANAGED")?
@@ -592,6 +643,37 @@ impl MemoryRuntimeConfig {
 			.min(HARD_MAX_MEMORY_REQUEST_TIMEOUT_MS);
 		self.openviking.client.api_key =
 			trim_optional_secret(self.openviking.client.api_key.take());
+
+		self.openviking.adapter.resource_root_uri = self
+			.openviking
+			.adapter
+			.resource_root_uri
+			.trim()
+			.trim_end_matches('/')
+			.to_string();
+		if self.openviking.adapter.resource_root_uri.is_empty() {
+			return Err(invalid_config(
+				"runtime.memory.openviking.adapter.resource_root_uri",
+				"value cannot be empty",
+			));
+		}
+		if self.openviking.adapter.staging_dir.as_os_str().is_empty() {
+			return Err(invalid_config(
+				"runtime.memory.openviking.adapter.staging_dir",
+				"value cannot be empty",
+			));
+		}
+		if self.openviking.adapter.write_wait_timeout_ms == 0 {
+			return Err(invalid_config(
+				"runtime.memory.openviking.adapter.write_wait_timeout_ms",
+				"value must be greater than zero",
+			));
+		}
+		self.openviking.adapter.write_wait_timeout_ms = self
+			.openviking
+			.adapter
+			.write_wait_timeout_ms
+			.min(HARD_MAX_OPENVIKING_WRITE_WAIT_TIMEOUT_MS);
 
 		if self
 			.openviking
@@ -839,6 +921,9 @@ impl OpenVikingRuntimeConfig {
 		if let Some(value) = patch.client {
 			self.client.apply_patch(value);
 		}
+		if let Some(value) = patch.adapter {
+			self.adapter.apply_patch(value);
+		}
 		if let Some(value) = patch.process {
 			self.process.apply_patch(value);
 		}
@@ -855,6 +940,23 @@ impl OpenVikingClientConfig {
 		}
 		if let Some(value) = patch.request_timeout_ms {
 			self.request_timeout_ms = value;
+		}
+	}
+}
+
+impl OpenVikingAdapterConfig {
+	fn apply_patch(&mut self, patch: OpenVikingAdapterConfigPatch) {
+		if let Some(value) = patch.resource_root_uri {
+			self.resource_root_uri = value;
+		}
+		if let Some(value) = patch.staging_dir {
+			self.staging_dir = value;
+		}
+		if let Some(value) = patch.write_wait_timeout_ms {
+			self.write_wait_timeout_ms = value;
+		}
+		if let Some(value) = patch.strict {
+			self.strict = value;
 		}
 	}
 }

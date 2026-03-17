@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+memory-openviking = ["dep:roku-plugin-memory-openviking"]
+
 [dependencies]
 actix-web = "4"
 dotenvy = "0.15"
@@ -20,6 +24,7 @@ roku-plugin-core = { path = "../roku-plugins/core" }
 roku-plugin-host = { path = "../roku-plugins/host" }
 roku-plugin-llm = { path = "../roku-plugins/llm" }
 roku-plugin-skills = { path = "../roku-plugins/skills" }
+roku-plugin-memory-openviking = { path = "../roku-plugins/memory-openviking", optional = true }
 roku-plugin-telegram = { path = "../roku-plugins/telegram" }
 roku-runtime-service = { path = "../roku-runtime-service" }
 roku-state-store = { path = "../roku-state-store" }

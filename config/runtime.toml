@@ -149,6 +149,13 @@ connect_timeout_ms = 1000
 request_timeout_ms = 5000
 # Secrets such as client auth remain env-only.
 
+[runtime.memory.openviking.adapter]
+# Roku-owned adapter settings for mapping memory records into OpenViking resources.
+resource_root_uri = "viking://resources/roku-memory"
+staging_dir = ".roku/openviking/staging"
+write_wait_timeout_ms = 120000
+strict = true
+
 [runtime.memory.openviking.process]
 # Managed process bootstrap stays disabled until the OpenViking adapter phase.
 managed = false
