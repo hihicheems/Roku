@@ -88,6 +88,12 @@ pub trait ResultRepository {
 	fn list_results(&self, task_id: &TaskId) -> Result<Vec<ResultEnvelope>, StoreError>;
 }
 
+/// Session-scoped runtime continuation state owned by the transport/session layer.
+///
+/// This is currently backed by [`SessionPreferences`] for compatibility, but callers should use
+/// the `SessionState*` naming to avoid treating this record as a general preference bucket.
+pub type SessionState = SessionPreferences;
+
 pub trait SessionPreferenceRepository {
 	fn save_preferences(
 		&mut self,
@@ -109,6 +115,92 @@ pub trait ConversationRepository {
 	/// Deletes one session's stored conversation turns.
 	fn delete_conversation(&mut self, session_id: &str) -> Result<(), StoreError>;
 }
+
+/// Semantic boundary for transport/session-owned state.
+///
+/// This narrows the role of the backing record to session-scoped continuity control state instead
+/// of a generic preference repository. Existing repositories still implement the legacy
+/// `SessionPreferenceRepository` contract; this trait provides the Phase 2 caller-facing name.
+pub trait SessionStateStore {
+	fn save_session_state(
+		&mut self,
+		session_id: &str,
+		state: SessionState,
+	) -> Result<(), StoreError>;
+	fn load_session_state(&self, session_id: &str) -> Result<Option<SessionState>, StoreError>;
+	fn delete_session_state(&mut self, session_id: &str) -> Result<(), StoreError>;
+}
+
+impl<T> SessionStateStore for T
+where
+	T: SessionPreferenceRepository + ?Sized,
+{
+	fn save_session_state(
+		&mut self,
+		session_id: &str,
+		state: SessionState,
+	) -> Result<(), StoreError> {
+		self.save_preferences(session_id, state)
+	}
+
+	fn load_session_state(&self, session_id: &str) -> Result<Option<SessionState>, StoreError> {
+		self.load_preferences(session_id)
+	}
+
+	fn delete_session_state(&mut self, session_id: &str) -> Result<(), StoreError> {
+		self.delete_preferences(session_id)
+	}
+}
+
+/// Semantic boundary for short-term continuity turns.
+///
+/// This represents recent transcript continuity only; it is not a general-purpose memory store.
+pub trait ConversationStore {
+	fn append_continuity_turn(
+		&mut self,
+		session_id: &str,
+		turn: ConversationTurn,
+	) -> Result<(), StoreError>;
+	fn load_short_term_continuity(
+		&self,
+		session_id: &str,
+		limit: usize,
+	) -> Result<Vec<ConversationTurn>, StoreError>;
+	fn delete_continuity(&mut self, session_id: &str) -> Result<(), StoreError>;
+}
+
+impl<T> ConversationStore for T
+where
+	T: ConversationRepository + ?Sized,
+{
+	fn append_continuity_turn(
+		&mut self,
+		session_id: &str,
+		turn: ConversationTurn,
+	) -> Result<(), StoreError> {
+		ConversationRepository::append_turn(self, session_id, turn)
+	}
+
+	fn load_short_term_continuity(
+		&self,
+		session_id: &str,
+		limit: usize,
+	) -> Result<Vec<ConversationTurn>, StoreError> {
+		ConversationRepository::load_recent_turns(self, session_id, limit)
+	}
+
+	fn delete_continuity(&mut self, session_id: &str) -> Result<(), StoreError> {
+		ConversationRepository::delete_conversation(self, session_id)
+	}
+}
+
+pub type InMemorySessionStateStore = InMemorySessionPreferenceRepository;
+pub type FileSessionStateStore = FileSessionPreferenceRepository;
+pub type SqliteSessionStateStore = SqliteSessionPreferenceRepository;
+
+pub type InMemoryConversationStore = InMemoryConversationRepository;
+pub type FileConversationStore = FileConversationRepository;
+pub type SqliteConversationStore = SqliteConversationRepository;
 
 #[derive(Debug, Default)]
 pub struct InMemoryTaskRepository {
