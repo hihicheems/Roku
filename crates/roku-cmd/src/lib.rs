@@ -21,6 +21,7 @@
 
 mod api;
 mod bot;
+mod memory_runtime_config;
 mod runtime;
 mod runtime_config;
 mod storage;

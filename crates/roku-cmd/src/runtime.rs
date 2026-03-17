@@ -49,7 +49,9 @@ use roku_state_store::{
 use serde_json::json;
 
 use crate::CommandError;
-use crate::runtime_config::{RuntimeConfigs, load_runtime_configs};
+use crate::runtime_config::{
+	RuntimeConfigs, load_runtime_configs, prepare_runtime_generated_artifacts,
+};
 use crate::storage::LocalStorageLayout;
 
 /// Canonical request options shared by CLI entrypoints before a runtime request is normalized.
@@ -439,6 +441,7 @@ pub(crate) fn build_plugin_bootstrap_from_env()
 fn build_plugin_bootstrap(layout: &LocalStorageLayout) -> Result<PluginBootstrap, CommandError> {
 	let tool_config = load_tool_catalog_config(layout)?;
 	let runtime_configs = load_runtime_configs(layout)?;
+	let _ = prepare_runtime_generated_artifacts(&runtime_configs)?;
 	let policy = load_plugin_policy_config(layout)?;
 	let discovery = PluginDiscoveryConfig {
 		explicit_paths: policy.paths.clone(),

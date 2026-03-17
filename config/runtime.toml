@@ -7,6 +7,7 @@
 # - [runtime.llm.openrouter] -> crates/roku-plugins/llm
 # - [runtime.telegram]       -> crates/roku-plugins/telegram
 # - [runtime.skills]         -> crates/roku-plugins/skills
+# - [runtime.memory.*]       -> crates/roku-cmd
 #
 # Values in this file are runtime defaults and overrides.
 # Final hard ceilings still live in code so one bad edit cannot push the
@@ -123,3 +124,61 @@ max_archive_bytes = 33554432
 max_prompt_document_bytes = 24576
 # Maximum number of skill documents included in prompt context.
 max_prompt_documents = 24
+
+[runtime.memory]
+# Phase 1 keeps memory disabled by default so startup behavior stays unchanged until
+# the later runtime rollout phases wire the new backend into the main execution path.
+enabled = false
+# Backend selector stays typed even while only OpenViking is supported.
+backend = "openviking"
+
+[runtime.memory.recall]
+# Future long-term recall is opt-in and stays under Roku-owned control.
+enabled = true
+top_k = 8
+
+[runtime.memory.write]
+# Future long-term write-back is opt-in and stays under Roku-owned control.
+enabled = true
+max_batch_size = 16
+
+[runtime.memory.openviking.client]
+# HTTP endpoint for the external OpenViking service when Roku calls it as a backend.
+base_url = "http://127.0.0.1:1933"
+connect_timeout_ms = 1000
+request_timeout_ms = 5000
+# Secrets such as client auth remain env-only.
+
+[runtime.memory.openviking.process]
+# Managed process bootstrap stays disabled until the OpenViking adapter phase.
+managed = false
+# Generated config artifact path; this file is rendered from typed config rather than hand-edited.
+config_output_path = ".roku/run/openviking/ov.conf"
+
+[runtime.memory.openviking.process.storage]
+# Workspace root consumed by the generated OpenViking service config.
+workspace = ".roku/openviking/workspace"
+# These backend selectors remain Roku-owned process config for future bootstrap wiring.
+# The current OpenViking release template only consumes `storage.workspace`.
+vectordb_backend = "local"
+agfs_backend = "local"
+
+[runtime.memory.openviking.process.server]
+# Server binding hints are reserved for later dev bootstrap wiring.
+# The current OpenViking release template does not consume them from `ov.conf`.
+host = "127.0.0.1"
+port = 1933
+
+[runtime.memory.openviking.process.embedding]
+provider = "openai"
+api_base = "https://openrouter.ai/api/v1"
+model = "thenlper/gte-base"
+dimension = 768
+max_concurrent = 8
+
+[runtime.memory.openviking.process.vlm]
+provider = "openai"
+api_base = "https://openrouter.ai/api/v1"
+model = "qwen/qwen3.5-flash-02-23"
+max_concurrent = 16
+thinking = false
