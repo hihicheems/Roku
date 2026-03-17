@@ -16,6 +16,8 @@
 //!
 //! This module is intentionally narrow: it reads `runtime.toml`, applies env overrides, and hands
 //! typed config bundles back to the crates that actually enforce runtime semantics.
+//! For memory specifically, startup only performs parsing/materialization during the migration;
+//! provider-neutral ownership belongs to `roku-memory`.
 
 use std::fs;
 use std::path::PathBuf;
@@ -301,11 +303,22 @@ mod tests {
 		assert_eq!(configs.memory.recall.top_k, 8);
 		assert_eq!(configs.memory.write.max_batch_size, 16);
 		assert_eq!(
-			configs.memory.openviking.process.config_output_path,
+			configs
+				.memory
+				.backends
+				.openviking
+				.process
+				.config_output_path,
 			PathBuf::from(".roku")
 				.join("run")
 				.join("openviking")
 				.join("ov.conf")
+		);
+		assert_eq!(
+			configs.memory.backends.sqlite.path,
+			PathBuf::from(".roku")
+				.join("state")
+				.join("control-plane.db")
 		);
 	}
 
@@ -352,13 +365,13 @@ top_k = 999
 [runtime.memory.write]
 max_batch_size = 999
 
-[runtime.memory.openviking.client]
+[runtime.memory.backends.openviking.client]
 request_timeout_ms = 999999
 
-[runtime.memory.openviking.process.embedding]
+[runtime.memory.backends.openviking.process.embedding]
 max_concurrent = 999
 
-[runtime.memory.openviking.process.vlm]
+[runtime.memory.backends.openviking.process.vlm]
 max_concurrent = 999
 "#,
 		);
@@ -395,15 +408,27 @@ max_concurrent = 999
 			HARD_MAX_MEMORY_WRITE_BATCH_SIZE
 		);
 		assert_eq!(
-			configs.memory.openviking.client.request_timeout_ms,
+			configs.memory.backends.openviking.client.request_timeout_ms,
 			HARD_MAX_MEMORY_REQUEST_TIMEOUT_MS
 		);
 		assert_eq!(
-			configs.memory.openviking.process.embedding.max_concurrent,
+			configs
+				.memory
+				.backends
+				.openviking
+				.process
+				.embedding
+				.max_concurrent,
 			HARD_MAX_OPENVIKING_EMBED_MAX_CONCURRENT
 		);
 		assert_eq!(
-			configs.memory.openviking.process.vlm.max_concurrent,
+			configs
+				.memory
+				.backends
+				.openviking
+				.process
+				.vlm
+				.max_concurrent,
 			HARD_MAX_OPENVIKING_VLM_MAX_CONCURRENT
 		);
 	}
@@ -451,7 +476,7 @@ enabled = false
 [runtime.memory.recall]
 top_k = 5
 
-[runtime.memory.openviking.process]
+[runtime.memory.backends.openviking.process]
 managed = false
 "#,
 		);
@@ -466,10 +491,11 @@ managed = false
 			EnvGuard::remove("ROKU_RUNTIME__AGENT__NEXT_STEP__EXPECTED_OUTPUT_TOKENS");
 		let _clear_memory_enabled = EnvGuard::remove("ROKU_RUNTIME__MEMORY__ENABLED");
 		let _clear_memory_top_k = EnvGuard::remove("ROKU_RUNTIME__MEMORY__RECALL__TOP_K");
-		let _clear_memory_embedding_key =
-			EnvGuard::remove("ROKU_RUNTIME__MEMORY__OPENVIKING__PROCESS__EMBEDDING__API_KEY");
+		let _clear_memory_embedding_key = EnvGuard::remove(
+			"ROKU_RUNTIME__MEMORY__BACKENDS__OPENVIKING__PROCESS__EMBEDDING__API_KEY",
+		);
 		let _clear_memory_vlm_key =
-			EnvGuard::remove("ROKU_RUNTIME__MEMORY__OPENVIKING__PROCESS__VLM__API_KEY");
+			EnvGuard::remove("ROKU_RUNTIME__MEMORY__BACKENDS__OPENVIKING__PROCESS__VLM__API_KEY");
 		let _clear_memory_legacy_key = EnvGuard::remove("OPENROUTER_API_KEY");
 
 		let _legacy_tools = EnvGuard::set("ROKU_WEB_SEARCH_URL", "https://legacy.example/search");
@@ -506,6 +532,7 @@ managed = false
 		assert_eq!(
 			configs
 				.memory
+				.backends
 				.openviking
 				.process
 				.embedding
@@ -514,7 +541,14 @@ managed = false
 			Some("legacy-memory-key")
 		);
 		assert_eq!(
-			configs.memory.openviking.process.vlm.api_key.as_deref(),
+			configs
+				.memory
+				.backends
+				.openviking
+				.process
+				.vlm
+				.api_key
+				.as_deref(),
 			Some("legacy-memory-key")
 		);
 	}
@@ -529,16 +563,17 @@ managed = false
 [runtime.memory]
 enabled = true
 
-[runtime.memory.openviking.process]
+[runtime.memory.backends.openviking.process]
 managed = true
 config_output_path = ".roku/run/openviking/generated.ov.conf"
 "#,
 		);
 
-		let _clear_embedding_key =
-			EnvGuard::remove("ROKU_RUNTIME__MEMORY__OPENVIKING__PROCESS__EMBEDDING__API_KEY");
+		let _clear_embedding_key = EnvGuard::remove(
+			"ROKU_RUNTIME__MEMORY__BACKENDS__OPENVIKING__PROCESS__EMBEDDING__API_KEY",
+		);
 		let _clear_vlm_key =
-			EnvGuard::remove("ROKU_RUNTIME__MEMORY__OPENVIKING__PROCESS__VLM__API_KEY");
+			EnvGuard::remove("ROKU_RUNTIME__MEMORY__BACKENDS__OPENVIKING__PROCESS__VLM__API_KEY");
 		let _clear_legacy = EnvGuard::remove("OPENROUTER_API_KEY");
 		let _legacy_key = EnvGuard::set("OPENROUTER_API_KEY", "phase1-generated-key");
 

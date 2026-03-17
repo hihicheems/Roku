@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! OpenViking adapter for Roku long-term memory.
+//! OpenViking adapter for Roku memory contracts.
 //!
 //! This crate maps the provider-neutral contracts from `roku-memory` onto the
 //! OpenViking HTTP API. It is intentionally limited to provider configuration,
@@ -25,4 +25,13 @@ mod backend;
 mod config;
 
 pub use backend::OpenVikingLongTermMemoryBackend;
-pub use config::{OpenVikingBackendConfig, OpenVikingBackendConfigError};
+pub use config::{
+	OpenVikingAdapterConfig, OpenVikingAdapterConfigPatch, OpenVikingBackendConfig,
+	OpenVikingBackendConfigError, OpenVikingClientConfig, OpenVikingClientConfigPatch,
+	OpenVikingEmbeddingConfig, OpenVikingEmbeddingConfigPatch, OpenVikingEmbeddingInput,
+	OpenVikingEmbeddingProvider, OpenVikingProcessConfig, OpenVikingProcessConfigPatch,
+	OpenVikingRuntimeConfig, OpenVikingRuntimeConfigError, OpenVikingRuntimeConfigPatch,
+	OpenVikingServerConfig, OpenVikingServerConfigPatch, OpenVikingStorageBackend,
+	OpenVikingStorageConfig, OpenVikingStorageConfigPatch, OpenVikingVlmConfig,
+	OpenVikingVlmConfigPatch, OpenVikingVlmProvider,
+};

@@ -18,6 +18,10 @@
 //! envelopes. It owns process-local bootstrap concerns such as plugin discovery, config loading,
 //! state-store wiring, and mode selection. It does not decide agent behavior inside a run once the
 //! request has entered the runtime loop.
+//!
+//! For memory specifically, this module is still carrying transitional concrete bootstrap code.
+//! That is migration residue, not target ownership: later phases move memory resolution behind the
+//! Roku-owned registry while `roku-cmd` remains the composition root.
 
 use std::fs;
 use std::path::Path;
@@ -33,8 +37,8 @@ use roku_common_types::{
 };
 use roku_experiment_registry::ExperimentRegistry;
 use roku_memory::{
-	ConservativeMemoryLifecyclePolicy, LongTermMemoryBackend, MemoryBackendHealth,
-	MemoryDeleteSelector, MemoryError, MemoryLifecyclePolicy, MemoryQuery, MemoryRecallInput,
+	ConservativeMemoryLifecyclePolicy, DisabledMemoryLifecyclePolicy, LongTermMemoryBackend,
+	MemoryBackendHealth, MemoryDeleteSelector, MemoryError, MemoryLifecyclePolicy, MemoryQuery,
 	MemoryWriteRequest, NoopLongTermMemoryBackend,
 };
 use roku_observability::{InMemoryAuditSink, LogLevel, LogRecord, Metrics, emit_global_log};
@@ -61,7 +65,7 @@ use crate::runtime_config::{
 use crate::storage::LocalStorageLayout;
 
 #[cfg(feature = "memory-openviking")]
-use roku_plugin_memory_openviking::{OpenVikingBackendConfig, OpenVikingLongTermMemoryBackend};
+use roku_plugin_memory_openviking::OpenVikingLongTermMemoryBackend;
 
 /// Canonical request options shared by CLI entrypoints before a runtime request is normalized.
 ///
@@ -73,22 +77,6 @@ pub(crate) struct ExecutionRequestOptions {
 	pub goal: String,
 	pub planning_mode_hint: Option<PlanningModeHint>,
 	pub generated_skill_root: Option<std::path::PathBuf>,
-}
-
-#[derive(Debug, Default)]
-struct DisabledMemoryLifecyclePolicy;
-
-impl MemoryLifecyclePolicy for DisabledMemoryLifecyclePolicy {
-	fn build_recall_query(&self, _input: &MemoryRecallInput) -> Option<MemoryQuery> {
-		None
-	}
-
-	fn build_write_request(
-		&self,
-		_input: &roku_memory::MemoryWritePolicyInput,
-	) -> Option<MemoryWriteRequest> {
-		None
-	}
 }
 
 /// Runs a single deterministic in-process request with default CLI session options.
@@ -276,25 +264,9 @@ pub(crate) fn prepare_memory_artifacts_from_env() -> Result<String, CommandError
 		"backend": match configs.memory.backend {
 			MemoryBackend::OpenViking => "openviking",
 		},
-		"openviking": {
-			"client": {
-				"base_url": configs.memory.openviking.client.base_url,
-			},
-			"adapter": {
-				"resource_root_uri": configs.memory.openviking.adapter.resource_root_uri,
-				"staging_dir": configs
-					.memory
-					.openviking
-					.adapter
-					.staging_dir
-					.display()
-					.to_string(),
-				"write_wait_timeout_ms": configs.memory.openviking.adapter.write_wait_timeout_ms,
-				"strict": configs.memory.openviking.adapter.strict,
-			},
-			"process": {
-				"managed": configs.memory.openviking.process.managed,
-			},
+		"backends": {
+			"openviking": configs.memory.backends.openviking.summary_json(),
+			"sqlite": configs.memory.backends.sqlite.summary_json(),
 		},
 		"generated_openviking_config_path": generated
 			.as_ref()
@@ -706,6 +678,10 @@ fn build_enabled_memory_backend_from_env()
 	Ok((configs, backend))
 }
 
+/// Transitional startup helper for Phase 1.
+///
+/// Concrete memory backend construction still lives in `roku-cmd` as migration
+/// residue. Later phases replace this with Roku-owned registry resolution.
 fn build_long_term_memory_backend(
 	memory_config: &MemoryRuntimeConfig,
 ) -> Result<Arc<dyn LongTermMemoryBackend>, CommandError> {
@@ -719,25 +695,18 @@ fn build_long_term_memory_backend(
 }
 
 #[cfg(feature = "memory-openviking")]
+/// Transitional adapter bootstrap that will move behind the memory registry.
 fn build_openviking_memory_backend(
 	memory_config: &MemoryRuntimeConfig,
 ) -> Result<Arc<dyn LongTermMemoryBackend>, CommandError> {
-	let config = OpenVikingBackendConfig {
-		base_url: memory_config.openviking.client.base_url.clone(),
-		api_key: memory_config.openviking.client.api_key.clone(),
-		connect_timeout_ms: memory_config.openviking.client.connect_timeout_ms,
-		request_timeout_ms: memory_config.openviking.client.request_timeout_ms,
-		resource_root_uri: memory_config.openviking.adapter.resource_root_uri.clone(),
-		staging_dir: memory_config.openviking.adapter.staging_dir.clone(),
-		write_wait_timeout_ms: memory_config.openviking.adapter.write_wait_timeout_ms,
-		strict: memory_config.openviking.adapter.strict,
-	};
+	let config = memory_config.backends.openviking.to_backend_config();
 	let backend = OpenVikingLongTermMemoryBackend::new(config)
 		.map_err(|error| CommandError::MemoryBackend(error.to_string()))?;
 	Ok(Arc::new(backend))
 }
 
 #[cfg(not(feature = "memory-openviking"))]
+/// Transitional adapter bootstrap that will move behind the memory registry.
 fn build_openviking_memory_backend(
 	_memory_config: &MemoryRuntimeConfig,
 ) -> Result<Arc<dyn LongTermMemoryBackend>, CommandError> {
