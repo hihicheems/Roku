@@ -20,6 +20,10 @@ use roku_common_types::{
 	ApprovalId, ApprovalTicket, ConversationTurn, NodeId, ResultEnvelope, SessionPreferences, Task,
 	TaskEvent, TaskId, TaskReplaySnapshot,
 };
+use roku_memory::{
+	SessionState, SessionStateBackend, SessionStateError, ShortTermContinuityBackend,
+	ShortTermContinuityError,
+};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::{
@@ -410,6 +414,30 @@ impl SessionPreferenceRepository for SqliteSessionPreferenceRepository {
 	}
 }
 
+impl SessionStateBackend for SqliteSessionPreferenceRepository {
+	fn save_session_state(
+		&mut self,
+		session_id: &str,
+		state: SessionState,
+	) -> Result<(), SessionStateError> {
+		self.save_preferences(session_id, state)
+			.map_err(|error| SessionStateError::Backend(error.to_string()))
+	}
+
+	fn load_session_state(
+		&self,
+		session_id: &str,
+	) -> Result<Option<SessionState>, SessionStateError> {
+		self.load_preferences(session_id)
+			.map_err(|error| SessionStateError::Backend(error.to_string()))
+	}
+
+	fn delete_session_state(&mut self, session_id: &str) -> Result<(), SessionStateError> {
+		self.delete_preferences(session_id)
+			.map_err(|error| SessionStateError::Backend(error.to_string()))
+	}
+}
+
 #[derive(Debug, Clone)]
 pub struct SqliteConversationRepository {
 	config: SqliteStoreConfig,
@@ -466,6 +494,31 @@ impl ConversationRepository for SqliteConversationRepository {
 			params![session_id],
 		)?;
 		Ok(())
+	}
+}
+
+impl ShortTermContinuityBackend for SqliteConversationRepository {
+	fn append_continuity_turn(
+		&mut self,
+		session_id: &str,
+		turn: ConversationTurn,
+	) -> Result<(), ShortTermContinuityError> {
+		self.append_turn(session_id, turn)
+			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
+	}
+
+	fn load_short_term_continuity(
+		&self,
+		session_id: &str,
+		limit: usize,
+	) -> Result<Vec<ConversationTurn>, ShortTermContinuityError> {
+		self.load_recent_turns(session_id, limit)
+			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
+	}
+
+	fn delete_continuity(&mut self, session_id: &str) -> Result<(), ShortTermContinuityError> {
+		self.delete_conversation(session_id)
+			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
 	}
 }
 

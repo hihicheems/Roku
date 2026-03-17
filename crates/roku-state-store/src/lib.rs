@@ -12,7 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Trait-backed state repositories with in-memory and file adapters.
+//! Transitional persistence repositories and adapters.
+//!
+//! This crate is exiting the target memory architecture. It is not the long-term
+//! home for Roku memory, continuity, session, or pending-loop contracts.
+//! During the migration it may still host storage adapters and compatibility
+//! shims, but new memory-subsystem ownership belongs in `roku-memory`.
 
 mod dispatch;
 mod sqlite;
@@ -24,6 +29,10 @@ use std::path::{Path, PathBuf};
 use roku_common_types::{
 	ApprovalId, ApprovalTicket, ConversationTurn, NodeId, ResultEnvelope, SessionPreferences, Task,
 	TaskEvent, TaskId, TaskReplaySnapshot,
+};
+use roku_memory::{
+	SessionState, SessionStateBackend, SessionStateError, ShortTermContinuityBackend,
+	ShortTermContinuityError,
 };
 use thiserror::Error;
 
@@ -88,13 +97,7 @@ pub trait ResultRepository {
 	fn list_results(&self, task_id: &TaskId) -> Result<Vec<ResultEnvelope>, StoreError>;
 }
 
-/// Session-scoped runtime continuation state owned by the transport/session layer.
-///
-/// This is currently backed by [`SessionPreferences`] for compatibility, but callers should use
-/// the `SessionState*` naming to avoid treating this record as a general preference bucket.
-pub type SessionState = SessionPreferences;
-
-pub trait SessionPreferenceRepository {
+pub(crate) trait SessionPreferenceRepository {
 	fn save_preferences(
 		&mut self,
 		session_id: &str,
@@ -105,7 +108,7 @@ pub trait SessionPreferenceRepository {
 	fn delete_preferences(&mut self, session_id: &str) -> Result<(), StoreError>;
 }
 
-pub trait ConversationRepository {
+pub(crate) trait ConversationRepository {
 	fn append_turn(&mut self, session_id: &str, turn: ConversationTurn) -> Result<(), StoreError>;
 	fn load_recent_turns(
 		&self,
@@ -115,92 +118,6 @@ pub trait ConversationRepository {
 	/// Deletes one session's stored conversation turns.
 	fn delete_conversation(&mut self, session_id: &str) -> Result<(), StoreError>;
 }
-
-/// Semantic boundary for transport/session-owned state.
-///
-/// This narrows the role of the backing record to session-scoped continuity control state instead
-/// of a generic preference repository. Existing repositories still implement the legacy
-/// `SessionPreferenceRepository` contract; this trait provides the Phase 2 caller-facing name.
-pub trait SessionStateStore {
-	fn save_session_state(
-		&mut self,
-		session_id: &str,
-		state: SessionState,
-	) -> Result<(), StoreError>;
-	fn load_session_state(&self, session_id: &str) -> Result<Option<SessionState>, StoreError>;
-	fn delete_session_state(&mut self, session_id: &str) -> Result<(), StoreError>;
-}
-
-impl<T> SessionStateStore for T
-where
-	T: SessionPreferenceRepository + ?Sized,
-{
-	fn save_session_state(
-		&mut self,
-		session_id: &str,
-		state: SessionState,
-	) -> Result<(), StoreError> {
-		self.save_preferences(session_id, state)
-	}
-
-	fn load_session_state(&self, session_id: &str) -> Result<Option<SessionState>, StoreError> {
-		self.load_preferences(session_id)
-	}
-
-	fn delete_session_state(&mut self, session_id: &str) -> Result<(), StoreError> {
-		self.delete_preferences(session_id)
-	}
-}
-
-/// Semantic boundary for short-term continuity turns.
-///
-/// This represents recent transcript continuity only; it is not a general-purpose memory store.
-pub trait ConversationStore {
-	fn append_continuity_turn(
-		&mut self,
-		session_id: &str,
-		turn: ConversationTurn,
-	) -> Result<(), StoreError>;
-	fn load_short_term_continuity(
-		&self,
-		session_id: &str,
-		limit: usize,
-	) -> Result<Vec<ConversationTurn>, StoreError>;
-	fn delete_continuity(&mut self, session_id: &str) -> Result<(), StoreError>;
-}
-
-impl<T> ConversationStore for T
-where
-	T: ConversationRepository + ?Sized,
-{
-	fn append_continuity_turn(
-		&mut self,
-		session_id: &str,
-		turn: ConversationTurn,
-	) -> Result<(), StoreError> {
-		ConversationRepository::append_turn(self, session_id, turn)
-	}
-
-	fn load_short_term_continuity(
-		&self,
-		session_id: &str,
-		limit: usize,
-	) -> Result<Vec<ConversationTurn>, StoreError> {
-		ConversationRepository::load_recent_turns(self, session_id, limit)
-	}
-
-	fn delete_continuity(&mut self, session_id: &str) -> Result<(), StoreError> {
-		ConversationRepository::delete_conversation(self, session_id)
-	}
-}
-
-pub type InMemorySessionStateStore = InMemorySessionPreferenceRepository;
-pub type FileSessionStateStore = FileSessionPreferenceRepository;
-pub type SqliteSessionStateStore = SqliteSessionPreferenceRepository;
-
-pub type InMemoryConversationStore = InMemoryConversationRepository;
-pub type FileConversationStore = FileConversationRepository;
-pub type SqliteConversationStore = SqliteConversationRepository;
 
 #[derive(Debug, Default)]
 pub struct InMemoryTaskRepository {
@@ -319,6 +236,30 @@ impl SessionPreferenceRepository for InMemorySessionPreferenceRepository {
 	}
 }
 
+impl SessionStateBackend for InMemorySessionPreferenceRepository {
+	fn save_session_state(
+		&mut self,
+		session_id: &str,
+		state: SessionState,
+	) -> Result<(), SessionStateError> {
+		self.save_preferences(session_id, state)
+			.map_err(|error| SessionStateError::Backend(error.to_string()))
+	}
+
+	fn load_session_state(
+		&self,
+		session_id: &str,
+	) -> Result<Option<SessionState>, SessionStateError> {
+		self.load_preferences(session_id)
+			.map_err(|error| SessionStateError::Backend(error.to_string()))
+	}
+
+	fn delete_session_state(&mut self, session_id: &str) -> Result<(), SessionStateError> {
+		self.delete_preferences(session_id)
+			.map_err(|error| SessionStateError::Backend(error.to_string()))
+	}
+}
+
 #[derive(Debug, Default)]
 pub struct InMemoryConversationRepository {
 	turns_by_session: HashMap<String, Vec<ConversationTurn>>,
@@ -348,6 +289,31 @@ impl ConversationRepository for InMemoryConversationRepository {
 	fn delete_conversation(&mut self, session_id: &str) -> Result<(), StoreError> {
 		self.turns_by_session.remove(session_id);
 		Ok(())
+	}
+}
+
+impl ShortTermContinuityBackend for InMemoryConversationRepository {
+	fn append_continuity_turn(
+		&mut self,
+		session_id: &str,
+		turn: ConversationTurn,
+	) -> Result<(), ShortTermContinuityError> {
+		self.append_turn(session_id, turn)
+			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
+	}
+
+	fn load_short_term_continuity(
+		&self,
+		session_id: &str,
+		limit: usize,
+	) -> Result<Vec<ConversationTurn>, ShortTermContinuityError> {
+		self.load_recent_turns(session_id, limit)
+			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
+	}
+
+	fn delete_continuity(&mut self, session_id: &str) -> Result<(), ShortTermContinuityError> {
+		self.delete_conversation(session_id)
+			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
 	}
 }
 
@@ -557,6 +523,30 @@ impl SessionPreferenceRepository for FileSessionPreferenceRepository {
 	}
 }
 
+impl SessionStateBackend for FileSessionPreferenceRepository {
+	fn save_session_state(
+		&mut self,
+		session_id: &str,
+		state: SessionState,
+	) -> Result<(), SessionStateError> {
+		self.save_preferences(session_id, state)
+			.map_err(|error| SessionStateError::Backend(error.to_string()))
+	}
+
+	fn load_session_state(
+		&self,
+		session_id: &str,
+	) -> Result<Option<SessionState>, SessionStateError> {
+		self.load_preferences(session_id)
+			.map_err(|error| SessionStateError::Backend(error.to_string()))
+	}
+
+	fn delete_session_state(&mut self, session_id: &str) -> Result<(), SessionStateError> {
+		self.delete_preferences(session_id)
+			.map_err(|error| SessionStateError::Backend(error.to_string()))
+	}
+}
+
 #[derive(Debug, Clone)]
 pub struct FileConversationRepository {
 	path: PathBuf,
@@ -619,6 +609,31 @@ impl ConversationRepository for FileConversationRepository {
 	}
 }
 
+impl ShortTermContinuityBackend for FileConversationRepository {
+	fn append_continuity_turn(
+		&mut self,
+		session_id: &str,
+		turn: ConversationTurn,
+	) -> Result<(), ShortTermContinuityError> {
+		self.append_turn(session_id, turn)
+			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
+	}
+
+	fn load_short_term_continuity(
+		&self,
+		session_id: &str,
+		limit: usize,
+	) -> Result<Vec<ConversationTurn>, ShortTermContinuityError> {
+		self.load_recent_turns(session_id, limit)
+			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
+	}
+
+	fn delete_continuity(&mut self, session_id: &str) -> Result<(), ShortTermContinuityError> {
+		self.delete_conversation(session_id)
+			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
+	}
+}
+
 impl ResultRepository for FileResultRepository {
 	fn save_result(&mut self, result: ResultEnvelope) -> Result<(), StoreError> {
 		let mut results = self.read_all()?;
@@ -678,6 +693,7 @@ mod tests {
 		ConversationRole, ConversationTurn, EvidenceItem, PlanningModeHint, RequestId,
 		ResultStatus, TaskState,
 	};
+	use roku_memory::{SessionStateBackend, ShortTermContinuityBackend};
 	use std::time::{SystemTime, UNIX_EPOCH};
 
 	fn unique_path(suffix: &str) -> PathBuf {
@@ -846,10 +862,10 @@ mod tests {
 
 	#[test]
 	fn semantic_store_boundaries_roundtrip() {
-		let mut session_state_store: Box<dyn SessionStateStore> =
-			Box::new(InMemorySessionStateStore::default());
-		let mut continuity_store: Box<dyn ConversationStore> =
-			Box::new(InMemoryConversationStore::default());
+		let mut session_state_store: Box<dyn SessionStateBackend> =
+			Box::new(InMemorySessionPreferenceRepository::default());
+		let mut continuity_store: Box<dyn ShortTermContinuityBackend> =
+			Box::new(InMemoryConversationRepository::default());
 
 		session_state_store
 			.save_session_state(
