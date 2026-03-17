@@ -24,7 +24,11 @@
 mod backend;
 mod config;
 
-pub use backend::OpenVikingLongTermMemoryBackend;
+use std::sync::Arc;
+
+use roku_memory::{LongTermMemoryBackend, MemoryAdapterAvailability, MemoryBackendId};
+
+pub use backend::{OpenVikingBackendBootstrapError, OpenVikingLongTermMemoryBackend};
 pub use config::{
 	OpenVikingAdapterConfig, OpenVikingAdapterConfigPatch, OpenVikingBackendConfig,
 	OpenVikingBackendConfigError, OpenVikingClientConfig, OpenVikingClientConfigPatch,
@@ -35,3 +39,27 @@ pub use config::{
 	OpenVikingStorageConfig, OpenVikingStorageConfigPatch, OpenVikingVlmConfig,
 	OpenVikingVlmConfigPatch, OpenVikingVlmProvider,
 };
+
+/// Registration surface for the OpenViking memory adapter.
+pub struct OpenVikingMemoryRegistration;
+
+impl OpenVikingMemoryRegistration {
+	/// Advertises the currently implemented OpenViking memory capabilities.
+	pub const fn availability() -> MemoryAdapterAvailability {
+		MemoryAdapterAvailability {
+			backend: MemoryBackendId::OpenViking,
+			long_term: true,
+			short_term: false,
+			session_state: false,
+			pending_loop: false,
+		}
+	}
+
+	/// Builds the provider-neutral long-term backend from adapter-owned config.
+	pub fn build_long_term_backend(
+		config: &OpenVikingRuntimeConfig,
+	) -> Result<Arc<dyn LongTermMemoryBackend>, OpenVikingBackendBootstrapError> {
+		let backend = OpenVikingLongTermMemoryBackend::new(config.to_backend_config())?;
+		Ok(Arc::new(backend))
+	}
+}
