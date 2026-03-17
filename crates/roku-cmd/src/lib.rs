@@ -20,11 +20,12 @@
 //! stay inside the runtime service and agent-runtime crates.
 //!
 //! `roku-cmd` is a composition root, not the owner of memory subsystem contracts or registry
-//! semantics. Any concrete memory bootstrap that still lives here is migration residue that will
-//! move behind the Roku-owned memory registry in later phases.
+//! semantics. Memory provider selection now flows through the Roku-owned entry registry; this
+//! crate keeps only the process-local glue that feeds typed config into that registry.
 
 mod api;
 mod bot;
+mod memory_registry;
 mod memory_runtime_config;
 mod runtime;
 mod runtime_config;

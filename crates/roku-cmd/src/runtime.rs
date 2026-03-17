@@ -19,9 +19,9 @@
 //! state-store wiring, and mode selection. It does not decide agent behavior inside a run once the
 //! request has entered the runtime loop.
 //!
-//! For memory specifically, this module is still carrying transitional concrete bootstrap code.
-//! That is migration residue, not target ownership: later phases move memory resolution behind the
-//! Roku-owned registry while `roku-cmd` remains the composition root.
+//! For memory specifically, this module now delegates adapter selection to the
+//! Roku-owned entry registry and keeps only composition-root duties such as
+//! config loading and service startup.
 
 use std::fs;
 use std::path::Path;
@@ -37,10 +37,9 @@ use roku_common_types::{
 };
 use roku_experiment_registry::ExperimentRegistry;
 use roku_memory::{
-	ConservativeMemoryLifecyclePolicy, DisabledMemoryLifecyclePolicy, LongTermBackendSelection,
-	LongTermMemoryBackend, MemoryAdapterAvailability, MemoryBackendHealth, MemoryBackendId,
-	MemoryDeleteSelector, MemoryError, MemoryLifecyclePolicy, MemoryQuery, MemoryWriteRequest,
-	NoopLongTermMemoryBackend, resolve_long_term_backend_selection,
+	ConservativeMemoryLifecyclePolicy, DisabledMemoryLifecyclePolicy, LongTermMemoryBackend,
+	MemoryBackendHealth, MemoryDeleteSelector, MemoryError, MemoryLifecyclePolicy, MemoryQuery,
+	MemoryWriteRequest,
 };
 use roku_observability::{InMemoryAuditSink, LogLevel, LogRecord, Metrics, emit_global_log};
 use roku_plugin_core::{PluginDisableReason, PluginPolicyConfig};
@@ -59,15 +58,12 @@ use roku_state_store::{
 use serde_json::json;
 
 use crate::CommandError;
+use crate::memory_registry::resolve_memory_subsystem;
 use crate::memory_runtime_config::MemoryRuntimeConfig;
 use crate::runtime_config::{
 	RuntimeConfigs, load_runtime_configs, prepare_runtime_generated_artifacts,
 };
 use crate::storage::LocalStorageLayout;
-
-#[cfg(feature = "memory-openviking")]
-use roku_plugin_memory_openviking::OpenVikingMemoryRegistration;
-use roku_plugin_memory_sqlite::SqliteMemoryRegistration;
 
 /// Canonical request options shared by CLI entrypoints before a runtime request is normalized.
 ///
@@ -648,7 +644,7 @@ fn wire_default_long_term_memory(
 	service: RuntimeService,
 	memory_config: &MemoryRuntimeConfig,
 ) -> Result<RuntimeService, CommandError> {
-	let backend = build_long_term_memory_backend(memory_config)?;
+	let backend = resolve_memory_subsystem(memory_config)?.long_term;
 	let policy: Arc<dyn MemoryLifecyclePolicy> =
 		if memory_config.enabled && memory_config.recall.enabled {
 			Arc::new(ConservativeMemoryLifecyclePolicy {
@@ -674,71 +670,8 @@ fn build_enabled_memory_backend_from_env()
 				.to_string(),
 		));
 	}
-	let backend = build_long_term_memory_backend(&configs.memory)?;
+	let backend = resolve_memory_subsystem(&configs.memory)?.long_term;
 	Ok((configs, backend))
-}
-
-/// Transitional startup helper during the phase1-3 migration.
-///
-/// Concrete long-term backend construction still lives in `roku-cmd` as
-/// migration residue. Entry-registry unification is still deferred to the
-/// later entry-layer phase.
-fn build_long_term_memory_backend(
-	memory_config: &MemoryRuntimeConfig,
-) -> Result<Arc<dyn LongTermMemoryBackend>, CommandError> {
-	let selection = resolve_long_term_backend_selection(
-		memory_config.enabled,
-		memory_config.backend,
-		match memory_config.backend {
-			MemoryBackendId::OpenViking => openviking_memory_adapter_availability(),
-			MemoryBackendId::Sqlite => sqlite_memory_adapter_availability(),
-		},
-	);
-
-	match selection {
-		LongTermBackendSelection::Disabled => Ok(Arc::new(NoopLongTermMemoryBackend)),
-		LongTermBackendSelection::Backend(MemoryBackendId::OpenViking) => {
-			build_openviking_memory_backend(memory_config)
-		}
-		LongTermBackendSelection::Backend(MemoryBackendId::Sqlite) => {
-			Ok(Arc::new(NoopLongTermMemoryBackend))
-		}
-	}
-}
-
-#[cfg(feature = "memory-openviking")]
-/// Transitional adapter bootstrap that will move behind the memory registry.
-fn build_openviking_memory_backend(
-	memory_config: &MemoryRuntimeConfig,
-) -> Result<Arc<dyn LongTermMemoryBackend>, CommandError> {
-	let backend =
-		OpenVikingMemoryRegistration::build_long_term_backend(&memory_config.backends.openviking)
-			.map_err(|error| CommandError::MemoryBackend(error.to_string()))?;
-	Ok(backend)
-}
-
-#[cfg(not(feature = "memory-openviking"))]
-/// Transitional adapter bootstrap that will move behind the memory registry.
-fn build_openviking_memory_backend(
-	_memory_config: &MemoryRuntimeConfig,
-) -> Result<Arc<dyn LongTermMemoryBackend>, CommandError> {
-	Err(CommandError::MemoryBackend(
-		"runtime.memory.backend=openviking requires the `memory-openviking` feature".to_string(),
-	))
-}
-
-#[cfg(feature = "memory-openviking")]
-fn openviking_memory_adapter_availability() -> MemoryAdapterAvailability {
-	OpenVikingMemoryRegistration::availability()
-}
-
-#[cfg(not(feature = "memory-openviking"))]
-fn openviking_memory_adapter_availability() -> MemoryAdapterAvailability {
-	MemoryAdapterAvailability::unavailable(MemoryBackendId::OpenViking)
-}
-
-fn sqlite_memory_adapter_availability() -> MemoryAdapterAvailability {
-	SqliteMemoryRegistration::availability()
 }
 
 fn map_memory_error(error: MemoryError) -> CommandError {

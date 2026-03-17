@@ -32,7 +32,6 @@ use roku_memory::{
 	ShortTermContinuityBackend, ShortTermContinuityError,
 };
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
-use roku_plugin_memory_sqlite::SqliteMemoryRegistration;
 use roku_plugin_telegram::{
 	TelegramBotConfig, TelegramChat, TelegramConnector, TelegramControlCommand,
 	TelegramControlCommandRequest, TelegramInteraction, TelegramInteractionHandler,
@@ -44,6 +43,7 @@ use roku_state_store::{InMemoryConversationRepository, InMemorySessionPreference
 use serde_json::json;
 
 use crate::CommandError;
+use crate::memory_registry::resolve_memory_subsystem;
 use crate::runtime::ExecutionRequestOptions;
 use crate::runtime::{
 	apply_request_env_overrides, build_live_runtime_service_from_layout_and_bootstrap,
@@ -514,21 +514,20 @@ pub(crate) struct TelegramTransportState {
 }
 
 impl TelegramTransportState {
-	/// Builds state from env using [`LocalStorageLayout`]; uses SQLite for both session state and continuity.
+	/// Builds state from env using the selected memory entry-registry bundle.
 	fn from_env() -> Result<Self, CommandError> {
 		let layout = LocalStorageLayout::from_env();
 		layout.ensure_dirs().map_err(CommandError::Io)?;
 		let runtime_configs = load_runtime_configs(&layout)?;
-		let sqlite_config = runtime_configs.memory.backends.sqlite.clone();
-		let subsystem = SqliteMemoryRegistration::resolve_subsystem(sqlite_config.clone())
-			.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?;
+		let subsystem = resolve_memory_subsystem(&runtime_configs.memory)?;
 		let _ = emit_global_log(
 			LogRecord::new(
 				"roku-cmd",
 				LogLevel::Info,
-				"using sqlite-backed telegram session state",
+				"using registry-backed telegram transport state",
 			)
-			.with_field("path", sqlite_config.path.display().to_string()),
+			.with_field("backend", runtime_configs.memory.backend.as_str())
+			.with_field("enabled", runtime_configs.memory.enabled.to_string()),
 		);
 		Ok(Self::from_memory_subsystem(subsystem))
 	}
