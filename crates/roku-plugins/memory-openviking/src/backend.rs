@@ -12,6 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! OpenViking-backed implementation of Roku's long-term memory contract.
+//!
+//! This module is deliberately adapter-shaped: it translates provider-neutral
+//! query and write requests into OpenViking HTTP calls, normalizes provider
+//! responses back into Roku memory records, and surfaces provider health/errors.
+//! It does not decide when recall occurs or what runtime should persist.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,11 +41,17 @@ use crate::config::{OpenVikingBackendConfig, OpenVikingBackendConfigError};
 
 static NEXT_RECORD_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// OpenViking adapter that implements Roku's provider-neutral memory backend trait.
+///
+/// The adapter owns only provider-facing concerns: HTTP transport, request/response
+/// mapping, staging local markdown files for ingestion, and basic health/error
+/// normalization. Runtime policy stays upstream in Roku.
 pub struct OpenVikingLongTermMemoryBackend {
 	client: Client,
 	config: OpenVikingBackendConfig,
 }
 
+/// Errors produced while constructing an [`OpenVikingLongTermMemoryBackend`].
 #[derive(Debug, Error)]
 pub enum OpenVikingBackendBootstrapError {
 	#[error(transparent)]
@@ -60,6 +73,10 @@ impl std::fmt::Debug for OpenVikingLongTermMemoryBackend {
 }
 
 impl OpenVikingLongTermMemoryBackend {
+	/// Builds a new OpenViking adapter from validated typed config.
+	///
+	/// The constructor also installs the optional API key into the default request
+	/// headers for subsequent backend calls.
 	pub fn new(config: OpenVikingBackendConfig) -> Result<Self, OpenVikingBackendBootstrapError> {
 		config.validate()?;
 		let mut headers = reqwest::header::HeaderMap::new();
@@ -78,10 +95,12 @@ impl OpenVikingLongTermMemoryBackend {
 		Ok(Self { client, config })
 	}
 
+	/// Resolves a provider-relative path against the configured base URL.
 	fn endpoint(&self, path: &str) -> String {
 		format!("{}{}", self.config.base_url.trim_end_matches('/'), path)
 	}
 
+	/// Sends a request and decodes OpenViking's `{ status, result, error }` envelope.
 	fn send_json<T>(&self, request: RequestBuilder) -> Result<T, MemoryError>
 	where
 		T: DeserializeOwned,
@@ -90,6 +109,10 @@ impl OpenVikingLongTermMemoryBackend {
 		parse_json_response(response)
 	}
 
+	/// Computes the OpenViking root URI to search for a recall query.
+	///
+	/// When the query narrows to a single memory kind, the adapter searches that
+	/// subtree directly so provider-side retrieval stays as tight as possible.
 	fn scope_root_uri_for_query(&self, query: &MemoryQuery) -> Result<String, MemoryError> {
 		let mut root = scope_root_uri(
 			&self.config.resource_root_uri,
@@ -105,6 +128,7 @@ impl OpenVikingLongTermMemoryBackend {
 		Ok(root)
 	}
 
+	/// Computes the storage subtree used for a new memory record.
 	fn scope_root_uri_for_write(
 		&self,
 		request: &MemoryWriteRequest,
@@ -123,6 +147,10 @@ impl OpenVikingLongTermMemoryBackend {
 		))
 	}
 
+	/// Materializes a provider-ingestible markdown file for the pending write.
+	///
+	/// Phase 4 uses local-file ingestion against a local OpenViking server, so the
+	/// staged path becomes part of the provider request.
 	fn stage_memory_record(&self, request: &MemoryWriteRequest) -> Result<PathBuf, MemoryError> {
 		let now_ms = unix_ms_now();
 		let counter = NEXT_RECORD_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -243,6 +271,7 @@ impl LongTermMemoryBackend for OpenVikingLongTermMemoryBackend {
 	}
 }
 
+/// OpenViking `search/find` request body for Roku recall.
 #[derive(Debug, Serialize)]
 struct FindRequestPayload {
 	query: String,
@@ -252,6 +281,7 @@ struct FindRequestPayload {
 	score_threshold: Option<f32>,
 }
 
+/// OpenViking `resources` ingestion request used for long-term memory writes.
 #[derive(Debug, Serialize)]
 struct AddResourceRequestPayload {
 	path: String,
@@ -266,6 +296,7 @@ struct AddResourceRequestPayload {
 	preserve_structure: Option<bool>,
 }
 
+/// Common provider envelope returned by OpenViking JSON endpoints.
 #[derive(Debug, Deserialize)]
 struct ProviderEnvelope {
 	status: String,
@@ -275,6 +306,7 @@ struct ProviderEnvelope {
 	error: Option<ProviderErrorPayload>,
 }
 
+/// Provider-side error details embedded inside [`ProviderEnvelope`].
 #[derive(Debug, Deserialize)]
 struct ProviderErrorPayload {
 	#[serde(default)]
@@ -283,6 +315,7 @@ struct ProviderErrorPayload {
 	message: Option<String>,
 }
 
+/// Search results returned by OpenViking's `find` endpoint.
 #[derive(Debug, Default, Deserialize)]
 struct FindResultPayload {
 	#[serde(default)]
@@ -294,6 +327,7 @@ struct FindResultPayload {
 }
 
 impl FindResultPayload {
+	/// Projects provider search payloads into Roku memory hits.
 	fn into_hits(self, resource_root_uri: &str, query: &MemoryQuery) -> Vec<MemoryHit> {
 		self.memories
 			.into_iter()
@@ -304,6 +338,7 @@ impl FindResultPayload {
 	}
 }
 
+/// Provider match payload shared across `memories`, `resources`, and `skills`.
 #[derive(Debug, Deserialize)]
 struct MatchedContextPayload {
 	uri: String,
@@ -317,12 +352,14 @@ struct MatchedContextPayload {
 	match_reason: String,
 }
 
+/// Result payload returned by resource ingestion.
 #[derive(Debug, Default, Deserialize)]
 struct AddResourceResultPayload {
 	#[serde(default)]
 	root_uri: Option<String>,
 }
 
+/// Minimal health payload used by the adapter's readiness check.
 #[derive(Debug, Deserialize)]
 struct HealthPayload {
 	status: String,
@@ -332,6 +369,7 @@ struct HealthPayload {
 	version: Option<String>,
 }
 
+/// Parses a successful JSON response that uses OpenViking's common envelope shape.
 fn parse_json_response<T>(response: reqwest::blocking::Response) -> Result<T, MemoryError>
 where
 	T: DeserializeOwned,
@@ -360,6 +398,7 @@ where
 		})
 }
 
+/// Parses provider responses whose success case does not carry a JSON `result`.
 fn parse_empty_response(response: reqwest::blocking::Response) -> Result<(), MemoryError> {
 	let status = response.status();
 	let body = response
@@ -380,6 +419,7 @@ fn parse_empty_response(response: reqwest::blocking::Response) -> Result<(), Mem
 	}
 }
 
+/// Maps provider-specific error codes into Roku's backend-neutral error taxonomy.
 fn map_provider_error(error: Option<ProviderErrorPayload>) -> MemoryError {
 	let Some(error) = error else {
 		return MemoryError::Internal("provider returned status=error without details".to_string());
@@ -399,6 +439,7 @@ fn map_provider_error(error: Option<ProviderErrorPayload>) -> MemoryError {
 	}
 }
 
+/// Maps raw HTTP failures into Roku's backend-neutral error taxonomy.
 fn map_status_error(status: StatusCode, body: String) -> MemoryError {
 	let detail = if body.trim().is_empty() {
 		format!("http {}", status.as_u16())
@@ -420,6 +461,7 @@ fn map_status_error(status: StatusCode, body: String) -> MemoryError {
 	}
 }
 
+/// Converts reqwest transport failures into backend-neutral errors.
 fn map_transport_error(error: reqwest::Error) -> MemoryError {
 	if error.is_timeout() || error.is_connect() {
 		return MemoryError::Unavailable(error.to_string());
@@ -427,6 +469,10 @@ fn map_transport_error(error: reqwest::Error) -> MemoryError {
 	MemoryError::Internal(error.to_string())
 }
 
+/// Projects a matched OpenViking context into Roku's canonical [`MemoryHit`] shape.
+///
+/// Provider URIs are normalized so that derived child resources such as
+/// `.abstract.md` still point back to the canonical record id.
 fn matched_context_into_hit(
 	context: MatchedContextPayload,
 	resource_root_uri: &str,
@@ -495,6 +541,7 @@ fn matched_context_into_hit(
 	}
 }
 
+/// Normalizes provider child-resource URIs back to the canonical record URI.
 fn canonical_record_uri(uri: &str) -> String {
 	let trimmed = uri.trim_end_matches('/');
 	let mut segments = trimmed.rsplitn(2, '/');
@@ -517,6 +564,11 @@ fn canonical_record_uri(uri: &str) -> String {
 	}
 }
 
+/// Returns whether the configured server can ingest local filesystem paths.
+///
+/// The current adapter write path stages markdown files locally and sends the path
+/// directly to OpenViking, so non-local servers are rejected until a remote upload
+/// flow is implemented.
 fn server_accepts_local_paths(base_url: &str) -> bool {
 	let Ok(url) = Url::parse(base_url) else {
 		return false;
@@ -527,6 +579,7 @@ fn server_accepts_local_paths(base_url: &str) -> bool {
 	matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
+/// Builds the local staging path used for a pending memory write.
 fn stage_path(root: &Path, request: &MemoryWriteRequest, file_name: &str) -> PathBuf {
 	let mut path = root.to_path_buf();
 	match request.scope {
@@ -566,6 +619,7 @@ fn stage_path(root: &Path, request: &MemoryWriteRequest, file_name: &str) -> Pat
 	path
 }
 
+/// Renders a Roku memory record into the markdown format ingested by OpenViking.
 fn render_memory_markdown(request: &MemoryWriteRequest) -> String {
 	let mut lines = Vec::new();
 	lines.push("# Roku Memory Record".to_string());
@@ -611,6 +665,7 @@ fn render_memory_markdown(request: &MemoryWriteRequest) -> String {
 	lines.join("\n")
 }
 
+/// Resolves the provider resource subtree that corresponds to a Roku memory scope.
 fn scope_root_uri(
 	resource_root_uri: &str,
 	scope: MemoryScope,
@@ -652,6 +707,7 @@ fn scope_root_uri(
 	}
 }
 
+/// Parses scope and kind back out of an OpenViking resource URI when possible.
 fn parse_uri_descriptor(uri: &str, resource_root_uri: &str) -> Option<MemoryUriDescriptor> {
 	let prefix = resource_root_uri.trim_end_matches('/');
 	let remainder = uri.strip_prefix(prefix)?.trim_start_matches('/');
@@ -719,6 +775,7 @@ fn parse_uri_descriptor(uri: &str, resource_root_uri: &str) -> Option<MemoryUriD
 	Some(descriptor)
 }
 
+/// Sanitizes user-controlled scope identifiers for filesystem and URI segments.
 fn sanitize_segment(value: &str) -> String {
 	let sanitized = value
 		.chars()
@@ -737,6 +794,7 @@ fn sanitize_segment(value: &str) -> String {
 	}
 }
 
+/// Returns the provider path segment for a Roku memory kind.
 fn memory_kind_segment(kind: MemoryKind) -> &'static str {
 	match kind {
 		MemoryKind::UserPreference => "user_preference",
@@ -749,6 +807,7 @@ fn memory_kind_segment(kind: MemoryKind) -> &'static str {
 	}
 }
 
+/// Parses an OpenViking path segment back into a Roku memory kind.
 fn parse_memory_kind_segment(segment: &str) -> Option<MemoryKind> {
 	match segment {
 		"user_preference" => Some(MemoryKind::UserPreference),
@@ -762,6 +821,7 @@ fn parse_memory_kind_segment(segment: &str) -> Option<MemoryKind> {
 	}
 }
 
+/// Returns the provider path segment for a Roku memory scope.
 fn memory_scope_segment(scope: MemoryScope) -> &'static str {
 	match scope {
 		MemoryScope::Session => "session",
@@ -772,6 +832,7 @@ fn memory_scope_segment(scope: MemoryScope) -> &'static str {
 	}
 }
 
+/// Returns the provider path segment for a Roku write reason.
 fn memory_write_reason_segment(reason: MemoryWriteReason) -> &'static str {
 	match reason {
 		MemoryWriteReason::TaskSucceeded => "task_succeeded",
@@ -780,6 +841,7 @@ fn memory_write_reason_segment(reason: MemoryWriteReason) -> &'static str {
 	}
 }
 
+/// Returns the current Unix timestamp in milliseconds.
 fn unix_ms_now() -> u64 {
 	SystemTime::now()
 		.duration_since(UNIX_EPOCH)
@@ -787,6 +849,7 @@ fn unix_ms_now() -> u64 {
 		.as_millis() as u64
 }
 
+/// Parsed scope metadata extracted from a provider URI.
 #[derive(Debug, Clone)]
 struct MemoryUriDescriptor {
 	kind: MemoryKind,
@@ -798,6 +861,7 @@ struct MemoryUriDescriptor {
 }
 
 impl MemoryUriDescriptor {
+	/// Falls back to query/request context when the provider URI is not parseable.
 	fn fallback(
 		scope: MemoryScope,
 		session_id: Option<String>,

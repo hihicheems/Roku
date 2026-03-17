@@ -12,6 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! OpenViking adapter for Roku long-term memory.
+//!
+//! This crate maps the provider-neutral contracts from `roku-memory` onto the
+//! OpenViking HTTP API. It is intentionally limited to provider configuration,
+//! request/response translation, and backend capability handling.
+//!
+//! Runtime policy such as when recall happens, what should be written back, and
+//! how recalled memories are injected into prompts remains outside this crate.
+
 mod backend;
 mod config;
 
