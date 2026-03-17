@@ -184,7 +184,7 @@ impl ResolvedMemorySubsystem {
 ///
 /// Adapter crates implement this trait so the registry can resolve a complete
 /// memory subsystem bundle without `roku-cmd` importing concrete provider
-/// bootstrap logic into every entry surface.
+/// selection or bundle-wiring logic into every entry surface.
 pub trait MemorySubsystemRegistration {
 	fn availability(&self) -> MemoryAdapterAvailability;
 
@@ -195,7 +195,7 @@ pub trait MemorySubsystemRegistration {
 #[derive(Debug, Error)]
 pub enum MemoryRegistryError {
 	#[error("memory adapter `{backend}` failed to resolve: {message}")]
-	AdapterBootstrap {
+	AdapterResolution {
 		backend: MemoryBackendId,
 		message: String,
 	},
@@ -245,7 +245,7 @@ impl<'a> MemoryEntryRegistry<'a> {
 
 		registration
 			.resolve_subsystem()
-			.map_err(|message| MemoryRegistryError::AdapterBootstrap {
+			.map_err(|message| MemoryRegistryError::AdapterResolution {
 				backend: requested,
 				message,
 			})
