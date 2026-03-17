@@ -26,6 +26,7 @@ members = [
     "crates/roku-plugins/catalog",
     "crates/roku-plugins/skills",
     "crates/roku-plugins/llm",
+    "crates/roku-plugins/memory-openviking",
     "crates/roku-plugins/coding",
     "crates/roku-plugins/mcp",
     "crates/roku-plugins/telegram",

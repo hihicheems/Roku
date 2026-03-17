@@ -1620,6 +1620,7 @@ dependencies = [
  "roku-plugin-core",
  "roku-plugin-host",
  "roku-plugin-llm",
+ "roku-plugin-memory-openviking",
  "roku-plugin-skills",
  "roku-plugin-telegram",
  "roku-runtime-service",
@@ -1733,6 +1734,18 @@ name = "roku-plugin-mcp"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "roku-plugin-memory-openviking"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "roku-memory",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
 ]
 
