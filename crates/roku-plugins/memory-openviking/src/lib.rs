@@ -28,7 +28,11 @@ use std::sync::Arc;
 
 use roku_memory::{LongTermMemoryBackend, MemoryAdapterAvailability, MemoryBackendId};
 
-pub use backend::{OpenVikingBackendBootstrapError, OpenVikingLongTermMemoryBackend};
+pub use backend::{
+	OpenVikingBackendBootstrapError, OpenVikingLongTermMemoryBackend, OpenVikingMemoryAdapters,
+	OpenVikingPendingLoopSnapshotAdapter, OpenVikingSessionStateAdapter,
+	OpenVikingShortTermContinuityAdapter,
+};
 pub use config::{
 	OpenVikingAdapterConfig, OpenVikingAdapterConfigPatch, OpenVikingBackendConfig,
 	OpenVikingBackendConfigError, OpenVikingClientConfig, OpenVikingClientConfigPatch,
@@ -49,9 +53,9 @@ impl OpenVikingMemoryRegistration {
 		MemoryAdapterAvailability {
 			backend: MemoryBackendId::OpenViking,
 			long_term: true,
-			short_term: false,
-			session_state: false,
-			pending_loop: false,
+			short_term: true,
+			session_state: true,
+			pending_loop: true,
 		}
 	}
 
@@ -61,5 +65,12 @@ impl OpenVikingMemoryRegistration {
 	) -> Result<Arc<dyn LongTermMemoryBackend>, OpenVikingBackendBootstrapError> {
 		let backend = OpenVikingLongTermMemoryBackend::new(config.to_backend_config())?;
 		Ok(Arc::new(backend))
+	}
+
+	/// Connects the full set of currently implemented OpenViking-backed adapters.
+	pub fn connect_adapters(
+		config: &OpenVikingRuntimeConfig,
+	) -> Result<OpenVikingMemoryAdapters, OpenVikingBackendBootstrapError> {
+		OpenVikingMemoryAdapters::connect(config.to_backend_config())
 	}
 }
