@@ -162,8 +162,8 @@ impl OpenVikingLongTermMemoryBackend {
 
 	/// Materializes a provider-ingestible markdown file for the pending write.
 	///
-	/// Phase 4 uses local-file ingestion against a local OpenViking server, so the
-	/// staged path becomes part of the provider request.
+	/// Local-file ingestion against a local OpenViking server makes the staged
+	/// path part of the provider request.
 	fn stage_memory_record(&self, request: &MemoryWriteRequest) -> Result<PathBuf, MemoryError> {
 		let now_ms = unix_ms_now();
 		let counter = NEXT_RECORD_COUNTER.fetch_add(1, Ordering::Relaxed);

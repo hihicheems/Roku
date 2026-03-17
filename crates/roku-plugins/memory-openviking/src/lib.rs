@@ -23,13 +23,7 @@
 
 mod backend;
 mod config;
-
-use std::sync::Arc;
-
-use roku_memory::{
-	DisabledMemoryLifecyclePolicy, LongTermMemoryBackend, MemoryAdapterAvailability,
-	MemoryBackendId, MemorySubsystemRegistration, ResolvedMemorySubsystem,
-};
+mod registration;
 
 pub use backend::{
 	OpenVikingBackendBootstrapError, OpenVikingLongTermMemoryBackend, OpenVikingMemoryAdapters,
@@ -46,64 +40,4 @@ pub use config::{
 	OpenVikingStorageConfig, OpenVikingStorageConfigPatch, OpenVikingVlmConfig,
 	OpenVikingVlmConfigPatch, OpenVikingVlmProvider,
 };
-
-/// Registration surface for the OpenViking memory adapter.
-pub struct OpenVikingMemoryRegistration;
-
-impl OpenVikingMemoryRegistration {
-	/// Advertises the currently implemented OpenViking memory capabilities.
-	pub const fn availability() -> MemoryAdapterAvailability {
-		MemoryAdapterAvailability {
-			backend: MemoryBackendId::OpenViking,
-			long_term: true,
-			short_term: true,
-			session_state: true,
-			pending_loop: true,
-		}
-	}
-
-	/// Builds the provider-neutral long-term backend from adapter-owned config.
-	pub fn build_long_term_backend(
-		config: &OpenVikingRuntimeConfig,
-	) -> Result<Arc<dyn LongTermMemoryBackend>, OpenVikingBackendBootstrapError> {
-		let backend = OpenVikingLongTermMemoryBackend::new(config.to_backend_config())?;
-		Ok(Arc::new(backend))
-	}
-
-	/// Connects the full set of currently implemented OpenViking-backed adapters.
-	pub fn connect_adapters(
-		config: &OpenVikingRuntimeConfig,
-	) -> Result<OpenVikingMemoryAdapters, OpenVikingBackendBootstrapError> {
-		OpenVikingMemoryAdapters::connect(config.to_backend_config())
-	}
-}
-
-/// Config-bound OpenViking registration consumed by the Roku entry registry.
-#[derive(Debug, Clone)]
-pub struct OpenVikingMemorySubsystemRegistration {
-	config: OpenVikingRuntimeConfig,
-}
-
-impl OpenVikingMemorySubsystemRegistration {
-	pub fn new(config: OpenVikingRuntimeConfig) -> Self {
-		Self { config }
-	}
-}
-
-impl MemorySubsystemRegistration for OpenVikingMemorySubsystemRegistration {
-	fn availability(&self) -> MemoryAdapterAvailability {
-		OpenVikingMemoryRegistration::availability()
-	}
-
-	fn resolve_subsystem(&self) -> Result<ResolvedMemorySubsystem, String> {
-		let adapters = OpenVikingMemoryRegistration::connect_adapters(&self.config)
-			.map_err(|error| error.to_string())?;
-		Ok(ResolvedMemorySubsystem::with_parts(
-			Arc::new(adapters.long_term),
-			Box::new(adapters.short_term),
-			Box::new(adapters.session_state),
-			Box::new(adapters.pending_loop),
-			Arc::new(DisabledMemoryLifecyclePolicy),
-		))
-	}
-}
+pub use registration::{OpenVikingMemoryRegistration, OpenVikingMemorySubsystemRegistration};
