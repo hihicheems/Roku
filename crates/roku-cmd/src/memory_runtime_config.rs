@@ -41,7 +41,7 @@ const OPENROUTER_API_KEY_LEGACY_ALIAS: &str = "OPENROUTER_API_KEY";
 const GENERATED_OPENVIKING_LOG_LEVEL: &str = "INFO";
 const GENERATED_OPENVIKING_LOG_OUTPUT: &str = "stdout";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemoryRuntimeConfig {
 	pub enabled: bool,
 	pub backend: MemoryBackend,
@@ -89,7 +89,7 @@ pub struct MemoryWriteConfigPatch {
 	pub max_batch_size: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OpenVikingRuntimeConfig {
 	pub client: OpenVikingClientConfig,
 	pub process: OpenVikingProcessConfig,
@@ -216,37 +216,42 @@ pub struct OpenVikingVlmConfigPatch {
 	pub thinking: Option<bool>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MemoryBackend {
+	#[default]
 	OpenViking,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OpenVikingStorageBackend {
+	#[default]
 	Local,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OpenVikingEmbeddingProvider {
+	#[default]
 	OpenAi,
 	Volcengine,
 	Jina,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OpenVikingVlmProvider {
+	#[default]
 	OpenAi,
 	Volcengine,
 	Litellm,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OpenVikingEmbeddingInput {
+	#[default]
 	Text,
 }
 
@@ -275,24 +280,6 @@ pub enum MemoryRuntimeConfigError {
 	},
 }
 
-impl Default for MemoryRuntimeConfig {
-	fn default() -> Self {
-		Self {
-			enabled: false,
-			backend: MemoryBackend::default(),
-			recall: MemoryRecallConfig::default(),
-			write: MemoryWriteConfig::default(),
-			openviking: OpenVikingRuntimeConfig::default(),
-		}
-	}
-}
-
-impl Default for MemoryBackend {
-	fn default() -> Self {
-		Self::OpenViking
-	}
-}
-
 impl Default for MemoryRecallConfig {
 	fn default() -> Self {
 		Self {
@@ -307,15 +294,6 @@ impl Default for MemoryWriteConfig {
 		Self {
 			enabled: true,
 			max_batch_size: 16,
-		}
-	}
-}
-
-impl Default for OpenVikingRuntimeConfig {
-	fn default() -> Self {
-		Self {
-			client: OpenVikingClientConfig::default(),
-			process: OpenVikingProcessConfig::default(),
 		}
 	}
 }
@@ -391,30 +369,6 @@ impl Default for OpenVikingVlmConfig {
 			max_concurrent: 16,
 			thinking: false,
 		}
-	}
-}
-
-impl Default for OpenVikingStorageBackend {
-	fn default() -> Self {
-		Self::Local
-	}
-}
-
-impl Default for OpenVikingEmbeddingProvider {
-	fn default() -> Self {
-		Self::OpenAi
-	}
-}
-
-impl Default for OpenVikingVlmProvider {
-	fn default() -> Self {
-		Self::OpenAi
-	}
-}
-
-impl Default for OpenVikingEmbeddingInput {
-	fn default() -> Self {
-		Self::Text
 	}
 }
 
@@ -1118,9 +1072,7 @@ fn env_override_secret_with_legacy(
 	if let Some(value) = env_override_secret(canonical) {
 		return Some(value);
 	}
-	let Some(value) = env_override_secret(legacy) else {
-		return None;
-	};
+	let value = env_override_secret(legacy)?;
 	let _ = emit_global_log(
 		LogRecord::new(
 			"roku-cmd",
@@ -1211,7 +1163,7 @@ where
 }
 
 fn env_override_path(key: &'static str) -> Option<PathBuf> {
-	env_override_string(key).map(|value| PathBuf::from(value))
+	env_override_string(key).map(PathBuf::from)
 }
 
 fn trim_optional_secret(value: Option<String>) -> Option<String> {
