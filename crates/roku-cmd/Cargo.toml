@@ -13,6 +13,7 @@ roku-artifact-store = { path = "../roku-artifact-store" }
 roku-api-gateway = { path = "../roku-api-gateway" }
 roku-common-types = { path = "../roku-common-types" }
 roku-experiment-registry = { path = "../roku-experiment-registry" }
+roku-memory = { path = "../roku-memory" }
 roku-observability = { path = "../roku-observability" }
 roku-orchestrator = { path = "../roku-orchestrator" }
 roku-plugin-core = { path = "../roku-plugins/core" }

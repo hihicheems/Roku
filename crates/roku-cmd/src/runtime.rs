@@ -32,6 +32,7 @@ use roku_common_types::{
 	TaskId,
 };
 use roku_experiment_registry::ExperimentRegistry;
+use roku_memory::{ConservativeMemoryLifecyclePolicy, NoopLongTermMemoryBackend};
 use roku_observability::{InMemoryAuditSink, LogLevel, LogRecord, Metrics, emit_global_log};
 use roku_plugin_core::{PluginDisableReason, PluginPolicyConfig};
 use roku_plugin_host::{
@@ -315,19 +316,21 @@ fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandEr
 	let store_config = sqlite_store_config(&layout);
 	let (artifact_store, experiment_registry) = build_runtime_data_plane(&layout);
 
-	Ok(RuntimeService::new_with_runtime_data_plane_and_metrics(
-		roku_runtime_service::RuntimeDataPlane {
-			task_repo: Box::new(connect_sqlite_task_repository(&store_config)?),
-			event_repo: Box::new(connect_sqlite_event_repository(&store_config)?),
-			approval_repo: Box::new(connect_sqlite_approval_repository(&store_config)?),
-			result_repo: Box::new(connect_sqlite_result_repository(&store_config)?),
-			dispatch_queue: Box::new(connect_sqlite_dispatch_queue(&store_config)?),
-			artifact_store,
-			experiment_registry,
-		},
-		Arc::new(InMemoryAuditSink::default()),
-		runtime,
-		Arc::new(Metrics::default()),
+	Ok(wire_default_long_term_memory(
+		RuntimeService::new_with_runtime_data_plane_and_metrics(
+			roku_runtime_service::RuntimeDataPlane {
+				task_repo: Box::new(connect_sqlite_task_repository(&store_config)?),
+				event_repo: Box::new(connect_sqlite_event_repository(&store_config)?),
+				approval_repo: Box::new(connect_sqlite_approval_repository(&store_config)?),
+				result_repo: Box::new(connect_sqlite_result_repository(&store_config)?),
+				dispatch_queue: Box::new(connect_sqlite_dispatch_queue(&store_config)?),
+				artifact_store,
+				experiment_registry,
+			},
+			Arc::new(InMemoryAuditSink::default()),
+			runtime,
+			Arc::new(Metrics::default()),
+		),
 	))
 }
 
@@ -521,8 +524,10 @@ fn build_deterministic_runtime_service_from_env() -> Result<RuntimeService, Comm
 			bootstrap.runtime_configs.agent,
 		);
 	log_runtime_bootstrap_mode(&RuntimeModeReport::deterministic());
-	Ok(RuntimeService::in_memory_with_agent_runtime(runtime)
-		.with_runtime_mode_report(RuntimeModeReport::deterministic()))
+	Ok(wire_default_long_term_memory(
+		RuntimeService::in_memory_with_agent_runtime(runtime)
+			.with_runtime_mode_report(RuntimeModeReport::deterministic()),
+	))
 }
 
 pub(crate) fn build_live_runtime_service_from_layout_and_bootstrap(
@@ -534,21 +539,29 @@ pub(crate) fn build_live_runtime_service_from_layout_and_bootstrap(
 	let store_config = sqlite_store_config(layout);
 	let (artifact_store, experiment_registry) = build_runtime_data_plane(layout);
 
-	Ok(RuntimeService::new_with_runtime_data_plane_and_metrics(
-		roku_runtime_service::RuntimeDataPlane {
-			task_repo: Box::new(connect_sqlite_task_repository(&store_config)?),
-			event_repo: Box::new(connect_sqlite_event_repository(&store_config)?),
-			approval_repo: Box::new(connect_sqlite_approval_repository(&store_config)?),
-			result_repo: Box::new(connect_sqlite_result_repository(&store_config)?),
-			dispatch_queue: Box::new(connect_sqlite_dispatch_queue(&store_config)?),
-			artifact_store,
-			experiment_registry,
-		},
-		Arc::new(InMemoryAuditSink::default()),
-		runtime,
-		metrics,
-	)
-	.with_runtime_mode_report(runtime_mode))
+	Ok(wire_default_long_term_memory(
+		RuntimeService::new_with_runtime_data_plane_and_metrics(
+			roku_runtime_service::RuntimeDataPlane {
+				task_repo: Box::new(connect_sqlite_task_repository(&store_config)?),
+				event_repo: Box::new(connect_sqlite_event_repository(&store_config)?),
+				approval_repo: Box::new(connect_sqlite_approval_repository(&store_config)?),
+				result_repo: Box::new(connect_sqlite_result_repository(&store_config)?),
+				dispatch_queue: Box::new(connect_sqlite_dispatch_queue(&store_config)?),
+				artifact_store,
+				experiment_registry,
+			},
+			Arc::new(InMemoryAuditSink::default()),
+			runtime,
+			metrics,
+		)
+		.with_runtime_mode_report(runtime_mode),
+	))
+}
+
+fn wire_default_long_term_memory(service: RuntimeService) -> RuntimeService {
+	service
+		.with_long_term_memory_backend(Arc::new(NoopLongTermMemoryBackend))
+		.with_memory_lifecycle_policy(Arc::new(ConservativeMemoryLifecyclePolicy::default()))
 }
 
 fn build_live_runtime(
