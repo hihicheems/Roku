@@ -1621,6 +1621,7 @@ dependencies = [
  "roku-plugin-host",
  "roku-plugin-llm",
  "roku-plugin-memory-openviking",
+ "roku-plugin-memory-sqlite",
  "roku-plugin-skills",
  "roku-plugin-telegram",
  "roku-runtime-service",
@@ -1750,6 +1751,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "roku-plugin-memory-sqlite"
+version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+ "roku-memory",
+ "roku-state-store",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "roku-plugin-skills"
 version = "0.1.0"
 dependencies = [
@@ -1831,6 +1845,7 @@ name = "roku-state-store"
 version = "0.1.0"
 dependencies = [
  "roku-common-types",
+ "roku-memory",
  "rusqlite",
  "serde_json",
  "thiserror",
