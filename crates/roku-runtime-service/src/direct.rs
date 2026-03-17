@@ -29,11 +29,16 @@ impl RuntimeService {
 		_plan: &DirectRoutePlan,
 		loop_state: &mut LoopState,
 		context_bundle: &ContextBundle,
+		memory_context: &str,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let initial_history_len = loop_state.history.len();
-		let execution = self
-			.runtime
-			.execute_tool_loop(&task.task_id, request, loop_state, None);
+		let execution = self.runtime.execute_tool_loop(
+			&task.task_id,
+			request,
+			loop_state,
+			memory_context,
+			None,
+		);
 		self.record_runtime_loop_history(loop_state, initial_history_len);
 		let response =
 			self.finalize_direct_path(task, execution.node, execution.result, execution.message)?;
@@ -49,6 +54,7 @@ impl RuntimeService {
 		}
 		self.sync_pending_loop(loop_state)?;
 		self.apply_memory_write_back(request, &response, context_bundle);
+		self.clear_memory_context(&task.task_id);
 		Ok(response)
 	}
 
@@ -59,10 +65,11 @@ impl RuntimeService {
 		plan: &RouteEscalationPlan,
 		loop_state: &mut LoopState,
 		context_bundle: &ContextBundle,
+		memory_context: &str,
 	) -> Result<ResponseEnvelope, RuntimeError> {
-		let execution = self
-			.runtime
-			.execute_escalation_action(&task.task_id, request, plan);
+		let execution =
+			self.runtime
+				.execute_escalation_action(&task.task_id, request, plan, memory_context);
 		let response =
 			self.finalize_direct_path(task, execution.node, execution.result, execution.message)?;
 		if matches!(
@@ -88,6 +95,7 @@ impl RuntimeService {
 		}
 		self.sync_pending_loop(loop_state)?;
 		self.apply_memory_write_back(request, &response, context_bundle);
+		self.clear_memory_context(&task.task_id);
 		Ok(response)
 	}
 

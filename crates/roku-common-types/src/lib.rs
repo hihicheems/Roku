@@ -455,7 +455,11 @@ pub struct AgentContext {
 	#[serde(default)]
 	pub resources: Vec<ResourceSelector>,
 	#[serde(default)]
+	/// Legacy short-term continuity carrier; does not transport long-term recall hits.
 	pub conversation_history: Vec<ConversationTurn>,
+	#[serde(default)]
+	/// Provider-neutral runtime memory context (rendered from ContextBundle hits).
+	pub memory_context: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

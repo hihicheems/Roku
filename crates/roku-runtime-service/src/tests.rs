@@ -197,6 +197,46 @@ fn context_bundle_separates_short_term_continuity_from_long_term_hits() {
 }
 
 #[test]
+fn context_bundle_renders_memory_context_independently() {
+	let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
+	let mut seed = MemoryWriteRequest::new(
+		MemoryKind::UserPreference,
+		MemoryScope::Session,
+		"User prefers Rust snippets.",
+		"Rust preference".to_string(),
+		MemoryWriteReason::OperatorRequested,
+	);
+	seed.session_id = Some("session-1".to_string());
+	backend
+		.write(&seed)
+		.expect("seed long-term memory write should succeed");
+
+	let service = RuntimeService::default().with_long_term_memory_backend(backend);
+	let request = RequestEnvelope {
+		request_id: RequestId("req-memory-context".to_string()),
+		session_id: "session-1".to_string(),
+		goal: "Rust preference".to_string(),
+		planning_mode_hint: None,
+		conversation_history: vec![roku_common_types::ConversationTurn {
+			role: roku_common_types::ConversationRole::User,
+			content: "Please use concise answers.".to_string(),
+			created_at_unix_ms: 0,
+		}],
+	};
+
+	let bundle = service
+		.build_context_bundle(&request, false)
+		.expect("context bundle should build");
+	let memory_context_text = bundle.memory_context_text();
+
+	assert!(memory_context_text.contains("Rust preference"));
+	assert!(!memory_context_text.contains("Please use concise answers."));
+	assert!(!memory_context_text.is_empty());
+	assert_eq!(bundle.short_term_continuity.len(), 1);
+	assert_eq!(request.conversation_history.len(), 1);
+}
+
+#[test]
 fn resumed_pending_loops_project_bound_resources_into_context_bundle() {
 	let service = RuntimeService::default();
 	let cwd = env::current_dir().expect("cwd should resolve");

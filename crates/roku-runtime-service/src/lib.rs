@@ -173,6 +173,7 @@ pub struct RuntimeService {
 	memory_policy: Arc<dyn MemoryLifecyclePolicy>,
 	state: Mutex<RuntimeState>,
 	pending_loops: Mutex<HashMap<String, LoopState>>,
+	memory_contexts: Mutex<HashMap<String, String>>,
 }
 
 impl RuntimeService {
@@ -315,6 +316,7 @@ impl RuntimeService {
 				experiment_registry,
 			}),
 			pending_loops: Mutex::new(HashMap::new()),
+			memory_contexts: Mutex::new(HashMap::new()),
 		}
 	}
 
@@ -429,6 +431,8 @@ impl RuntimeService {
 
 		if let Some(planning_mode_hint) = normalized_request.planning_mode_hint {
 			let context_bundle = self.build_context_bundle(&normalized_request, false)?;
+			let memory_context_text = context_bundle.memory_context_text();
+			self.cache_memory_context(&task.task_id, &memory_context_text);
 			self.clear_pending_loop(&normalized_request.session_id)?;
 			self.metrics.inc_route_escalations();
 			self.metrics.inc_route_limited_planning();
@@ -454,12 +458,15 @@ impl RuntimeService {
 				&compatibility_plan,
 				&mut loop_state,
 				&context_bundle,
+				&memory_context_text,
 			);
 		}
 
 		let mut resumable_loop = self.take_resumable_pending_loop(&normalized_request)?;
 		let mut context_bundle =
 			self.build_context_bundle(&normalized_request, resumable_loop.is_some())?;
+		let memory_context_text = context_bundle.memory_context_text();
+		self.cache_memory_context(&task.task_id, &memory_context_text);
 
 		if let Some(mut loop_state) = resumable_loop.take() {
 			self.attach_resumed_loop_resources(&mut context_bundle, &loop_state);
@@ -469,6 +476,7 @@ impl RuntimeService {
 				&normalized_request,
 				&mut loop_state,
 				&context_bundle,
+				&memory_context_text,
 			);
 		}
 
@@ -488,6 +496,7 @@ impl RuntimeService {
 					plan,
 					&mut loop_state,
 					&context_bundle,
+					&memory_context_text,
 				)
 			}
 			RouteDecisionResult::Escalate(plan) => {
@@ -514,6 +523,7 @@ impl RuntimeService {
 							plan,
 							&mut loop_state,
 							&context_bundle,
+							&memory_context_text,
 						)
 					}
 					EscalationAction::FallbackAnswer => {
@@ -525,6 +535,7 @@ impl RuntimeService {
 							plan,
 							&mut loop_state,
 							&context_bundle,
+							&memory_context_text,
 						)
 					}
 					EscalationAction::EnterLimitedPlanning => {
@@ -541,6 +552,7 @@ impl RuntimeService {
 							plan,
 							&mut loop_state,
 							&context_bundle,
+							&memory_context_text,
 						)
 					}
 				}

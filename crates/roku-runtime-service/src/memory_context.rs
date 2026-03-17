@@ -36,6 +36,24 @@ pub struct ContextBundle {
 	pub blockers: Vec<String>,
 }
 
+impl ContextBundle {
+	pub fn memory_context_text(&self) -> String {
+		if self.long_term_memory_hits.is_empty() {
+			return String::new();
+		}
+		self.long_term_memory_hits
+			.iter()
+			.map(|hit| {
+				format!(
+					"- {} | {:?} | {}",
+					hit.record.record_id, hit.record.kind, hit.record.summary
+				)
+			})
+			.collect::<Vec<_>>()
+			.join("\n")
+	}
+}
+
 impl RuntimeService {
 	pub fn with_long_term_memory_backend(
 		mut self,
