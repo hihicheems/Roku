@@ -20,9 +20,11 @@
 //!
 //! Phase 1 established namespace ownership. Phase 2 and Phase 3 then moved the
 //! provider-neutral bundle shape, disabled fallbacks, backend ids, and adapter
-//! availability helpers into this module so later entry unification can build
-//! on Roku-owned registry semantics instead of `roku-cmd` bootstrap code.
+//! availability helpers into this module. Phase 4 now adds the entry-registry
+//! resolution surface so composition roots can call one Roku-owned registry
+//! instead of rebuilding provider selection in each entry module.
 
+use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -34,6 +36,7 @@ use crate::{
 	MemoryWriteRequest, NoopLongTermMemoryBackend,
 };
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// Provider-neutral identifier for the configured long-term memory backend.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -51,6 +54,12 @@ impl MemoryBackendId {
 			Self::OpenViking => "openviking",
 			Self::Sqlite => "sqlite",
 		}
+	}
+}
+
+impl fmt::Display for MemoryBackendId {
+	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+		formatter.write_str(self.as_str())
 	}
 }
 
@@ -171,11 +180,90 @@ impl ResolvedMemorySubsystem {
 	}
 }
 
+/// Provider-neutral registration surface consumed by the entry registry.
+///
+/// Adapter crates implement this trait so the registry can resolve a complete
+/// memory subsystem bundle without `roku-cmd` importing concrete provider
+/// bootstrap logic into every entry surface.
+pub trait MemorySubsystemRegistration {
+	fn availability(&self) -> MemoryAdapterAvailability;
+
+	fn resolve_subsystem(&self) -> Result<ResolvedMemorySubsystem, String>;
+}
+
+/// Errors produced while resolving the selected entry-layer memory subsystem.
+#[derive(Debug, Error)]
+pub enum MemoryRegistryError {
+	#[error("memory adapter `{backend}` failed to resolve: {message}")]
+	AdapterBootstrap {
+		backend: MemoryBackendId,
+		message: String,
+	},
+}
+
+/// Roku-owned entry registry for memory subsystem resolution.
+///
+/// The registry owns provider-neutral selection and disabled fallback semantics.
+/// Composition roots may register concrete adapter implementations, but they
+/// no longer rebuild provider selection logic inside each entry surface.
+#[derive(Default)]
+pub struct MemoryEntryRegistry<'a> {
+	registrations: Vec<&'a dyn MemorySubsystemRegistration>,
+}
+
+impl<'a> MemoryEntryRegistry<'a> {
+	/// Returns an empty entry registry.
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// Registers one adapter-backed memory subsystem.
+	pub fn register(&mut self, registration: &'a dyn MemorySubsystemRegistration) -> &mut Self {
+		self.registrations.push(registration);
+		self
+	}
+
+	/// Resolves the selected memory subsystem or returns a disabled bundle.
+	pub fn resolve_subsystem(
+		&self,
+		enabled: bool,
+		requested: MemoryBackendId,
+	) -> Result<ResolvedMemorySubsystem, MemoryRegistryError> {
+		if !enabled {
+			return Ok(ResolvedMemorySubsystem::disabled());
+		}
+
+		let registration = self
+			.registrations
+			.iter()
+			.find(|registration| registration.availability().backend == requested)
+			.copied();
+
+		let Some(registration) = registration else {
+			return Ok(ResolvedMemorySubsystem::disabled());
+		};
+
+		registration
+			.resolve_subsystem()
+			.map_err(|message| MemoryRegistryError::AdapterBootstrap {
+				backend: requested,
+				message,
+			})
+	}
+}
+
 #[cfg(test)]
 mod tests {
+	use std::sync::Arc;
+
+	use crate::pending_loop::NoopPendingLoopSnapshotBackend;
+	use crate::session::NoopSessionStateBackend;
+	use crate::short_term::NoopShortTermContinuityBackend;
+	use crate::{DisabledMemoryLifecyclePolicy, NoopLongTermMemoryBackend};
+
 	use super::{
-		LongTermBackendSelection, MemoryAdapterAvailability, MemoryBackendId,
-		resolve_long_term_backend_selection,
+		LongTermBackendSelection, MemoryAdapterAvailability, MemoryBackendId, MemoryEntryRegistry,
+		MemorySubsystemRegistration, ResolvedMemorySubsystem, resolve_long_term_backend_selection,
 	};
 
 	#[test]
@@ -212,6 +300,103 @@ mod tests {
 		assert_eq!(
 			selection,
 			LongTermBackendSelection::Backend(MemoryBackendId::OpenViking)
+		);
+	}
+
+	struct StubRegistration {
+		availability: MemoryAdapterAvailability,
+	}
+
+	impl MemorySubsystemRegistration for StubRegistration {
+		fn availability(&self) -> MemoryAdapterAvailability {
+			self.availability
+		}
+
+		fn resolve_subsystem(&self) -> Result<ResolvedMemorySubsystem, String> {
+			Ok(ResolvedMemorySubsystem::with_parts(
+				Arc::new(NoopLongTermMemoryBackend),
+				Box::new(NoopShortTermContinuityBackend),
+				Box::new(NoopSessionStateBackend),
+				Box::new(NoopPendingLoopSnapshotBackend),
+				Arc::new(DisabledMemoryLifecyclePolicy),
+			))
+		}
+	}
+
+	#[test]
+	fn entry_registry_returns_disabled_bundle_when_memory_is_disabled() {
+		let registry = MemoryEntryRegistry::new();
+		let resolved = registry
+			.resolve_subsystem(false, MemoryBackendId::OpenViking)
+			.expect("disabled memory should resolve");
+
+		assert_eq!(
+			resolved
+				.lifecycle_policy
+				.build_recall_query(&crate::MemoryRecallInput {
+					goal: "noop".to_string(),
+					session_id: "session-1".to_string(),
+					planning_mode_hint_present: false,
+					pending_loop_active: false,
+					short_term_continuity: Vec::new(),
+					user_id: None,
+					project_id: None,
+					workspace_id: None,
+				}),
+			None
+		);
+	}
+
+	#[test]
+	fn entry_registry_selects_the_requested_adapter_registration() {
+		let sqlite = StubRegistration {
+			availability: MemoryAdapterAvailability {
+				backend: MemoryBackendId::Sqlite,
+				long_term: false,
+				short_term: true,
+				session_state: true,
+				pending_loop: true,
+			},
+		};
+		let openviking = StubRegistration {
+			availability: MemoryAdapterAvailability {
+				backend: MemoryBackendId::OpenViking,
+				long_term: true,
+				short_term: true,
+				session_state: true,
+				pending_loop: true,
+			},
+		};
+		let mut registry = MemoryEntryRegistry::new();
+		registry.register(&sqlite).register(&openviking);
+
+		registry
+			.resolve_subsystem(true, MemoryBackendId::OpenViking)
+			.expect("registered adapter should resolve");
+	}
+
+	#[test]
+	fn entry_registry_returns_disabled_bundle_when_backend_is_not_registered() {
+		let registry = MemoryEntryRegistry::new();
+
+		let resolved = registry
+			.resolve_subsystem(true, MemoryBackendId::OpenViking)
+			.expect("missing adapter should fall back to disabled bundle");
+
+		assert_eq!(
+			resolved
+				.lifecycle_policy
+				.build_recall_query(&crate::MemoryRecallInput {
+					goal: "noop".to_string(),
+					session_id: "session-1".to_string(),
+					planning_mode_hint_present: false,
+					pending_loop_active: false,
+					short_term_continuity: Vec::new(),
+					user_id: None,
+					project_id: None,
+					workspace_id: None,
+				}),
+			None
 		);
 	}
 }

@@ -54,7 +54,8 @@ pub use policy::{
 };
 pub use registry::{
 	DisabledMemoryLifecyclePolicy, LongTermBackendSelection, MemoryAdapterAvailability,
-	MemoryBackendId, ResolvedMemorySubsystem, resolve_long_term_backend_selection,
+	MemoryBackendId, MemoryEntryRegistry, MemoryRegistryError, MemorySubsystemRegistration,
+	ResolvedMemorySubsystem, resolve_long_term_backend_selection,
 };
 pub use session::{NoopSessionStateBackend, SessionState, SessionStateBackend, SessionStateError};
 pub use short_term::{
