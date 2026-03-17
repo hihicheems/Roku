@@ -50,7 +50,10 @@ pub use policy::{
 	ConservativeMemoryLifecyclePolicy, MemoryLifecyclePolicy, MemoryRecallInput,
 	MemoryWritePolicyInput,
 };
-pub use registry::{DisabledMemoryLifecyclePolicy, ResolvedMemorySubsystem};
+pub use registry::{
+	DisabledMemoryLifecyclePolicy, LongTermBackendSelection, MemoryAdapterAvailability,
+	MemoryBackendId, ResolvedMemorySubsystem, resolve_long_term_backend_selection,
+};
 pub use session::{NoopSessionStateBackend, SessionState, SessionStateBackend, SessionStateError};
 pub use short_term::{
 	NoopShortTermContinuityBackend, ShortTermContinuityBackend, ShortTermContinuityError,

@@ -21,6 +21,7 @@
 //! Phase 1 establishes namespace ownership only. Concrete bundle shapes,
 //! registration APIs, and fallback implementations arrive in later phases.
 
+use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::pending_loop::{NoopPendingLoopSnapshotBackend, PendingLoopSnapshotBackend};
@@ -30,6 +31,81 @@ use crate::{
 	LongTermMemoryBackend, MemoryLifecyclePolicy, MemoryQuery, MemoryRecallInput,
 	MemoryWriteRequest, NoopLongTermMemoryBackend,
 };
+use serde::{Deserialize, Serialize};
+
+/// Provider-neutral identifier for the configured long-term memory backend.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryBackendId {
+	#[default]
+	OpenViking,
+	Sqlite,
+}
+
+impl MemoryBackendId {
+	/// Returns the stable config/diagnostic label for the backend.
+	pub const fn as_str(self) -> &'static str {
+		match self {
+			Self::OpenViking => "openviking",
+			Self::Sqlite => "sqlite",
+		}
+	}
+}
+
+impl FromStr for MemoryBackendId {
+	type Err = &'static str;
+
+	fn from_str(value: &str) -> Result<Self, Self::Err> {
+		match value.trim().to_ascii_lowercase().as_str() {
+			"openviking" => Ok(Self::OpenViking),
+			"sqlite" => Ok(Self::Sqlite),
+			_ => Err("expected one of: openviking, sqlite"),
+		}
+	}
+}
+
+/// Capability snapshot advertised by one adapter registration surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryAdapterAvailability {
+	pub backend: MemoryBackendId,
+	pub long_term: bool,
+	pub short_term: bool,
+	pub session_state: bool,
+	pub pending_loop: bool,
+}
+
+impl MemoryAdapterAvailability {
+	/// Returns an availability snapshot for an adapter with no active capabilities.
+	pub const fn unavailable(backend: MemoryBackendId) -> Self {
+		Self {
+			backend,
+			long_term: false,
+			short_term: false,
+			session_state: false,
+			pending_loop: false,
+		}
+	}
+}
+
+/// Registry-side resolution result for the active long-term backend selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LongTermBackendSelection {
+	Disabled,
+	Backend(MemoryBackendId),
+}
+
+/// Resolves the effective long-term backend choice using registry-owned fallback rules.
+pub fn resolve_long_term_backend_selection(
+	enabled: bool,
+	requested: MemoryBackendId,
+	availability: MemoryAdapterAvailability,
+) -> LongTermBackendSelection {
+	if !enabled || availability.backend != requested || !availability.long_term {
+		LongTermBackendSelection::Disabled
+	} else {
+		LongTermBackendSelection::Backend(requested)
+	}
+}
 
 /// Disabled provider-neutral lifecycle policy.
 ///
@@ -72,5 +148,67 @@ impl ResolvedMemorySubsystem {
 			pending_loop: Box::new(NoopPendingLoopSnapshotBackend),
 			lifecycle_policy: Arc::new(DisabledMemoryLifecyclePolicy),
 		}
+	}
+
+	/// Builds a provider-neutral bundle from concrete adapter-backed parts.
+	pub fn with_parts(
+		long_term: Arc<dyn LongTermMemoryBackend>,
+		short_term: Box<dyn ShortTermContinuityBackend>,
+		session_state: Box<dyn SessionStateBackend>,
+		pending_loop: Box<dyn PendingLoopSnapshotBackend>,
+		lifecycle_policy: Arc<dyn MemoryLifecyclePolicy>,
+	) -> Self {
+		Self {
+			long_term,
+			short_term,
+			session_state,
+			pending_loop,
+			lifecycle_policy,
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{
+		LongTermBackendSelection, MemoryAdapterAvailability, MemoryBackendId,
+		resolve_long_term_backend_selection,
+	};
+
+	#[test]
+	fn disables_long_term_when_adapter_id_does_not_match_requested_backend() {
+		let selection = resolve_long_term_backend_selection(
+			true,
+			MemoryBackendId::OpenViking,
+			MemoryAdapterAvailability {
+				backend: MemoryBackendId::Sqlite,
+				long_term: true,
+				short_term: true,
+				session_state: true,
+				pending_loop: true,
+			},
+		);
+
+		assert_eq!(selection, LongTermBackendSelection::Disabled);
+	}
+
+	#[test]
+	fn selects_backend_only_when_requested_adapter_advertises_long_term_capability() {
+		let selection = resolve_long_term_backend_selection(
+			true,
+			MemoryBackendId::OpenViking,
+			MemoryAdapterAvailability {
+				backend: MemoryBackendId::OpenViking,
+				long_term: true,
+				short_term: false,
+				session_state: false,
+				pending_loop: false,
+			},
+		);
+
+		assert_eq!(
+			selection,
+			LongTermBackendSelection::Backend(MemoryBackendId::OpenViking)
+		);
 	}
 }
