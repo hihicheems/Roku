@@ -37,18 +37,18 @@ pub struct ContextBundle {
 }
 
 impl RuntimeService {
-	pub fn with_long_term_memory_backend<B>(mut self, memory_backend: Arc<B>) -> Self
-	where
-		B: LongTermMemoryBackend + 'static,
-	{
+	pub fn with_long_term_memory_backend(
+		mut self,
+		memory_backend: Arc<dyn LongTermMemoryBackend>,
+	) -> Self {
 		self.memory_backend = memory_backend;
 		self
 	}
 
-	pub fn with_memory_lifecycle_policy<P>(mut self, memory_policy: Arc<P>) -> Self
-	where
-		P: MemoryLifecyclePolicy + 'static,
-	{
+	pub fn with_memory_lifecycle_policy(
+		mut self,
+		memory_policy: Arc<dyn MemoryLifecyclePolicy>,
+	) -> Self {
 		self.memory_policy = memory_policy;
 		self
 	}
