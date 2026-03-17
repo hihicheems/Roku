@@ -18,6 +18,8 @@
 //! Concrete transcript stores remain adapter implementations; they no longer
 //! define the continuity semantics themselves.
 
+use std::collections::HashMap;
+
 use roku_common_types::ConversationTurn;
 use thiserror::Error;
 
@@ -71,5 +73,98 @@ impl ShortTermContinuityBackend for NoopShortTermContinuityBackend {
 
 	fn delete_continuity(&mut self, _session_id: &str) -> Result<(), ShortTermContinuityError> {
 		Ok(())
+	}
+}
+
+/// In-memory short-term backend used by core/runtime tests.
+///
+/// Keeping this test double in `roku-memory` avoids leaking continuity
+/// semantics back into transitional persistence crates.
+#[derive(Debug, Default)]
+pub struct InMemoryShortTermContinuityBackend {
+	turns_by_session: HashMap<String, Vec<ConversationTurn>>,
+}
+
+impl ShortTermContinuityBackend for InMemoryShortTermContinuityBackend {
+	fn append_continuity_turn(
+		&mut self,
+		session_id: &str,
+		turn: ConversationTurn,
+	) -> Result<(), ShortTermContinuityError> {
+		self.turns_by_session
+			.entry(session_id.to_string())
+			.or_default()
+			.push(turn);
+		Ok(())
+	}
+
+	fn load_short_term_continuity(
+		&self,
+		session_id: &str,
+		limit: usize,
+	) -> Result<Vec<ConversationTurn>, ShortTermContinuityError> {
+		let Some(turns) = self.turns_by_session.get(session_id) else {
+			return Ok(Vec::new());
+		};
+		let start = turns.len().saturating_sub(limit);
+		Ok(turns[start..].to_vec())
+	}
+
+	fn delete_continuity(&mut self, session_id: &str) -> Result<(), ShortTermContinuityError> {
+		self.turns_by_session.remove(session_id);
+		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use roku_common_types::ConversationRole;
+
+	use super::*;
+
+	#[test]
+	fn in_memory_short_term_backend_roundtrips_recent_turns() {
+		let mut backend = InMemoryShortTermContinuityBackend::default();
+		backend
+			.append_continuity_turn(
+				"session-1",
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: "hello".to_string(),
+					created_at_unix_ms: 1,
+				},
+			)
+			.expect("first turn should save");
+		backend
+			.append_continuity_turn(
+				"session-1",
+				ConversationTurn {
+					role: ConversationRole::Assistant,
+					content: "world".to_string(),
+					created_at_unix_ms: 2,
+				},
+			)
+			.expect("second turn should save");
+
+		assert_eq!(
+			backend
+				.load_short_term_continuity("session-1", 1)
+				.expect("recent turns should load"),
+			vec![ConversationTurn {
+				role: ConversationRole::Assistant,
+				content: "world".to_string(),
+				created_at_unix_ms: 2,
+			}]
+		);
+
+		backend
+			.delete_continuity("session-1")
+			.expect("turns should delete");
+		assert!(
+			backend
+				.load_short_term_continuity("session-1", 4)
+				.expect("deleted turns should load")
+				.is_empty()
+		);
 	}
 }

@@ -18,6 +18,8 @@
 //! specific persistence remains adapter work; the session model itself belongs
 //! to Roku's memory subsystem.
 
+use std::collections::HashMap;
+
 use roku_common_types::SessionPreferences;
 use thiserror::Error;
 
@@ -72,5 +74,76 @@ impl SessionStateBackend for NoopSessionStateBackend {
 
 	fn delete_session_state(&mut self, _session_id: &str) -> Result<(), SessionStateError> {
 		Ok(())
+	}
+}
+
+/// In-memory session-state backend used by core tests and lightweight entry tests.
+///
+/// This lives in `roku-memory` so test-only session behavior does not need to
+/// reach back into transitional persistence crates.
+#[derive(Debug, Default)]
+pub struct InMemorySessionStateBackend {
+	states: HashMap<String, SessionState>,
+}
+
+impl SessionStateBackend for InMemorySessionStateBackend {
+	fn save_session_state(
+		&mut self,
+		session_id: &str,
+		state: SessionState,
+	) -> Result<(), SessionStateError> {
+		self.states.insert(session_id.to_string(), state);
+		Ok(())
+	}
+
+	fn load_session_state(
+		&self,
+		session_id: &str,
+	) -> Result<Option<SessionState>, SessionStateError> {
+		Ok(self.states.get(session_id).cloned())
+	}
+
+	fn delete_session_state(&mut self, session_id: &str) -> Result<(), SessionStateError> {
+		self.states.remove(session_id);
+		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use roku_common_types::{PendingLoopBinding, PlanningModeHint};
+
+	use super::*;
+
+	#[test]
+	fn in_memory_session_state_backend_roundtrips_state() {
+		let mut backend = InMemorySessionStateBackend::default();
+		let state = SessionState {
+			planning_mode: Some(PlanningModeHint::TreeSearch),
+			pending_loop: Some(PendingLoopBinding {
+				run_id: "loop-1".to_string(),
+				loop_state_json: "{\"status\":\"paused\"}".to_string(),
+			}),
+		};
+
+		backend
+			.save_session_state("session-1", state.clone())
+			.expect("state should save");
+		assert_eq!(
+			backend
+				.load_session_state("session-1")
+				.expect("state should load"),
+			Some(state)
+		);
+
+		backend
+			.delete_session_state("session-1")
+			.expect("state should delete");
+		assert_eq!(
+			backend
+				.load_session_state("session-1")
+				.expect("deleted state should load"),
+			None
+		);
 	}
 }

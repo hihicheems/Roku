@@ -44,6 +44,11 @@ pub use backend::{
 	InMemoryLongTermMemoryBackend, LongTermMemoryBackend, MemoryBackendHealth, MemoryBackendStatus,
 	MemoryDeleteSelector, MemoryError, MemoryWriteAck, NoopLongTermMemoryBackend,
 };
+pub use config::{
+	HARD_MAX_MEMORY_RECALL_TOP_K, HARD_MAX_MEMORY_WRITE_BATCH_SIZE, MemoryRecallConfig,
+	MemoryRecallConfigPatch, MemoryRuntimeConfig, MemoryRuntimeConfigError,
+	MemoryRuntimeConfigPatch, MemoryWriteConfig, MemoryWriteConfigPatch,
+};
 pub use pending_loop::{
 	NoopPendingLoopSnapshotBackend, PendingLoopSnapshot, PendingLoopSnapshotBackend,
 	PendingLoopSnapshotError,
@@ -57,9 +62,13 @@ pub use registry::{
 	MemoryBackendId, MemoryEntryRegistry, MemoryRegistryError, MemorySubsystemRegistration,
 	ResolvedMemorySubsystem, resolve_long_term_backend_selection,
 };
-pub use session::{NoopSessionStateBackend, SessionState, SessionStateBackend, SessionStateError};
+pub use session::{
+	InMemorySessionStateBackend, NoopSessionStateBackend, SessionState, SessionStateBackend,
+	SessionStateError,
+};
 pub use short_term::{
-	NoopShortTermContinuityBackend, ShortTermContinuityBackend, ShortTermContinuityError,
+	InMemoryShortTermContinuityBackend, NoopShortTermContinuityBackend, ShortTermContinuityBackend,
+	ShortTermContinuityError,
 };
 pub use types::{
 	MemoryFilters, MemoryHit, MemoryKind, MemoryMetadata, MemoryProvenance, MemoryQuery,
