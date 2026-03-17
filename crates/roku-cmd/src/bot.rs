@@ -42,7 +42,7 @@ use roku_runtime_service::{RuntimeExecutionMode, RuntimeModeReport};
 use serde_json::json;
 
 use crate::CommandError;
-use crate::memory_registry::resolve_memory_subsystem;
+use crate::entry_registry::resolve_memory_subsystem;
 use crate::runtime::ExecutionRequestOptions;
 use crate::runtime::{
 	apply_request_env_overrides, build_live_runtime_service_from_layout_and_bootstrap,

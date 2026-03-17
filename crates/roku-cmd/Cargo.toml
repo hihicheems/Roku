@@ -7,7 +7,7 @@ authors.workspace = true
 
 [features]
 default = []
-memory-openviking = []
+memory-openviking = ["roku-entry-registry/memory-openviking"]
 
 [dependencies]
 actix-web = "4"
@@ -16,6 +16,7 @@ roku-agent-runtime = { path = "../roku-agent-runtime" }
 roku-artifact-store = { path = "../roku-artifact-store" }
 roku-api-gateway = { path = "../roku-api-gateway" }
 roku-common-types = { path = "../roku-common-types" }
+roku-entry-registry = { path = "../roku-entry-registry" }
 roku-experiment-registry = { path = "../roku-experiment-registry" }
 roku-memory = { path = "../roku-memory" }
 roku-observability = { path = "../roku-observability" }
@@ -28,7 +29,6 @@ roku-plugin-memory-openviking = { path = "../roku-plugins/memory-openviking" }
 roku-plugin-memory-sqlite = { path = "../roku-plugins/memory-sqlite" }
 roku-plugin-telegram = { path = "../roku-plugins/telegram" }
 roku-runtime-service = { path = "../roku-runtime-service" }
-roku-state-store = { path = "../roku-state-store" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.0"

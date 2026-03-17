@@ -25,7 +25,7 @@
 
 mod api;
 mod bot;
-mod memory_registry;
+mod entry_registry;
 mod memory_runtime_config;
 mod runtime;
 mod runtime_config;
@@ -77,8 +77,8 @@ pub enum CommandError {
 	LoggingConfiguration(String),
 	#[error("failed to bootstrap api gateway: {0}")]
 	ApiGatewayBootstrap(String),
-	#[error("failed to bootstrap state store: {0}")]
-	StateStoreBootstrap(String),
+	#[error("failed to bootstrap control-plane bundle: {0}")]
+	ControlPlaneBootstrap(String),
 	#[error("failed to load runtime config: {0}")]
 	RuntimeConfigBootstrap(String),
 	#[error("failed to load tool catalog config: {0}")]

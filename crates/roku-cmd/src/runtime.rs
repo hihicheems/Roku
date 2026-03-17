@@ -16,8 +16,8 @@
 //!
 //! This module translates CLI/env inputs into concrete runtime-service instances and request
 //! envelopes. It owns process-local bootstrap concerns such as plugin discovery, config loading,
-//! state-store wiring, and mode selection. It does not decide agent behavior inside a run once the
-//! request has entered the runtime loop.
+//! entry/runtime bundle resolution, and mode selection. It does not decide
+//! agent behavior inside a run once the request has entered the runtime loop.
 //!
 //! For memory specifically, this module now delegates adapter selection to the
 //! Roku-owned entry registry and keeps only composition-root duties such as
@@ -30,12 +30,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use roku_agent_runtime::{GenericAgentRuntime, PluginRegistrySnapshot, ToolCatalogConfig};
 use roku_api_gateway::{Gateway, RawRequest};
-use roku_artifact_store::ArtifactStore;
 use roku_common_types::{
 	ApprovalDecision, ApprovalId, ArtifactId, PlanningModeHint, ResponseEnvelope, RuntimeError,
 	TaskId,
 };
-use roku_experiment_registry::ExperimentRegistry;
 use roku_memory::{
 	ConservativeMemoryLifecyclePolicy, DisabledMemoryLifecyclePolicy, LongTermMemoryBackend,
 	MemoryBackendHealth, MemoryDeleteSelector, MemoryError, MemoryLifecyclePolicy, MemoryQuery,
@@ -51,14 +49,10 @@ use roku_plugin_llm::build_openrouter_router_with_metrics;
 use roku_plugin_skills::{SkillRegistry, SkillsRuntimeConfig};
 pub use roku_runtime_service::RunMode;
 use roku_runtime_service::{RuntimeModeReport, RuntimeService};
-use roku_state_store::{
-	SqliteApprovalRepository, SqliteDispatchQueue, SqliteEventRepository, SqliteResultRepository,
-	SqliteStoreConfig, SqliteTaskRepository,
-};
 use serde_json::json;
 
 use crate::CommandError;
-use crate::memory_registry::resolve_memory_subsystem;
+use crate::entry_registry::{resolve_entry_runtime_bundle, resolve_memory_subsystem};
 use crate::memory_runtime_config::MemoryRuntimeConfig;
 use crate::runtime_config::{
 	RuntimeConfigs, load_runtime_configs, prepare_runtime_generated_artifacts,
@@ -392,24 +386,18 @@ fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandEr
 			bootstrap.runtime_configs.tools,
 			bootstrap.runtime_configs.agent,
 		);
-	let store_config = sqlite_store_config(&layout);
-	let (artifact_store, experiment_registry) = build_runtime_data_plane(&layout);
+	let bundle = resolve_entry_runtime_bundle(&bootstrap.runtime_configs.memory, &layout)?;
 
 	wire_default_long_term_memory(
-		RuntimeService::new_with_runtime_data_plane_and_metrics(
-			roku_runtime_service::RuntimeDataPlane {
-				task_repo: Box::new(connect_sqlite_task_repository(&store_config)?),
-				event_repo: Box::new(connect_sqlite_event_repository(&store_config)?),
-				approval_repo: Box::new(connect_sqlite_approval_repository(&store_config)?),
-				result_repo: Box::new(connect_sqlite_result_repository(&store_config)?),
-				dispatch_queue: Box::new(connect_sqlite_dispatch_queue(&store_config)?),
-				artifact_store,
-				experiment_registry,
-			},
+		RuntimeService::new_with_bundles_and_runtime_and_metrics(
+			bundle.control_plane,
+			bundle.artifact_store,
+			bundle.experiment_registry,
 			Arc::new(InMemoryAuditSink::default()),
 			runtime,
 			Arc::new(Metrics::default()),
 		),
+		bundle.memory,
 		&bootstrap.runtime_configs.memory,
 	)
 }
@@ -437,72 +425,6 @@ fn load_plugin_policy_config(
 	PluginPolicyConfig::from_toml(&content)
 		.map_err(roku_plugin_host::PluginHostError::from)
 		.map_err(CommandError::from)
-}
-
-fn connect_sqlite_task_repository(
-	config: &SqliteStoreConfig,
-) -> Result<SqliteTaskRepository, CommandError> {
-	log_state_store_backend("sqlite", &config.path);
-	SqliteTaskRepository::connect(config.clone())
-		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))
-}
-
-fn connect_sqlite_event_repository(
-	config: &SqliteStoreConfig,
-) -> Result<SqliteEventRepository, CommandError> {
-	SqliteEventRepository::connect(config.clone())
-		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))
-}
-
-fn connect_sqlite_approval_repository(
-	config: &SqliteStoreConfig,
-) -> Result<SqliteApprovalRepository, CommandError> {
-	SqliteApprovalRepository::connect(config.clone())
-		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))
-}
-
-fn connect_sqlite_result_repository(
-	config: &SqliteStoreConfig,
-) -> Result<SqliteResultRepository, CommandError> {
-	SqliteResultRepository::connect(config.clone())
-		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))
-}
-
-fn connect_sqlite_dispatch_queue(
-	config: &SqliteStoreConfig,
-) -> Result<SqliteDispatchQueue, CommandError> {
-	SqliteDispatchQueue::connect(config.clone())
-		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))
-}
-
-fn log_state_store_backend(kind: &str, path: &Path) {
-	let mut record = LogRecord::new(
-		"roku-cmd",
-		LogLevel::Info,
-		format!("using {kind} orchestration state store"),
-	);
-	record = record.with_field("path", path.display().to_string());
-	let _ = emit_global_log(record);
-}
-
-fn build_runtime_data_plane(layout: &LocalStorageLayout) -> (ArtifactStore, ExperimentRegistry) {
-	log_data_plane_backend("artifact-store", &layout.artifact_root);
-	log_data_plane_backend("experiment-registry", &layout.experiment_root);
-	(
-		ArtifactStore::file_backed(layout.artifact_root.clone()),
-		ExperimentRegistry::file_backed(layout.experiment_root.clone()),
-	)
-}
-
-fn log_data_plane_backend(component: &str, path: &Path) {
-	let _ = emit_global_log(
-		LogRecord::new(
-			"roku-cmd",
-			LogLevel::Info,
-			format!("using local file-backed {component}"),
-		)
-		.with_field("path", path.display().to_string()),
-	);
 }
 
 #[derive(Clone)]
@@ -581,7 +503,7 @@ fn build_skill_registry(
 	skills_runtime_config: SkillsRuntimeConfig,
 ) -> SkillRegistry {
 	if plugin_snapshot.is_plugin_enabled("skill-source-local") {
-		log_data_plane_backend("skill-registry", &layout.skill_root);
+		log_local_backend("skill-registry", &layout.skill_root);
 		SkillRegistry::file_backed_with_config(layout.skill_root.clone(), skills_runtime_config)
 	} else {
 		let _ = emit_global_log(LogRecord::new(
@@ -594,7 +516,7 @@ fn build_skill_registry(
 }
 
 fn build_deterministic_runtime_service_from_env() -> Result<RuntimeService, CommandError> {
-	let (_, bootstrap) = build_plugin_bootstrap_from_env()?;
+	let (layout, bootstrap) = build_plugin_bootstrap_from_env()?;
 	let runtime =
 		GenericAgentRuntime::with_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
 			bootstrap.skill_registry,
@@ -604,9 +526,18 @@ fn build_deterministic_runtime_service_from_env() -> Result<RuntimeService, Comm
 			bootstrap.runtime_configs.agent,
 		);
 	log_runtime_bootstrap_mode(&RuntimeModeReport::deterministic());
+	let bundle = resolve_entry_runtime_bundle(&bootstrap.runtime_configs.memory, &layout)?;
 	wire_default_long_term_memory(
-		RuntimeService::in_memory_with_agent_runtime(runtime)
-			.with_runtime_mode_report(RuntimeModeReport::deterministic()),
+		RuntimeService::new_with_bundles_and_runtime_and_metrics(
+			bundle.control_plane,
+			bundle.artifact_store,
+			bundle.experiment_registry,
+			Arc::new(InMemoryAuditSink::default()),
+			runtime,
+			Arc::new(Metrics::default()),
+		)
+		.with_runtime_mode_report(RuntimeModeReport::deterministic()),
+		bundle.memory,
 		&bootstrap.runtime_configs.memory,
 	)
 }
@@ -617,34 +548,28 @@ pub(crate) fn build_live_runtime_service_from_layout_and_bootstrap(
 ) -> Result<RuntimeService, CommandError> {
 	let metrics = Arc::new(Metrics::default());
 	let (runtime, runtime_mode) = build_live_runtime(bootstrap.clone(), metrics.clone())?;
-	let store_config = sqlite_store_config(layout);
-	let (artifact_store, experiment_registry) = build_runtime_data_plane(layout);
+	let bundle = resolve_entry_runtime_bundle(&bootstrap.runtime_configs.memory, layout)?;
 
 	wire_default_long_term_memory(
-		RuntimeService::new_with_runtime_data_plane_and_metrics(
-			roku_runtime_service::RuntimeDataPlane {
-				task_repo: Box::new(connect_sqlite_task_repository(&store_config)?),
-				event_repo: Box::new(connect_sqlite_event_repository(&store_config)?),
-				approval_repo: Box::new(connect_sqlite_approval_repository(&store_config)?),
-				result_repo: Box::new(connect_sqlite_result_repository(&store_config)?),
-				dispatch_queue: Box::new(connect_sqlite_dispatch_queue(&store_config)?),
-				artifact_store,
-				experiment_registry,
-			},
+		RuntimeService::new_with_bundles_and_runtime_and_metrics(
+			bundle.control_plane,
+			bundle.artifact_store,
+			bundle.experiment_registry,
 			Arc::new(InMemoryAuditSink::default()),
 			runtime,
 			metrics,
 		)
 		.with_runtime_mode_report(runtime_mode),
+		bundle.memory,
 		&bootstrap.runtime_configs.memory,
 	)
 }
 
 fn wire_default_long_term_memory(
 	service: RuntimeService,
+	subsystem: roku_memory::ResolvedMemorySubsystem,
 	memory_config: &MemoryRuntimeConfig,
 ) -> Result<RuntimeService, CommandError> {
-	let backend = resolve_memory_subsystem(memory_config)?.long_term;
 	let policy: Arc<dyn MemoryLifecyclePolicy> =
 		if memory_config.enabled && memory_config.recall.enabled {
 			Arc::new(ConservativeMemoryLifecyclePolicy {
@@ -654,7 +579,7 @@ fn wire_default_long_term_memory(
 			Arc::new(DisabledMemoryLifecyclePolicy)
 		};
 	Ok(service
-		.with_long_term_memory_backend(backend)
+		.with_long_term_memory_backend(subsystem.long_term)
 		.with_memory_lifecycle_policy(policy))
 }
 
@@ -744,6 +669,17 @@ fn build_live_runtime(
 		),
 		runtime_mode,
 	))
+}
+
+fn log_local_backend(component: &str, path: &Path) {
+	let _ = emit_global_log(
+		LogRecord::new(
+			"roku-cmd",
+			LogLevel::Info,
+			format!("using local file-backed {component}"),
+		)
+		.with_field("path", path.display().to_string()),
+	);
 }
 
 pub(crate) fn openrouter_api_key_from_env()
@@ -839,10 +775,6 @@ fn expand_home_path(value: &str) -> std::path::PathBuf {
 		return std::path::PathBuf::from(home).join(suffix);
 	}
 	std::path::PathBuf::from(value)
-}
-
-fn sqlite_store_config(layout: &LocalStorageLayout) -> SqliteStoreConfig {
-	SqliteStoreConfig::new(layout.sqlite_path.clone())
 }
 
 fn build_request(
