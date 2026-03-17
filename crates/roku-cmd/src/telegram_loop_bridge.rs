@@ -19,25 +19,9 @@
 //! adapter between those two representations.
 
 use roku_agent_runtime::LoopState;
-use roku_common_types::{PendingLoopBinding, RuntimeError};
+use roku_common_types::RuntimeError;
+use roku_memory::{PendingLoopSnapshotBackend, PendingLoopSnapshotError};
 use roku_runtime_service::RuntimeService;
-
-pub(crate) trait PendingLoopStore {
-	fn load_pending_loop_binding(
-		&self,
-		session_id: &str,
-	) -> Result<Option<PendingLoopBinding>, RuntimeError>;
-
-	fn save_pending_loop_binding(
-		&self,
-		session_id: &str,
-		binding: Option<PendingLoopBinding>,
-	) -> Result<(), RuntimeError>;
-
-	fn clear_pending_loop_binding(&self, session_id: &str) -> Result<(), RuntimeError> {
-		self.save_pending_loop_binding(session_id, None)
-	}
-}
 
 /// Restores a persisted Telegram pending-loop binding into the live runtime service.
 ///
@@ -45,16 +29,21 @@ pub(crate) trait PendingLoopStore {
 /// dropped instead of failing the whole request path.
 pub(crate) fn restore_pending_loop_from_session(
 	service: &RuntimeService,
-	pending_loop_store: &dyn PendingLoopStore,
+	pending_loop_store: &dyn PendingLoopSnapshotBackend,
 	session_id: &str,
 ) -> Result<(), RuntimeError> {
-	let Some(binding) = pending_loop_store.load_pending_loop_binding(session_id)? else {
+	let Some(binding) = pending_loop_store
+		.load_pending_loop_snapshot(session_id)
+		.map_err(pending_loop_snapshot_error)?
+	else {
 		return Ok(());
 	};
 	let loop_state = match serde_json::from_str::<LoopState>(&binding.loop_state_json) {
 		Ok(loop_state) => loop_state,
 		Err(_) => {
-			pending_loop_store.clear_pending_loop_binding(session_id)?;
+			pending_loop_store
+				.clear_pending_loop_snapshot(session_id)
+				.map_err(pending_loop_snapshot_error)?;
 			return Ok(());
 		}
 	};
@@ -67,11 +56,11 @@ pub(crate) fn restore_pending_loop_from_session(
 /// runtime most recently exposed.
 pub(crate) fn sync_pending_loop_to_session(
 	service: &RuntimeService,
-	pending_loop_store: &dyn PendingLoopStore,
+	pending_loop_store: &dyn PendingLoopSnapshotBackend,
 	session_id: &str,
 ) -> Result<(), RuntimeError> {
 	let binding = match service.pending_loop(session_id)? {
-		Some(loop_state) => Some(PendingLoopBinding {
+		Some(loop_state) => Some(roku_memory::PendingLoopSnapshot {
 			run_id: loop_state.run_id.clone(),
 			loop_state_json: serde_json::to_string(&loop_state).map_err(|error| {
 				RuntimeError::new(format!("failed to encode pending runtime loop: {error}"))
@@ -79,5 +68,11 @@ pub(crate) fn sync_pending_loop_to_session(
 		}),
 		None => None,
 	};
-	pending_loop_store.save_pending_loop_binding(session_id, binding)
+	pending_loop_store
+		.save_pending_loop_snapshot(session_id, binding)
+		.map_err(pending_loop_snapshot_error)
+}
+
+fn pending_loop_snapshot_error(error: PendingLoopSnapshotError) -> RuntimeError {
+	RuntimeError::new(error.to_string())
 }

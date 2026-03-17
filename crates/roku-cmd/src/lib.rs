@@ -18,6 +18,10 @@
 //! storage/config layout, and boots the requested runtime surface such as one-shot execution,
 //! Telegram transport, or the HTTP gateway. It does not own task-planning semantics itself; those
 //! stay inside the runtime service and agent-runtime crates.
+//!
+//! `roku-cmd` is a composition root, not the owner of memory subsystem contracts or registry
+//! semantics. Any concrete memory bootstrap that still lives here is migration residue that will
+//! move behind the Roku-owned memory registry in later phases.
 
 mod api;
 mod bot;

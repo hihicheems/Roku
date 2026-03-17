@@ -23,10 +23,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use roku_common_types::{
-	ApprovalDecision, ApprovalId, ConversationRole, ConversationTurn, PendingLoopBinding,
-	RequestEnvelope, RequestId, ResponseEnvelope, ResponseStatus, RuntimeError,
+	ApprovalDecision, ApprovalId, ConversationRole, ConversationTurn, RequestEnvelope, RequestId,
+	ResponseEnvelope, ResponseStatus, RuntimeError,
+};
+use roku_memory::{
+	PendingLoopSnapshot, PendingLoopSnapshotBackend, PendingLoopSnapshotError, SessionState,
+	SessionStateBackend, SessionStateError, ShortTermContinuityBackend, ShortTermContinuityError,
 };
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
+use roku_plugin_memory_sqlite::SqliteMemoryAdapters;
 use roku_plugin_telegram::{
 	TelegramBotConfig, TelegramChat, TelegramConnector, TelegramControlCommand,
 	TelegramControlCommandRequest, TelegramInteraction, TelegramInteractionHandler,
@@ -34,11 +39,7 @@ use roku_plugin_telegram::{
 	TelegramUpdate, TelegramUser,
 };
 use roku_runtime_service::{RuntimeExecutionMode, RuntimeModeReport};
-use roku_state_store::{
-	ConversationStore, InMemoryConversationStore, InMemorySessionStateStore, SessionState,
-	SessionStateStore, SqliteConversationStore, SqliteSessionStateStore, SqliteStoreConfig,
-	StoreError,
-};
+use roku_state_store::{InMemoryConversationRepository, InMemorySessionPreferenceRepository};
 use serde_json::json;
 
 use crate::CommandError;
@@ -47,9 +48,10 @@ use crate::runtime::{
 	apply_request_env_overrides, build_live_runtime_service_from_layout_and_bootstrap,
 	build_plugin_bootstrap_from_env, ensure_plugin_enabled_for_command,
 };
+use crate::runtime_config::load_runtime_configs;
 use crate::storage::LocalStorageLayout;
 use crate::telegram_loop_bridge::{
-	PendingLoopStore, restore_pending_loop_from_session, sync_pending_loop_to_session,
+	restore_pending_loop_from_session, sync_pending_loop_to_session,
 };
 
 /// Starts the Telegram bot polling loop using env-driven layout and plugin bootstrap.
@@ -294,7 +296,8 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 				// Clear both runtime and session binding so no stale pending loop remains.
 				self.service.clear_pending_loop(&command.session_id)?;
 				self.transport_state
-					.clear_pending_loop_binding(&command.session_id)?;
+					.clear_pending_loop_snapshot(&command.session_id)
+					.map_err(|error| RuntimeError::new(error.to_string()))?;
 				let snapshot = self.transport_state.status_snapshot(&command.session_id)?;
 				Ok(self.control_command_response(
 					command.command,
@@ -504,9 +507,9 @@ fn telegram_parse_mode_label(mode: TelegramParseMode) -> &'static str {
 /// turns. Source of truth for Telegram session data; runtime service holds the actual loop state.
 pub(crate) struct TelegramTransportState {
 	/// Session-scoped transport state (planning mode, pending loop binding); one store per process.
-	session_state_store: Mutex<Box<dyn SessionStateStore + Send>>,
+	session_state_store: Mutex<Box<dyn SessionStateBackend + Send>>,
 	/// Conversation turns per session_id; one store per process.
-	conversation_store: Mutex<Box<dyn ConversationStore + Send>>,
+	conversation_store: Mutex<Box<dyn ShortTermContinuityBackend + Send>>,
 }
 
 impl TelegramTransportState {
@@ -514,31 +517,28 @@ impl TelegramTransportState {
 	fn from_env() -> Result<Self, CommandError> {
 		let layout = LocalStorageLayout::from_env();
 		layout.ensure_dirs().map_err(CommandError::Io)?;
-		let config = SqliteStoreConfig::new(layout.sqlite_path.clone());
+		let runtime_configs = load_runtime_configs(&layout)?;
+		let sqlite_config = runtime_configs.memory.backends.sqlite.clone();
+		let adapters = SqliteMemoryAdapters::connect(sqlite_config.clone())
+			.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?;
 		let _ = emit_global_log(
 			LogRecord::new(
 				"roku-cmd",
 				LogLevel::Info,
 				"using sqlite-backed telegram session state",
 			)
-			.with_field("path", layout.sqlite_path.display().to_string()),
+			.with_field("path", sqlite_config.path.display().to_string()),
 		);
 		Ok(Self::new(
-			Box::new(
-				SqliteSessionStateStore::connect(config.clone())
-					.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?,
-			),
-			Box::new(
-				SqliteConversationStore::connect(config)
-					.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?,
-			),
+			Box::new(adapters.session_state),
+			Box::new(adapters.short_term),
 		))
 	}
 
 	/// Constructs state with the given store implementations (used by tests and from_env).
 	fn new(
-		session_state_store: Box<dyn SessionStateStore + Send>,
-		conversation_store: Box<dyn ConversationStore + Send>,
+		session_state_store: Box<dyn SessionStateBackend + Send>,
+		conversation_store: Box<dyn ShortTermContinuityBackend + Send>,
 	) -> Self {
 		Self {
 			session_state_store: Mutex::new(session_state_store),
@@ -555,7 +555,7 @@ impl TelegramTransportState {
 		let mut store = self.lock_session_state_store()?;
 		store
 			.save_session_state(session_id, state)
-			.map_err(runtime_store_error)?;
+			.map_err(runtime_session_state_error)?;
 		Ok(())
 	}
 
@@ -567,7 +567,7 @@ impl TelegramTransportState {
 		let store = self.lock_session_state_store()?;
 		Ok(store
 			.load_session_state(session_id)
-			.map_err(runtime_store_error)?
+			.map_err(runtime_session_state_error)?
 			.unwrap_or_default())
 	}
 
@@ -575,7 +575,7 @@ impl TelegramTransportState {
 		let mut store = self.lock_conversation_store()?;
 		store
 			.append_continuity_turn(session_id, turn)
-			.map_err(runtime_store_error)?;
+			.map_err(runtime_short_term_error)?;
 		Ok(())
 	}
 
@@ -587,7 +587,7 @@ impl TelegramTransportState {
 		let store = self.lock_conversation_store()?;
 		store
 			.load_short_term_continuity(session_id, limit)
-			.map_err(runtime_store_error)
+			.map_err(runtime_short_term_error)
 	}
 
 	/// Clears Telegram session-scoped state for one chat/session.
@@ -597,10 +597,10 @@ impl TelegramTransportState {
 	fn clear_transport_session(&self, session_id: &str) -> Result<(), RuntimeError> {
 		self.lock_session_state_store()?
 			.delete_session_state(session_id)
-			.map_err(runtime_store_error)?;
+			.map_err(runtime_session_state_error)?;
 		self.lock_conversation_store()?
 			.delete_continuity(session_id)
-			.map_err(runtime_store_error)?;
+			.map_err(runtime_short_term_error)?;
 		Ok(())
 	}
 
@@ -622,7 +622,7 @@ impl TelegramTransportState {
 	/// Locks the session-state store; returns a runtime error if the mutex is poisoned.
 	fn lock_session_state_store(
 		&self,
-	) -> Result<std::sync::MutexGuard<'_, Box<dyn SessionStateStore + Send>>, RuntimeError> {
+	) -> Result<std::sync::MutexGuard<'_, Box<dyn SessionStateBackend + Send>>, RuntimeError> {
 		self.session_state_store
 			.lock()
 			.map_err(|_| RuntimeError::new("session state store is poisoned"))
@@ -631,29 +631,35 @@ impl TelegramTransportState {
 	/// Locks the conversation store; returns a runtime error if the mutex is poisoned.
 	fn lock_conversation_store(
 		&self,
-	) -> Result<std::sync::MutexGuard<'_, Box<dyn ConversationStore + Send>>, RuntimeError> {
+	) -> Result<std::sync::MutexGuard<'_, Box<dyn ShortTermContinuityBackend + Send>>, RuntimeError>
+	{
 		self.conversation_store
 			.lock()
 			.map_err(|_| RuntimeError::new("conversation store is poisoned"))
 	}
 }
 
-impl PendingLoopStore for TelegramTransportState {
-	fn load_pending_loop_binding(
+impl PendingLoopSnapshotBackend for TelegramTransportState {
+	fn load_pending_loop_snapshot(
 		&self,
 		session_id: &str,
-	) -> Result<Option<PendingLoopBinding>, RuntimeError> {
-		Ok(self.load_session_state_or_default(session_id)?.pending_loop)
+	) -> Result<Option<PendingLoopSnapshot>, PendingLoopSnapshotError> {
+		self.load_session_state_or_default(session_id)
+			.map(|state| state.pending_loop)
+			.map_err(|error| PendingLoopSnapshotError::Backend(error.to_string()))
 	}
 
-	fn save_pending_loop_binding(
+	fn save_pending_loop_snapshot(
 		&self,
 		session_id: &str,
-		binding: Option<PendingLoopBinding>,
-	) -> Result<(), RuntimeError> {
-		let mut session_state = self.load_session_state_or_default(session_id)?;
+		binding: Option<PendingLoopSnapshot>,
+	) -> Result<(), PendingLoopSnapshotError> {
+		let mut session_state = self
+			.load_session_state_or_default(session_id)
+			.map_err(|error| PendingLoopSnapshotError::Backend(error.to_string()))?;
 		session_state.pending_loop = binding;
 		self.save_session_state(session_id, session_state)
+			.map_err(|error| PendingLoopSnapshotError::Backend(error.to_string()))
 	}
 }
 
@@ -661,14 +667,17 @@ impl Default for TelegramTransportState {
 	/// In-memory backends only; for tests. Production uses [`TelegramTransportState::from_env`].
 	fn default() -> Self {
 		Self::new(
-			Box::new(InMemorySessionStateStore::default()),
-			Box::new(InMemoryConversationStore::default()),
+			Box::new(InMemorySessionPreferenceRepository::default()),
+			Box::new(InMemoryConversationRepository::default()),
 		)
 	}
 }
 
-/// Maps store layer errors to runtime errors for handler and bridge callers.
-fn runtime_store_error(error: StoreError) -> RuntimeError {
+fn runtime_session_state_error(error: SessionStateError) -> RuntimeError {
+	RuntimeError::new(error.to_string())
+}
+
+fn runtime_short_term_error(error: ShortTermContinuityError) -> RuntimeError {
 	RuntimeError::new(error.to_string())
 }
 
