@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::StatusCode;
+use reqwest::Url;
 use reqwest::blocking::{Client, RequestBuilder};
 use roku_memory::{
 	LongTermMemoryBackend, MemoryBackendHealth, MemoryBackendStatus, MemoryDeleteSelector,
@@ -160,6 +161,11 @@ impl LongTermMemoryBackend for OpenVikingLongTermMemoryBackend {
 	}
 
 	fn write(&self, request: &MemoryWriteRequest) -> Result<MemoryWriteAck, MemoryError> {
+		if !server_accepts_local_paths(&self.config.base_url) {
+			return Err(MemoryError::Rejected(
+				"phase-4 OpenViking write support requires a localhost server; remote temp_upload is not implemented yet".to_string(),
+			));
+		}
 		let staged_path = self.stage_memory_record(request)?;
 		let scope_root_uri = self.scope_root_uri_for_write(request)?;
 		let target_uri = format!(
@@ -491,16 +497,15 @@ fn matched_context_into_hit(
 
 fn canonical_record_uri(uri: &str) -> String {
 	let trimmed = uri.trim_end_matches('/');
-	if let Some(stripped) = trimmed.strip_suffix("/.abstract.md") {
-		return stripped.to_string();
-	}
-
 	let mut segments = trimmed.rsplitn(2, '/');
 	let last_segment = segments.next().unwrap_or(trimmed);
 	let parent_path = match segments.next() {
 		Some(parent_path) => parent_path,
 		None => return trimmed.to_string(),
 	};
+	if last_segment.starts_with('.') && last_segment.ends_with(".md") {
+		return parent_path.to_string();
+	}
 	let parent_name = match parent_path.rsplit('/').next() {
 		Some(parent_name) => parent_name,
 		None => return trimmed.to_string(),
@@ -510,6 +515,16 @@ fn canonical_record_uri(uri: &str) -> String {
 	} else {
 		trimmed.to_string()
 	}
+}
+
+fn server_accepts_local_paths(base_url: &str) -> bool {
+	let Ok(url) = Url::parse(base_url) else {
+		return false;
+	};
+	let Some(host) = url.host_str() else {
+		return false;
+	};
+	matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
 fn stage_path(root: &Path, request: &MemoryWriteRequest, file_name: &str) -> PathBuf {
@@ -806,7 +821,7 @@ impl MemoryUriDescriptor {
 mod tests {
 	use super::{
 		canonical_record_uri, memory_kind_segment, parse_memory_kind_segment, parse_uri_descriptor,
-		render_memory_markdown, scope_root_uri,
+		render_memory_markdown, scope_root_uri, server_accepts_local_paths,
 	};
 	use roku_memory::{MemoryKind, MemoryScope, MemoryWriteReason, MemoryWriteRequest};
 
@@ -876,9 +891,22 @@ mod tests {
 		);
 		assert_eq!(
 			canonical_record_uri(
+				"viking://resources/roku-memory/session/s1/user_preference/record-1.md/.overview.md"
+			),
+			"viking://resources/roku-memory/session/s1/user_preference/record-1.md"
+		);
+		assert_eq!(
+			canonical_record_uri(
 				"viking://resources/roku-memory/session/s1/user_preference/record-1.md/record-1.md"
 			),
 			"viking://resources/roku-memory/session/s1/user_preference/record-1.md"
 		);
+	}
+
+	#[test]
+	fn remote_servers_are_rejected_for_local_path_ingest() {
+		assert!(server_accepts_local_paths("http://127.0.0.1:1933"));
+		assert!(server_accepts_local_paths("http://localhost:1933"));
+		assert!(!server_accepts_local_paths("https://memory.example.com"));
 	}
 }
