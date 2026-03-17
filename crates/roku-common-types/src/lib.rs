@@ -93,6 +93,7 @@ pub struct RequestEnvelope {
 	pub session_id: String,
 	pub goal: String,
 	#[serde(default)]
+	/// Deprecated compatibility hint; new requests stay on the direct runtime path.
 	pub planning_mode_hint: Option<PlanningModeHint>,
 	#[serde(default)]
 	/// Short-term continuity only; long-term recall is injected through runtime-owned context.
@@ -247,6 +248,7 @@ pub struct Task {
 	pub state: TaskState,
 	pub attempts: u32,
 	#[serde(default)]
+	/// Legacy compatibility hint preserved for replay/resume metadata only.
 	pub planning_mode_hint: Option<PlanningModeHint>,
 	#[serde(default)]
 	/// Legacy persisted short-term continuity snapshot; not a canonical long-term memory source.
