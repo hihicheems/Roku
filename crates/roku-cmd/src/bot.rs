@@ -326,7 +326,7 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 }
 
 impl RuntimeServiceTelegramHandler {
-	/// Reconciles the runtime's pending-loop memory with the Telegram session binding.
+	/// Reconciles the runtime's pending-loop state with the Telegram session binding.
 	///
 	/// Status-like commands should call this before reading a session snapshot so Telegram control
 	/// views reflect the latest resumable-loop truth instead of stale session metadata.
@@ -787,7 +787,7 @@ mod tests {
 	}
 
 	#[test]
-	fn telegram_handler_keeps_memory_across_regular_requests() {
+	fn telegram_handler_keeps_short_term_continuity_across_regular_requests() {
 		let mut router = LlmRouter::new(RoutingPolicy {
 			max_request_cost_usd: 1.0,
 			max_latency_ms: 5_000,
@@ -844,7 +844,7 @@ mod tests {
 	}
 
 	#[test]
-	fn telegram_control_cancel_clears_pending_loop_without_clearing_memory() {
+	fn telegram_control_cancel_clears_pending_loop_without_clearing_continuity() {
 		let handler = test_handler();
 		let session_id = "telegram-control-cancel";
 		handler
@@ -1051,7 +1051,7 @@ mod tests {
 	}
 
 	#[test]
-	fn recognized_control_commands_do_not_pollute_memory() {
+	fn recognized_control_commands_do_not_pollute_continuity() {
 		let handler = test_handler();
 		let session_id = "telegram-control-memory";
 		handler
