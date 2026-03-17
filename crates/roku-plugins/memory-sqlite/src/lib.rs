@@ -23,6 +23,7 @@ mod config;
 
 pub use backend::{
 	SqliteMemoryAdapterError, SqliteMemoryAdapters, SqliteMemoryRegistration,
-	SqlitePendingLoopSnapshotAdapter, SqliteSessionStateAdapter, SqliteShortTermContinuityAdapter,
+	SqliteMemorySubsystemRegistration, SqlitePendingLoopSnapshotAdapter, SqliteSessionStateAdapter,
+	SqliteShortTermContinuityAdapter,
 };
 pub use config::{SqliteMemoryConfig, SqliteMemoryConfigError, SqliteMemoryConfigPatch};

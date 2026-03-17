@@ -19,9 +19,9 @@ use std::sync::Mutex;
 
 use roku_memory::{
 	DisabledMemoryLifecyclePolicy, MemoryAdapterAvailability, MemoryBackendId,
-	NoopLongTermMemoryBackend, PendingLoopSnapshot, PendingLoopSnapshotBackend,
-	PendingLoopSnapshotError, ResolvedMemorySubsystem, SessionState, SessionStateBackend,
-	SessionStateError, ShortTermContinuityBackend, ShortTermContinuityError,
+	MemorySubsystemRegistration, NoopLongTermMemoryBackend, PendingLoopSnapshot,
+	PendingLoopSnapshotBackend, PendingLoopSnapshotError, ResolvedMemorySubsystem, SessionState,
+	SessionStateBackend, SessionStateError, ShortTermContinuityBackend, ShortTermContinuityError,
 };
 use roku_state_store::{
 	SqliteConversationRepository, SqliteSessionPreferenceRepository, SqliteStoreConfig,
@@ -83,6 +83,29 @@ impl SqliteMemoryRegistration {
 			Box::new(adapters.pending_loop),
 			Arc::new(DisabledMemoryLifecyclePolicy),
 		))
+	}
+}
+
+/// Config-bound SQLite registration consumed by the Roku entry registry.
+#[derive(Debug, Clone)]
+pub struct SqliteMemorySubsystemRegistration {
+	config: SqliteMemoryConfig,
+}
+
+impl SqliteMemorySubsystemRegistration {
+	pub fn new(config: SqliteMemoryConfig) -> Self {
+		Self { config }
+	}
+}
+
+impl MemorySubsystemRegistration for SqliteMemorySubsystemRegistration {
+	fn availability(&self) -> MemoryAdapterAvailability {
+		SqliteMemoryRegistration::availability()
+	}
+
+	fn resolve_subsystem(&self) -> Result<ResolvedMemorySubsystem, String> {
+		SqliteMemoryRegistration::resolve_subsystem(self.config.clone())
+			.map_err(|error| error.to_string())
 	}
 }
 
