@@ -423,12 +423,12 @@ impl RuntimeService {
 				],
 			);
 		}
-		let mut context_bundle = self.build_context_bundle(&normalized_request)?;
 		let mut task = self.orchestrator.create_task(&normalized_request);
 
 		self.record_transition(&mut task, TaskState::Planning, "classify direct route")?;
 
 		if let Some(planning_mode_hint) = normalized_request.planning_mode_hint {
+			let context_bundle = self.build_context_bundle(&normalized_request, false)?;
 			self.clear_pending_loop(&normalized_request.session_id)?;
 			self.metrics.inc_route_escalations();
 			self.metrics.inc_route_limited_planning();
@@ -457,7 +457,12 @@ impl RuntimeService {
 			);
 		}
 
-		if let Some(mut loop_state) = self.take_resumable_pending_loop(&normalized_request)? {
+		let mut resumable_loop = self.take_resumable_pending_loop(&normalized_request)?;
+		let mut context_bundle =
+			self.build_context_bundle(&normalized_request, resumable_loop.is_some())?;
+
+		if let Some(mut loop_state) = resumable_loop.take() {
+			self.attach_resumed_loop_resources(&mut context_bundle, &loop_state);
 			self.start_experiment_run(&task, &normalized_request.goal, "runtime_loop_resume")?;
 			return self.resume_pending_loop(
 				&mut task,

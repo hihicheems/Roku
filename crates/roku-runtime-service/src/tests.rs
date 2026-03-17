@@ -184,7 +184,7 @@ fn context_bundle_separates_short_term_continuity_from_long_term_hits() {
 	};
 
 	let bundle = service
-		.build_context_bundle(&request)
+		.build_context_bundle(&request, false)
 		.expect("context bundle should build");
 
 	assert_eq!(request.conversation_history.len(), 1);
@@ -194,6 +194,44 @@ fn context_bundle_separates_short_term_continuity_from_long_term_hits() {
 		bundle.long_term_memory_hits[0].record.summary,
 		"Rust preference"
 	);
+}
+
+#[test]
+fn resumed_pending_loops_project_bound_resources_into_context_bundle() {
+	let service = RuntimeService::default();
+	let cwd = env::current_dir().expect("cwd should resolve");
+	let context = LoopContext {
+		request_id: "req-pending-context".to_string(),
+		session_id: "session-1".to_string(),
+		goal: "继续".to_string(),
+		workspace_root: cwd.display().to_string(),
+		working_directory: cwd.display().to_string(),
+		visible_tools: vec!["fs.read_text".to_string()],
+		bound_resources: vec![ResourceSelector::tool("fs.read_text".to_string())],
+		route_decision: RouteDecision::new(
+			IntentFamily::FilesystemRead,
+			0.91,
+			false,
+			RouteRisk::Low,
+			vec!["fs.read_text".to_string()],
+			Vec::new(),
+			Vec::new(),
+			"resume request",
+		),
+		last_observation: None,
+	};
+	let loop_state = LoopState::new("loop-pending-context", &context);
+	let mut bundle = service
+		.build_context_bundle(&request("继续"), true)
+		.expect("context bundle should build");
+
+	service.attach_resumed_loop_resources(&mut bundle, &loop_state);
+
+	assert_eq!(
+		bundle.visible_resources,
+		vec![ResourceSelector::tool("fs.read_text".to_string())]
+	);
+	assert!(bundle.pending_loop_active);
 }
 
 #[test]
@@ -463,7 +501,19 @@ fn pending_filesystem_tool_loops_resume_through_the_generic_loop_driver() {
 
 #[test]
 fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
-	let service = RuntimeService::default();
+	let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
+	let mut memory = MemoryWriteRequest::new(
+		MemoryKind::UserPreference,
+		MemoryScope::Session,
+		"User prefers Rust snippets.",
+		"Rust preference".to_string(),
+		MemoryWriteReason::OperatorRequested,
+	);
+	memory.session_id = Some("session-1".to_string());
+	backend
+		.write(&memory)
+		.expect("seed long-term memory write should succeed");
+	let service = RuntimeService::default().with_long_term_memory_backend(backend.clone());
 	let cwd = env::current_dir().expect("cwd should resolve");
 	let context = LoopContext {
 		request_id: "req-freeform-pending".to_string(),
@@ -502,6 +552,7 @@ fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
 
 	assert_eq!(response.status, ResponseStatus::Succeeded);
 	assert_ne!(response.message, "您想继续什么任务？");
+	assert_eq!(backend.recorded_queries().len(), 1);
 	assert!(
 		service
 			.pending_loop("session-1")

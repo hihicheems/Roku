@@ -56,8 +56,8 @@ impl RuntimeService {
 	pub(crate) fn build_context_bundle(
 		&self,
 		request: &RequestEnvelope,
+		pending_loop_active: bool,
 	) -> Result<ContextBundle, RuntimeError> {
-		let pending_loop_active = self.has_pending_loop(&request.session_id)?;
 		let mut bundle = ContextBundle {
 			short_term_continuity: request.conversation_history.clone(),
 			pending_loop_active,
@@ -136,6 +136,14 @@ impl RuntimeService {
 		}
 
 		Ok(bundle)
+	}
+
+	pub(crate) fn attach_resumed_loop_resources(
+		&self,
+		context_bundle: &mut ContextBundle,
+		loop_state: &roku_agent_runtime::LoopState,
+	) {
+		context_bundle.visible_resources = loop_state.bound_resources.clone();
 	}
 
 	pub(crate) fn attach_visible_resources(

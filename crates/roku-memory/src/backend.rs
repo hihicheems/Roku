@@ -234,19 +234,19 @@ fn scope_matches(record: &MemoryRecord, query: &MemoryQuery) -> bool {
 	match query.scope {
 		MemoryScope::Session => match (&record.session_id, &query.session_id) {
 			(Some(record_session), Some(query_session)) => record_session == query_session,
-			_ => true,
+			_ => false,
 		},
 		MemoryScope::User => match (&record.user_id, &query.user_id) {
 			(Some(record_user), Some(query_user)) => record_user == query_user,
-			_ => true,
+			_ => false,
 		},
 		MemoryScope::Project => match (&record.project_id, &query.project_id) {
 			(Some(record_project), Some(query_project)) => record_project == query_project,
-			_ => true,
+			_ => false,
 		},
 		MemoryScope::Workspace => match (&record.workspace_id, &query.workspace_id) {
 			(Some(record_workspace), Some(query_workspace)) => record_workspace == query_workspace,
-			_ => true,
+			_ => false,
 		},
 		MemoryScope::Global => true,
 	}
@@ -349,5 +349,29 @@ mod tests {
 		assert_eq!(backend.recorded_queries().len(), 1);
 		assert_eq!(hits.len(), 1);
 		assert_eq!(hits[0].record.summary, "Rust preference");
+	}
+
+	#[test]
+	fn in_memory_backend_keeps_session_scope_isolated() {
+		let backend = InMemoryLongTermMemoryBackend::default();
+		let mut write = MemoryWriteRequest::new(
+			MemoryKind::UserPreference,
+			MemoryScope::Session,
+			"User prefers Rust examples.",
+			"Rust preference",
+			MemoryWriteReason::TaskSucceeded,
+		);
+		write.session_id = Some("session-a".to_string());
+		backend.write(&write).expect("write should succeed");
+
+		let mut query = MemoryQuery::new(
+			"Rust preference",
+			MemoryRecallReason::RequestIntake,
+			MemoryScope::Session,
+		);
+		query.session_id = Some("session-b".to_string());
+		let hits = backend.search(&query).expect("search should succeed");
+
+		assert!(hits.is_empty());
 	}
 }

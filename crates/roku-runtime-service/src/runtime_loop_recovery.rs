@@ -40,11 +40,6 @@ impl RuntimeService {
 		Ok(())
 	}
 
-	pub(super) fn has_pending_loop(&self, session_id: &str) -> Result<bool, RuntimeError> {
-		let pending = self.lock_pending_loops()?;
-		Ok(pending.contains_key(session_id))
-	}
-
 	pub(super) fn sync_pending_loop(&self, loop_state: &LoopState) -> Result<(), RuntimeError> {
 		let mut pending = self.lock_pending_loops()?;
 		match loop_state.status {
