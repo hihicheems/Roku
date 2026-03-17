@@ -14,6 +14,7 @@
 
 //! Roku-owned runtime bundle namespace.
 //!
-//! Later phases define the provider-neutral bundle shapes consumed by runtime
-//! and entry layers. Phase 1 establishes the ownership boundary so these shapes
-//! do not grow inside `roku-cmd`.
+//! Provider-neutral bundle ownership lives in this subsystem even while the
+//! current resolved bundle shape is still exposed from `registry`. Entry-layer
+//! unification may later split these shapes into dedicated bundle modules, but
+//! they no longer grow inside `roku-cmd`.

@@ -18,8 +18,10 @@
 //! registry` is the main entry. `backend registry` and `runtime bundle registry`
 //! are internal responsibility splits within the same registry surface.
 //!
-//! Phase 1 establishes namespace ownership only. Concrete bundle shapes,
-//! registration APIs, and fallback implementations arrive in later phases.
+//! Phase 1 established namespace ownership. Phase 2 and Phase 3 then moved the
+//! provider-neutral bundle shape, disabled fallbacks, backend ids, and adapter
+//! availability helpers into this module so later entry unification can build
+//! on Roku-owned registry semantics instead of `roku-cmd` bootstrap code.
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -126,10 +128,11 @@ impl MemoryLifecyclePolicy for DisabledMemoryLifecyclePolicy {
 	}
 }
 
-/// Provider-neutral bundle shape returned by later memory registry resolution.
+/// Provider-neutral bundle shape returned by memory registry resolution.
 ///
-/// Phase 2 defines this shape so entry and runtime layers can converge on a
-/// shared contract surface before adapter resolution is moved out of `roku-cmd`.
+/// Phase 2 defined this shape so entry and runtime layers can converge on a
+/// shared contract surface before full entry-registry wiring is moved out of
+/// `roku-cmd`.
 pub struct ResolvedMemorySubsystem {
 	pub long_term: Arc<dyn LongTermMemoryBackend>,
 	pub short_term: Box<dyn ShortTermContinuityBackend>,

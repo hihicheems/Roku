@@ -14,10 +14,10 @@
 
 //! Roku-owned long-term memory namespace.
 //!
-//! This module is the stable home for recall and write-back semantics. During
-//! Phase 1 the concrete items still live in the crate's flat compatibility
-//! modules and are re-exported here so later phases can migrate callers without
-//! another namespace break.
+//! This module is the stable home for recall and write-back semantics. The
+//! concrete items still live in the crate's flat compatibility modules, but
+//! callers consume them through this subdomain so the memory subsystem keeps a
+//! stable provider-neutral surface.
 
 pub use crate::backend::{
 	InMemoryLongTermMemoryBackend, LongTermMemoryBackend, MemoryBackendHealth, MemoryBackendStatus,

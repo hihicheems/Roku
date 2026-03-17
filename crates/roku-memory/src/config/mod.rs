@@ -15,5 +15,6 @@
 //! Roku-owned memory configuration namespace.
 //!
 //! The provider-neutral meaning of `runtime.memory.*` belongs to this subsystem.
-//! Startup parsing may temporarily live elsewhere during migration, but adapter
-//! specific settings must not redefine the top-level memory semantics.
+//! Startup parsing still lives in `roku-cmd` at this stage, but adapter-specific
+//! settings must not redefine the top-level memory semantics and remain
+//! subordinate to the Roku-owned config contract.

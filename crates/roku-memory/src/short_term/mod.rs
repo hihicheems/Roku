@@ -14,9 +14,9 @@
 
 //! Roku-owned short-term continuity namespace.
 //!
-//! Phase 1 reserves this module as the future home for provider-neutral
-//! short-term continuity contracts. New short-term ownership should land here,
-//! not in `roku-cmd` or `roku-state-store`.
+//! Phase 2 moved the provider-neutral short-term continuity contract here.
+//! Concrete transcript stores remain adapter implementations; they no longer
+//! define the continuity semantics themselves.
 
 use roku_common_types::ConversationTurn;
 use thiserror::Error;

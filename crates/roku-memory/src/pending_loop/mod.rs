@@ -15,8 +15,8 @@
 //! Roku-owned pending-loop snapshot namespace.
 //!
 //! Pending-loop persistence belongs to the memory subsystem only when it is part
-//! of Roku's continuity/session contract. Phase 1 establishes the namespace
-//! without migrating concrete implementations yet.
+//! of Roku's continuity/session contract. Phase 2 moved the provider-neutral
+//! snapshot contract here; concrete persistence remains adapter work.
 
 use roku_common_types::PendingLoopBinding;
 use thiserror::Error;

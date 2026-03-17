@@ -14,9 +14,9 @@
 
 //! Roku-owned session-state namespace.
 //!
-//! This module is reserved for provider-neutral session-state contracts and
-//! types. Transport-specific implementations remain adapters and do not own the
-//! session model.
+//! Phase 2 moved the provider-neutral session-state contract here. Transport-
+//! specific persistence remains adapter work; the session model itself belongs
+//! to Roku's memory subsystem.
 
 use roku_common_types::SessionPreferences;
 use thiserror::Error;

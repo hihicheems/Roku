@@ -18,9 +18,11 @@
 //! pending-loop semantics. Concrete providers such as OpenViking or SQLite are
 //! adapter crates: they implement Roku contracts, but they do not redefine them.
 //!
-//! Phase 1 establishes the ownership boundary and namespace skeleton. The existing
-//! long-term contracts remain re-exported from the flat compatibility modules below
-//! while later phases migrate additional subdomains into their dedicated modules.
+//! Phase 1 fixed the ownership boundary and namespace skeleton. Phase 2 then
+//! pulled short-term continuity, session-state, pending-loop snapshot, and
+//! registry bundle contracts back into this crate. The flat compatibility
+//! modules remain as internal implementation units, while callers consume the
+//! provider-neutral subdomains re-exported here.
 //!
 //! `registry` is the umbrella term for subsystem resolution. `entry registry` is
 //! the main entry. `backend registry` and `runtime bundle registry` are internal
