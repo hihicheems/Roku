@@ -1,0 +1,75 @@
+// Copyright 2025 itscheems
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Roku-owned short-term continuity namespace.
+//!
+//! Phase 1 reserves this module as the future home for provider-neutral
+//! short-term continuity contracts. New short-term ownership should land here,
+//! not in `roku-cmd` or `roku-state-store`.
+
+use roku_common_types::ConversationTurn;
+use thiserror::Error;
+
+/// Error returned by short-term continuity backends.
+#[derive(Debug, Error)]
+pub enum ShortTermContinuityError {
+	#[error("short-term continuity backend failed: {0}")]
+	Backend(String),
+}
+
+/// Provider-neutral short-term continuity contract.
+///
+/// Implementations own recent transcript storage only. They do not define
+/// recall policy, long-term memory semantics, or entry-specific workflow.
+pub trait ShortTermContinuityBackend: Send {
+	fn append_continuity_turn(
+		&mut self,
+		session_id: &str,
+		turn: ConversationTurn,
+	) -> Result<(), ShortTermContinuityError>;
+
+	fn load_short_term_continuity(
+		&self,
+		session_id: &str,
+		limit: usize,
+	) -> Result<Vec<ConversationTurn>, ShortTermContinuityError>;
+
+	fn delete_continuity(&mut self, session_id: &str) -> Result<(), ShortTermContinuityError>;
+}
+
+/// Disabled short-term continuity backend used when continuity is intentionally unavailable.
+#[derive(Debug, Default)]
+pub struct NoopShortTermContinuityBackend;
+
+impl ShortTermContinuityBackend for NoopShortTermContinuityBackend {
+	fn append_continuity_turn(
+		&mut self,
+		_session_id: &str,
+		_turn: ConversationTurn,
+	) -> Result<(), ShortTermContinuityError> {
+		Ok(())
+	}
+
+	fn load_short_term_continuity(
+		&self,
+		_session_id: &str,
+		_limit: usize,
+	) -> Result<Vec<ConversationTurn>, ShortTermContinuityError> {
+		Ok(Vec::new())
+	}
+
+	fn delete_continuity(&mut self, _session_id: &str) -> Result<(), ShortTermContinuityError> {
+		Ok(())
+	}
+}

@@ -12,27 +12,48 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Provider-neutral long-term memory domain types and backend contracts for Roku.
+//! Provider-neutral memory subsystem ownership for Roku.
 //!
-//! This crate defines Roku's own memory vocabulary: what a recall query looks like,
-//! what a persisted memory record contains, how runtime policy can ask for recall
-//! or write-back, and what a backend is allowed to do in response.
+//! `roku-memory` is the Roku-owned home for memory, continuity, session, and
+//! pending-loop semantics. Concrete providers such as OpenViking or SQLite are
+//! adapter crates: they implement Roku contracts, but they do not redefine them.
 //!
-//! Backends such as OpenViking are intentionally kept out of this crate. They map
-//! these contracts onto provider-specific APIs, but they do not redefine the
-//! memory model itself.
+//! Phase 1 establishes the ownership boundary and namespace skeleton. The existing
+//! long-term contracts remain re-exported from the flat compatibility modules below
+//! while later phases migrate additional subdomains into their dedicated modules.
+//!
+//! `registry` is the umbrella term for subsystem resolution. `entry registry` is
+//! the main entry. `backend registry` and `runtime bundle registry` are internal
+//! responsibility splits within that same Roku-owned registry surface.
 
 mod backend;
 mod policy;
 mod types;
 
+pub mod bundle;
+pub mod config;
+pub mod long_term;
+pub mod pending_loop;
+pub mod registry;
+pub mod session;
+pub mod short_term;
+
 pub use backend::{
 	InMemoryLongTermMemoryBackend, LongTermMemoryBackend, MemoryBackendHealth, MemoryBackendStatus,
 	MemoryDeleteSelector, MemoryError, MemoryWriteAck, NoopLongTermMemoryBackend,
 };
+pub use pending_loop::{
+	NoopPendingLoopSnapshotBackend, PendingLoopSnapshot, PendingLoopSnapshotBackend,
+	PendingLoopSnapshotError,
+};
 pub use policy::{
 	ConservativeMemoryLifecyclePolicy, MemoryLifecyclePolicy, MemoryRecallInput,
 	MemoryWritePolicyInput,
+};
+pub use registry::{DisabledMemoryLifecyclePolicy, ResolvedMemorySubsystem};
+pub use session::{NoopSessionStateBackend, SessionState, SessionStateBackend, SessionStateError};
+pub use short_term::{
+	NoopShortTermContinuityBackend, ShortTermContinuityBackend, ShortTermContinuityError,
 };
 pub use types::{
 	MemoryFilters, MemoryHit, MemoryKind, MemoryMetadata, MemoryProvenance, MemoryQuery,
