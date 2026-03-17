@@ -12,15 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Startup-side typed parsing for `runtime.memory.*` during the memory migration.
+//! Startup-side composition for `runtime.memory.*`.
 //!
-//! The provider-neutral meaning of `runtime.memory.*` belongs to Roku's memory
-//! subsystem. This module only keeps the provider-neutral top-level shape and
-//! delegates provider-specific subtrees to adapter crates.
+//! The provider-neutral top-level schema now lives in `roku-memory`.
+//! This module keeps only the process-local startup glue that layers adapter
+//! subtrees on top of that core config and applies env overrides/materialized
+//! provider artifacts for this command process.
 
+use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 
-use roku_memory::MemoryBackendId;
+use roku_memory::{
+	MemoryBackendId, MemoryRuntimeConfig as CoreMemoryRuntimeConfig,
+	MemoryRuntimeConfigError as CoreMemoryRuntimeConfigError,
+	MemoryRuntimeConfigPatch as CoreMemoryRuntimeConfigPatch,
+};
 use roku_plugin_memory_openviking::{
 	OpenVikingRuntimeConfig, OpenVikingRuntimeConfigError, OpenVikingRuntimeConfigPatch,
 };
@@ -30,8 +36,6 @@ use roku_plugin_memory_sqlite::{
 use serde::Deserialize;
 use thiserror::Error;
 
-pub const HARD_MAX_MEMORY_RECALL_TOP_K: usize = 64;
-pub const HARD_MAX_MEMORY_WRITE_BATCH_SIZE: usize = 256;
 #[cfg(test)]
 pub const HARD_MAX_MEMORY_REQUEST_TIMEOUT_MS: u64 = 120_000;
 #[cfg(test)]
@@ -41,50 +45,17 @@ pub const HARD_MAX_OPENVIKING_VLM_MAX_CONCURRENT: usize = 64;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemoryRuntimeConfig {
-	pub enabled: bool,
-	pub backend: MemoryBackendId,
-	pub recall: MemoryRecallConfig,
-	pub write: MemoryWriteConfig,
+	pub core: CoreMemoryRuntimeConfig,
 	pub backends: MemoryBackendConfigs,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryRuntimeConfigPatch {
-	pub enabled: Option<bool>,
-	pub backend: Option<MemoryBackendId>,
-	#[serde(default)]
-	pub recall: Option<MemoryRecallConfigPatch>,
-	#[serde(default)]
-	pub write: Option<MemoryWriteConfigPatch>,
+	#[serde(flatten)]
+	pub core: CoreMemoryRuntimeConfigPatch,
 	#[serde(default)]
 	pub backends: Option<MemoryBackendConfigsPatch>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MemoryRecallConfig {
-	pub enabled: bool,
-	pub top_k: usize,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MemoryRecallConfigPatch {
-	pub enabled: Option<bool>,
-	pub top_k: Option<usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MemoryWriteConfig {
-	pub enabled: bool,
-	pub max_batch_size: usize,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MemoryWriteConfigPatch {
-	pub enabled: Option<bool>,
-	pub max_batch_size: Option<usize>,
 }
 
 /// Provider-specific config subtree anchored under `runtime.memory.backends.*`.
@@ -107,49 +78,31 @@ pub struct MemoryBackendConfigsPatch {
 pub enum MemoryRuntimeConfigError {
 	#[error("invalid environment variable {key}: {message}")]
 	InvalidEnv { key: &'static str, message: String },
-	#[error("invalid runtime.memory configuration for {field}: {message}")]
-	InvalidConfig {
-		field: &'static str,
-		message: String,
-	},
+	#[error(transparent)]
+	Core(#[from] CoreMemoryRuntimeConfigError),
 	#[error(transparent)]
 	OpenViking(#[from] OpenVikingRuntimeConfigError),
 	#[error(transparent)]
 	Sqlite(#[from] SqliteMemoryConfigError),
 }
 
-impl Default for MemoryRecallConfig {
-	fn default() -> Self {
-		Self {
-			enabled: true,
-			top_k: 8,
-		}
+impl Deref for MemoryRuntimeConfig {
+	type Target = CoreMemoryRuntimeConfig;
+
+	fn deref(&self) -> &Self::Target {
+		&self.core
 	}
 }
 
-impl Default for MemoryWriteConfig {
-	fn default() -> Self {
-		Self {
-			enabled: true,
-			max_batch_size: 16,
-		}
+impl DerefMut for MemoryRuntimeConfig {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		&mut self.core
 	}
 }
 
 impl MemoryRuntimeConfig {
 	pub fn apply_patch(&mut self, patch: MemoryRuntimeConfigPatch) {
-		if let Some(value) = patch.enabled {
-			self.enabled = value;
-		}
-		if let Some(value) = patch.backend {
-			self.backend = value;
-		}
-		if let Some(value) = patch.recall {
-			self.recall.apply_patch(value);
-		}
-		if let Some(value) = patch.write {
-			self.write.apply_patch(value);
-		}
+		self.core.apply_patch(patch.core);
 		if let Some(value) = patch.backends {
 			self.backends.apply_patch(value);
 		}
@@ -181,24 +134,7 @@ impl MemoryRuntimeConfig {
 	}
 
 	pub fn validate_and_clamp(&mut self) -> Result<(), MemoryRuntimeConfigError> {
-		if self.recall.top_k == 0 {
-			return Err(invalid_config(
-				"runtime.memory.recall.top_k",
-				"value must be greater than zero",
-			));
-		}
-		if self.write.max_batch_size == 0 {
-			return Err(invalid_config(
-				"runtime.memory.write.max_batch_size",
-				"value must be greater than zero",
-			));
-		}
-		self.recall.top_k = self.recall.top_k.min(HARD_MAX_MEMORY_RECALL_TOP_K);
-		self.write.max_batch_size = self
-			.write
-			.max_batch_size
-			.min(HARD_MAX_MEMORY_WRITE_BATCH_SIZE);
-
+		self.core.validate_and_clamp()?;
 		self.backends.openviking.validate_and_clamp()?;
 		self.backends.sqlite.validate()?;
 		Ok(())
@@ -213,28 +149,6 @@ impl MemoryRuntimeConfig {
 				self.enabled && matches!(self.backend, MemoryBackendId::OpenViking),
 			)
 			.map_err(MemoryRuntimeConfigError::from)
-	}
-}
-
-impl MemoryRecallConfig {
-	fn apply_patch(&mut self, patch: MemoryRecallConfigPatch) {
-		if let Some(value) = patch.enabled {
-			self.enabled = value;
-		}
-		if let Some(value) = patch.top_k {
-			self.top_k = value;
-		}
-	}
-}
-
-impl MemoryWriteConfig {
-	fn apply_patch(&mut self, patch: MemoryWriteConfigPatch) {
-		if let Some(value) = patch.enabled {
-			self.enabled = value;
-		}
-		if let Some(value) = patch.max_batch_size {
-			self.max_batch_size = value;
-		}
 	}
 }
 
@@ -297,9 +211,39 @@ where
 		})
 }
 
-fn invalid_config(field: &'static str, message: &str) -> MemoryRuntimeConfigError {
-	MemoryRuntimeConfigError::InvalidConfig {
-		field,
-		message: message.to_string(),
+#[cfg(test)]
+mod tests {
+	use roku_memory::{
+		HARD_MAX_MEMORY_RECALL_TOP_K, HARD_MAX_MEMORY_WRITE_BATCH_SIZE, MemoryRecallConfig,
+		MemoryWriteConfig,
+	};
+
+	use super::*;
+
+	#[test]
+	fn startup_wrapper_keeps_core_schema_in_roku_memory() {
+		let mut config = MemoryRuntimeConfig {
+			core: CoreMemoryRuntimeConfig {
+				enabled: true,
+				backend: MemoryBackendId::OpenViking,
+				recall: MemoryRecallConfig {
+					enabled: true,
+					top_k: 999,
+				},
+				write: MemoryWriteConfig {
+					enabled: true,
+					max_batch_size: 999,
+				},
+			},
+			..MemoryRuntimeConfig::default()
+		};
+
+		config.validate_and_clamp().expect("config should validate");
+
+		assert_eq!(config.recall.top_k, HARD_MAX_MEMORY_RECALL_TOP_K);
+		assert_eq!(
+			config.write.max_batch_size,
+			HARD_MAX_MEMORY_WRITE_BATCH_SIZE
+		);
 	}
 }

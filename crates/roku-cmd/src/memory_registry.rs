@@ -56,8 +56,11 @@ mod tests {
 	fn resolves_sqlite_entry_bundle_from_provider_neutral_config() {
 		let tempdir = tempfile::tempdir().expect("tempdir should exist");
 		let mut config = MemoryRuntimeConfig {
-			enabled: true,
-			backend: MemoryBackendId::Sqlite,
+			core: roku_memory::MemoryRuntimeConfig {
+				enabled: true,
+				backend: MemoryBackendId::Sqlite,
+				..roku_memory::MemoryRuntimeConfig::default()
+			},
 			..MemoryRuntimeConfig::default()
 		};
 		config.backends.sqlite.path = tempdir.path().join("memory.db");
@@ -124,8 +127,11 @@ mod tests {
 	#[test]
 	fn unregistered_openviking_backend_falls_back_to_disabled_bundle() {
 		let config = MemoryRuntimeConfig {
-			enabled: true,
-			backend: MemoryBackendId::OpenViking,
+			core: roku_memory::MemoryRuntimeConfig {
+				enabled: true,
+				backend: MemoryBackendId::OpenViking,
+				..roku_memory::MemoryRuntimeConfig::default()
+			},
 			..MemoryRuntimeConfig::default()
 		};
 

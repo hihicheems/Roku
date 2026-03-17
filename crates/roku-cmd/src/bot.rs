@@ -27,9 +27,9 @@ use roku_common_types::{
 	ResponseEnvelope, ResponseStatus, RuntimeError,
 };
 use roku_memory::{
-	PendingLoopSnapshot, PendingLoopSnapshotBackend, PendingLoopSnapshotError,
-	ResolvedMemorySubsystem, SessionState, SessionStateBackend, SessionStateError,
-	ShortTermContinuityBackend, ShortTermContinuityError,
+	InMemorySessionStateBackend, InMemoryShortTermContinuityBackend, PendingLoopSnapshot,
+	PendingLoopSnapshotBackend, PendingLoopSnapshotError, ResolvedMemorySubsystem, SessionState,
+	SessionStateBackend, SessionStateError, ShortTermContinuityBackend, ShortTermContinuityError,
 };
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_telegram::{
@@ -39,7 +39,6 @@ use roku_plugin_telegram::{
 	TelegramUpdate, TelegramUser,
 };
 use roku_runtime_service::{RuntimeExecutionMode, RuntimeModeReport};
-use roku_state_store::{InMemoryConversationRepository, InMemorySessionPreferenceRepository};
 use serde_json::json;
 
 use crate::CommandError;
@@ -668,8 +667,8 @@ impl Default for TelegramTransportState {
 	/// In-memory backends only; for tests. Production uses [`TelegramTransportState::from_env`].
 	fn default() -> Self {
 		Self::new(
-			Box::new(InMemorySessionPreferenceRepository::default()),
-			Box::new(InMemoryConversationRepository::default()),
+			Box::new(InMemorySessionStateBackend::default()),
+			Box::new(InMemoryShortTermContinuityBackend::default()),
 		)
 	}
 }
