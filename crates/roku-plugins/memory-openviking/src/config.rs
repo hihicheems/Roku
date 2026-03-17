@@ -777,7 +777,7 @@ impl OpenVikingRuntimeConfig {
 	}
 
 	/// Materializes a managed OpenViking config file when the current runtime
-	/// selects OpenViking and managed bootstrap is enabled.
+	/// selects OpenViking and managed process wiring is enabled.
 	pub fn materialize_generated_config(
 		&self,
 		selected_as_active_backend: bool,
