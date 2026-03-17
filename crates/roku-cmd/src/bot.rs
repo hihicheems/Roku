@@ -27,11 +27,12 @@ use roku_common_types::{
 	ResponseEnvelope, ResponseStatus, RuntimeError,
 };
 use roku_memory::{
-	PendingLoopSnapshot, PendingLoopSnapshotBackend, PendingLoopSnapshotError, SessionState,
-	SessionStateBackend, SessionStateError, ShortTermContinuityBackend, ShortTermContinuityError,
+	PendingLoopSnapshot, PendingLoopSnapshotBackend, PendingLoopSnapshotError,
+	ResolvedMemorySubsystem, SessionState, SessionStateBackend, SessionStateError,
+	ShortTermContinuityBackend, ShortTermContinuityError,
 };
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
-use roku_plugin_memory_sqlite::SqliteMemoryAdapters;
+use roku_plugin_memory_sqlite::SqliteMemoryRegistration;
 use roku_plugin_telegram::{
 	TelegramBotConfig, TelegramChat, TelegramConnector, TelegramControlCommand,
 	TelegramControlCommandRequest, TelegramInteraction, TelegramInteractionHandler,
@@ -519,7 +520,7 @@ impl TelegramTransportState {
 		layout.ensure_dirs().map_err(CommandError::Io)?;
 		let runtime_configs = load_runtime_configs(&layout)?;
 		let sqlite_config = runtime_configs.memory.backends.sqlite.clone();
-		let adapters = SqliteMemoryAdapters::connect(sqlite_config.clone())
+		let subsystem = SqliteMemoryRegistration::resolve_subsystem(sqlite_config.clone())
 			.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))?;
 		let _ = emit_global_log(
 			LogRecord::new(
@@ -529,10 +530,7 @@ impl TelegramTransportState {
 			)
 			.with_field("path", sqlite_config.path.display().to_string()),
 		);
-		Ok(Self::new(
-			Box::new(adapters.session_state),
-			Box::new(adapters.short_term),
-		))
+		Ok(Self::from_memory_subsystem(subsystem))
 	}
 
 	/// Constructs state with the given store implementations (used by tests and from_env).
@@ -544,6 +542,10 @@ impl TelegramTransportState {
 			session_state_store: Mutex::new(session_state_store),
 			conversation_store: Mutex::new(conversation_store),
 		}
+	}
+
+	fn from_memory_subsystem(subsystem: ResolvedMemorySubsystem) -> Self {
+		Self::new(subsystem.session_state, subsystem.short_term)
 	}
 
 	/// Persists transport-owned session state for the given session.

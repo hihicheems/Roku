@@ -19,15 +19,15 @@
 //! delegates provider-specific subtrees to adapter crates.
 
 use std::path::PathBuf;
-use std::str::FromStr;
 
+use roku_memory::MemoryBackendId;
 use roku_plugin_memory_openviking::{
 	OpenVikingRuntimeConfig, OpenVikingRuntimeConfigError, OpenVikingRuntimeConfigPatch,
 };
 use roku_plugin_memory_sqlite::{
 	SqliteMemoryConfig, SqliteMemoryConfigError, SqliteMemoryConfigPatch,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use thiserror::Error;
 
 pub const HARD_MAX_MEMORY_RECALL_TOP_K: usize = 64;
@@ -42,7 +42,7 @@ pub const HARD_MAX_OPENVIKING_VLM_MAX_CONCURRENT: usize = 64;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemoryRuntimeConfig {
 	pub enabled: bool,
-	pub backend: MemoryBackend,
+	pub backend: MemoryBackendId,
 	pub recall: MemoryRecallConfig,
 	pub write: MemoryWriteConfig,
 	pub backends: MemoryBackendConfigs,
@@ -52,7 +52,7 @@ pub struct MemoryRuntimeConfig {
 #[serde(deny_unknown_fields)]
 pub struct MemoryRuntimeConfigPatch {
 	pub enabled: Option<bool>,
-	pub backend: Option<MemoryBackend>,
+	pub backend: Option<MemoryBackendId>,
 	#[serde(default)]
 	pub recall: Option<MemoryRecallConfigPatch>,
 	#[serde(default)]
@@ -101,13 +101,6 @@ pub struct MemoryBackendConfigsPatch {
 	pub openviking: Option<OpenVikingRuntimeConfigPatch>,
 	#[serde(default)]
 	pub sqlite: Option<SqliteMemoryConfigPatch>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MemoryBackend {
-	#[default]
-	OpenViking,
 }
 
 #[derive(Debug, Error)]
@@ -217,7 +210,7 @@ impl MemoryRuntimeConfig {
 		self.backends
 			.openviking
 			.materialize_generated_config(
-				self.enabled && matches!(self.backend, MemoryBackend::OpenViking),
+				self.enabled && matches!(self.backend, MemoryBackendId::OpenViking),
 			)
 			.map_err(MemoryRuntimeConfigError::from)
 	}
@@ -252,17 +245,6 @@ impl MemoryBackendConfigs {
 		}
 		if let Some(value) = patch.sqlite {
 			self.sqlite.apply_patch(value);
-		}
-	}
-}
-
-impl FromStr for MemoryBackend {
-	type Err = &'static str;
-
-	fn from_str(value: &str) -> Result<Self, Self::Err> {
-		match value.trim().to_ascii_lowercase().as_str() {
-			"openviking" => Ok(Self::OpenViking),
-			_ => Err("expected one of: openviking"),
 		}
 	}
 }
@@ -302,7 +284,7 @@ fn env_override_usize(key: &'static str) -> Result<Option<usize>, MemoryRuntimeC
 
 fn env_override_enum<T>(key: &'static str) -> Result<Option<T>, MemoryRuntimeConfigError>
 where
-	T: FromStr<Err = &'static str>,
+	T: std::str::FromStr<Err = &'static str>,
 {
 	let Some(raw) = env_override_string(key) else {
 		return Ok(None);

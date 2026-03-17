@@ -37,9 +37,10 @@ use roku_common_types::{
 };
 use roku_experiment_registry::ExperimentRegistry;
 use roku_memory::{
-	ConservativeMemoryLifecyclePolicy, DisabledMemoryLifecyclePolicy, LongTermMemoryBackend,
-	MemoryBackendHealth, MemoryDeleteSelector, MemoryError, MemoryLifecyclePolicy, MemoryQuery,
-	MemoryWriteRequest, NoopLongTermMemoryBackend,
+	ConservativeMemoryLifecyclePolicy, DisabledMemoryLifecyclePolicy, LongTermBackendSelection,
+	LongTermMemoryBackend, MemoryAdapterAvailability, MemoryBackendHealth, MemoryBackendId,
+	MemoryDeleteSelector, MemoryError, MemoryLifecyclePolicy, MemoryQuery, MemoryWriteRequest,
+	NoopLongTermMemoryBackend, resolve_long_term_backend_selection,
 };
 use roku_observability::{InMemoryAuditSink, LogLevel, LogRecord, Metrics, emit_global_log};
 use roku_plugin_core::{PluginDisableReason, PluginPolicyConfig};
@@ -58,14 +59,15 @@ use roku_state_store::{
 use serde_json::json;
 
 use crate::CommandError;
-use crate::memory_runtime_config::{MemoryBackend, MemoryRuntimeConfig};
+use crate::memory_runtime_config::MemoryRuntimeConfig;
 use crate::runtime_config::{
 	RuntimeConfigs, load_runtime_configs, prepare_runtime_generated_artifacts,
 };
 use crate::storage::LocalStorageLayout;
 
 #[cfg(feature = "memory-openviking")]
-use roku_plugin_memory_openviking::OpenVikingLongTermMemoryBackend;
+use roku_plugin_memory_openviking::OpenVikingMemoryRegistration;
+use roku_plugin_memory_sqlite::SqliteMemoryRegistration;
 
 /// Canonical request options shared by CLI entrypoints before a runtime request is normalized.
 ///
@@ -261,9 +263,7 @@ pub(crate) fn prepare_memory_artifacts_from_env() -> Result<String, CommandError
 	let generated = prepare_runtime_generated_artifacts(&configs)?;
 	serde_json::to_string_pretty(&json!({
 		"enabled": configs.memory.enabled,
-		"backend": match configs.memory.backend {
-			MemoryBackend::OpenViking => "openviking",
-		},
+		"backend": configs.memory.backend.as_str(),
 		"backends": {
 			"openviking": configs.memory.backends.openviking.summary_json(),
 			"sqlite": configs.memory.backends.sqlite.summary_json(),
@@ -685,12 +685,23 @@ fn build_enabled_memory_backend_from_env()
 fn build_long_term_memory_backend(
 	memory_config: &MemoryRuntimeConfig,
 ) -> Result<Arc<dyn LongTermMemoryBackend>, CommandError> {
-	if !memory_config.enabled {
-		return Ok(Arc::new(NoopLongTermMemoryBackend));
-	}
+	let selection = resolve_long_term_backend_selection(
+		memory_config.enabled,
+		memory_config.backend,
+		match memory_config.backend {
+			MemoryBackendId::OpenViking => openviking_memory_adapter_availability(),
+			MemoryBackendId::Sqlite => sqlite_memory_adapter_availability(),
+		},
+	);
 
-	match memory_config.backend {
-		MemoryBackend::OpenViking => build_openviking_memory_backend(memory_config),
+	match selection {
+		LongTermBackendSelection::Disabled => Ok(Arc::new(NoopLongTermMemoryBackend)),
+		LongTermBackendSelection::Backend(MemoryBackendId::OpenViking) => {
+			build_openviking_memory_backend(memory_config)
+		}
+		LongTermBackendSelection::Backend(MemoryBackendId::Sqlite) => {
+			Ok(Arc::new(NoopLongTermMemoryBackend))
+		}
 	}
 }
 
@@ -699,10 +710,10 @@ fn build_long_term_memory_backend(
 fn build_openviking_memory_backend(
 	memory_config: &MemoryRuntimeConfig,
 ) -> Result<Arc<dyn LongTermMemoryBackend>, CommandError> {
-	let config = memory_config.backends.openviking.to_backend_config();
-	let backend = OpenVikingLongTermMemoryBackend::new(config)
-		.map_err(|error| CommandError::MemoryBackend(error.to_string()))?;
-	Ok(Arc::new(backend))
+	let backend =
+		OpenVikingMemoryRegistration::build_long_term_backend(&memory_config.backends.openviking)
+			.map_err(|error| CommandError::MemoryBackend(error.to_string()))?;
+	Ok(backend)
 }
 
 #[cfg(not(feature = "memory-openviking"))]
@@ -713,6 +724,20 @@ fn build_openviking_memory_backend(
 	Err(CommandError::MemoryBackend(
 		"runtime.memory.backend=openviking requires the `memory-openviking` feature".to_string(),
 	))
+}
+
+#[cfg(feature = "memory-openviking")]
+fn openviking_memory_adapter_availability() -> MemoryAdapterAvailability {
+	OpenVikingMemoryRegistration::availability()
+}
+
+#[cfg(not(feature = "memory-openviking"))]
+fn openviking_memory_adapter_availability() -> MemoryAdapterAvailability {
+	MemoryAdapterAvailability::unavailable(MemoryBackendId::OpenViking)
+}
+
+fn sqlite_memory_adapter_availability() -> MemoryAdapterAvailability {
+	SqliteMemoryRegistration::availability()
 }
 
 fn map_memory_error(error: MemoryError) -> CommandError {
