@@ -678,10 +678,11 @@ fn build_enabled_memory_backend_from_env()
 	Ok((configs, backend))
 }
 
-/// Transitional startup helper for Phase 1.
+/// Transitional startup helper during the phase1-3 migration.
 ///
-/// Concrete memory backend construction still lives in `roku-cmd` as migration
-/// residue. Later phases replace this with Roku-owned registry resolution.
+/// Concrete long-term backend construction still lives in `roku-cmd` as
+/// migration residue. Entry-registry unification is still deferred to the
+/// later entry-layer phase.
 fn build_long_term_memory_backend(
 	memory_config: &MemoryRuntimeConfig,
 ) -> Result<Arc<dyn LongTermMemoryBackend>, CommandError> {
