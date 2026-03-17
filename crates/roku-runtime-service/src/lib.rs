@@ -38,6 +38,10 @@ use roku_common_types::{
 	ApprovalDecision, ApprovalId, ApprovalStatus, ApprovalTicket, ErrorClass, RequestEnvelope,
 	ResponseEnvelope, ResponseStatus, RuntimeError, Task, TaskEventKind, TaskNode, TaskState,
 };
+use roku_control_plane::{
+	ApprovalRepository, ControlPlaneDataPlane, DispatchQueue, EventRepository,
+	InMemoryDispatchQueue, ResultRepository, TaskRepository,
+};
 use roku_experiment_registry::ExperimentRegistry;
 use roku_memory::{
 	ConservativeMemoryLifecyclePolicy, LongTermMemoryBackend, MemoryLifecyclePolicy,
@@ -48,11 +52,6 @@ use roku_observability::{
 	MetricsSnapshot, emit_global_log,
 };
 use roku_orchestrator::Orchestrator;
-use roku_state_store::{
-	ApprovalRepository, EventRepository, InMemoryApprovalRepository, InMemoryDispatchQueue,
-	InMemoryEventRepository, InMemoryResultRepository, InMemoryTaskRepository, ResultRepository,
-	TaskRepository,
-};
 use roku_validation_plane::ValidationPipeline;
 
 use crate::helpers::{approval_artifact, failure_message, ticket_status_label};
@@ -96,9 +95,10 @@ impl RuntimeExecutionMode {
 /// Records the requested runtime path and the path that is actually active.
 ///
 /// ## Why this exists
-/// Phase 1 needs an explicit source of truth for whether a command is exercising the
-/// live ReAct runtime or a deterministic fallback. Without this report, logs and CLI
-/// output can silently make deterministic executions look like live runtime passes.
+/// Runtime entry surfaces need an explicit source of truth for whether a
+/// command is exercising the live ReAct runtime or a deterministic fallback.
+/// Without this report, logs and CLI output can silently make deterministic
+/// executions look like live runtime passes.
 ///
 /// ## Invariants
 /// - `effective` is the runtime path that will actually execute the request.
@@ -147,17 +147,13 @@ struct RuntimeState {
 	event_repo: Box<dyn EventRepository + Send>,
 	approval_repo: Box<dyn ApprovalRepository + Send>,
 	result_repo: Box<dyn ResultRepository + Send>,
-	dispatch_queue: Box<dyn roku_state_store::DispatchQueue + Send>,
+	dispatch_queue: Box<dyn DispatchQueue + Send>,
 	artifact_store: ArtifactStore,
 	experiment_registry: ExperimentRegistry,
 }
 
 pub struct RuntimeDataPlane {
-	pub task_repo: Box<dyn TaskRepository + Send>,
-	pub event_repo: Box<dyn EventRepository + Send>,
-	pub approval_repo: Box<dyn ApprovalRepository + Send>,
-	pub result_repo: Box<dyn ResultRepository + Send>,
-	pub dispatch_queue: Box<dyn roku_state_store::DispatchQueue + Send>,
+	pub control_plane: ControlPlaneDataPlane,
 	pub artifact_store: ArtifactStore,
 	pub experiment_registry: ExperimentRegistry,
 }
@@ -187,11 +183,13 @@ impl RuntimeService {
 		let runtime = GenericAgentRuntime::default();
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
-				task_repo,
-				event_repo,
-				approval_repo,
-				result_repo,
-				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				control_plane: ControlPlaneDataPlane {
+					task_repo,
+					event_repo,
+					approval_repo,
+					result_repo,
+					dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				},
 				artifact_store: ArtifactStore::default(),
 				experiment_registry: ExperimentRegistry::default(),
 			},
@@ -213,11 +211,13 @@ impl RuntimeService {
 		let runtime = GenericAgentRuntime::default();
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
-				task_repo,
-				event_repo,
-				approval_repo,
-				result_repo,
-				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				control_plane: ControlPlaneDataPlane {
+					task_repo,
+					event_repo,
+					approval_repo,
+					result_repo,
+					dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				},
 				artifact_store,
 				experiment_registry,
 			},
@@ -239,11 +239,13 @@ impl RuntimeService {
 	) -> Self {
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
-				task_repo,
-				event_repo,
-				approval_repo,
-				result_repo,
-				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				control_plane: ControlPlaneDataPlane {
+					task_repo,
+					event_repo,
+					approval_repo,
+					result_repo,
+					dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				},
 				artifact_store,
 				experiment_registry,
 			},
@@ -266,11 +268,33 @@ impl RuntimeService {
 	) -> Self {
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
-				task_repo,
-				event_repo,
-				approval_repo,
-				result_repo,
-				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				control_plane: ControlPlaneDataPlane {
+					task_repo,
+					event_repo,
+					approval_repo,
+					result_repo,
+					dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				},
+				artifact_store,
+				experiment_registry,
+			},
+			audit_sink,
+			runtime,
+			metrics,
+		)
+	}
+
+	pub fn new_with_bundles_and_runtime_and_metrics(
+		control_plane: ControlPlaneDataPlane,
+		artifact_store: ArtifactStore,
+		experiment_registry: ExperimentRegistry,
+		audit_sink: Arc<dyn AuditSink>,
+		runtime: GenericAgentRuntime,
+		metrics: Arc<Metrics>,
+	) -> Self {
+		Self::new_with_runtime_data_plane_and_metrics(
+			RuntimeDataPlane {
+				control_plane,
 				artifact_store,
 				experiment_registry,
 			},
@@ -287,14 +311,17 @@ impl RuntimeService {
 		metrics: Arc<Metrics>,
 	) -> Self {
 		let RuntimeDataPlane {
+			control_plane,
+			artifact_store,
+			experiment_registry,
+		} = data_plane;
+		let ControlPlaneDataPlane {
 			task_repo,
 			event_repo,
 			approval_repo,
 			result_repo,
 			dispatch_queue,
-			artifact_store,
-			experiment_registry,
-		} = data_plane;
+		} = control_plane;
 
 		Self {
 			orchestrator: Orchestrator::default(),
@@ -342,11 +369,7 @@ impl RuntimeService {
 	pub fn in_memory_with_agent_runtime(runtime: GenericAgentRuntime) -> Self {
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
-				task_repo: Box::new(InMemoryTaskRepository::default()),
-				event_repo: Box::new(InMemoryEventRepository::default()),
-				approval_repo: Box::new(InMemoryApprovalRepository::default()),
-				result_repo: Box::new(InMemoryResultRepository::default()),
-				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				control_plane: ControlPlaneDataPlane::in_memory(),
 				artifact_store: ArtifactStore::default(),
 				experiment_registry: ExperimentRegistry::default(),
 			},
@@ -362,11 +385,7 @@ impl RuntimeService {
 	) -> Self {
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
-				task_repo: Box::new(InMemoryTaskRepository::default()),
-				event_repo: Box::new(InMemoryEventRepository::default()),
-				approval_repo: Box::new(InMemoryApprovalRepository::default()),
-				result_repo: Box::new(InMemoryResultRepository::default()),
-				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				control_plane: ControlPlaneDataPlane::in_memory(),
 				artifact_store: ArtifactStore::default(),
 				experiment_registry: ExperimentRegistry::default(),
 			},
