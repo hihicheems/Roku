@@ -14,11 +14,14 @@
 
 //! SQLite implementations of Roku-owned memory contracts.
 
+use std::sync::Arc;
 use std::sync::Mutex;
 
 use roku_memory::{
-	PendingLoopSnapshot, PendingLoopSnapshotBackend, PendingLoopSnapshotError, SessionState,
-	SessionStateBackend, SessionStateError, ShortTermContinuityBackend, ShortTermContinuityError,
+	DisabledMemoryLifecyclePolicy, MemoryAdapterAvailability, MemoryBackendId,
+	NoopLongTermMemoryBackend, PendingLoopSnapshot, PendingLoopSnapshotBackend,
+	PendingLoopSnapshotError, ResolvedMemorySubsystem, SessionState, SessionStateBackend,
+	SessionStateError, ShortTermContinuityBackend, ShortTermContinuityError,
 };
 use roku_state_store::{
 	SqliteConversationRepository, SqliteSessionPreferenceRepository, SqliteStoreConfig,
@@ -50,6 +53,36 @@ impl SqliteMemoryAdapters {
 			short_term: SqliteShortTermContinuityAdapter::connect(store_config.clone())?,
 			pending_loop: SqlitePendingLoopSnapshotAdapter::connect(store_config)?,
 		})
+	}
+}
+
+/// Registration surface for the SQLite memory adapter.
+pub struct SqliteMemoryRegistration;
+
+impl SqliteMemoryRegistration {
+	/// Advertises the currently implemented SQLite memory capabilities.
+	pub const fn availability() -> MemoryAdapterAvailability {
+		MemoryAdapterAvailability {
+			backend: MemoryBackendId::Sqlite,
+			long_term: false,
+			short_term: true,
+			session_state: true,
+			pending_loop: true,
+		}
+	}
+
+	/// Resolves SQLite-backed continuity/session adapters into a provider-neutral bundle.
+	pub fn resolve_subsystem(
+		config: SqliteMemoryConfig,
+	) -> Result<ResolvedMemorySubsystem, SqliteMemoryAdapterError> {
+		let adapters = SqliteMemoryAdapters::connect(config)?;
+		Ok(ResolvedMemorySubsystem::with_parts(
+			Arc::new(NoopLongTermMemoryBackend),
+			Box::new(adapters.short_term),
+			Box::new(adapters.session_state),
+			Box::new(adapters.pending_loop),
+			Arc::new(DisabledMemoryLifecyclePolicy),
+		))
 	}
 }
 
