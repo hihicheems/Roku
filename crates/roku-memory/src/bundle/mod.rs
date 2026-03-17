@@ -14,7 +14,47 @@
 
 //! Roku-owned runtime bundle namespace.
 //!
-//! Provider-neutral bundle ownership lives in this subsystem even while the
-//! current resolved bundle shape is still exposed from `registry`. Entry-layer
-//! unification may later split these shapes into dedicated bundle modules, but
-//! they no longer grow inside `roku-cmd`.
+//! Provider-neutral bundle ownership lives in this subsystem. Registration and
+//! resolution stay in `registry`, but the resolved bundle shape lives here so
+//! entry/runtime consumers have a stable home that is separate from
+//! registration mechanics.
+
+use crate::long_term::{LongTermMemoryBackend, NoopLongTermMemoryBackend};
+use crate::pending_loop::{NoopPendingLoopSnapshotBackend, PendingLoopSnapshotBackend};
+use crate::session::{NoopSessionStateBackend, SessionStateBackend};
+use crate::short_term::{NoopShortTermContinuityBackend, ShortTermContinuityBackend};
+
+/// Provider-neutral memory subsystem bundle returned by registry resolution.
+pub struct ResolvedMemorySubsystem {
+	pub long_term: std::sync::Arc<dyn LongTermMemoryBackend>,
+	pub short_term: Box<dyn ShortTermContinuityBackend>,
+	pub session_state: Box<dyn SessionStateBackend>,
+	pub pending_loop: Box<dyn PendingLoopSnapshotBackend>,
+}
+
+impl ResolvedMemorySubsystem {
+	/// Returns a fully disabled provider-neutral bundle.
+	pub fn disabled() -> Self {
+		Self {
+			long_term: std::sync::Arc::new(NoopLongTermMemoryBackend),
+			short_term: Box::new(NoopShortTermContinuityBackend),
+			session_state: Box::new(NoopSessionStateBackend),
+			pending_loop: Box::new(NoopPendingLoopSnapshotBackend),
+		}
+	}
+
+	/// Builds a provider-neutral bundle from concrete adapter-backed parts.
+	pub fn with_parts(
+		long_term: std::sync::Arc<dyn LongTermMemoryBackend>,
+		short_term: Box<dyn ShortTermContinuityBackend>,
+		session_state: Box<dyn SessionStateBackend>,
+		pending_loop: Box<dyn PendingLoopSnapshotBackend>,
+	) -> Self {
+		Self {
+			long_term,
+			short_term,
+			session_state,
+			pending_loop,
+		}
+	}
+}

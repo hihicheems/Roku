@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Provider-neutral memory domain types.
+//! Provider-neutral long-term memory domain types.
 //!
 //! These types are shared across runtime, policy, and backend adapters. They carry
 //! Roku's own semantics for recall scope, record shape, provenance, and write-back

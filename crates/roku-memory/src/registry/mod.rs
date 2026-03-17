@@ -18,23 +18,16 @@
 //! registry` is the main entry. `backend registry` and `runtime bundle registry`
 //! are internal responsibility splits within the same registry surface.
 //!
-//! Phase 1 established namespace ownership. Phase 2 and Phase 3 then moved the
-//! provider-neutral bundle shape, disabled fallbacks, backend ids, and adapter
-//! availability helpers into this module. Phase 4 now adds the entry-registry
-//! resolution surface so composition roots can call one Roku-owned registry
-//! instead of rebuilding provider selection in each entry module.
+//! This module owns provider-neutral bundle resolution, backend ids, and
+//! adapter-availability helpers so composition roots can call one Roku-owned
+//! registry surface instead of rebuilding provider selection in each entry
+//! module.
 
 use std::fmt;
 use std::str::FromStr;
-use std::sync::Arc;
 
-use crate::pending_loop::{NoopPendingLoopSnapshotBackend, PendingLoopSnapshotBackend};
-use crate::session::{NoopSessionStateBackend, SessionStateBackend};
-use crate::short_term::{NoopShortTermContinuityBackend, ShortTermContinuityBackend};
-use crate::{
-	LongTermMemoryBackend, MemoryLifecyclePolicy, MemoryQuery, MemoryRecallInput,
-	MemoryWriteRequest, NoopLongTermMemoryBackend,
-};
+use crate::bundle::ResolvedMemorySubsystem;
+use crate::{MemoryLifecyclePolicy, MemoryQuery, MemoryRecallInput, MemoryWriteRequest};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -137,49 +130,6 @@ impl MemoryLifecyclePolicy for DisabledMemoryLifecyclePolicy {
 	}
 }
 
-/// Provider-neutral bundle shape returned by memory registry resolution.
-///
-/// Phase 2 defined this shape so entry and runtime layers can converge on a
-/// shared contract surface before full entry-registry wiring is moved out of
-/// `roku-cmd`.
-pub struct ResolvedMemorySubsystem {
-	pub long_term: Arc<dyn LongTermMemoryBackend>,
-	pub short_term: Box<dyn ShortTermContinuityBackend>,
-	pub session_state: Box<dyn SessionStateBackend>,
-	pub pending_loop: Box<dyn PendingLoopSnapshotBackend>,
-	pub lifecycle_policy: Arc<dyn MemoryLifecyclePolicy>,
-}
-
-impl ResolvedMemorySubsystem {
-	/// Returns a fully disabled provider-neutral bundle.
-	pub fn disabled() -> Self {
-		Self {
-			long_term: Arc::new(NoopLongTermMemoryBackend),
-			short_term: Box::new(NoopShortTermContinuityBackend),
-			session_state: Box::new(NoopSessionStateBackend),
-			pending_loop: Box::new(NoopPendingLoopSnapshotBackend),
-			lifecycle_policy: Arc::new(DisabledMemoryLifecyclePolicy),
-		}
-	}
-
-	/// Builds a provider-neutral bundle from concrete adapter-backed parts.
-	pub fn with_parts(
-		long_term: Arc<dyn LongTermMemoryBackend>,
-		short_term: Box<dyn ShortTermContinuityBackend>,
-		session_state: Box<dyn SessionStateBackend>,
-		pending_loop: Box<dyn PendingLoopSnapshotBackend>,
-		lifecycle_policy: Arc<dyn MemoryLifecyclePolicy>,
-	) -> Self {
-		Self {
-			long_term,
-			short_term,
-			session_state,
-			pending_loop,
-			lifecycle_policy,
-		}
-	}
-}
-
 /// Provider-neutral registration surface consumed by the entry registry.
 ///
 /// Adapter crates implement this trait so the registry can resolve a complete
@@ -256,10 +206,10 @@ impl<'a> MemoryEntryRegistry<'a> {
 mod tests {
 	use std::sync::Arc;
 
+	use crate::NoopLongTermMemoryBackend;
 	use crate::pending_loop::NoopPendingLoopSnapshotBackend;
 	use crate::session::NoopSessionStateBackend;
 	use crate::short_term::NoopShortTermContinuityBackend;
-	use crate::{DisabledMemoryLifecyclePolicy, NoopLongTermMemoryBackend};
 
 	use super::{
 		LongTermBackendSelection, MemoryAdapterAvailability, MemoryBackendId, MemoryEntryRegistry,
@@ -318,7 +268,6 @@ mod tests {
 				Box::new(NoopShortTermContinuityBackend),
 				Box::new(NoopSessionStateBackend),
 				Box::new(NoopPendingLoopSnapshotBackend),
-				Arc::new(DisabledMemoryLifecyclePolicy),
 			))
 		}
 	}
@@ -330,21 +279,7 @@ mod tests {
 			.resolve_subsystem(false, MemoryBackendId::OpenViking)
 			.expect("disabled memory should resolve");
 
-		assert_eq!(
-			resolved
-				.lifecycle_policy
-				.build_recall_query(&crate::MemoryRecallInput {
-					goal: "noop".to_string(),
-					session_id: "session-1".to_string(),
-					planning_mode_hint_present: false,
-					pending_loop_active: false,
-					short_term_continuity: Vec::new(),
-					user_id: None,
-					project_id: None,
-					workspace_id: None,
-				}),
-			None
-		);
+		assert_eq!(resolved.long_term.backend_name(), "noop");
 	}
 
 	#[test]
@@ -383,20 +318,6 @@ mod tests {
 			.resolve_subsystem(true, MemoryBackendId::OpenViking)
 			.expect("missing adapter should fall back to disabled bundle");
 
-		assert_eq!(
-			resolved
-				.lifecycle_policy
-				.build_recall_query(&crate::MemoryRecallInput {
-					goal: "noop".to_string(),
-					session_id: "session-1".to_string(),
-					planning_mode_hint_present: false,
-					pending_loop_active: false,
-					short_term_continuity: Vec::new(),
-					user_id: None,
-					project_id: None,
-					workspace_id: None,
-				}),
-			None
-		);
+		assert_eq!(resolved.long_term.backend_name(), "noop");
 	}
 }

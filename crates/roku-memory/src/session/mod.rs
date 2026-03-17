@@ -14,9 +14,8 @@
 
 //! Roku-owned session-state namespace.
 //!
-//! Phase 2 moved the provider-neutral session-state contract here. Transport-
-//! specific persistence remains adapter work; the session model itself belongs
-//! to Roku's memory subsystem.
+//! Transport-specific persistence remains adapter work; the session model
+//! itself belongs to Roku's memory subsystem.
 
 use std::collections::HashMap;
 

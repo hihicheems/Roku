@@ -14,20 +14,24 @@
 
 //! Roku-owned long-term memory namespace.
 //!
-//! This module is the stable home for recall and write-back semantics. The
-//! concrete items still live in the crate's flat compatibility modules, but
-//! callers consume them through this subdomain so the memory subsystem keeps a
-//! stable provider-neutral surface.
+//! This module is the stable home for recall and write-back semantics.
+//! Long-term contracts, types, and lifecycle policy live directly under this
+//! subdomain so the crate no longer depends on top-level long-term-only
+//! compatibility files.
 
-pub use crate::backend::{
+mod backend;
+mod policy;
+mod types;
+
+pub use backend::{
 	InMemoryLongTermMemoryBackend, LongTermMemoryBackend, MemoryBackendHealth, MemoryBackendStatus,
 	MemoryDeleteSelector, MemoryError, MemoryWriteAck, NoopLongTermMemoryBackend,
 };
-pub use crate::policy::{
+pub use policy::{
 	ConservativeMemoryLifecyclePolicy, MemoryLifecyclePolicy, MemoryRecallInput,
 	MemoryWritePolicyInput,
 };
-pub use crate::types::{
+pub use types::{
 	MemoryFilters, MemoryHit, MemoryKind, MemoryMetadata, MemoryProvenance, MemoryQuery,
 	MemoryRecallReason, MemoryRecord, MemoryScope, MemorySourceRef, MemoryWriteReason,
 	MemoryWriteRequest,

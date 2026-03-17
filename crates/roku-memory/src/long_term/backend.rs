@@ -24,7 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 
-use crate::types::{
+use super::types::{
 	MemoryFilters, MemoryHit, MemoryProvenance, MemoryQuery, MemoryRecord, MemoryScope,
 	MemoryWriteRequest,
 };

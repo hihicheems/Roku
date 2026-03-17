@@ -22,7 +22,7 @@
 use roku_common_types::{ConversationTurn, ResponseStatus};
 use serde::{Deserialize, Serialize};
 
-use crate::types::{MemoryHit, MemoryQuery, MemoryRecallReason, MemoryScope, MemoryWriteRequest};
+use super::types::{MemoryHit, MemoryQuery, MemoryRecallReason, MemoryScope, MemoryWriteRequest};
 
 /// Decides when runtime should recall or persist long-term memory.
 pub trait MemoryLifecyclePolicy: Send + Sync {

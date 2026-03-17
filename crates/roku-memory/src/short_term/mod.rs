@@ -14,8 +14,7 @@
 
 //! Roku-owned short-term continuity namespace.
 //!
-//! Phase 2 moved the provider-neutral short-term continuity contract here.
-//! Concrete transcript stores remain adapter implementations; they no longer
+//! Concrete transcript stores remain adapter implementations; they do not
 //! define the continuity semantics themselves.
 
 use std::collections::HashMap;

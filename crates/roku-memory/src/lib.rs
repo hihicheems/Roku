@@ -18,19 +18,13 @@
 //! pending-loop semantics. Concrete providers such as OpenViking or SQLite are
 //! adapter crates: they implement Roku contracts, but they do not redefine them.
 //!
-//! Phase 1 fixed the ownership boundary and namespace skeleton. Phase 2 then
-//! pulled short-term continuity, session-state, pending-loop snapshot, and
-//! registry bundle contracts back into this crate. The flat compatibility
-//! modules remain as internal implementation units, while callers consume the
-//! provider-neutral subdomains re-exported here.
+//! The provider-neutral subdomains exposed here are the stable home for
+//! long-term memory, short-term continuity, session-state, pending-loop
+//! persistence, bundle assembly, and registry resolution.
 //!
 //! `registry` is the umbrella term for subsystem resolution. `entry registry` is
 //! the main entry. `backend registry` and `runtime bundle registry` are internal
 //! responsibility splits within that same Roku-owned registry surface.
-
-mod backend;
-mod policy;
-mod types;
 
 pub mod bundle;
 pub mod config;
@@ -40,27 +34,28 @@ pub mod registry;
 pub mod session;
 pub mod short_term;
 
-pub use backend::{
-	InMemoryLongTermMemoryBackend, LongTermMemoryBackend, MemoryBackendHealth, MemoryBackendStatus,
-	MemoryDeleteSelector, MemoryError, MemoryWriteAck, NoopLongTermMemoryBackend,
-};
+pub use bundle::ResolvedMemorySubsystem;
 pub use config::{
 	HARD_MAX_MEMORY_RECALL_TOP_K, HARD_MAX_MEMORY_WRITE_BATCH_SIZE, MemoryRecallConfig,
 	MemoryRecallConfigPatch, MemoryRuntimeConfig, MemoryRuntimeConfigError,
 	MemoryRuntimeConfigPatch, MemoryWriteConfig, MemoryWriteConfigPatch,
 };
+pub use long_term::{
+	ConservativeMemoryLifecyclePolicy, InMemoryLongTermMemoryBackend, LongTermMemoryBackend,
+	MemoryBackendHealth, MemoryBackendStatus, MemoryDeleteSelector, MemoryError, MemoryFilters,
+	MemoryHit, MemoryKind, MemoryLifecyclePolicy, MemoryMetadata, MemoryProvenance, MemoryQuery,
+	MemoryRecallInput, MemoryRecallReason, MemoryRecord, MemoryScope, MemorySourceRef,
+	MemoryWriteAck, MemoryWritePolicyInput, MemoryWriteReason, MemoryWriteRequest,
+	NoopLongTermMemoryBackend,
+};
 pub use pending_loop::{
 	NoopPendingLoopSnapshotBackend, PendingLoopSnapshot, PendingLoopSnapshotBackend,
 	PendingLoopSnapshotError,
 };
-pub use policy::{
-	ConservativeMemoryLifecyclePolicy, MemoryLifecyclePolicy, MemoryRecallInput,
-	MemoryWritePolicyInput,
-};
 pub use registry::{
 	DisabledMemoryLifecyclePolicy, LongTermBackendSelection, MemoryAdapterAvailability,
 	MemoryBackendId, MemoryEntryRegistry, MemoryRegistryError, MemorySubsystemRegistration,
-	ResolvedMemorySubsystem, resolve_long_term_backend_selection,
+	resolve_long_term_backend_selection,
 };
 pub use session::{
 	InMemorySessionStateBackend, NoopSessionStateBackend, SessionState, SessionStateBackend,
@@ -69,9 +64,4 @@ pub use session::{
 pub use short_term::{
 	InMemoryShortTermContinuityBackend, NoopShortTermContinuityBackend, ShortTermContinuityBackend,
 	ShortTermContinuityError,
-};
-pub use types::{
-	MemoryFilters, MemoryHit, MemoryKind, MemoryMetadata, MemoryProvenance, MemoryQuery,
-	MemoryRecallReason, MemoryRecord, MemoryScope, MemorySourceRef, MemoryWriteReason,
-	MemoryWriteRequest,
 };
