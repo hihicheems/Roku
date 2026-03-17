@@ -30,14 +30,14 @@ use thiserror::Error;
 
 use crate::SqliteMemoryConfig;
 
-/// Connection/bootstrap failures for SQLite memory adapters.
+/// Connection or resolution failures for SQLite memory adapters.
 #[derive(Debug, Error)]
 pub enum SqliteMemoryAdapterError {
-	#[error("failed to bootstrap sqlite memory adapter: {0}")]
-	Bootstrap(String),
+	#[error("failed to resolve sqlite memory adapter: {0}")]
+	Resolution(String),
 }
 
-/// Provider-specific SQLite adapter bundle used by entry/bootstrap code.
+/// Provider-specific SQLite adapter bundle used by registry-backed entry resolution.
 pub struct SqliteMemoryAdapters {
 	pub session_state: SqliteSessionStateAdapter,
 	pub short_term: SqliteShortTermContinuityAdapter,
@@ -118,7 +118,7 @@ pub struct SqliteSessionStateAdapter {
 impl SqliteSessionStateAdapter {
 	pub fn connect(config: SqliteStoreConfig) -> Result<Self, SqliteMemoryAdapterError> {
 		let inner = SqliteSessionPreferenceRepository::connect(config)
-			.map_err(|error| SqliteMemoryAdapterError::Bootstrap(error.to_string()))?;
+			.map_err(|error| SqliteMemoryAdapterError::Resolution(error.to_string()))?;
 		Ok(Self { inner })
 	}
 }
@@ -153,7 +153,7 @@ pub struct SqliteShortTermContinuityAdapter {
 impl SqliteShortTermContinuityAdapter {
 	pub fn connect(config: SqliteStoreConfig) -> Result<Self, SqliteMemoryAdapterError> {
 		let inner = SqliteConversationRepository::connect(config)
-			.map_err(|error| SqliteMemoryAdapterError::Bootstrap(error.to_string()))?;
+			.map_err(|error| SqliteMemoryAdapterError::Resolution(error.to_string()))?;
 		Ok(Self { inner })
 	}
 }
@@ -189,7 +189,7 @@ pub struct SqlitePendingLoopSnapshotAdapter {
 impl SqlitePendingLoopSnapshotAdapter {
 	pub fn connect(config: SqliteStoreConfig) -> Result<Self, SqliteMemoryAdapterError> {
 		let inner = SqliteSessionPreferenceRepository::connect(config)
-			.map_err(|error| SqliteMemoryAdapterError::Bootstrap(error.to_string()))?;
+			.map_err(|error| SqliteMemoryAdapterError::Resolution(error.to_string()))?;
 		Ok(Self {
 			inner: Mutex::new(inner),
 		})
