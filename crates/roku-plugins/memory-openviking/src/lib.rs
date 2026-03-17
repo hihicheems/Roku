@@ -26,7 +26,10 @@ mod config;
 
 use std::sync::Arc;
 
-use roku_memory::{LongTermMemoryBackend, MemoryAdapterAvailability, MemoryBackendId};
+use roku_memory::{
+	DisabledMemoryLifecyclePolicy, LongTermMemoryBackend, MemoryAdapterAvailability,
+	MemoryBackendId, MemorySubsystemRegistration, ResolvedMemorySubsystem,
+};
 
 pub use backend::{
 	OpenVikingBackendBootstrapError, OpenVikingLongTermMemoryBackend, OpenVikingMemoryAdapters,
@@ -72,5 +75,35 @@ impl OpenVikingMemoryRegistration {
 		config: &OpenVikingRuntimeConfig,
 	) -> Result<OpenVikingMemoryAdapters, OpenVikingBackendBootstrapError> {
 		OpenVikingMemoryAdapters::connect(config.to_backend_config())
+	}
+}
+
+/// Config-bound OpenViking registration consumed by the Roku entry registry.
+#[derive(Debug, Clone)]
+pub struct OpenVikingMemorySubsystemRegistration {
+	config: OpenVikingRuntimeConfig,
+}
+
+impl OpenVikingMemorySubsystemRegistration {
+	pub fn new(config: OpenVikingRuntimeConfig) -> Self {
+		Self { config }
+	}
+}
+
+impl MemorySubsystemRegistration for OpenVikingMemorySubsystemRegistration {
+	fn availability(&self) -> MemoryAdapterAvailability {
+		OpenVikingMemoryRegistration::availability()
+	}
+
+	fn resolve_subsystem(&self) -> Result<ResolvedMemorySubsystem, String> {
+		let adapters = OpenVikingMemoryRegistration::connect_adapters(&self.config)
+			.map_err(|error| error.to_string())?;
+		Ok(ResolvedMemorySubsystem::with_parts(
+			Arc::new(adapters.long_term),
+			Box::new(adapters.short_term),
+			Box::new(adapters.session_state),
+			Box::new(adapters.pending_loop),
+			Arc::new(DisabledMemoryLifecyclePolicy),
+		))
 	}
 }
