@@ -129,18 +129,24 @@ impl SessionStateBackend for SqliteSessionStateAdapter {
 		session_id: &str,
 		state: SessionState,
 	) -> Result<(), SessionStateError> {
-		self.inner.save_session_state(session_id, state)
+		self.inner
+			.save_preferences(session_id, state)
+			.map_err(|error| SessionStateError::Backend(error.to_string()))
 	}
 
 	fn load_session_state(
 		&self,
 		session_id: &str,
 	) -> Result<Option<SessionState>, SessionStateError> {
-		self.inner.load_session_state(session_id)
+		self.inner
+			.load_preferences(session_id)
+			.map_err(|error| SessionStateError::Backend(error.to_string()))
 	}
 
 	fn delete_session_state(&mut self, session_id: &str) -> Result<(), SessionStateError> {
-		self.inner.delete_session_state(session_id)
+		self.inner
+			.delete_preferences(session_id)
+			.map_err(|error| SessionStateError::Backend(error.to_string()))
 	}
 }
 
@@ -164,7 +170,9 @@ impl ShortTermContinuityBackend for SqliteShortTermContinuityAdapter {
 		session_id: &str,
 		turn: roku_common_types::ConversationTurn,
 	) -> Result<(), ShortTermContinuityError> {
-		self.inner.append_continuity_turn(session_id, turn)
+		self.inner
+			.append_turn(session_id, turn)
+			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
 	}
 
 	fn load_short_term_continuity(
@@ -172,11 +180,15 @@ impl ShortTermContinuityBackend for SqliteShortTermContinuityAdapter {
 		session_id: &str,
 		limit: usize,
 	) -> Result<Vec<roku_common_types::ConversationTurn>, ShortTermContinuityError> {
-		self.inner.load_short_term_continuity(session_id, limit)
+		self.inner
+			.load_recent_turns(session_id, limit)
+			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
 	}
 
 	fn delete_continuity(&mut self, session_id: &str) -> Result<(), ShortTermContinuityError> {
-		self.inner.delete_continuity(session_id)
+		self.inner
+			.delete_conversation(session_id)
+			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
 	}
 }
 
@@ -205,7 +217,7 @@ impl PendingLoopSnapshotBackend for SqlitePendingLoopSnapshotAdapter {
 			PendingLoopSnapshotError::Backend("sqlite pending-loop store is poisoned".to_string())
 		})?;
 		Ok(store
-			.load_session_state(session_id)
+			.load_preferences(session_id)
 			.map_err(|error| PendingLoopSnapshotError::Backend(error.to_string()))?
 			.and_then(|state| state.pending_loop))
 	}
@@ -219,12 +231,12 @@ impl PendingLoopSnapshotBackend for SqlitePendingLoopSnapshotAdapter {
 			PendingLoopSnapshotError::Backend("sqlite pending-loop store is poisoned".to_string())
 		})?;
 		let mut state = store
-			.load_session_state(session_id)
+			.load_preferences(session_id)
 			.map_err(|error| PendingLoopSnapshotError::Backend(error.to_string()))?
 			.unwrap_or_default();
 		state.pending_loop = snapshot;
 		store
-			.save_session_state(session_id, state)
+			.save_preferences(session_id, state)
 			.map_err(|error| PendingLoopSnapshotError::Backend(error.to_string()))
 	}
 }
