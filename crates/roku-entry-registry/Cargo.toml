@@ -1,0 +1,24 @@
+[package]
+name = "roku-entry-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+default = []
+memory-openviking = []
+
+[dependencies]
+roku-artifact-store = { path = "../roku-artifact-store" }
+roku-common-types = { path = "../roku-common-types" }
+roku-control-plane = { path = "../roku-control-plane" }
+roku-experiment-registry = { path = "../roku-experiment-registry" }
+roku-memory = { path = "../roku-memory" }
+roku-plugin-control-plane-sqlite = { path = "../roku-plugins/control-plane-sqlite" }
+roku-plugin-memory-openviking = { path = "../roku-plugins/memory-openviking" }
+roku-plugin-memory-sqlite = { path = "../roku-plugins/memory-sqlite" }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
