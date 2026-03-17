@@ -1,0 +1,11 @@
+[package]
+name = "roku-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+roku-common-types = { path = "../roku-common-types" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"

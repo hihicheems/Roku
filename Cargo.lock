@@ -1614,6 +1614,7 @@ dependencies = [
  "roku-artifact-store",
  "roku-common-types",
  "roku-experiment-registry",
+ "roku-memory",
  "roku-observability",
  "roku-orchestrator",
  "roku-plugin-core",
@@ -1645,6 +1646,15 @@ version = "0.1.0"
 dependencies = [
  "roku-common-types",
  "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "roku-memory"
+version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+ "serde",
  "thiserror",
 ]
 
@@ -1791,6 +1801,7 @@ dependencies = [
  "roku-capability-auth",
  "roku-common-types",
  "roku-experiment-registry",
+ "roku-memory",
  "roku-observability",
  "roku-orchestrator",
  "roku-plugin-catalog",
