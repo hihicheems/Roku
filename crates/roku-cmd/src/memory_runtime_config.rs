@@ -808,6 +808,11 @@ impl MemoryRuntimeConfig {
 		self.validate_managed_process_secrets()?;
 
 		let workspace_root = resolve_path(&self.openviking.process.storage.workspace);
+		// The current released OpenViking server template consumes a flat
+		// storage/log/embedding/vlm document. Startup-only fields such as
+		// server bind hints and future backend selectors stay in Roku-owned
+		// typed config for later bootstrap wiring rather than leaking into the
+		// generated service config shape.
 		let file_config = OpenVikingFileConfig {
 			storage: OpenVikingFileStorageConfig {
 				workspace: workspace_root,

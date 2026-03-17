@@ -553,6 +553,9 @@ config_output_path = ".roku/run/openviking/generated.ov.conf"
 		assert!(content.contains("\"storage\""));
 		assert!(content.contains("\"embedding\""));
 		assert!(content.contains("\"dense\""));
+		assert!(!content.contains("\"vectordb\""));
+		assert!(!content.contains("\"agfs\""));
+		assert!(!content.contains("\"server\""));
 		assert!(content.contains("\"model\": \"thenlper/gte-base\""));
 		assert!(content.contains("\"model\": \"qwen/qwen3.5-flash-02-23\""));
 		assert!(content.contains("\"max_concurrent\": 8"));
