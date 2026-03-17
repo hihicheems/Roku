@@ -12,6 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Backend-facing long-term memory contracts.
+//!
+//! The types in this module define the narrow surface that runtime code can use to
+//! recall, persist, delete, and health-check long-term memory. Provider-specific
+//! adapters implement [`LongTermMemoryBackend`], but the trait itself stays
+//! provider-neutral so runtime policy remains owned by Roku.
+
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,53 +29,95 @@ use crate::types::{
 	MemoryWriteRequest,
 };
 
+/// Acknowledges a write attempt made through a [`LongTermMemoryBackend`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryWriteAck {
+	/// Whether the backend accepted the write for persistence.
 	pub accepted: bool,
+	/// Backend-assigned record identifier when one is available.
+	///
+	/// Callers must treat this identifier as opaque. Some backends may accept a
+	/// write without returning an id.
 	pub record_id: Option<String>,
 }
 
+/// Coarse-grained health state reported by a long-term memory backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryBackendStatus {
+	/// The backend is reachable and can service normal requests.
 	Healthy,
+	/// The backend is reachable but signals reduced readiness.
 	Degraded,
+	/// The backend is currently unavailable for normal use.
 	Unavailable,
 }
 
+/// Health snapshot returned by [`LongTermMemoryBackend::health`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryBackendHealth {
+	/// Stable backend name used for diagnostics and logs.
 	pub backend: String,
+	/// Current backend status as observed by the adapter.
 	pub status: MemoryBackendStatus,
+	/// Optional backend-specific detail for operators.
 	pub detail: Option<String>,
 }
 
+/// Selects a single persisted memory record for deletion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryDeleteSelector {
+	/// Opaque record identifier previously returned by the backend.
 	pub record_id: String,
 }
 
+/// Backend-facing error taxonomy for long-term memory operations.
 #[derive(Debug, Error)]
 pub enum MemoryError {
+	/// The backend or network path is currently unavailable.
 	#[error("memory backend is unavailable: {0}")]
 	Unavailable(String),
+	/// The backend understood the request but rejected it as invalid or unsupported.
 	#[error("memory backend rejected request: {0}")]
 	Rejected(String),
+	/// The backend failed in a way that the caller cannot recover from automatically.
 	#[error("memory backend failed: {0}")]
 	Internal(String),
 }
 
+/// Provider-neutral capability surface for Roku long-term memory backends.
+///
+/// Implementations translate Roku's memory contracts into provider-specific
+/// requests. They should not make policy decisions such as when recall occurs,
+/// what should be written back, or how returned memories are injected into model
+/// context.
 pub trait LongTermMemoryBackend: Send + Sync {
+	/// Returns a stable backend name for logs, diagnostics, and provenance.
 	fn backend_name(&self) -> &'static str;
 
+	/// Executes a recall query and returns matching long-term memory hits.
+	///
+	/// Implementations may apply backend-local ranking, but they should preserve
+	/// the caller's scope and filter semantics as closely as the provider allows.
 	fn search(&self, query: &MemoryQuery) -> Result<Vec<MemoryHit>, MemoryError>;
 
+	/// Persists a long-term memory record.
+	///
+	/// Acceptance means the backend has accepted responsibility for eventual
+	/// persistence. It does not guarantee synchronous indexing or immediate search
+	/// visibility.
 	fn write(&self, request: &MemoryWriteRequest) -> Result<MemoryWriteAck, MemoryError>;
 
+	/// Deletes a previously persisted memory record.
 	fn delete(&self, selector: &MemoryDeleteSelector) -> Result<(), MemoryError>;
 
+	/// Returns a backend health snapshot suitable for operator-facing diagnostics.
 	fn health(&self) -> Result<MemoryBackendHealth, MemoryError>;
 }
 
+/// A disabled long-term memory backend that never persists data.
+///
+/// This is useful when runtime wiring should remain intact but long-term memory is
+/// intentionally turned off.
 #[derive(Debug, Default)]
 pub struct NoopLongTermMemoryBackend;
 
@@ -101,6 +150,11 @@ impl LongTermMemoryBackend for NoopLongTermMemoryBackend {
 	}
 }
 
+/// A lightweight in-process backend used for tests and local wiring checks.
+///
+/// It stores records in memory, records observed queries and writes, and applies a
+/// simple substring matcher for recall. It is intentionally naive and should not
+/// be treated as production retrieval behavior.
 #[derive(Debug, Default)]
 pub struct InMemoryLongTermMemoryBackend {
 	state: Mutex<InMemoryBackendState>,
@@ -116,6 +170,7 @@ struct InMemoryBackendState {
 }
 
 impl InMemoryLongTermMemoryBackend {
+	/// Returns the recall queries observed by this backend instance.
 	pub fn recorded_queries(&self) -> Vec<MemoryQuery> {
 		self.state
 			.lock()
@@ -124,6 +179,7 @@ impl InMemoryLongTermMemoryBackend {
 			.clone()
 	}
 
+	/// Returns the write requests observed by this backend instance.
 	pub fn recorded_writes(&self) -> Vec<MemoryWriteRequest> {
 		self.state
 			.lock()
@@ -132,6 +188,7 @@ impl InMemoryLongTermMemoryBackend {
 			.clone()
 	}
 
+	/// Returns the currently stored memory records.
 	pub fn stored_records(&self) -> Vec<MemoryRecord> {
 		self.state
 			.lock()

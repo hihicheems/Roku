@@ -12,6 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Provider-neutral long-term memory domain types and backend contracts for Roku.
+//!
+//! This crate defines Roku's own memory vocabulary: what a recall query looks like,
+//! what a persisted memory record contains, how runtime policy can ask for recall
+//! or write-back, and what a backend is allowed to do in response.
+//!
+//! Backends such as OpenViking are intentionally kept out of this crate. They map
+//! these contracts onto provider-specific APIs, but they do not redefine the
+//! memory model itself.
+
 mod backend;
 mod policy;
 mod types;

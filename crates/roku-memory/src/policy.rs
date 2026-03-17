@@ -12,55 +12,95 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Runtime-owned policy inputs and lifecycle decisions for long-term memory.
+//!
+//! Backends persist and retrieve records, but they do not decide when recall
+//! should happen or what should be written back. Those decisions stay in runtime
+//! policy, which consumes the inputs defined here and emits provider-neutral
+//! [`MemoryQuery`] or [`MemoryWriteRequest`] values.
+
 use roku_common_types::{ConversationTurn, ResponseStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{MemoryHit, MemoryQuery, MemoryRecallReason, MemoryScope, MemoryWriteRequest};
 
+/// Decides when runtime should recall or persist long-term memory.
 pub trait MemoryLifecyclePolicy: Send + Sync {
+	/// Builds a recall query for the current runtime situation.
+	///
+	/// Returning `None` means recall should be skipped for this turn.
 	fn build_recall_query(&self, input: &MemoryRecallInput) -> Option<MemoryQuery>;
 
+	/// Builds a write-back request for the current runtime result.
+	///
+	/// Returning `None` means no long-term write should happen.
 	fn build_write_request(&self, input: &MemoryWritePolicyInput) -> Option<MemoryWriteRequest>;
 }
 
+/// Runtime facts available when deciding whether to recall long-term memory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryRecallInput {
+	/// Session receiving the request.
 	pub session_id: String,
+	/// Current user goal in natural language.
 	pub goal: String,
+	/// Whether request handling is already in a planning-specific compatibility path.
 	pub planning_mode_hint_present: bool,
+	/// Whether runtime is resuming an already-active pending loop.
 	pub pending_loop_active: bool,
 	#[serde(default)]
+	/// Recent conversation turns kept only for short-term continuity.
 	pub short_term_continuity: Vec<ConversationTurn>,
 	#[serde(default)]
+	/// Optional user identity for wider-scope recall.
 	pub user_id: Option<String>,
 	#[serde(default)]
+	/// Optional project identity for wider-scope recall.
 	pub project_id: Option<String>,
 	#[serde(default)]
+	/// Optional workspace identity for wider-scope recall.
 	pub workspace_id: Option<String>,
 }
 
+/// Runtime facts available when deciding whether to write back long-term memory.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryWritePolicyInput {
+	/// Request that produced the candidate memory.
 	pub request_id: String,
+	/// Session associated with the candidate memory.
 	pub session_id: String,
+	/// User goal that led to the response.
 	pub goal: String,
+	/// Final response status observed by runtime.
 	pub response_status: ResponseStatus,
+	/// Final response text observed by runtime.
 	pub response_message: String,
+	/// Whether the request ended with a still-pending loop.
 	pub pending_loop_active: bool,
 	#[serde(default)]
+	/// Recent conversation turns retained for short-term continuity only.
 	pub short_term_continuity: Vec<ConversationTurn>,
 	#[serde(default)]
+	/// Recall results that influenced this response, if any.
 	pub recalled_hits: Vec<MemoryHit>,
 	#[serde(default)]
+	/// Optional user identity for wider-scope writes.
 	pub user_id: Option<String>,
 	#[serde(default)]
+	/// Optional project identity for wider-scope writes.
 	pub project_id: Option<String>,
 	#[serde(default)]
+	/// Optional workspace identity for wider-scope writes.
 	pub workspace_id: Option<String>,
 }
 
+/// Conservative default policy used by Roku during the initial rollout.
+///
+/// It allows intake-time recall for ordinary requests but intentionally keeps
+/// automatic write-back disabled until runtime has stronger extraction rules.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConservativeMemoryLifecyclePolicy {
+	/// Maximum number of hits to request when recall is enabled.
 	pub recall_limit: usize,
 }
 
