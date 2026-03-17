@@ -20,10 +20,12 @@
 
 mod backend;
 mod config;
+mod registration;
+mod store;
 
 pub use backend::{
-	SqliteMemoryAdapterError, SqliteMemoryAdapters, SqliteMemoryRegistration,
-	SqliteMemorySubsystemRegistration, SqlitePendingLoopSnapshotAdapter, SqliteSessionStateAdapter,
-	SqliteShortTermContinuityAdapter,
+	SqliteMemoryAdapterError, SqliteMemoryAdapters, SqlitePendingLoopSnapshotAdapter,
+	SqliteSessionStateAdapter, SqliteShortTermContinuityAdapter,
 };
 pub use config::{SqliteMemoryConfig, SqliteMemoryConfigError, SqliteMemoryConfigPatch};
+pub use registration::{SqliteMemoryRegistration, SqliteMemorySubsystemRegistration};

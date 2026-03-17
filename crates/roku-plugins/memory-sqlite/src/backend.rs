@@ -14,21 +14,18 @@
 
 //! SQLite implementations of Roku-owned memory contracts.
 
-use std::sync::Arc;
 use std::sync::Mutex;
 
 use roku_memory::{
-	DisabledMemoryLifecyclePolicy, MemoryAdapterAvailability, MemoryBackendId,
-	MemorySubsystemRegistration, NoopLongTermMemoryBackend, PendingLoopSnapshot,
-	PendingLoopSnapshotBackend, PendingLoopSnapshotError, ResolvedMemorySubsystem, SessionState,
+	PendingLoopSnapshot, PendingLoopSnapshotBackend, PendingLoopSnapshotError, SessionState,
 	SessionStateBackend, SessionStateError, ShortTermContinuityBackend, ShortTermContinuityError,
-};
-use roku_state_store::{
-	SqliteConversationRepository, SqliteSessionPreferenceRepository, SqliteStoreConfig,
 };
 use thiserror::Error;
 
 use crate::SqliteMemoryConfig;
+use crate::store::{
+	SqliteConversationRepository, SqliteMemoryStoreConfig, SqliteSessionPreferenceRepository,
+};
 
 /// Connection or resolution failures for SQLite memory adapters.
 #[derive(Debug, Error)]
@@ -47,65 +44,12 @@ pub struct SqliteMemoryAdapters {
 impl SqliteMemoryAdapters {
 	/// Connects all SQLite-backed memory adapters against one SQLite database.
 	pub fn connect(config: SqliteMemoryConfig) -> Result<Self, SqliteMemoryAdapterError> {
-		let store_config = SqliteStoreConfig::new(config.path);
+		let store_config = SqliteMemoryStoreConfig::new(config.path);
 		Ok(Self {
 			session_state: SqliteSessionStateAdapter::connect(store_config.clone())?,
 			short_term: SqliteShortTermContinuityAdapter::connect(store_config.clone())?,
 			pending_loop: SqlitePendingLoopSnapshotAdapter::connect(store_config)?,
 		})
-	}
-}
-
-/// Registration surface for the SQLite memory adapter.
-pub struct SqliteMemoryRegistration;
-
-impl SqliteMemoryRegistration {
-	/// Advertises the currently implemented SQLite memory capabilities.
-	pub const fn availability() -> MemoryAdapterAvailability {
-		MemoryAdapterAvailability {
-			backend: MemoryBackendId::Sqlite,
-			long_term: false,
-			short_term: true,
-			session_state: true,
-			pending_loop: true,
-		}
-	}
-
-	/// Resolves SQLite-backed continuity/session adapters into a provider-neutral bundle.
-	pub fn resolve_subsystem(
-		config: SqliteMemoryConfig,
-	) -> Result<ResolvedMemorySubsystem, SqliteMemoryAdapterError> {
-		let adapters = SqliteMemoryAdapters::connect(config)?;
-		Ok(ResolvedMemorySubsystem::with_parts(
-			Arc::new(NoopLongTermMemoryBackend),
-			Box::new(adapters.short_term),
-			Box::new(adapters.session_state),
-			Box::new(adapters.pending_loop),
-			Arc::new(DisabledMemoryLifecyclePolicy),
-		))
-	}
-}
-
-/// Config-bound SQLite registration consumed by the Roku entry registry.
-#[derive(Debug, Clone)]
-pub struct SqliteMemorySubsystemRegistration {
-	config: SqliteMemoryConfig,
-}
-
-impl SqliteMemorySubsystemRegistration {
-	pub fn new(config: SqliteMemoryConfig) -> Self {
-		Self { config }
-	}
-}
-
-impl MemorySubsystemRegistration for SqliteMemorySubsystemRegistration {
-	fn availability(&self) -> MemoryAdapterAvailability {
-		SqliteMemoryRegistration::availability()
-	}
-
-	fn resolve_subsystem(&self) -> Result<ResolvedMemorySubsystem, String> {
-		SqliteMemoryRegistration::resolve_subsystem(self.config.clone())
-			.map_err(|error| error.to_string())
 	}
 }
 
@@ -116,7 +60,7 @@ pub struct SqliteSessionStateAdapter {
 }
 
 impl SqliteSessionStateAdapter {
-	pub fn connect(config: SqliteStoreConfig) -> Result<Self, SqliteMemoryAdapterError> {
+	pub fn connect(config: SqliteMemoryStoreConfig) -> Result<Self, SqliteMemoryAdapterError> {
 		let inner = SqliteSessionPreferenceRepository::connect(config)
 			.map_err(|error| SqliteMemoryAdapterError::Resolution(error.to_string()))?;
 		Ok(Self { inner })
@@ -157,7 +101,7 @@ pub struct SqliteShortTermContinuityAdapter {
 }
 
 impl SqliteShortTermContinuityAdapter {
-	pub fn connect(config: SqliteStoreConfig) -> Result<Self, SqliteMemoryAdapterError> {
+	pub fn connect(config: SqliteMemoryStoreConfig) -> Result<Self, SqliteMemoryAdapterError> {
 		let inner = SqliteConversationRepository::connect(config)
 			.map_err(|error| SqliteMemoryAdapterError::Resolution(error.to_string()))?;
 		Ok(Self { inner })
@@ -199,7 +143,7 @@ pub struct SqlitePendingLoopSnapshotAdapter {
 }
 
 impl SqlitePendingLoopSnapshotAdapter {
-	pub fn connect(config: SqliteStoreConfig) -> Result<Self, SqliteMemoryAdapterError> {
+	pub fn connect(config: SqliteMemoryStoreConfig) -> Result<Self, SqliteMemoryAdapterError> {
 		let inner = SqliteSessionPreferenceRepository::connect(config)
 			.map_err(|error| SqliteMemoryAdapterError::Resolution(error.to_string()))?;
 		Ok(Self {
