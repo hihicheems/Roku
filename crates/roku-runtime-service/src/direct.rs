@@ -18,8 +18,8 @@ use roku_common_types::{
 	ResultStatus, RuntimeError, Task, TaskEventKind, TaskNode, TaskState,
 };
 
-use crate::RuntimeService;
 use crate::helpers::{failure_message, result_message};
+use crate::{ContextBundle, RuntimeService};
 
 impl RuntimeService {
 	pub(super) fn process_direct_route(
@@ -28,6 +28,7 @@ impl RuntimeService {
 		request: &RequestEnvelope,
 		_plan: &DirectRoutePlan,
 		loop_state: &mut LoopState,
+		context_bundle: &ContextBundle,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let initial_history_len = loop_state.history.len();
 		let execution = self
@@ -47,6 +48,7 @@ impl RuntimeService {
 			self.record_runtime_loop_terminal_step(loop_state, response.status, &response.message);
 		}
 		self.sync_pending_loop(loop_state)?;
+		self.apply_memory_write_back(request, &response, context_bundle);
 		Ok(response)
 	}
 
@@ -56,6 +58,7 @@ impl RuntimeService {
 		request: &RequestEnvelope,
 		plan: &RouteEscalationPlan,
 		loop_state: &mut LoopState,
+		context_bundle: &ContextBundle,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let execution = self
 			.runtime
@@ -84,6 +87,7 @@ impl RuntimeService {
 			);
 		}
 		self.sync_pending_loop(loop_state)?;
+		self.apply_memory_write_back(request, &response, context_bundle);
 		Ok(response)
 	}
 

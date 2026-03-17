@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::env;
+use std::sync::Arc;
 
 use roku_agent_runtime::{
 	AskUserPayload, AskUserResumeContract, AskUserResumeDirective, IntentFamily, LoopContext,
@@ -24,6 +25,12 @@ use roku_common_types::{
 	NodeId, PlanningModeHint, RecoveryEligibility, RequestEnvelope, RequestId, ResponseStatus,
 	ResultEnvelope, ResultStatus, Task, TaskEdge, TaskGraph, TaskId, TaskNode, TaskNodeKind,
 	TaskState,
+};
+use roku_memory::{
+	InMemoryLongTermMemoryBackend, LongTermMemoryBackend, MemoryBackendHealth, MemoryBackendStatus,
+	MemoryDeleteSelector, MemoryError, MemoryKind, MemoryLifecyclePolicy, MemoryQuery,
+	MemoryRecallInput, MemoryScope, MemoryWriteAck, MemoryWritePolicyInput, MemoryWriteReason,
+	MemoryWriteRequest,
 };
 
 use crate::{RuntimeExecutionMode, RuntimeModeReport, RuntimeService, compact_approval_id};
@@ -91,6 +98,104 @@ fn graph_task(
 	}
 }
 
+struct FailingRecallBackend;
+
+impl LongTermMemoryBackend for FailingRecallBackend {
+	fn backend_name(&self) -> &'static str {
+		"failing-recall"
+	}
+
+	fn search(&self, _query: &MemoryQuery) -> Result<Vec<roku_memory::MemoryHit>, MemoryError> {
+		Err(MemoryError::Unavailable(
+			"simulated recall outage".to_string(),
+		))
+	}
+
+	fn write(&self, _request: &MemoryWriteRequest) -> Result<MemoryWriteAck, MemoryError> {
+		Ok(MemoryWriteAck {
+			accepted: true,
+			record_id: Some("memory-record-1".to_string()),
+		})
+	}
+
+	fn delete(&self, _selector: &MemoryDeleteSelector) -> Result<(), MemoryError> {
+		Ok(())
+	}
+
+	fn health(&self) -> Result<MemoryBackendHealth, MemoryError> {
+		Ok(MemoryBackendHealth {
+			backend: self.backend_name().to_string(),
+			status: MemoryBackendStatus::Degraded,
+			detail: Some("simulated recall outage".to_string()),
+		})
+	}
+}
+
+struct AlwaysWriteMemoryPolicy;
+
+impl MemoryLifecyclePolicy for AlwaysWriteMemoryPolicy {
+	fn build_recall_query(&self, _input: &MemoryRecallInput) -> Option<MemoryQuery> {
+		None
+	}
+
+	fn build_write_request(&self, input: &MemoryWritePolicyInput) -> Option<MemoryWriteRequest> {
+		if input.response_status != ResponseStatus::Succeeded {
+			return None;
+		}
+
+		let mut request = MemoryWriteRequest::new(
+			MemoryKind::HistoricalCase,
+			MemoryScope::Session,
+			format!("goal={} response={}", input.goal, input.response_message),
+			"Successful runtime response".to_string(),
+			MemoryWriteReason::TaskSucceeded,
+		);
+		request.session_id = Some(input.session_id.clone());
+		Some(request)
+	}
+}
+
+#[test]
+fn context_bundle_separates_short_term_continuity_from_long_term_hits() {
+	let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
+	let mut seed = MemoryWriteRequest::new(
+		MemoryKind::UserPreference,
+		MemoryScope::Session,
+		"User prefers Rust code snippets.",
+		"Rust preference".to_string(),
+		MemoryWriteReason::OperatorRequested,
+	);
+	seed.session_id = Some("session-1".to_string());
+	backend
+		.write(&seed)
+		.expect("seed long-term memory write should succeed");
+
+	let service = RuntimeService::default().with_long_term_memory_backend(backend);
+	let request = RequestEnvelope {
+		request_id: RequestId("req-memory-context".to_string()),
+		session_id: "session-1".to_string(),
+		goal: "Rust preference".to_string(),
+		planning_mode_hint: None,
+		conversation_history: vec![roku_common_types::ConversationTurn {
+			role: roku_common_types::ConversationRole::User,
+			content: "Please use concise answers.".to_string(),
+			created_at_unix_ms: 0,
+		}],
+	};
+
+	let bundle = service
+		.build_context_bundle(&request)
+		.expect("context bundle should build");
+
+	assert_eq!(request.conversation_history.len(), 1);
+	assert_eq!(bundle.short_term_continuity.len(), 1);
+	assert_eq!(bundle.long_term_memory_hits.len(), 1);
+	assert_eq!(
+		bundle.long_term_memory_hits[0].record.summary,
+		"Rust preference"
+	);
+}
+
 #[test]
 fn compact_approval_id_stays_short_for_telegram_callbacks() {
 	let approval_id = compact_approval_id("task-tg-919471825", "request-approval");
@@ -145,6 +250,34 @@ fn runtime_service_can_expose_live_fallback_mode_report() {
 		report.fallback_reason.as_deref(),
 		Some("openrouter plugin disabled by startup policy")
 	);
+}
+
+#[test]
+fn recall_failures_do_not_block_direct_execution() {
+	let service =
+		RuntimeService::default().with_long_term_memory_backend(Arc::new(FailingRecallBackend));
+
+	let response = service
+		.execute(request("What skills and tools do you have right now?"))
+		.expect("direct request should still succeed");
+
+	assert_eq!(response.status, ResponseStatus::Succeeded);
+}
+
+#[test]
+fn successful_requests_trigger_memory_write_back_hook() {
+	let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
+	let service = RuntimeService::default()
+		.with_long_term_memory_backend(backend.clone())
+		.with_memory_lifecycle_policy(Arc::new(AlwaysWriteMemoryPolicy));
+
+	let response = service
+		.execute(request("What skills and tools do you have right now?"))
+		.expect("direct request should succeed");
+
+	assert_eq!(response.status, ResponseStatus::Succeeded);
+	assert_eq!(backend.recorded_writes().len(), 1);
+	assert_eq!(backend.stored_records().len(), 1);
 }
 
 #[test]

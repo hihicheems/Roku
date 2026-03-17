@@ -19,6 +19,7 @@ mod direct;
 mod execution;
 mod helpers;
 mod legacy_graph;
+mod memory_context;
 mod runtime_loop_lifecycle;
 mod runtime_loop_recovery;
 #[cfg(test)]
@@ -38,6 +39,10 @@ use roku_common_types::{
 	ResponseEnvelope, ResponseStatus, RuntimeError, Task, TaskEventKind, TaskNode, TaskState,
 };
 use roku_experiment_registry::ExperimentRegistry;
+use roku_memory::{
+	ConservativeMemoryLifecyclePolicy, LongTermMemoryBackend, MemoryLifecyclePolicy,
+	NoopLongTermMemoryBackend,
+};
 use roku_observability::{
 	AuditCorrelation, AuditRecord, AuditSink, InMemoryAuditSink, LogLevel, LogRecord, Metrics,
 	MetricsSnapshot, emit_global_log,
@@ -51,6 +56,7 @@ use roku_state_store::{
 use roku_validation_plane::ValidationPipeline;
 
 use crate::helpers::{approval_artifact, failure_message, ticket_status_label};
+pub use crate::memory_context::ContextBundle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RunMode {
@@ -163,6 +169,8 @@ pub struct RuntimeService {
 	validator: ValidationPipeline,
 	metrics: Arc<Metrics>,
 	audit_sink: Arc<dyn AuditSink>,
+	memory_backend: Arc<dyn LongTermMemoryBackend>,
+	memory_policy: Arc<dyn MemoryLifecyclePolicy>,
 	state: Mutex<RuntimeState>,
 	pending_loops: Mutex<HashMap<String, LoopState>>,
 }
@@ -294,6 +302,8 @@ impl RuntimeService {
 			validator: ValidationPipeline::default(),
 			metrics,
 			audit_sink,
+			memory_backend: Arc::new(NoopLongTermMemoryBackend),
+			memory_policy: Arc::new(ConservativeMemoryLifecyclePolicy::default()),
 			state: Mutex::new(RuntimeState {
 				capability_auth: CapabilityAuthority::default(),
 				task_repo,
@@ -413,6 +423,7 @@ impl RuntimeService {
 				],
 			);
 		}
+		let mut context_bundle = self.build_context_bundle(&normalized_request)?;
 		let mut task = self.orchestrator.create_task(&normalized_request);
 
 		self.record_transition(&mut task, TaskState::Planning, "classify direct route")?;
@@ -442,24 +453,37 @@ impl RuntimeService {
 				&normalized_request,
 				&compatibility_plan,
 				&mut loop_state,
+				&context_bundle,
 			);
 		}
 
 		if let Some(mut loop_state) = self.take_resumable_pending_loop(&normalized_request)? {
 			self.start_experiment_run(&task, &normalized_request.goal, "runtime_loop_resume")?;
-			return self.resume_pending_loop(&mut task, &normalized_request, &mut loop_state);
+			return self.resume_pending_loop(
+				&mut task,
+				&normalized_request,
+				&mut loop_state,
+				&context_bundle,
+			);
 		}
 
 		let route = self
 			.runtime
 			.classify_route(&normalized_request, &normalized_request.session_id);
+		self.attach_visible_resources(&mut context_bundle, &route);
 		log_route_decision(&normalized_request, &route);
 		let mut loop_state = self.initialize_runtime_loop_for_route(&normalized_request, &route);
 		match &route {
 			RouteDecisionResult::Direct(plan) => {
 				self.metrics.inc_direct_route_hits();
 				self.start_experiment_run(&task, &normalized_request.goal, "direct_route")?;
-				self.process_direct_route(&mut task, &normalized_request, plan, &mut loop_state)
+				self.process_direct_route(
+					&mut task,
+					&normalized_request,
+					plan,
+					&mut loop_state,
+					&context_bundle,
+				)
 			}
 			RouteDecisionResult::Escalate(plan) => {
 				self.metrics.inc_route_escalations();
@@ -484,6 +508,7 @@ impl RuntimeService {
 							&normalized_request,
 							plan,
 							&mut loop_state,
+							&context_bundle,
 						)
 					}
 					EscalationAction::FallbackAnswer => {
@@ -494,6 +519,7 @@ impl RuntimeService {
 							&normalized_request,
 							plan,
 							&mut loop_state,
+							&context_bundle,
 						)
 					}
 					EscalationAction::EnterLimitedPlanning => {
@@ -509,6 +535,7 @@ impl RuntimeService {
 							&normalized_request,
 							plan,
 							&mut loop_state,
+							&context_bundle,
 						)
 					}
 				}

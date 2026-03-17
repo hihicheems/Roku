@@ -19,7 +19,7 @@ use roku_agent_runtime::LoopState;
 use roku_common_types::{RequestEnvelope, ResponseEnvelope, RuntimeError, Task};
 use roku_observability::LogLevel;
 
-use crate::RuntimeService;
+use crate::{ContextBundle, RuntimeService};
 use crate::{log_runtime, truncate_for_log};
 
 impl RuntimeService {
@@ -38,6 +38,11 @@ impl RuntimeService {
 		let mut pending = self.lock_pending_loops()?;
 		pending.remove(session_id);
 		Ok(())
+	}
+
+	pub(super) fn has_pending_loop(&self, session_id: &str) -> Result<bool, RuntimeError> {
+		let pending = self.lock_pending_loops()?;
+		Ok(pending.contains_key(session_id))
 	}
 
 	pub(super) fn sync_pending_loop(&self, loop_state: &LoopState) -> Result<(), RuntimeError> {
@@ -102,6 +107,7 @@ impl RuntimeService {
 		task: &mut Task,
 		request: &RequestEnvelope,
 		loop_state: &mut LoopState,
+		context_bundle: &ContextBundle,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let initial_history_len = loop_state.history.len();
 		let execution =
@@ -121,6 +127,7 @@ impl RuntimeService {
 			self.record_runtime_loop_terminal_step(loop_state, response.status, &response.message);
 		}
 		self.sync_pending_loop(loop_state)?;
+		self.apply_memory_write_back(request, &response, context_bundle);
 		Ok(response)
 	}
 
