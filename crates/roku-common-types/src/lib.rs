@@ -75,6 +75,7 @@ pub struct ConversationTurn {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionPreferences {
 	#[serde(default)]
+	/// Deprecated compatibility hint; does not control modern runtime memory policy.
 	pub planning_mode: Option<PlanningModeHint>,
 	#[serde(default)]
 	pub pending_loop: Option<PendingLoopBinding>,
@@ -94,6 +95,7 @@ pub struct RequestEnvelope {
 	#[serde(default)]
 	pub planning_mode_hint: Option<PlanningModeHint>,
 	#[serde(default)]
+	/// Short-term continuity only; long-term recall is injected through runtime-owned context.
 	pub conversation_history: Vec<ConversationTurn>,
 }
 
@@ -247,6 +249,7 @@ pub struct Task {
 	#[serde(default)]
 	pub planning_mode_hint: Option<PlanningModeHint>,
 	#[serde(default)]
+	/// Legacy persisted short-term continuity snapshot; not a canonical long-term memory source.
 	pub conversation_history: Vec<ConversationTurn>,
 	#[serde(default)]
 	pub completed_nodes: Vec<NodeId>,
