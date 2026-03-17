@@ -845,6 +845,69 @@ mod tests {
 	}
 
 	#[test]
+	fn semantic_store_boundaries_roundtrip() {
+		let mut session_state_store: Box<dyn SessionStateStore> =
+			Box::new(InMemorySessionStateStore::default());
+		let mut continuity_store: Box<dyn ConversationStore> =
+			Box::new(InMemoryConversationStore::default());
+
+		session_state_store
+			.save_session_state(
+				"session-2",
+				SessionState {
+					planning_mode: Some(PlanningModeHint::IterativeRefinement),
+					pending_loop: None,
+				},
+			)
+			.expect("save session state should succeed");
+		continuity_store
+			.append_continuity_turn(
+				"session-2",
+				ConversationTurn {
+					role: ConversationRole::Assistant,
+					content: "continuity".to_string(),
+					created_at_unix_ms: 9,
+				},
+			)
+			.expect("append continuity turn should succeed");
+
+		let state = session_state_store
+			.load_session_state("session-2")
+			.expect("load session state should succeed")
+			.expect("session state should exist");
+		let turns = continuity_store
+			.load_short_term_continuity("session-2", 4)
+			.expect("load continuity turns should succeed");
+
+		assert_eq!(
+			state.planning_mode,
+			Some(PlanningModeHint::IterativeRefinement)
+		);
+		assert_eq!(turns.len(), 1);
+		assert_eq!(turns[0].content, "continuity");
+
+		session_state_store
+			.delete_session_state("session-2")
+			.expect("delete session state should succeed");
+		continuity_store
+			.delete_continuity("session-2")
+			.expect("delete continuity should succeed");
+
+		assert!(
+			session_state_store
+				.load_session_state("session-2")
+				.expect("load deleted session state should succeed")
+				.is_none()
+		);
+		assert!(
+			continuity_store
+				.load_short_term_continuity("session-2", 4)
+				.expect("load deleted continuity should succeed")
+				.is_empty()
+		);
+	}
+
+	#[test]
 	fn file_repositories_roundtrip() {
 		let task_path = unique_path("task");
 		let event_path = unique_path("event");
