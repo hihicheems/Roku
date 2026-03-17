@@ -452,6 +452,26 @@ api_key = "should-not-be-configurable"
 	}
 
 	#[test]
+	fn runtime_toml_rejects_provider_specific_memory_fields_at_top_level() {
+		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
+		let layout = temp_layout();
+		write_runtime_toml(
+			&layout,
+			r#"
+[runtime.memory]
+enabled = true
+base_url = "http://127.0.0.1:1933"
+"#,
+		);
+
+		let error = load_runtime_configs(&layout)
+			.expect_err("provider-specific memory fields should stay under backends.*");
+
+		assert!(matches!(error, CommandError::RuntimeConfigBootstrap(_)));
+		assert!(error.to_string().contains("unknown field `base_url`"));
+	}
+
+	#[test]
 	fn canonical_and_legacy_env_overrides_apply_on_top_of_toml() {
 		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
 		let layout = temp_layout();

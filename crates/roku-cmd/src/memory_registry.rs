@@ -44,3 +44,101 @@ pub(crate) fn resolve_memory_subsystem(
 		.resolve_subsystem(memory_config.enabled, memory_config.backend)
 		.map_err(|error| CommandError::MemoryBackend(error.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+	use roku_common_types::{ConversationRole, ConversationTurn, PendingLoopBinding};
+	use roku_memory::{MemoryBackendId, SessionState};
+
+	use super::*;
+
+	#[test]
+	fn resolves_sqlite_entry_bundle_from_provider_neutral_config() {
+		let tempdir = tempfile::tempdir().expect("tempdir should exist");
+		let mut config = MemoryRuntimeConfig {
+			enabled: true,
+			backend: MemoryBackendId::Sqlite,
+			..MemoryRuntimeConfig::default()
+		};
+		config.backends.sqlite.path = tempdir.path().join("memory.db");
+
+		let mut subsystem =
+			resolve_memory_subsystem(&config).expect("sqlite subsystem should resolve");
+
+		subsystem
+			.short_term
+			.append_continuity_turn(
+				"session-1",
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: "hello".to_string(),
+					created_at_unix_ms: 1,
+				},
+			)
+			.expect("short-term continuity should append");
+		subsystem
+			.session_state
+			.save_session_state(
+				"session-1",
+				SessionState {
+					planning_mode: None,
+					pending_loop: Some(PendingLoopBinding {
+						run_id: "loop-1".to_string(),
+						loop_state_json: "{\"status\":\"waiting\"}".to_string(),
+					}),
+				},
+			)
+			.expect("session state should save");
+		subsystem
+			.pending_loop
+			.save_pending_loop_snapshot("session-1", None)
+			.expect("pending loop snapshot should save");
+
+		assert_eq!(
+			subsystem
+				.short_term
+				.load_short_term_continuity("session-1", 8)
+				.expect("continuity should load")
+				.len(),
+			1
+		);
+		assert_eq!(
+			subsystem
+				.session_state
+				.load_session_state("session-1")
+				.expect("session state should load")
+				.expect("session state should exist")
+				.pending_loop,
+			None
+		);
+		assert_eq!(
+			subsystem
+				.pending_loop
+				.load_pending_loop_snapshot("session-1")
+				.expect("pending loop snapshot should load"),
+			None
+		);
+	}
+
+	#[cfg(not(feature = "memory-openviking"))]
+	#[test]
+	fn unregistered_openviking_backend_falls_back_to_disabled_bundle() {
+		let config = MemoryRuntimeConfig {
+			enabled: true,
+			backend: MemoryBackendId::OpenViking,
+			..MemoryRuntimeConfig::default()
+		};
+
+		let subsystem =
+			resolve_memory_subsystem(&config).expect("missing adapter should not hard fail");
+
+		assert_eq!(subsystem.long_term.backend_name(), "noop");
+		assert!(
+			subsystem
+				.short_term
+				.load_short_term_continuity("session-1", 8)
+				.expect("noop continuity should load")
+				.is_empty()
+		);
+	}
+}
