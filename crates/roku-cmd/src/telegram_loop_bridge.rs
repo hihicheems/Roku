@@ -14,7 +14,7 @@
 
 //! Bridge between runtime pending-loop state and Telegram session persistence.
 //!
-//! Telegram stores pause/resume bindings in chat-scoped session preferences, while the runtime
+//! Telegram stores pause/resume bindings in chat-scoped session state, while the runtime
 //! service owns the in-memory loop state used to continue execution. This module is the explicit
 //! adapter between those two representations.
 
@@ -22,7 +22,22 @@ use roku_agent_runtime::LoopState;
 use roku_common_types::{PendingLoopBinding, RuntimeError};
 use roku_runtime_service::RuntimeService;
 
-use crate::bot::TelegramSessionState;
+pub(crate) trait PendingLoopStore {
+	fn load_pending_loop_binding(
+		&self,
+		session_id: &str,
+	) -> Result<Option<PendingLoopBinding>, RuntimeError>;
+
+	fn save_pending_loop_binding(
+		&self,
+		session_id: &str,
+		binding: Option<PendingLoopBinding>,
+	) -> Result<(), RuntimeError>;
+
+	fn clear_pending_loop_binding(&self, session_id: &str) -> Result<(), RuntimeError> {
+		self.save_pending_loop_binding(session_id, None)
+	}
+}
 
 /// Restores a persisted Telegram pending-loop binding into the live runtime service.
 ///
@@ -30,18 +45,16 @@ use crate::bot::TelegramSessionState;
 /// dropped instead of failing the whole request path.
 pub(crate) fn restore_pending_loop_from_session(
 	service: &RuntimeService,
-	session_state: &TelegramSessionState,
+	pending_loop_store: &dyn PendingLoopStore,
 	session_id: &str,
 ) -> Result<(), RuntimeError> {
-	let mut preferences = session_state.load_preferences_or_default(session_id)?;
-	let Some(binding) = preferences.pending_loop.clone() else {
+	let Some(binding) = pending_loop_store.load_pending_loop_binding(session_id)? else {
 		return Ok(());
 	};
 	let loop_state = match serde_json::from_str::<LoopState>(&binding.loop_state_json) {
 		Ok(loop_state) => loop_state,
 		Err(_) => {
-			preferences.pending_loop = None;
-			session_state.save_preferences(session_id, preferences)?;
+			pending_loop_store.clear_pending_loop_binding(session_id)?;
 			return Ok(());
 		}
 	};
@@ -54,11 +67,10 @@ pub(crate) fn restore_pending_loop_from_session(
 /// runtime most recently exposed.
 pub(crate) fn sync_pending_loop_to_session(
 	service: &RuntimeService,
-	session_state: &TelegramSessionState,
+	pending_loop_store: &dyn PendingLoopStore,
 	session_id: &str,
 ) -> Result<(), RuntimeError> {
-	let mut preferences = session_state.load_preferences_or_default(session_id)?;
-	preferences.pending_loop = match service.pending_loop(session_id)? {
+	let binding = match service.pending_loop(session_id)? {
 		Some(loop_state) => Some(PendingLoopBinding {
 			run_id: loop_state.run_id.clone(),
 			loop_state_json: serde_json::to_string(&loop_state).map_err(|error| {
@@ -67,5 +79,5 @@ pub(crate) fn sync_pending_loop_to_session(
 		}),
 		None => None,
 	};
-	session_state.save_preferences(session_id, preferences)
+	pending_loop_store.save_pending_loop_binding(session_id, binding)
 }
