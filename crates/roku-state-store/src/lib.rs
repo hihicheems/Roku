@@ -17,7 +17,9 @@
 //! This crate is exiting the target memory architecture. It is not the long-term
 //! home for Roku memory, continuity, session, or pending-loop contracts.
 //! During the migration it may still host storage adapters and compatibility
-//! shims, but new memory-subsystem ownership belongs in `roku-memory`.
+//! shims, but new memory-subsystem ownership belongs in `roku-memory`. If no
+//! clear standalone persistence role survives after the migration, this crate
+//! should be removed rather than re-expanded as the memory subsystem host.
 
 mod dispatch;
 mod sqlite;
