@@ -548,7 +548,7 @@ fn parse_download_output_path(parts: &[String]) -> Result<PathBuf, CommandError>
 fn parse_memory_search_options(parts: &[String]) -> Result<MemorySearchOptions, CommandError> {
 	let mut options = MemorySearchOptions {
 		scope: MemoryScope::Session,
-		session_id: Some("session-1".to_string()),
+		session_id: None,
 		user_id: None,
 		project_id: None,
 		workspace_id: None,
@@ -657,7 +657,7 @@ fn parse_memory_write_options(parts: &[String]) -> Result<MemoryWriteOptions, Co
 	let mut options = MemoryWriteOptions {
 		scope: MemoryScope::Session,
 		kind: MemoryKind::HistoricalCase,
-		session_id: Some("session-1".to_string()),
+		session_id: None,
 		user_id: None,
 		project_id: None,
 		workspace_id: None,
@@ -1107,5 +1107,40 @@ mod tests {
 	fn parse_download_output_path_requires_output_flag() {
 		let error = parse_download_output_path(&[]).expect_err("output flag should be required");
 		assert!(error.to_string().contains("missing required --output"));
+	}
+
+	#[test]
+	fn parse_memory_search_options_requires_explicit_scope_identity() {
+		let error = parse_memory_search_options(&["recent preference".to_string()])
+			.expect_err("session-scoped search should require an explicit session id");
+		assert!(error.to_string().contains("--session-id is required"));
+
+		let options = parse_memory_search_options(&[
+			"--scope".to_string(),
+			"global".to_string(),
+			"recent preference".to_string(),
+		])
+		.expect("global search should not require extra identity");
+		assert_eq!(options.scope, MemoryScope::Global);
+		assert_eq!(options.query, "recent preference");
+	}
+
+	#[test]
+	fn parse_memory_write_options_requires_explicit_scope_identity() {
+		let error = parse_memory_write_options(&["remember this".to_string()])
+			.expect_err("session-scoped write should require an explicit session id");
+		assert!(error.to_string().contains("--session-id is required"));
+
+		let options = parse_memory_write_options(&[
+			"--scope".to_string(),
+			"global".to_string(),
+			"--summary".to_string(),
+			"global note".to_string(),
+			"remember this".to_string(),
+		])
+		.expect("global write should not require extra identity");
+		assert_eq!(options.scope, MemoryScope::Global);
+		assert_eq!(options.summary, "global note");
+		assert_eq!(options.content, "remember this");
 	}
 }
