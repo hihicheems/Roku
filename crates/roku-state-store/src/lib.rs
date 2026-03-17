@@ -32,10 +32,6 @@ use roku_common_types::{
 	ApprovalId, ApprovalTicket, ConversationTurn, NodeId, ResultEnvelope, SessionPreferences, Task,
 	TaskEvent, TaskId, TaskReplaySnapshot,
 };
-use roku_memory::{
-	SessionState, SessionStateBackend, SessionStateError, ShortTermContinuityBackend,
-	ShortTermContinuityError,
-};
 use thiserror::Error;
 
 pub use dispatch::{
@@ -213,11 +209,13 @@ impl ResultRepository for InMemoryResultRepository {
 	}
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
-pub struct InMemorySessionPreferenceRepository {
+struct InMemorySessionPreferenceRepository {
 	preferences: HashMap<String, SessionPreferences>,
 }
 
+#[cfg(test)]
 impl SessionPreferenceRepository for InMemorySessionPreferenceRepository {
 	fn save_preferences(
 		&mut self,
@@ -238,35 +236,13 @@ impl SessionPreferenceRepository for InMemorySessionPreferenceRepository {
 	}
 }
 
-impl SessionStateBackend for InMemorySessionPreferenceRepository {
-	fn save_session_state(
-		&mut self,
-		session_id: &str,
-		state: SessionState,
-	) -> Result<(), SessionStateError> {
-		self.save_preferences(session_id, state)
-			.map_err(|error| SessionStateError::Backend(error.to_string()))
-	}
-
-	fn load_session_state(
-		&self,
-		session_id: &str,
-	) -> Result<Option<SessionState>, SessionStateError> {
-		self.load_preferences(session_id)
-			.map_err(|error| SessionStateError::Backend(error.to_string()))
-	}
-
-	fn delete_session_state(&mut self, session_id: &str) -> Result<(), SessionStateError> {
-		self.delete_preferences(session_id)
-			.map_err(|error| SessionStateError::Backend(error.to_string()))
-	}
-}
-
+#[cfg(test)]
 #[derive(Debug, Default)]
-pub struct InMemoryConversationRepository {
+struct InMemoryConversationRepository {
 	turns_by_session: HashMap<String, Vec<ConversationTurn>>,
 }
 
+#[cfg(test)]
 impl ConversationRepository for InMemoryConversationRepository {
 	fn append_turn(&mut self, session_id: &str, turn: ConversationTurn) -> Result<(), StoreError> {
 		self.turns_by_session
@@ -291,31 +267,6 @@ impl ConversationRepository for InMemoryConversationRepository {
 	fn delete_conversation(&mut self, session_id: &str) -> Result<(), StoreError> {
 		self.turns_by_session.remove(session_id);
 		Ok(())
-	}
-}
-
-impl ShortTermContinuityBackend for InMemoryConversationRepository {
-	fn append_continuity_turn(
-		&mut self,
-		session_id: &str,
-		turn: ConversationTurn,
-	) -> Result<(), ShortTermContinuityError> {
-		self.append_turn(session_id, turn)
-			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
-	}
-
-	fn load_short_term_continuity(
-		&self,
-		session_id: &str,
-		limit: usize,
-	) -> Result<Vec<ConversationTurn>, ShortTermContinuityError> {
-		self.load_recent_turns(session_id, limit)
-			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
-	}
-
-	fn delete_continuity(&mut self, session_id: &str) -> Result<(), ShortTermContinuityError> {
-		self.delete_conversation(session_id)
-			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
 	}
 }
 
@@ -525,30 +476,6 @@ impl SessionPreferenceRepository for FileSessionPreferenceRepository {
 	}
 }
 
-impl SessionStateBackend for FileSessionPreferenceRepository {
-	fn save_session_state(
-		&mut self,
-		session_id: &str,
-		state: SessionState,
-	) -> Result<(), SessionStateError> {
-		self.save_preferences(session_id, state)
-			.map_err(|error| SessionStateError::Backend(error.to_string()))
-	}
-
-	fn load_session_state(
-		&self,
-		session_id: &str,
-	) -> Result<Option<SessionState>, SessionStateError> {
-		self.load_preferences(session_id)
-			.map_err(|error| SessionStateError::Backend(error.to_string()))
-	}
-
-	fn delete_session_state(&mut self, session_id: &str) -> Result<(), SessionStateError> {
-		self.delete_preferences(session_id)
-			.map_err(|error| SessionStateError::Backend(error.to_string()))
-	}
-}
-
 #[derive(Debug, Clone)]
 pub struct FileConversationRepository {
 	path: PathBuf,
@@ -611,31 +538,6 @@ impl ConversationRepository for FileConversationRepository {
 	}
 }
 
-impl ShortTermContinuityBackend for FileConversationRepository {
-	fn append_continuity_turn(
-		&mut self,
-		session_id: &str,
-		turn: ConversationTurn,
-	) -> Result<(), ShortTermContinuityError> {
-		self.append_turn(session_id, turn)
-			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
-	}
-
-	fn load_short_term_continuity(
-		&self,
-		session_id: &str,
-		limit: usize,
-	) -> Result<Vec<ConversationTurn>, ShortTermContinuityError> {
-		self.load_recent_turns(session_id, limit)
-			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
-	}
-
-	fn delete_continuity(&mut self, session_id: &str) -> Result<(), ShortTermContinuityError> {
-		self.delete_conversation(session_id)
-			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
-	}
-}
-
 impl ResultRepository for FileResultRepository {
 	fn save_result(&mut self, result: ResultEnvelope) -> Result<(), StoreError> {
 		let mut results = self.read_all()?;
@@ -695,7 +597,10 @@ mod tests {
 		ConversationRole, ConversationTurn, EvidenceItem, PlanningModeHint, RequestId,
 		ResultStatus, TaskState,
 	};
-	use roku_memory::{SessionStateBackend, ShortTermContinuityBackend};
+	use roku_memory::{
+		InMemorySessionStateBackend, InMemoryShortTermContinuityBackend, SessionState,
+		SessionStateBackend, ShortTermContinuityBackend,
+	};
 	use std::time::{SystemTime, UNIX_EPOCH};
 
 	fn unique_path(suffix: &str) -> PathBuf {
@@ -865,9 +770,9 @@ mod tests {
 	#[test]
 	fn semantic_store_boundaries_roundtrip() {
 		let mut session_state_store: Box<dyn SessionStateBackend> =
-			Box::new(InMemorySessionPreferenceRepository::default());
+			Box::new(InMemorySessionStateBackend::default());
 		let mut continuity_store: Box<dyn ShortTermContinuityBackend> =
-			Box::new(InMemoryConversationRepository::default());
+			Box::new(InMemoryShortTermContinuityBackend::default());
 
 		session_state_store
 			.save_session_state(

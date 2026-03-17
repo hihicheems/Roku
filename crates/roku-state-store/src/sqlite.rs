@@ -20,10 +20,6 @@ use roku_common_types::{
 	ApprovalId, ApprovalTicket, ConversationTurn, NodeId, ResultEnvelope, SessionPreferences, Task,
 	TaskEvent, TaskId, TaskReplaySnapshot,
 };
-use roku_memory::{
-	SessionState, SessionStateBackend, SessionStateError, ShortTermContinuityBackend,
-	ShortTermContinuityError,
-};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::{
@@ -369,6 +365,25 @@ impl SqliteSessionPreferenceRepository {
 	fn open(&self) -> Result<Connection, StoreError> {
 		open_connection(&self.config.path)
 	}
+
+	pub fn save_preferences(
+		&mut self,
+		session_id: &str,
+		preferences: SessionPreferences,
+	) -> Result<(), StoreError> {
+		SessionPreferenceRepository::save_preferences(self, session_id, preferences)
+	}
+
+	pub fn load_preferences(
+		&self,
+		session_id: &str,
+	) -> Result<Option<SessionPreferences>, StoreError> {
+		SessionPreferenceRepository::load_preferences(self, session_id)
+	}
+
+	pub fn delete_preferences(&mut self, session_id: &str) -> Result<(), StoreError> {
+		SessionPreferenceRepository::delete_preferences(self, session_id)
+	}
 }
 
 impl SessionPreferenceRepository for SqliteSessionPreferenceRepository {
@@ -414,30 +429,6 @@ impl SessionPreferenceRepository for SqliteSessionPreferenceRepository {
 	}
 }
 
-impl SessionStateBackend for SqliteSessionPreferenceRepository {
-	fn save_session_state(
-		&mut self,
-		session_id: &str,
-		state: SessionState,
-	) -> Result<(), SessionStateError> {
-		self.save_preferences(session_id, state)
-			.map_err(|error| SessionStateError::Backend(error.to_string()))
-	}
-
-	fn load_session_state(
-		&self,
-		session_id: &str,
-	) -> Result<Option<SessionState>, SessionStateError> {
-		self.load_preferences(session_id)
-			.map_err(|error| SessionStateError::Backend(error.to_string()))
-	}
-
-	fn delete_session_state(&mut self, session_id: &str) -> Result<(), SessionStateError> {
-		self.delete_preferences(session_id)
-			.map_err(|error| SessionStateError::Backend(error.to_string()))
-	}
-}
-
 #[derive(Debug, Clone)]
 pub struct SqliteConversationRepository {
 	config: SqliteStoreConfig,
@@ -451,6 +442,26 @@ impl SqliteConversationRepository {
 
 	fn open(&self) -> Result<Connection, StoreError> {
 		open_connection(&self.config.path)
+	}
+
+	pub fn append_turn(
+		&mut self,
+		session_id: &str,
+		turn: ConversationTurn,
+	) -> Result<(), StoreError> {
+		ConversationRepository::append_turn(self, session_id, turn)
+	}
+
+	pub fn load_recent_turns(
+		&self,
+		session_id: &str,
+		limit: usize,
+	) -> Result<Vec<ConversationTurn>, StoreError> {
+		ConversationRepository::load_recent_turns(self, session_id, limit)
+	}
+
+	pub fn delete_conversation(&mut self, session_id: &str) -> Result<(), StoreError> {
+		ConversationRepository::delete_conversation(self, session_id)
 	}
 }
 
@@ -494,31 +505,6 @@ impl ConversationRepository for SqliteConversationRepository {
 			params![session_id],
 		)?;
 		Ok(())
-	}
-}
-
-impl ShortTermContinuityBackend for SqliteConversationRepository {
-	fn append_continuity_turn(
-		&mut self,
-		session_id: &str,
-		turn: ConversationTurn,
-	) -> Result<(), ShortTermContinuityError> {
-		self.append_turn(session_id, turn)
-			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
-	}
-
-	fn load_short_term_continuity(
-		&self,
-		session_id: &str,
-		limit: usize,
-	) -> Result<Vec<ConversationTurn>, ShortTermContinuityError> {
-		self.load_recent_turns(session_id, limit)
-			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
-	}
-
-	fn delete_continuity(&mut self, session_id: &str) -> Result<(), ShortTermContinuityError> {
-		self.delete_conversation(session_id)
-			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))
 	}
 }
 
