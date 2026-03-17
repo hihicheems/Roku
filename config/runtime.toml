@@ -128,10 +128,9 @@ max_prompt_document_bytes = 24576
 max_prompt_documents = 24
 
 [runtime.memory]
-# Phase 1 keeps memory disabled by default so startup behavior stays unchanged until
-# the later runtime rollout phases wire the new backend into the main execution path.
+# Memory stays disabled by default so rollout remains an explicit operator choice.
 enabled = false
-# Backend selector stays typed even while only OpenViking is supported.
+# Backend selection is provider-neutral even when a given deployment only enables one adapter.
 backend = "openviking"
 
 [runtime.memory.recall]
@@ -162,7 +161,8 @@ write_wait_timeout_ms = 120000
 strict = true
 
 [runtime.memory.backends.openviking.process]
-# Managed process bootstrap stays disabled until the OpenViking adapter phase.
+# Managed process startup remains opt-in; the generated ov.conf is a provider artifact,
+# not the system's source of truth.
 managed = false
 # Generated config artifact path; this file is rendered from typed config rather than hand-edited.
 config_output_path = ".roku/run/openviking/ov.conf"
@@ -170,13 +170,13 @@ config_output_path = ".roku/run/openviking/ov.conf"
 [runtime.memory.backends.openviking.process.storage]
 # Workspace root consumed by the generated OpenViking service config.
 workspace = ".roku/openviking/workspace"
-# These backend selectors remain Roku-owned process config for future bootstrap wiring.
+# These backend selectors remain Roku-owned process config for future managed-process wiring.
 # The current OpenViking release template only consumes `storage.workspace`.
 vectordb_backend = "local"
 agfs_backend = "local"
 
 [runtime.memory.backends.openviking.process.server]
-# Server binding hints are reserved for later dev bootstrap wiring.
+# Server binding hints are reserved for later dev process wiring.
 # The current OpenViking release template does not consume them from `ov.conf`.
 host = "127.0.0.1"
 port = 1933
@@ -197,5 +197,6 @@ thinking = false
 
 [runtime.memory.backends.sqlite]
 # SQLite remains an adapter-level implementation for short-term continuity,
-# session-state, and pending-loop residue during the migration.
+# session-state, and pending-loop residue during the migration; it is not a
+# long-term owner of memory subsystem semantics.
 path = ".roku/state/control-plane.db"

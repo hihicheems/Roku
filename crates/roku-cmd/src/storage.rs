@@ -42,7 +42,11 @@ pub(crate) struct LocalStorageLayout {
 	pub workspace_plugin_root: PathBuf,
 	pub user_plugin_root: PathBuf,
 	pub prompt_archive_dir: PathBuf,
-	/// Legacy/export-only path retained for operator artifacts; not a canonical memory source.
+	/// Legacy/export-only path retained for operator artifacts.
+	///
+	/// This directory is outside the canonical memory registry/runtime path and
+	/// exists only as migration residue until those exports are either replaced
+	/// or deleted.
 	pub memory_summary_dir: PathBuf,
 	pub audit_export_dir: PathBuf,
 	pub log_dir: PathBuf,
