@@ -41,6 +41,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::config::{OpenVikingBackendConfig, OpenVikingBackendConfigError};
+use crate::runtime_state_doc::{
+	RuntimeStateDocument, delete_runtime_state_document, read_runtime_state_document,
+	replace_runtime_state_document,
+};
 
 static NEXT_RECORD_COUNTER: AtomicU64 = AtomicU64::new(1);
 static NEXT_CONTINUITY_RECORD_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -195,7 +199,7 @@ impl OpenVikingLongTermMemoryBackend {
 	}
 
 	/// Reads one text resource, returning `None` when the provider reports `NOT_FOUND`.
-	fn read_text_resource(&self, uri: &str) -> Result<Option<String>, MemoryError> {
+	pub(crate) fn read_text_resource(&self, uri: &str) -> Result<Option<String>, MemoryError> {
 		let response = self
 			.client
 			.get(self.endpoint("/api/v1/content/read"))
@@ -216,7 +220,7 @@ impl OpenVikingLongTermMemoryBackend {
 	}
 
 	/// Lists one directory using OpenViking's simple listing mode.
-	fn list_simple_entries(&self, uri: &str) -> Result<Vec<String>, MemoryError> {
+	pub(crate) fn list_simple_entries(&self, uri: &str) -> Result<Vec<String>, MemoryError> {
 		let response = self
 			.client
 			.get(self.endpoint("/api/v1/fs/ls"))
@@ -244,7 +248,7 @@ impl OpenVikingLongTermMemoryBackend {
 	}
 
 	/// Returns whether a provider URI currently exists.
-	fn resource_exists(&self, uri: &str) -> Result<bool, MemoryError> {
+	pub(crate) fn resource_exists(&self, uri: &str) -> Result<bool, MemoryError> {
 		let response = self
 			.client
 			.get(self.endpoint("/api/v1/fs/stat"))
@@ -266,7 +270,11 @@ impl OpenVikingLongTermMemoryBackend {
 	}
 
 	/// Removes one provider URI when it exists.
-	fn remove_resource_if_exists(&self, uri: &str, recursive: bool) -> Result<(), MemoryError> {
+	pub(crate) fn remove_resource_if_exists(
+		&self,
+		uri: &str,
+		recursive: bool,
+	) -> Result<(), MemoryError> {
 		let response = self
 			.client
 			.delete(self.endpoint("/api/v1/fs"))
@@ -290,7 +298,7 @@ impl OpenVikingLongTermMemoryBackend {
 	}
 
 	/// Writes one text resource to a concrete provider URI.
-	fn write_text_resource(
+	pub(crate) fn write_text_resource(
 		&self,
 		target_uri: &str,
 		relative_stage_path: &Path,
@@ -305,21 +313,30 @@ impl OpenVikingLongTermMemoryBackend {
 		}
 		let staged_path = self.stage_text_resource(relative_stage_path, content)?;
 		if self.resource_exists(target_uri)? {
-			self.remove_resource_if_exists(target_uri, false)?;
+			self.remove_resource_if_exists(target_uri, true)?;
 		}
-		let _: AddResourceResultPayload =
-			self.send_json(self.client.post(self.endpoint("/api/v1/resources")).json(
-				&AddResourceRequestPayload {
+		let request_timeout_ms = self
+			.config
+			.request_timeout_ms
+			.max(self.config.write_wait_timeout_ms);
+		let _: AddResourceResultPayload = self.send_json(
+			self.client
+				.post(self.endpoint("/api/v1/resources"))
+				.timeout(Duration::from_millis(request_timeout_ms))
+				.json(&AddResourceRequestPayload {
 					path: staged_path.display().to_string(),
 					to: target_uri.to_string(),
 					reason: reason.to_string(),
 					instruction: instruction.to_string(),
-					wait: true,
-					timeout: Some(self.config.write_wait_timeout_ms as f64 / 1000.0),
+					// Runtime-state documents only require durable materialization.
+					// Semantic post-processing is provider-internal and must not
+					// hold the adapter's session-state/pending-loop path open.
+					wait: false,
+					timeout: None,
 					strict: self.config.strict,
 					preserve_structure: Some(false),
-				},
-			))?;
+				}),
+		)?;
 		Ok(())
 	}
 }
@@ -475,15 +492,15 @@ impl SessionStateBackend for OpenVikingSessionStateAdapter {
 		let stage_path = runtime_session_state_stage_path(session_id);
 		let content = serde_json::to_string_pretty(&state)
 			.map_err(|error| SessionStateError::Backend(error.to_string()))?;
-		self.inner
-			.write_text_resource(
-				&target_uri,
-				&stage_path,
-				&content,
-				"roku-memory:session-state",
-				"persist Roku session state",
-			)
-			.map_err(map_session_state_memory_error)
+		replace_runtime_state_document(
+			&self.inner,
+			&target_uri,
+			&stage_path,
+			&content,
+			"roku-memory:session-state",
+			"persist Roku session state",
+		)
+		.map_err(map_session_state_memory_error)
 	}
 
 	fn load_session_state(
@@ -492,13 +509,11 @@ impl SessionStateBackend for OpenVikingSessionStateAdapter {
 	) -> Result<Option<SessionState>, SessionStateError> {
 		let target_uri =
 			runtime_session_state_uri(&self.inner.config.resource_root_uri, session_id);
-		let content = self
-			.inner
-			.read_text_resource(&target_uri)
+		let document = read_runtime_state_document(&self.inner, &target_uri)
 			.map_err(map_session_state_memory_error)?;
-		content
+		document
 			.map(|raw| {
-				serde_json::from_str::<SessionState>(&raw)
+				parse_runtime_state_json_document::<SessionState>(&target_uri, &raw)
 					.map_err(|error| SessionStateError::Backend(error.to_string()))
 			})
 			.transpose()
@@ -507,8 +522,7 @@ impl SessionStateBackend for OpenVikingSessionStateAdapter {
 	fn delete_session_state(&mut self, session_id: &str) -> Result<(), SessionStateError> {
 		let target_uri =
 			runtime_session_state_uri(&self.inner.config.resource_root_uri, session_id);
-		self.inner
-			.remove_resource_if_exists(&target_uri, false)
+		delete_runtime_state_document(&self.inner, &target_uri)
 			.map_err(map_session_state_memory_error)
 	}
 }
@@ -550,15 +564,15 @@ impl ShortTermContinuityBackend for OpenVikingShortTermContinuityAdapter {
 		let stage_path = runtime_continuity_stage_path(session_id, &file_name);
 		let content = serde_json::to_string_pretty(&normalized_turn)
 			.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))?;
-		self.inner
-			.write_text_resource(
-				&target_uri,
-				&stage_path,
-				&content,
-				"roku-memory:short-term-continuity",
-				"persist Roku short-term continuity turn",
-			)
-			.map_err(map_short_term_memory_error)
+		replace_runtime_state_document(
+			&self.inner,
+			&target_uri,
+			&stage_path,
+			&content,
+			"roku-memory:short-term-continuity",
+			"persist Roku short-term continuity turn",
+		)
+		.map_err(map_short_term_memory_error)
 	}
 
 	fn load_short_term_continuity(
@@ -580,21 +594,23 @@ impl ShortTermContinuityBackend for OpenVikingShortTermContinuityAdapter {
 		let start = entries.len().saturating_sub(limit);
 		let mut turns = Vec::with_capacity(entries.len().saturating_sub(start));
 		for entry in entries.into_iter().skip(start) {
-			let record_uri = runtime_continuity_record_uri(
-				&self.inner.config.resource_root_uri,
-				session_id,
-				&entry,
-			);
-			let raw = self
-				.inner
-				.read_text_resource(&record_uri)
+			let record_uri = if entry.contains("://") {
+				entry
+			} else {
+				runtime_continuity_record_uri(
+					&self.inner.config.resource_root_uri,
+					session_id,
+					&entry,
+				)
+			};
+			let raw = read_runtime_state_document(&self.inner, &record_uri)
 				.map_err(map_short_term_memory_error)?
 				.ok_or_else(|| {
 					ShortTermContinuityError::Backend(format!(
 						"OpenViking continuity record disappeared while reading: {record_uri}"
 					))
 				})?;
-			let turn = serde_json::from_str::<ConversationTurn>(&raw)
+			let turn = parse_runtime_state_json_document::<ConversationTurn>(&record_uri, &raw)
 				.map_err(|error| ShortTermContinuityError::Backend(error.to_string()))?;
 			turns.push(turn);
 		}
@@ -1310,6 +1326,21 @@ fn unix_ms_now() -> u64 {
 		.as_millis() as u64
 }
 
+fn parse_runtime_state_json_document<T>(
+	root_uri: &str,
+	document: &RuntimeStateDocument,
+) -> Result<T, MemoryError>
+where
+	T: DeserializeOwned,
+{
+	serde_json::from_str::<T>(&document.content).map_err(|error| {
+		MemoryError::Internal(format!(
+			"failed to parse OpenViking runtime-state document root_uri={root_uri} content_uri={}: {error}",
+			document.content_uri
+		))
+	})
+}
+
 fn map_session_state_memory_error(error: MemoryError) -> SessionStateError {
 	SessionStateError::Backend(error.to_string())
 }
@@ -1359,8 +1390,8 @@ mod tests {
 	use super::{
 		OpenVikingBackendConfig, OpenVikingMemoryAdapters, canonical_record_uri,
 		memory_kind_segment, parse_memory_kind_segment, parse_uri_descriptor,
-		render_memory_markdown, runtime_continuity_root_uri, runtime_state_root_uri,
-		scope_root_uri, server_accepts_local_paths,
+		render_memory_markdown, runtime_continuity_root_uri, runtime_session_state_uri,
+		runtime_state_root_uri, scope_root_uri, server_accepts_local_paths,
 	};
 	use reqwest::Url;
 	use roku_common_types::{ConversationRole, ConversationTurn, PendingLoopBinding};
@@ -1371,18 +1402,131 @@ mod tests {
 	use serde_json::json;
 	use tiny_http::{Header, Method, Response, Server, StatusCode};
 
+	#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+	enum MockStorageShape {
+		Flat,
+		MaterializedRuntimeState,
+	}
+
+	#[derive(Debug, Default)]
+	struct MockProviderState {
+		files: HashMap<String, String>,
+		directories: BTreeSet<String>,
+	}
+
+	impl MockProviderState {
+		fn store_resource(&mut self, target_uri: &str, content: String, shape: MockStorageShape) {
+			match shape {
+				MockStorageShape::Flat => {
+					self.files.insert(target_uri.to_string(), content);
+				}
+				MockStorageShape::MaterializedRuntimeState
+					if target_uri.contains("/runtime-state/") =>
+				{
+					let root_uri = target_uri.trim_end_matches('/').to_string();
+					let content_uri = materialized_content_uri(&root_uri);
+					self.directories.insert(root_uri.clone());
+					self.files.insert(content_uri, content);
+					self.files
+						.insert(format!("{root_uri}/.abstract.md"), "abstract".to_string());
+					self.files
+						.insert(format!("{root_uri}/.overview.md"), "overview".to_string());
+				}
+				MockStorageShape::MaterializedRuntimeState => {
+					self.files.insert(target_uri.to_string(), content);
+				}
+			}
+		}
+
+		fn exists(&self, uri: &str) -> bool {
+			let normalized = uri.trim_end_matches('/');
+			let prefix = format!("{normalized}/");
+			self.files.contains_key(normalized)
+				|| self.directories.contains(normalized)
+				|| self.files.keys().any(|key| key.starts_with(&prefix))
+				|| self
+					.directories
+					.iter()
+					.any(|entry| entry == normalized || entry.starts_with(&prefix))
+		}
+
+		fn list_entries(&self, uri: &str, show_all_hidden: bool) -> Vec<String> {
+			let prefix = format!("{}/", uri.trim_end_matches('/'));
+			let mut names = BTreeSet::new();
+			for key in self
+				.files
+				.keys()
+				.chain(self.directories.iter())
+				.filter_map(|key| key.strip_prefix(&prefix))
+			{
+				if let Some(name) = key.split('/').next().filter(|value| !value.is_empty()) {
+					if !show_all_hidden && name.starts_with('.') {
+						continue;
+					}
+					names.insert(format!("{prefix}{name}"));
+				}
+			}
+			names.into_iter().collect()
+		}
+
+		fn remove(&mut self, uri: &str, recursive: bool) -> Result<bool, String> {
+			let normalized = uri.trim_end_matches('/');
+			let prefix = format!("{normalized}/");
+			if recursive {
+				let mut removed = false;
+				removed |= self.files.remove(normalized).is_some();
+				removed |= self.directories.remove(normalized);
+				let before_files = self.files.len();
+				self.files.retain(|key, _| !key.starts_with(&prefix));
+				let before_dirs = self.directories.len();
+				self.directories.retain(|entry| !entry.starts_with(&prefix));
+				removed |= before_files != self.files.len();
+				removed |= before_dirs != self.directories.len();
+				return Ok(removed);
+			}
+
+			if self.files.remove(normalized).is_some() {
+				return Ok(true);
+			}
+
+			let has_descendants = self.files.keys().any(|key| key.starts_with(&prefix))
+				|| self
+					.directories
+					.iter()
+					.any(|entry| entry.starts_with(&prefix));
+			if self.directories.contains(normalized) {
+				if has_descendants {
+					return Err(format!("directory not empty: {normalized}"));
+				}
+				self.directories.remove(normalized);
+				return Ok(true);
+			}
+
+			Ok(false)
+		}
+	}
+
 	struct MockOpenVikingServer {
 		base_url: String,
 		shutdown_url: String,
+		state: Arc<Mutex<MockProviderState>>,
 		handle: Option<std::thread::JoinHandle<()>>,
 	}
 
 	impl MockOpenVikingServer {
 		fn start() -> Self {
+			Self::start_with_shape(MockStorageShape::Flat)
+		}
+
+		fn start_materialized_runtime_state() -> Self {
+			Self::start_with_shape(MockStorageShape::MaterializedRuntimeState)
+		}
+
+		fn start_with_shape(shape: MockStorageShape) -> Self {
 			let server = Server::http("127.0.0.1:0").expect("mock server should bind");
 			let base_url = format!("http://{}", server.server_addr());
 			let shutdown_url = format!("{base_url}/__shutdown");
-			let state = Arc::new(Mutex::new(HashMap::<String, String>::new()));
+			let state = Arc::new(Mutex::new(MockProviderState::default()));
 			let handle = {
 				let state = Arc::clone(&state);
 				thread::spawn(move || {
@@ -1418,10 +1562,11 @@ mod tests {
 									.to_string();
 								let content = std::fs::read_to_string(path)
 									.expect("staged resource should exist");
-								state
-									.lock()
-									.expect("state mutex")
-									.insert(target_uri.clone(), content);
+								state.lock().expect("state mutex").store_resource(
+									&target_uri,
+									content,
+									shape,
+								);
 								respond_json(
 									request,
 									200,
@@ -1431,13 +1576,20 @@ mod tests {
 							(&Method::Get, "/api/v1/content/read") => {
 								let uri =
 									query_value(&parsed, "uri").expect("uri query should exist");
-								let maybe_content =
-									state.lock().expect("state mutex").get(&uri).cloned();
+								let provider_state = state.lock().expect("state mutex");
+								let maybe_content = provider_state.files.get(&uri).cloned();
+								let is_directory = provider_state.directories.contains(&uri);
+								drop(provider_state);
 								match maybe_content {
 									Some(content) => respond_json(
 										request,
 										200,
 										json!({"status":"ok","result":content}),
+									),
+									None if is_directory => respond_json(
+										request,
+										200,
+										json!({"status":"ok","result":""}),
 									),
 									None => respond_json(
 										request,
@@ -1449,12 +1601,7 @@ mod tests {
 							(&Method::Get, "/api/v1/fs/stat") => {
 								let uri =
 									query_value(&parsed, "uri").expect("uri query should exist");
-								let exists = {
-									let state = state.lock().expect("state mutex");
-									let prefix = format!("{}/", uri.trim_end_matches('/'));
-									state.contains_key(&uri)
-										|| state.keys().any(|key| key.starts_with(&prefix))
-								};
+								let exists = state.lock().expect("state mutex").exists(&uri);
 								if exists {
 									respond_json(
 										request,
@@ -1472,22 +1619,12 @@ mod tests {
 							(&Method::Get, "/api/v1/fs/ls") => {
 								let uri =
 									query_value(&parsed, "uri").expect("uri query should exist");
-								let prefix = format!("{}/", uri.trim_end_matches('/'));
-								let entries = {
-									let state = state.lock().expect("state mutex");
-									let mut names = BTreeSet::new();
-									for key in state.keys() {
-										if let Some(remainder) = key.strip_prefix(&prefix)
-											&& let Some(name) = remainder
-												.split('/')
-												.next()
-												.filter(|value| !value.is_empty())
-										{
-											names.insert(name.to_string());
-										}
-									}
-									names.into_iter().collect::<Vec<_>>()
-								};
+								let show_all_hidden = query_value(&parsed, "show_all_hidden")
+									.as_deref() == Some("true");
+								let entries = state
+									.lock()
+									.expect("state mutex")
+									.list_entries(&uri, show_all_hidden);
 								if entries.is_empty() {
 									respond_json(
 										request,
@@ -1507,31 +1644,22 @@ mod tests {
 									query_value(&parsed, "uri").expect("uri query should exist");
 								let recursive =
 									query_value(&parsed, "recursive").as_deref() == Some("true");
-								let removed = {
-									let mut state = state.lock().expect("state mutex");
-									if recursive {
-										let prefix = format!("{}/", uri.trim_end_matches('/'));
-										let before = state.len();
-										state.retain(|key, _| {
-											key != &uri && !key.starts_with(&prefix)
-										});
-										before != state.len()
-									} else {
-										state.remove(&uri).is_some()
-									}
-								};
-								if removed {
-									respond_json(
+								match state.lock().expect("state mutex").remove(&uri, recursive) {
+									Ok(true) => respond_json(
 										request,
 										200,
 										json!({"status":"ok","result":{"uri":uri}}),
-									);
-								} else {
-									respond_json(
+									),
+									Ok(false) => respond_json(
 										request,
 										404,
 										json!({"status":"error","error":{"code":"NOT_FOUND","message":"missing resource"}}),
-									);
+									),
+									Err(message) => respond_json(
+										request,
+										500,
+										json!({"status":"error","error":{"code":"INTERNAL","message":message}}),
+									),
 								}
 							}
 							_ => respond_json(
@@ -1547,8 +1675,27 @@ mod tests {
 			Self {
 				base_url,
 				shutdown_url,
+				state,
 				handle: Some(handle),
 			}
+		}
+
+		fn set_materialized_content(&self, root_uri: &str, content: &str) {
+			let content_uri = materialized_content_uri(root_uri);
+			self.state
+				.lock()
+				.expect("state mutex")
+				.files
+				.insert(content_uri, content.to_string());
+		}
+
+		fn remove_materialized_content(&self, root_uri: &str) {
+			let content_uri = materialized_content_uri(root_uri);
+			self.state
+				.lock()
+				.expect("state mutex")
+				.files
+				.remove(&content_uri);
 		}
 	}
 
@@ -1564,6 +1711,22 @@ mod tests {
 	fn query_value(url: &Url, key: &str) -> Option<String> {
 		url.query_pairs()
 			.find_map(|(name, value)| (name == key).then(|| value.into_owned()))
+	}
+
+	fn materialized_content_uri(root_uri: &str) -> String {
+		format!(
+			"{}/{}",
+			root_uri.trim_end_matches('/'),
+			materialized_content_entry(root_uri)
+		)
+	}
+
+	fn materialized_content_entry(root_uri: &str) -> String {
+		let file_name = root_uri.rsplit('/').next().unwrap_or(root_uri);
+		match file_name.rsplit_once('.') {
+			Some((stem, _)) if !stem.is_empty() => format!("{stem}.md"),
+			_ => format!("{file_name}.md"),
+		}
 	}
 
 	fn respond_json(request: tiny_http::Request, status: u16, body: serde_json::Value) {
@@ -1783,6 +1946,245 @@ mod tests {
 				.load_session_state("session-1")
 				.expect("session state should reload")
 				.is_none()
+		);
+	}
+
+	#[test]
+	fn openviking_materialized_runtime_state_adapters_roundtrip_over_http() {
+		let server = MockOpenVikingServer::start_materialized_runtime_state();
+		let tempdir = tempfile::tempdir().expect("tempdir should exist");
+		let adapters = OpenVikingMemoryAdapters::connect(OpenVikingBackendConfig {
+			base_url: server.base_url.clone(),
+			api_key: None,
+			connect_timeout_ms: 1_000,
+			request_timeout_ms: 1_000,
+			resource_root_uri: "viking://resources/roku-memory".to_string(),
+			staging_dir: tempdir.path().join("staging"),
+			write_wait_timeout_ms: 5_000,
+			strict: true,
+		})
+		.expect("openviking adapters should connect");
+
+		let OpenVikingMemoryAdapters {
+			mut session_state,
+			mut short_term,
+			pending_loop,
+			..
+		} = adapters;
+
+		let first_state = SessionState {
+			planning_mode: None,
+			pending_loop: Some(PendingLoopBinding {
+				run_id: "run-1".to_string(),
+				loop_state_json: "{\"status\":\"waiting\"}".to_string(),
+			}),
+		};
+		session_state
+			.save_session_state("session-1", first_state.clone())
+			.expect("materialized session state should save");
+		assert_eq!(
+			session_state
+				.load_session_state("session-1")
+				.expect("materialized session state should load"),
+			Some(first_state.clone())
+		);
+
+		let overwritten_state = SessionState {
+			planning_mode: None,
+			pending_loop: Some(PendingLoopBinding {
+				run_id: "run-2".to_string(),
+				loop_state_json: "{\"status\":\"running\"}".to_string(),
+			}),
+		};
+		session_state
+			.save_session_state("session-1", overwritten_state.clone())
+			.expect("materialized session state should overwrite");
+		assert_eq!(
+			session_state
+				.load_session_state("session-1")
+				.expect("overwritten state should load"),
+			Some(overwritten_state.clone())
+		);
+
+		short_term
+			.append_continuity_turn(
+				"session-1",
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: "hello".to_string(),
+					created_at_unix_ms: 1,
+				},
+			)
+			.expect("materialized continuity should save first turn");
+		short_term
+			.append_continuity_turn(
+				"session-1",
+				ConversationTurn {
+					role: ConversationRole::Assistant,
+					content: "world".to_string(),
+					created_at_unix_ms: 2,
+				},
+			)
+			.expect("materialized continuity should save second turn");
+		let turns = short_term
+			.load_short_term_continuity("session-1", 8)
+			.expect("materialized continuity should load");
+		assert_eq!(turns.len(), 2);
+		assert_eq!(turns[0].content, "hello");
+		assert_eq!(turns[1].content, "world");
+
+		let pending_loop_snapshot = Some(PendingLoopBinding {
+			run_id: "run-3".to_string(),
+			loop_state_json: "{\"status\":\"paused\"}".to_string(),
+		});
+		pending_loop
+			.save_pending_loop_snapshot("session-1", pending_loop_snapshot.clone())
+			.expect("pending loop should save through materialized session-state");
+		assert_eq!(
+			pending_loop
+				.load_pending_loop_snapshot("session-1")
+				.expect("pending loop should load through materialized session-state"),
+			pending_loop_snapshot
+		);
+		pending_loop
+			.save_pending_loop_snapshot("session-1", None)
+			.expect("pending loop should clear through materialized session-state");
+		assert_eq!(
+			session_state
+				.load_session_state("session-1")
+				.expect("cleared state should still load")
+				.expect("session state should still exist")
+				.pending_loop,
+			None
+		);
+
+		session_state
+			.delete_session_state("session-1")
+			.expect("materialized session state should delete");
+		assert!(
+			session_state
+				.load_session_state("session-1")
+				.expect("deleted materialized state should load")
+				.is_none()
+		);
+	}
+
+	#[test]
+	fn openviking_materialized_runtime_state_reports_missing_content_node() {
+		let server = MockOpenVikingServer::start_materialized_runtime_state();
+		let tempdir = tempfile::tempdir().expect("tempdir should exist");
+		let adapters = OpenVikingMemoryAdapters::connect(OpenVikingBackendConfig {
+			base_url: server.base_url.clone(),
+			api_key: None,
+			connect_timeout_ms: 1_000,
+			request_timeout_ms: 1_000,
+			resource_root_uri: "viking://resources/roku-memory".to_string(),
+			staging_dir: tempdir.path().join("staging"),
+			write_wait_timeout_ms: 5_000,
+			strict: true,
+		})
+		.expect("openviking adapters should connect");
+		let mut session_state = adapters.session_state;
+		let root_uri = runtime_session_state_uri("viking://resources/roku-memory", "session-1");
+
+		session_state
+			.save_session_state(
+				"session-1",
+				SessionState {
+					planning_mode: None,
+					pending_loop: None,
+				},
+			)
+			.expect("materialized session state should save");
+		server.remove_materialized_content(&root_uri);
+
+		let error = session_state
+			.load_session_state("session-1")
+			.expect_err("missing materialized content node should fail");
+		assert!(
+			error.to_string().contains("compatibility error")
+				&& error.to_string().contains("no visible content nodes"),
+			"unexpected error: {error}"
+		);
+	}
+
+	#[test]
+	fn openviking_materialized_runtime_state_reports_empty_content_node() {
+		let server = MockOpenVikingServer::start_materialized_runtime_state();
+		let tempdir = tempfile::tempdir().expect("tempdir should exist");
+		let adapters = OpenVikingMemoryAdapters::connect(OpenVikingBackendConfig {
+			base_url: server.base_url.clone(),
+			api_key: None,
+			connect_timeout_ms: 1_000,
+			request_timeout_ms: 1_000,
+			resource_root_uri: "viking://resources/roku-memory".to_string(),
+			staging_dir: tempdir.path().join("staging"),
+			write_wait_timeout_ms: 5_000,
+			strict: true,
+		})
+		.expect("openviking adapters should connect");
+		let mut session_state = adapters.session_state;
+		let root_uri = runtime_session_state_uri("viking://resources/roku-memory", "session-1");
+
+		session_state
+			.save_session_state(
+				"session-1",
+				SessionState {
+					planning_mode: None,
+					pending_loop: None,
+				},
+			)
+			.expect("materialized session state should save");
+		server.set_materialized_content(&root_uri, "");
+
+		let error = session_state
+			.load_session_state("session-1")
+			.expect_err("empty materialized content node should fail");
+		assert!(
+			error
+				.to_string()
+				.contains("resolved content node was also empty"),
+			"unexpected error: {error}"
+		);
+	}
+
+	#[test]
+	fn openviking_materialized_runtime_state_reports_invalid_json_content() {
+		let server = MockOpenVikingServer::start_materialized_runtime_state();
+		let tempdir = tempfile::tempdir().expect("tempdir should exist");
+		let adapters = OpenVikingMemoryAdapters::connect(OpenVikingBackendConfig {
+			base_url: server.base_url.clone(),
+			api_key: None,
+			connect_timeout_ms: 1_000,
+			request_timeout_ms: 1_000,
+			resource_root_uri: "viking://resources/roku-memory".to_string(),
+			staging_dir: tempdir.path().join("staging"),
+			write_wait_timeout_ms: 5_000,
+			strict: true,
+		})
+		.expect("openviking adapters should connect");
+		let mut session_state = adapters.session_state;
+		let root_uri = runtime_session_state_uri("viking://resources/roku-memory", "session-1");
+
+		session_state
+			.save_session_state(
+				"session-1",
+				SessionState {
+					planning_mode: None,
+					pending_loop: None,
+				},
+			)
+			.expect("materialized session state should save");
+		server.set_materialized_content(&root_uri, "{invalid json");
+
+		let error = session_state
+			.load_session_state("session-1")
+			.expect_err("invalid materialized content should fail");
+		assert!(
+			error
+				.to_string()
+				.contains("failed to parse OpenViking runtime-state document"),
+			"unexpected error: {error}"
 		);
 	}
 }

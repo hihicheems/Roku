@@ -24,6 +24,7 @@
 mod backend;
 mod config;
 mod registration;
+mod runtime_state_doc;
 
 pub use backend::{
 	OpenVikingBackendBootstrapError, OpenVikingLongTermMemoryBackend, OpenVikingMemoryAdapters,
