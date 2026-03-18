@@ -31,7 +31,7 @@ use crate::MemoryBackendId;
 pub const HARD_MAX_MEMORY_RECALL_TOP_K: usize = 64;
 pub const HARD_MAX_MEMORY_WRITE_BATCH_SIZE: usize = 256;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryRuntimeConfig {
 	pub enabled: bool,
 	pub backend: MemoryBackendId,
@@ -99,6 +99,17 @@ impl Default for MemoryWriteConfig {
 		Self {
 			enabled: true,
 			max_batch_size: 16,
+		}
+	}
+}
+
+impl Default for MemoryRuntimeConfig {
+	fn default() -> Self {
+		Self {
+			enabled: true,
+			backend: MemoryBackendId::OpenViking,
+			recall: MemoryRecallConfig::default(),
+			write: MemoryWriteConfig::default(),
 		}
 	}
 }
@@ -197,5 +208,15 @@ mod tests {
 			config.write.max_batch_size,
 			HARD_MAX_MEMORY_WRITE_BATCH_SIZE
 		);
+	}
+
+	#[test]
+	fn provider_neutral_memory_config_defaults_enable_openviking() {
+		let config = MemoryRuntimeConfig::default();
+
+		assert!(config.enabled);
+		assert_eq!(config.backend, MemoryBackendId::OpenViking);
+		assert!(config.recall.enabled);
+		assert!(config.write.enabled);
 	}
 }

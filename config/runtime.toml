@@ -128,18 +128,19 @@ max_prompt_document_bytes = 24576
 max_prompt_documents = 24
 
 [runtime.memory]
-# Memory stays disabled by default so rollout remains an explicit operator choice.
-enabled = false
-# Backend selection is provider-neutral even when a given deployment only enables one adapter.
+# Memory is enabled by default and uses the provider-neutral OpenViking backend
+# unless runtime.toml/env overrides choose a different behavior.
+enabled = true
+# Backend selection stays provider-neutral even when a given deployment only enables one adapter.
 backend = "openviking"
 
 [runtime.memory.recall]
-# Future long-term recall is opt-in and stays under Roku-owned control.
+# Long-term recall stays under Roku-owned control.
 enabled = true
 top_k = 8
 
 [runtime.memory.write]
-# Future long-term write-back is opt-in and stays under Roku-owned control.
+# Long-term write-back stays under Roku-owned control.
 enabled = true
 max_batch_size = 16
 

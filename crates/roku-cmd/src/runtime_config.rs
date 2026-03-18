@@ -305,7 +305,8 @@ mod tests {
 		assert_eq!(configs.openrouter.max_latency_ms, 60_000);
 		assert_eq!(configs.telegram.poll_timeout_seconds, 30);
 		assert_eq!(configs.skills.max_prompt_documents, 24);
-		assert!(!configs.memory.enabled);
+		assert!(configs.memory.enabled);
+		assert_eq!(configs.memory.backend, MemoryBackendId::OpenViking);
 		assert_eq!(configs.memory.recall.top_k, 8);
 		assert_eq!(configs.memory.write.max_batch_size, 16);
 		assert_eq!(
