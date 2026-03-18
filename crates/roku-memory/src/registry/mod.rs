@@ -23,6 +23,8 @@
 //! registry surface instead of rebuilding provider selection in each entry
 //! module.
 
+pub mod entry;
+
 use std::fmt;
 use std::str::FromStr;
 
@@ -30,6 +32,12 @@ use crate::bundle::ResolvedMemorySubsystem;
 use crate::{MemoryLifecyclePolicy, MemoryQuery, MemoryRecallInput, MemoryWriteRequest};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub use entry::{
+	EntryAdapterCatalog, EntryControlPlaneBuilder, EntryMemoryConfig, EntryRegistryError,
+	EntryRuntimeLayout, ResolvedEntryRuntimeBundle, resolve_entry_runtime_bundle,
+	resolve_memory_subsystem,
+};
 
 /// Provider-neutral identifier for the configured long-term memory backend.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
