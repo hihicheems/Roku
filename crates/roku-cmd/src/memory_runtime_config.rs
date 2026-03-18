@@ -12,18 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Startup-side composition for `runtime.memory.*`.
+//! Startup-side parsing for `runtime.memory.*`.
 //!
 //! The provider-neutral top-level schema now lives in `roku-memory`.
-//! This module keeps only the process-local startup glue that layers adapter
-//! subtrees on top of that core config and applies env overrides/materialized
-//! provider artifacts for this command process.
+//! This module is intentionally narrow: it parses the startup-owned
+//! `runtime.memory.*` subtree, applies env/config precedence, and exposes the
+//! typed config results needed by the command composition root.
+//!
+//! It must not grow concrete provider lifecycle logic. In particular, this
+//! file must not construct provider instances, assemble registrations, choose
+//! builders, implement fallback, or assemble runtime bundles.
 
 use std::ops::{Deref, DerefMut};
-use std::path::PathBuf;
 
 use roku_memory::{
-	MemoryBackendId, MemoryRuntimeConfig as CoreMemoryRuntimeConfig,
+	MemoryRuntimeConfig as CoreMemoryRuntimeConfig,
 	MemoryRuntimeConfigError as CoreMemoryRuntimeConfigError,
 	MemoryRuntimeConfigPatch as CoreMemoryRuntimeConfigPatch,
 };
@@ -59,6 +62,10 @@ pub struct MemoryRuntimeConfigPatch {
 }
 
 /// Provider-specific config subtree anchored under `runtime.memory.backends.*`.
+///
+/// This is a typed config container only. It carries parsed provider config
+/// results for the startup layer; it must not grow provider instance
+/// construction, registration wiring, or bundle assembly responsibilities.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemoryBackendConfigs {
 	pub openviking: OpenVikingRuntimeConfig,
@@ -139,17 +146,6 @@ impl MemoryRuntimeConfig {
 		self.backends.sqlite.validate()?;
 		Ok(())
 	}
-
-	pub fn materialize_generated_openviking_config(
-		&self,
-	) -> Result<Option<PathBuf>, MemoryRuntimeConfigError> {
-		self.backends
-			.openviking
-			.materialize_generated_config(
-				self.enabled && matches!(self.backend, MemoryBackendId::OpenViking),
-			)
-			.map_err(MemoryRuntimeConfigError::from)
-	}
 }
 
 impl MemoryBackendConfigs {
@@ -214,8 +210,8 @@ where
 #[cfg(test)]
 mod tests {
 	use roku_memory::{
-		HARD_MAX_MEMORY_RECALL_TOP_K, HARD_MAX_MEMORY_WRITE_BATCH_SIZE, MemoryRecallConfig,
-		MemoryWriteConfig,
+		HARD_MAX_MEMORY_RECALL_TOP_K, HARD_MAX_MEMORY_WRITE_BATCH_SIZE, MemoryBackendId,
+		MemoryRecallConfig, MemoryWriteConfig,
 	};
 
 	use super::*;

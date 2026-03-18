@@ -19,6 +19,12 @@
 //! live in `roku-memory::registry::entry`; this module only injects the
 //! concrete adapter registrations/builders that the provider-neutral entry API
 //! needs.
+//!
+//! This shim must remain thin. It may inject concrete registrations/builders,
+//! project command-local config/layout into provider-neutral entry inputs, and
+//! map errors back into `CommandError`. It must not grow backend selection,
+//! fallback, bundle-shape definitions, resolved-bundle caching, or any other
+//! second-registry behavior.
 
 use roku_memory::registry::{
 	EntryAdapterCatalog, EntryControlPlaneBuilder, EntryMemoryConfig, EntryRegistryError,
@@ -82,6 +88,9 @@ fn with_entry_catalog<T>(
 		&EntryAdapterCatalog<'_>,
 	) -> Result<T, EntryRegistryError>,
 ) -> Result<T, EntryRegistryError> {
+	// Concrete adapter references stay private to the command-side shim. The
+	// provider-neutral registry continues to own selection and disabled-fallback
+	// semantics.
 	let sqlite_memory =
 		SqliteMemorySubsystemRegistration::new(memory_config.backends.sqlite.clone());
 	let sqlite_control_plane = SqliteControlPlaneBuilder::from_memory_config(memory_config);
@@ -141,7 +150,7 @@ mod tests {
 		let layout = LocalStorageLayout {
 			home_dir: tempdir.path().join(".roku"),
 			state_dir: tempdir.path().join(".roku").join("state"),
-			sqlite_path: tempdir.path().join("legacy-control-plane.db"),
+			legacy_sqlite_compat_path: tempdir.path().join("legacy-control-plane.db"),
 			artifact_root: tempdir.path().join("artifacts"),
 			experiment_root: tempdir.path().join("experiments"),
 			report_root: tempdir.path().join("reports"),
@@ -164,7 +173,7 @@ mod tests {
 			resolve_entry_runtime_bundle(&config, &layout).expect("entry bundle should resolve");
 
 		assert!(config.backends.sqlite.path.exists());
-		assert!(!layout.sqlite_path.exists());
+		assert!(!layout.legacy_sqlite_compat_path.exists());
 		assert_eq!(bundle.memory.long_term.backend_name(), "noop");
 		assert!(
 			bundle

@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use roku_agent_runtime::{
 	AgentRuntimeConfig, AgentRuntimeConfigPatch, ToolsRuntimeConfig, ToolsRuntimeConfigPatch,
 };
+use roku_memory::MemoryBackendId;
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_llm::{OpenRouterRuntimeConfig, OpenRouterRuntimeConfigPatch};
 use roku_plugin_skills::{SkillsRuntimeConfig, SkillsRuntimeConfigPatch};
@@ -171,7 +172,11 @@ pub(crate) fn prepare_runtime_generated_artifacts(
 ) -> Result<Option<PathBuf>, CommandError> {
 	let generated = configs
 		.memory
-		.materialize_generated_openviking_config()
+		.backends
+		.openviking
+		.materialize_generated_config(
+			configs.memory.enabled && matches!(configs.memory.backend, MemoryBackendId::OpenViking),
+		)
 		.map_err(|error| {
 			CommandError::RuntimeConfigBootstrap(format!(
 				"failed to prepare runtime.memory generated artifacts: {error}"
@@ -258,7 +263,7 @@ mod tests {
 		LocalStorageLayout {
 			home_dir: root.join(".roku"),
 			state_dir: root.join(".roku/state"),
-			sqlite_path: root.join(".roku/state/control-plane.db"),
+			legacy_sqlite_compat_path: root.join(".roku/state/control-plane.db"),
 			artifact_root: root.join(".roku/artifacts"),
 			experiment_root: root.join(".roku/experiments"),
 			report_root: root.join(".roku/reports"),
