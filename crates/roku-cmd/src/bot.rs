@@ -700,6 +700,7 @@ mod tests {
 		RouteDecision, RouteRisk,
 	};
 	use roku_common_types::{RequestEnvelope, RequestId, ResourceSelector, ResponseStatus};
+	use roku_memory::{NoopLongTermMemoryBackend, NoopPendingLoopSnapshotBackend};
 	use roku_plugin_llm::{
 		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderCallError,
 		ProviderResponse, RiskTier, RoutingPolicy,
@@ -793,6 +794,53 @@ mod tests {
 				latency_ms: 10,
 			})
 		}
+	}
+
+	#[test]
+	fn telegram_transport_state_uses_resolved_memory_subsystem_seams() {
+		let transport_state =
+			TelegramTransportState::from_memory_subsystem(ResolvedMemorySubsystem::with_parts(
+				Arc::new(NoopLongTermMemoryBackend),
+				Box::new(InMemoryShortTermContinuityBackend::default()),
+				Box::new(InMemorySessionStateBackend::default()),
+				Box::new(NoopPendingLoopSnapshotBackend),
+			));
+		let session_id = "telegram-seam-session";
+		let state = SessionState {
+			planning_mode: Some(roku_common_types::PlanningModeHint::TreeSearch),
+			pending_loop: None,
+		};
+
+		transport_state
+			.save_session_state(session_id, state.clone())
+			.expect("session state should save through subsystem seam");
+		transport_state
+			.append_turn(
+				session_id,
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: "remember me".to_string(),
+					created_at_unix_ms: 1,
+				},
+			)
+			.expect("continuity turn should append through subsystem seam");
+
+		assert_eq!(
+			transport_state
+				.load_session_state_or_default(session_id)
+				.expect("session state should load through subsystem seam"),
+			state
+		);
+		assert_eq!(
+			transport_state
+				.load_short_term_continuity(session_id, 8)
+				.expect("continuity should load through subsystem seam"),
+			vec![ConversationTurn {
+				role: ConversationRole::User,
+				content: "remember me".to_string(),
+				created_at_unix_ms: 1,
+			}]
+		);
 	}
 
 	#[test]
