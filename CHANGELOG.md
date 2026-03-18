@@ -2,6 +2,97 @@
 
 # Changelog
 
+## [v0.0.6] - 2026-03-18
+
+### Features
+
+- **(roku-cmd)** use sqlite adapter for telegram memory state (by @[itscheems](https://github.com/itscheems)) - ([46fee37](https://github.com/itscheems/Roku/commit/46fee37fcd9422408a624dd19d54bb952b377455))
+- **(roku-cmd)** wire OpenViking memory backend commands (by @[itscheems](https://github.com/itscheems)) - ([a60fdb8](https://github.com/itscheems/Roku/commit/a60fdb8ba03b4e199163a2aa9cdb4bc4b9ca29b1))
+- **(roku-cmd)** prepare managed openviking config at startup (by @[itscheems](https://github.com/itscheems)) - ([e491a55](https://github.com/itscheems/Roku/commit/e491a559ed2fd0ab2656ad36b3fc5f823adf0d3b))
+- **(roku-control-plane)** add provider-neutral control-plane core (by @[itscheems](https://github.com/itscheems)) - ([6ba149d](https://github.com/itscheems/Roku/commit/6ba149d45a878e36fda22fdafeaf434d2adba1d1))
+- **(roku-entry-registry)** assemble entry runtime bundles (by @[itscheems](https://github.com/itscheems)) - ([511e85c](https://github.com/itscheems/Roku/commit/511e85c49fb48a76d44610ce38e78ecd047af0ff))
+- **(roku-memory)** add provider-neutral entry registry API (by @[itscheems](https://github.com/itscheems)) - ([7f780cf](https://github.com/itscheems/Roku/commit/7f780cf6981db3b3e10164b96a6d64129af46735))
+- **(roku-memory)** own provider-neutral memory config and test backends (by @[itscheems](https://github.com/itscheems)) - ([fea6b61](https://github.com/itscheems/Roku/commit/fea6b6128dd32e5857cbf57223d021ce828c4c9c))
+- **(roku-memory)** add entry registry resolution (by @[itscheems](https://github.com/itscheems)) - ([733094f](https://github.com/itscheems/Roku/commit/733094f240f832fe7f5ed501ae45525564c68358))
+- **(roku-memory)** add adapter availability registry helpers (by @[itscheems](https://github.com/itscheems)) - ([8adea2d](https://github.com/itscheems/Roku/commit/8adea2d72f91f19542b19de91f0988198e1c6b98))
+- **(roku-memory)** add continuity and registry contract modules (by @[itscheems](https://github.com/itscheems)) - ([6eb324a](https://github.com/itscheems/Roku/commit/6eb324a3be022f441f83d6103ad6d56776fd23f4))
+- **(roku-memory)** define long-term memory contracts (by @[itscheems](https://github.com/itscheems)) - ([14c04e1](https://github.com/itscheems/Roku/commit/14c04e156c75864acb66231169d1ff0997014f8d))
+- **(roku-plugin-control-plane-sqlite)** add sqlite control-plane adapter (by @[itscheems](https://github.com/itscheems)) - ([1f50b3f](https://github.com/itscheems/Roku/commit/1f50b3f468545085e604da54511b465e500e24a6))
+- **(roku-plugin-memory-openviking)** expose registry subsystem registration (by @[itscheems](https://github.com/itscheems)) - ([4f0b54d](https://github.com/itscheems/Roku/commit/4f0b54d31a8dd9381ec569c3131a58f572dbde28))
+- **(roku-plugin-memory-openviking)** add runtime-state adapter capability (by @[itscheems](https://github.com/itscheems)) - ([5d75cfe](https://github.com/itscheems/Roku/commit/5d75cfe7405ce01e12623be6bc384895a4f2595e))
+- **(roku-plugin-memory-openviking)** expose adapter registration surface (by @[itscheems](https://github.com/itscheems)) - ([387485e](https://github.com/itscheems/Roku/commit/387485e61653e682b4bbf4eea6530ceb538f209a))
+- **(roku-plugin-memory-openviking)** own backend-scoped runtime config (by @[itscheems](https://github.com/itscheems)) - ([5e39462](https://github.com/itscheems/Roku/commit/5e39462dd16e4729112e4476cb2c4a54dbc05d26))
+- **(roku-plugin-memory-openviking)** add OpenViking memory backend adapter (by @[itscheems](https://github.com/itscheems)) - ([fe13224](https://github.com/itscheems/Roku/commit/fe1322482649e2b8a90fdc11d6bc2991f98165bb))
+- **(roku-plugin-memory-sqlite)** expose registry subsystem registration (by @[itscheems](https://github.com/itscheems)) - ([6610cdc](https://github.com/itscheems/Roku/commit/6610cdccc55f40d7d5177c1b6178eeb7694118e4))
+- **(roku-plugin-memory-sqlite)** expose registry-facing subsystem resolution (by @[itscheems](https://github.com/itscheems)) - ([7931f37](https://github.com/itscheems/Roku/commit/7931f37413d4bc14951b07e4938037344c502390))
+- **(roku-plugin-memory-sqlite)** add sqlite memory adapter crate (by @[itscheems](https://github.com/itscheems)) - ([1497c7e](https://github.com/itscheems/Roku/commit/1497c7e733a3a8b3a55c8530877c447539f68e1c))
+- **(roku-runtime-service)** assemble context bundles for memory hooks (by @[itscheems](https://github.com/itscheems)) - ([9e585f7](https://github.com/itscheems/Roku/commit/9e585f7fc91774d9b0e3778ef4eb515ea7517296))
+- **(roku-state-store)** implement concrete repos for memory contracts (by @[itscheems](https://github.com/itscheems)) - ([f3edc77](https://github.com/itscheems/Roku/commit/f3edc77d44166b3395a272de05c6e31ed046cdd4))
+
+### Bug Fixes
+
+- **(roku-cmd)** document memory startup residue boundaries (by @[itscheems](https://github.com/itscheems)) - ([aee3e87](https://github.com/itscheems/Roku/commit/aee3e874086b00609c21f0dcee6a17dcd3300545))
+- **(roku-cmd)** clarify transitional memory bootstrap (by @[itscheems](https://github.com/itscheems)) - ([ab37f9c](https://github.com/itscheems/Roku/commit/ab37f9c9ca0a955982015d8add02db89141e7e82))
+- **(roku-cmd)** consume adapter registration metadata (by @[itscheems](https://github.com/itscheems)) - ([74646d9](https://github.com/itscheems/Roku/commit/74646d9ddf249f59ef979a8424fed4f7b1d94555))
+- **(roku-cmd)** require explicit memory scope identity (by @[itscheems](https://github.com/itscheems)) - ([05a8ad5](https://github.com/itscheems/Roku/commit/05a8ad51619fcacc11969d64cf836a72c5ab5165))
+- **(roku-cmd)** resolve clippy issues in memory runtime config (by @[itscheems](https://github.com/itscheems)) - ([0d7330b](https://github.com/itscheems/Roku/commit/0d7330b254499113bb75719287617e2fa45cbb36))
+- **(roku-cmd)** harden openviking config generation (by @[itscheems](https://github.com/itscheems)) - ([929c2d9](https://github.com/itscheems/Roku/commit/929c2d91a3b7e3738286f23e4cf4b9ae700348eb))
+- **(roku-common-types)** clarify legacy request memory semantics (by @[itscheems](https://github.com/itscheems)) - ([137e7d0](https://github.com/itscheems/Roku/commit/137e7d0662e1d7a6cb26ca70a8a18d0faf994705))
+- **(roku-common-types)** clarify legacy memory carrier semantics (by @[itscheems](https://github.com/itscheems)) - ([5d5930d](https://github.com/itscheems/Roku/commit/5d5930d3cd178f4946872bdd14550a638dfddb78))
+- **(roku-memory)** align registry resolution terminology (by @[itscheems](https://github.com/itscheems)) - ([f92588c](https://github.com/itscheems/Roku/commit/f92588c83b8938deb1a5d79188fbfce467ab0bcc))
+- **(roku-memory)** align phase1-3 contract semantics (by @[itscheems](https://github.com/itscheems)) - ([b17f0e8](https://github.com/itscheems/Roku/commit/b17f0e8febf618d20324e88ad0460637aa19cb75))
+- **(roku-plugin-memory-openviking)** clarify managed process wording (by @[itscheems](https://github.com/itscheems)) - ([147cee1](https://github.com/itscheems/Roku/commit/147cee1a0459186c7f0c3e0769c004eef5136bb4))
+- **(roku-plugin-memory-openviking)** normalize sidecar search hits (by @[itscheems](https://github.com/itscheems)) - ([e8e4da3](https://github.com/itscheems/Roku/commit/e8e4da39c7465350ce463eee82eb44b660964cb6))
+- **(roku-plugin-memory-sqlite)** clarify adapter resolution terminology (by @[itscheems](https://github.com/itscheems)) - ([abe3817](https://github.com/itscheems/Roku/commit/abe381788cd2635954634a209b8efa58f05c904d))
+- **(roku-plugin-tools)** clarify short-term conversation carrier semantics (by @[itscheems](https://github.com/itscheems)) - ([04f2a81](https://github.com/itscheems/Roku/commit/04f2a8191774788ff9d59c031f34096aa217b5cf))
+- **(roku-runtime-service)** preserve long-term recall boundaries (by @[itscheems](https://github.com/itscheems)) - ([22a800f](https://github.com/itscheems/Roku/commit/22a800f20c8c43b4a64fd98ae7b656465a32175f))
+- **(roku-state-store)** document exit from target memory architecture (by @[itscheems](https://github.com/itscheems)) - ([f4d7d43](https://github.com/itscheems/Roku/commit/f4d7d43bb1d8ac9f879bea9743cd52dd6c3c0159))
+
+### Refactor
+
+- **(roku-cmd)** harden memory startup boundaries (by @[itscheems](https://github.com/itscheems)) - ([83160ab](https://github.com/itscheems/Roku/commit/83160ab83442f15b6e88c8bcc40110944746e64e))
+- **(roku-cmd)** route startup through memory entry registry (by @[itscheems](https://github.com/itscheems)) - ([6c907f1](https://github.com/itscheems/Roku/commit/6c907f1b5050413bee11c21176dd223f79a4334c))
+- **(roku-cmd)** resolve runtime startup through entry registry (by @[itscheems](https://github.com/itscheems)) - ([6cd0608](https://github.com/itscheems/Roku/commit/6cd0608bfef4d57f1b1ec905884182402bcc37bb))
+- **(roku-cmd)** consume core-owned memory config (by @[itscheems](https://github.com/itscheems)) - ([af62901](https://github.com/itscheems/Roku/commit/af62901395513402eecf2d2e6a3d169b2bee6975))
+- **(roku-cmd)** route entry memory wiring through registry (by @[itscheems](https://github.com/itscheems)) - ([89fae0b](https://github.com/itscheems/Roku/commit/89fae0bb8413bd326f9f572875bbc60261370545))
+- **(roku-cmd)** wire default long-term memory bootstrap (by @[itscheems](https://github.com/itscheems)) - ([8d7583c](https://github.com/itscheems/Roku/commit/8d7583c974fd7b272c931750607a82b0f845c797))
+- **(roku-cmd)** align telegram continuity terminology (by @[itscheems](https://github.com/itscheems)) - ([afe2510](https://github.com/itscheems/Roku/commit/afe251021a21be4eea66f03a9dccc0b66103a8b9))
+- **(roku-cmd)** separate telegram continuity from session state (by @[itscheems](https://github.com/itscheems)) - ([6da9d2a](https://github.com/itscheems/Roku/commit/6da9d2a9c50c3e8ccc4df5132abd389b56ce27c0))
+- **(roku-memory)** move control-plane contracts into memory (by @[itscheems](https://github.com/itscheems)) - ([3d19587](https://github.com/itscheems/Roku/commit/3d19587c73571bb317fc986afe4edab54fcb0910))
+- **(roku-memory)** reorganize memory contracts into subdomains (by @[itscheems](https://github.com/itscheems)) - ([eeaa8ee](https://github.com/itscheems/Roku/commit/eeaa8ee3bdcecaab4bdac918afa72be69f6ba119))
+- **(roku-plugin-memory-openviking)** separate adapter registration from backend (by @[itscheems](https://github.com/itscheems)) - ([41a33a2](https://github.com/itscheems/Roku/commit/41a33a213ad2cacb95cf812a4051365d60eeff4b))
+- **(roku-plugin-memory-sqlite)** absorb sqlite control-plane adapter (by @[itscheems](https://github.com/itscheems)) - ([bbbf18c](https://github.com/itscheems/Roku/commit/bbbf18c886fe76a7099a6b9a659642229a123c97))
+- **(roku-plugin-memory-sqlite)** own sqlite memory persistence (by @[itscheems](https://github.com/itscheems)) - ([3426c3c](https://github.com/itscheems/Roku/commit/3426c3c2baf729cc7bdc97c51611d035370b797b))
+- **(roku-plugin-memory-sqlite)** map sqlite repos through adapter contracts (by @[itscheems](https://github.com/itscheems)) - ([a187fdf](https://github.com/itscheems/Roku/commit/a187fdfe066ec3e80fddb3626d5898c649710198))
+- **(roku-runtime-service)** consume control-plane bundles (by @[itscheems](https://github.com/itscheems)) - ([67a2cc7](https://github.com/itscheems/Roku/commit/67a2cc7f53c3574abac7ee1cbf24c253629f1535))
+- **(roku-runtime-service)** route long-term context outside conversation history (by @[itscheems](https://github.com/itscheems)) - ([8dd2b4d](https://github.com/itscheems/Roku/commit/8dd2b4d3cb7358362c781ef605c96948be329cff))
+- **(roku-runtime-service)** accept trait-object memory wiring (by @[itscheems](https://github.com/itscheems)) - ([501d3ed](https://github.com/itscheems/Roku/commit/501d3ed40d64852ec86f506d27efb6a5669a32a6))
+- **(roku-state-store)** drop memory contract implementations from repos (by @[itscheems](https://github.com/itscheems)) - ([8282b1d](https://github.com/itscheems/Roku/commit/8282b1d4d56b846df9c7447234fb538ae4c81179))
+- **(roku-state-store)** add session-state and continuity store boundaries (by @[itscheems](https://github.com/itscheems)) - ([8a3f5db](https://github.com/itscheems/Roku/commit/8a3f5dbe04a05b867b23310f4a3c239161d23697))
+- **(scripts)** align sqlite reporting with canonical memory precedence (by @[itscheems](https://github.com/itscheems)) - ([0e32f38](https://github.com/itscheems/Roku/commit/0e32f38c032c7ee0b583fac833900559663e10cd))
+- **(workspace)** remove transitional control-plane crates (by @[itscheems](https://github.com/itscheems)) - ([9891bd7](https://github.com/itscheems/Roku/commit/9891bd72b5de964096e37271084625daf0e6a8f9))
+- **(workspace)** remove roku-state-store from the workspace (by @[itscheems](https://github.com/itscheems)) - ([98b7be4](https://github.com/itscheems/Roku/commit/98b7be416d03768d2d943cbbbe49b6a5f2812f94))
+
+### Documentation
+
+- **(roku-memory)** document core memory contracts (by @[itscheems](https://github.com/itscheems)) - ([37edd10](https://github.com/itscheems/Roku/commit/37edd105421457ca8e0dbd6f4baaef0f44bb5adb))
+- **(roku-plugin-memory-openviking)** document adapter boundaries (by @[itscheems](https://github.com/itscheems)) - ([ded8adb](https://github.com/itscheems/Roku/commit/ded8adb9c24689fc5b1c2600c7b1316550b99d9d))
+
+### Testing
+
+- **(roku-cmd)** prove telegram transport uses memory subsystem seams (by @[itscheems](https://github.com/itscheems)) - ([f11352c](https://github.com/itscheems/Roku/commit/f11352c9631f46b0100c60e646c4b6efb482137d))
+- **(roku-cmd)** cover memory registry resolution and config layering (by @[itscheems](https://github.com/itscheems)) - ([dadcd4b](https://github.com/itscheems/Roku/commit/dadcd4b50671c2557f2226a6cbd004239619896a))
+- **(roku-memory)** add entry registry boundary guardrails (by @[itscheems](https://github.com/itscheems)) - ([29f75c9](https://github.com/itscheems/Roku/commit/29f75c92017d5cc328ecddc4c23d6f076bfae148))
+- **(roku-state-store)** cover semantic session-state boundaries (by @[itscheems](https://github.com/itscheems)) - ([08d8bd0](https://github.com/itscheems/Roku/commit/08d8bd00a81b7cb9e5ff73c45dc48158e20456f7))
+
+### Miscellaneous Tasks
+
+- **(deploy)** pass proxy env into docker validate build (by @[itscheems](https://github.com/itscheems)) - ([a917047](https://github.com/itscheems/Roku/commit/a917047984cc6f65d13f7abccadd980c5e0a20a6))
+- **(deploy)** work around docker validate network timeouts (by @[itscheems](https://github.com/itscheems)) - ([d8b7819](https://github.com/itscheems/Roku/commit/d8b78193ff31927d05a0fabce76bbd3ee82a6bea))
+- **(deploy)** optimize docker validate workflow (by @[itscheems](https://github.com/itscheems)) - ([138db2a](https://github.com/itscheems/Roku/commit/138db2a59b6a3b8d3b524299c0f6c754592c0ee4))
+- **(roku-cmd)** add local OpenViking dev helper script (by @[itscheems](https://github.com/itscheems)) - ([36f32c1](https://github.com/itscheems/Roku/commit/36f32c1b3b99b0104cdf82e3ffccf7bb700db50c))
+- update .gitignore (by @[itscheems](https://github.com/itscheems)) - ([4c76a1a](https://github.com/itscheems/Roku/commit/4c76a1a18c00e9fe936865a8d5b428c9e52a4223))
+
 ## [v0.0.5] - 2026-03-15
 
 ### Features
