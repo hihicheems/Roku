@@ -1625,7 +1625,6 @@ dependencies = [
  "roku-api-gateway",
  "roku-artifact-store",
  "roku-common-types",
- "roku-entry-registry",
  "roku-experiment-registry",
  "roku-memory",
  "roku-observability",
@@ -1655,30 +1654,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "roku-control-plane"
-version = "0.1.0"
-dependencies = [
- "roku-common-types",
- "thiserror",
-]
-
-[[package]]
-name = "roku-entry-registry"
-version = "0.1.0"
-dependencies = [
- "roku-artifact-store",
- "roku-common-types",
- "roku-control-plane",
- "roku-experiment-registry",
- "roku-memory",
- "roku-plugin-control-plane-sqlite",
- "roku-plugin-memory-openviking",
- "roku-plugin-memory-sqlite",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
 name = "roku-experiment-registry"
 version = "0.1.0"
 dependencies = [
@@ -1691,8 +1666,11 @@ dependencies = [
 name = "roku-memory"
 version = "0.1.0"
 dependencies = [
+ "roku-artifact-store",
  "roku-common-types",
+ "roku-experiment-registry",
  "serde",
+ "tempfile",
  "thiserror",
 ]
 
@@ -1728,18 +1706,6 @@ dependencies = [
  "roku-plugin-mcp",
  "serde",
  "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "roku-plugin-control-plane-sqlite"
-version = "0.1.0"
-dependencies = [
- "roku-common-types",
- "roku-control-plane",
- "rusqlite",
- "serde_json",
- "tempfile",
  "thiserror",
 ]
 
@@ -1877,7 +1843,6 @@ dependencies = [
  "roku-artifact-store",
  "roku-capability-auth",
  "roku-common-types",
- "roku-control-plane",
  "roku-experiment-registry",
  "roku-memory",
  "roku-observability",

@@ -9,8 +9,6 @@ resolver = "3"
 members = [
     "crates/roku-cmd",
     "crates/roku-common-types",
-    "crates/roku-control-plane",
-    "crates/roku-entry-registry",
     "crates/roku-memory",
     "crates/roku-orchestrator",
     "crates/roku-agent-runtime",
@@ -27,7 +25,6 @@ members = [
     "crates/roku-plugins/catalog",
     "crates/roku-plugins/skills",
     "crates/roku-plugins/llm",
-    "crates/roku-plugins/control-plane-sqlite",
     "crates/roku-plugins/memory-openviking",
     "crates/roku-plugins/memory-sqlite",
     "crates/roku-plugins/coding",
