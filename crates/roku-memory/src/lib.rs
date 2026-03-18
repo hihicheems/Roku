@@ -28,6 +28,7 @@
 
 pub mod bundle;
 pub mod config;
+pub mod control_plane;
 pub mod long_term;
 pub mod pending_loop;
 pub mod registry;
@@ -39,6 +40,12 @@ pub use config::{
 	HARD_MAX_MEMORY_RECALL_TOP_K, HARD_MAX_MEMORY_WRITE_BATCH_SIZE, MemoryRecallConfig,
 	MemoryRecallConfigPatch, MemoryRuntimeConfig, MemoryRuntimeConfigError,
 	MemoryRuntimeConfigPatch, MemoryWriteConfig, MemoryWriteConfigPatch,
+};
+pub use control_plane::{
+	ApprovalRepository, BackpressureSnapshot, ControlPlaneDataPlane, ControlPlaneError,
+	DispatchClaim, DispatchEnvelope, DispatchLease, DispatchQueue, EventRepository,
+	InMemoryApprovalRepository, InMemoryDispatchQueue, InMemoryEventRepository,
+	InMemoryResultRepository, InMemoryTaskRepository, ResultRepository, RetryClaim, TaskRepository,
 };
 pub use long_term::{
 	ConservativeMemoryLifecyclePolicy, InMemoryLongTermMemoryBackend, LongTermMemoryBackend,

@@ -38,14 +38,11 @@ use roku_common_types::{
 	ApprovalDecision, ApprovalId, ApprovalStatus, ApprovalTicket, ErrorClass, RequestEnvelope,
 	ResponseEnvelope, ResponseStatus, RuntimeError, Task, TaskEventKind, TaskNode, TaskState,
 };
-use roku_control_plane::{
-	ApprovalRepository, ControlPlaneDataPlane, DispatchQueue, EventRepository,
-	InMemoryDispatchQueue, ResultRepository, TaskRepository,
-};
 use roku_experiment_registry::ExperimentRegistry;
 use roku_memory::{
-	ConservativeMemoryLifecyclePolicy, LongTermMemoryBackend, MemoryLifecyclePolicy,
-	NoopLongTermMemoryBackend,
+	ApprovalRepository, ConservativeMemoryLifecyclePolicy, ControlPlaneDataPlane, DispatchQueue,
+	EventRepository, InMemoryDispatchQueue, LongTermMemoryBackend, MemoryLifecyclePolicy,
+	NoopLongTermMemoryBackend, ResultRepository, TaskRepository,
 };
 use roku_observability::{
 	AuditCorrelation, AuditRecord, AuditSink, InMemoryAuditSink, LogLevel, LogRecord, Metrics,
