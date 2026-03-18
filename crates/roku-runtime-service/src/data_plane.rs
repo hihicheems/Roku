@@ -19,11 +19,11 @@ use roku_common_types::{
 	TaskEventKind, TaskId, TaskNode, TaskNodeKind, TaskReplayCursor, TaskReplayReport,
 	TaskReplaySnapshot, TaskState, ValidationEvidenceSet,
 };
+use roku_memory::{DispatchClaim, DispatchEnvelope, DispatchLease, RetryClaim};
 use roku_orchestrator::{
 	build_idempotency_key, recovery_eligibility_for_state, replay_consistency_status,
 	replay_consistency_status_from, replayed_state, replayed_state_from,
 };
-use roku_state_store::{DispatchClaim, DispatchEnvelope, DispatchLease, RetryClaim};
 use std::collections::{HashMap, HashSet};
 
 use crate::RuntimeService;

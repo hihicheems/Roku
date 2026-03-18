@@ -19,6 +19,7 @@ mod direct;
 mod execution;
 mod helpers;
 mod legacy_graph;
+mod memory_context;
 mod runtime_loop_lifecycle;
 mod runtime_loop_recovery;
 #[cfg(test)]
@@ -38,19 +39,20 @@ use roku_common_types::{
 	ResponseEnvelope, ResponseStatus, RuntimeError, Task, TaskEventKind, TaskNode, TaskState,
 };
 use roku_experiment_registry::ExperimentRegistry;
+use roku_memory::{
+	ApprovalRepository, ConservativeMemoryLifecyclePolicy, ControlPlaneDataPlane, DispatchQueue,
+	EventRepository, InMemoryDispatchQueue, LongTermMemoryBackend, MemoryLifecyclePolicy,
+	NoopLongTermMemoryBackend, ResultRepository, TaskRepository,
+};
 use roku_observability::{
 	AuditCorrelation, AuditRecord, AuditSink, InMemoryAuditSink, LogLevel, LogRecord, Metrics,
 	MetricsSnapshot, emit_global_log,
 };
 use roku_orchestrator::Orchestrator;
-use roku_state_store::{
-	ApprovalRepository, EventRepository, InMemoryApprovalRepository, InMemoryDispatchQueue,
-	InMemoryEventRepository, InMemoryResultRepository, InMemoryTaskRepository, ResultRepository,
-	TaskRepository,
-};
 use roku_validation_plane::ValidationPipeline;
 
 use crate::helpers::{approval_artifact, failure_message, ticket_status_label};
+pub use crate::memory_context::ContextBundle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RunMode {
@@ -90,9 +92,10 @@ impl RuntimeExecutionMode {
 /// Records the requested runtime path and the path that is actually active.
 ///
 /// ## Why this exists
-/// Phase 1 needs an explicit source of truth for whether a command is exercising the
-/// live ReAct runtime or a deterministic fallback. Without this report, logs and CLI
-/// output can silently make deterministic executions look like live runtime passes.
+/// Runtime entry surfaces need an explicit source of truth for whether a
+/// command is exercising the live ReAct runtime or a deterministic fallback.
+/// Without this report, logs and CLI output can silently make deterministic
+/// executions look like live runtime passes.
 ///
 /// ## Invariants
 /// - `effective` is the runtime path that will actually execute the request.
@@ -141,17 +144,13 @@ struct RuntimeState {
 	event_repo: Box<dyn EventRepository + Send>,
 	approval_repo: Box<dyn ApprovalRepository + Send>,
 	result_repo: Box<dyn ResultRepository + Send>,
-	dispatch_queue: Box<dyn roku_state_store::DispatchQueue + Send>,
+	dispatch_queue: Box<dyn DispatchQueue + Send>,
 	artifact_store: ArtifactStore,
 	experiment_registry: ExperimentRegistry,
 }
 
 pub struct RuntimeDataPlane {
-	pub task_repo: Box<dyn TaskRepository + Send>,
-	pub event_repo: Box<dyn EventRepository + Send>,
-	pub approval_repo: Box<dyn ApprovalRepository + Send>,
-	pub result_repo: Box<dyn ResultRepository + Send>,
-	pub dispatch_queue: Box<dyn roku_state_store::DispatchQueue + Send>,
+	pub control_plane: ControlPlaneDataPlane,
 	pub artifact_store: ArtifactStore,
 	pub experiment_registry: ExperimentRegistry,
 }
@@ -163,8 +162,11 @@ pub struct RuntimeService {
 	validator: ValidationPipeline,
 	metrics: Arc<Metrics>,
 	audit_sink: Arc<dyn AuditSink>,
+	memory_backend: Arc<dyn LongTermMemoryBackend>,
+	memory_policy: Arc<dyn MemoryLifecyclePolicy>,
 	state: Mutex<RuntimeState>,
 	pending_loops: Mutex<HashMap<String, LoopState>>,
+	memory_contexts: Mutex<HashMap<String, String>>,
 }
 
 impl RuntimeService {
@@ -178,11 +180,13 @@ impl RuntimeService {
 		let runtime = GenericAgentRuntime::default();
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
-				task_repo,
-				event_repo,
-				approval_repo,
-				result_repo,
-				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				control_plane: ControlPlaneDataPlane {
+					task_repo,
+					event_repo,
+					approval_repo,
+					result_repo,
+					dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				},
 				artifact_store: ArtifactStore::default(),
 				experiment_registry: ExperimentRegistry::default(),
 			},
@@ -204,11 +208,13 @@ impl RuntimeService {
 		let runtime = GenericAgentRuntime::default();
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
-				task_repo,
-				event_repo,
-				approval_repo,
-				result_repo,
-				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				control_plane: ControlPlaneDataPlane {
+					task_repo,
+					event_repo,
+					approval_repo,
+					result_repo,
+					dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				},
 				artifact_store,
 				experiment_registry,
 			},
@@ -230,11 +236,13 @@ impl RuntimeService {
 	) -> Self {
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
-				task_repo,
-				event_repo,
-				approval_repo,
-				result_repo,
-				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				control_plane: ControlPlaneDataPlane {
+					task_repo,
+					event_repo,
+					approval_repo,
+					result_repo,
+					dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				},
 				artifact_store,
 				experiment_registry,
 			},
@@ -257,11 +265,33 @@ impl RuntimeService {
 	) -> Self {
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
-				task_repo,
-				event_repo,
-				approval_repo,
-				result_repo,
-				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				control_plane: ControlPlaneDataPlane {
+					task_repo,
+					event_repo,
+					approval_repo,
+					result_repo,
+					dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				},
+				artifact_store,
+				experiment_registry,
+			},
+			audit_sink,
+			runtime,
+			metrics,
+		)
+	}
+
+	pub fn new_with_bundles_and_runtime_and_metrics(
+		control_plane: ControlPlaneDataPlane,
+		artifact_store: ArtifactStore,
+		experiment_registry: ExperimentRegistry,
+		audit_sink: Arc<dyn AuditSink>,
+		runtime: GenericAgentRuntime,
+		metrics: Arc<Metrics>,
+	) -> Self {
+		Self::new_with_runtime_data_plane_and_metrics(
+			RuntimeDataPlane {
+				control_plane,
 				artifact_store,
 				experiment_registry,
 			},
@@ -278,14 +308,17 @@ impl RuntimeService {
 		metrics: Arc<Metrics>,
 	) -> Self {
 		let RuntimeDataPlane {
+			control_plane,
+			artifact_store,
+			experiment_registry,
+		} = data_plane;
+		let ControlPlaneDataPlane {
 			task_repo,
 			event_repo,
 			approval_repo,
 			result_repo,
 			dispatch_queue,
-			artifact_store,
-			experiment_registry,
-		} = data_plane;
+		} = control_plane;
 
 		Self {
 			orchestrator: Orchestrator::default(),
@@ -294,6 +327,8 @@ impl RuntimeService {
 			validator: ValidationPipeline::default(),
 			metrics,
 			audit_sink,
+			memory_backend: Arc::new(NoopLongTermMemoryBackend),
+			memory_policy: Arc::new(ConservativeMemoryLifecyclePolicy::default()),
 			state: Mutex::new(RuntimeState {
 				capability_auth: CapabilityAuthority::default(),
 				task_repo,
@@ -305,6 +340,7 @@ impl RuntimeService {
 				experiment_registry,
 			}),
 			pending_loops: Mutex::new(HashMap::new()),
+			memory_contexts: Mutex::new(HashMap::new()),
 		}
 	}
 
@@ -330,11 +366,7 @@ impl RuntimeService {
 	pub fn in_memory_with_agent_runtime(runtime: GenericAgentRuntime) -> Self {
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
-				task_repo: Box::new(InMemoryTaskRepository::default()),
-				event_repo: Box::new(InMemoryEventRepository::default()),
-				approval_repo: Box::new(InMemoryApprovalRepository::default()),
-				result_repo: Box::new(InMemoryResultRepository::default()),
-				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				control_plane: ControlPlaneDataPlane::in_memory(),
 				artifact_store: ArtifactStore::default(),
 				experiment_registry: ExperimentRegistry::default(),
 			},
@@ -350,11 +382,7 @@ impl RuntimeService {
 	) -> Self {
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
-				task_repo: Box::new(InMemoryTaskRepository::default()),
-				event_repo: Box::new(InMemoryEventRepository::default()),
-				approval_repo: Box::new(InMemoryApprovalRepository::default()),
-				result_repo: Box::new(InMemoryResultRepository::default()),
-				dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
+				control_plane: ControlPlaneDataPlane::in_memory(),
 				artifact_store: ArtifactStore::default(),
 				experiment_registry: ExperimentRegistry::default(),
 			},
@@ -418,6 +446,9 @@ impl RuntimeService {
 		self.record_transition(&mut task, TaskState::Planning, "classify direct route")?;
 
 		if let Some(planning_mode_hint) = normalized_request.planning_mode_hint {
+			let context_bundle = self.build_context_bundle(&normalized_request, false)?;
+			let memory_context_text = context_bundle.memory_context_text();
+			self.cache_memory_context(&task.task_id, &memory_context_text);
 			self.clear_pending_loop(&normalized_request.session_id)?;
 			self.metrics.inc_route_escalations();
 			self.metrics.inc_route_limited_planning();
@@ -442,24 +473,47 @@ impl RuntimeService {
 				&normalized_request,
 				&compatibility_plan,
 				&mut loop_state,
+				&context_bundle,
+				&memory_context_text,
 			);
 		}
 
-		if let Some(mut loop_state) = self.take_resumable_pending_loop(&normalized_request)? {
+		let mut resumable_loop = self.take_resumable_pending_loop(&normalized_request)?;
+		let mut context_bundle =
+			self.build_context_bundle(&normalized_request, resumable_loop.is_some())?;
+		let memory_context_text = context_bundle.memory_context_text();
+		self.cache_memory_context(&task.task_id, &memory_context_text);
+
+		if let Some(mut loop_state) = resumable_loop.take() {
+			self.attach_resumed_loop_resources(&mut context_bundle, &loop_state);
 			self.start_experiment_run(&task, &normalized_request.goal, "runtime_loop_resume")?;
-			return self.resume_pending_loop(&mut task, &normalized_request, &mut loop_state);
+			return self.resume_pending_loop(
+				&mut task,
+				&normalized_request,
+				&mut loop_state,
+				&context_bundle,
+				&memory_context_text,
+			);
 		}
 
 		let route = self
 			.runtime
 			.classify_route(&normalized_request, &normalized_request.session_id);
+		self.attach_visible_resources(&mut context_bundle, &route);
 		log_route_decision(&normalized_request, &route);
 		let mut loop_state = self.initialize_runtime_loop_for_route(&normalized_request, &route);
 		match &route {
 			RouteDecisionResult::Direct(plan) => {
 				self.metrics.inc_direct_route_hits();
 				self.start_experiment_run(&task, &normalized_request.goal, "direct_route")?;
-				self.process_direct_route(&mut task, &normalized_request, plan, &mut loop_state)
+				self.process_direct_route(
+					&mut task,
+					&normalized_request,
+					plan,
+					&mut loop_state,
+					&context_bundle,
+					&memory_context_text,
+				)
 			}
 			RouteDecisionResult::Escalate(plan) => {
 				self.metrics.inc_route_escalations();
@@ -484,6 +538,8 @@ impl RuntimeService {
 							&normalized_request,
 							plan,
 							&mut loop_state,
+							&context_bundle,
+							&memory_context_text,
 						)
 					}
 					EscalationAction::FallbackAnswer => {
@@ -494,6 +550,8 @@ impl RuntimeService {
 							&normalized_request,
 							plan,
 							&mut loop_state,
+							&context_bundle,
+							&memory_context_text,
 						)
 					}
 					EscalationAction::EnterLimitedPlanning => {
@@ -509,6 +567,8 @@ impl RuntimeService {
 							&normalized_request,
 							plan,
 							&mut loop_state,
+							&context_bundle,
+							&memory_context_text,
 						)
 					}
 				}

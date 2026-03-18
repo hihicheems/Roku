@@ -7,6 +7,9 @@
 # - [runtime.llm.openrouter] -> crates/roku-plugins/llm
 # - [runtime.telegram]       -> crates/roku-plugins/telegram
 # - [runtime.skills]         -> crates/roku-plugins/skills
+# - [runtime.memory.*]       -> provider-neutral ownership in crates/roku-memory
+#                               startup parsing/materialization currently lives in
+#                               crates/roku-cmd as migration residue
 #
 # Values in this file are runtime defaults and overrides.
 # Final hard ceilings still live in code so one bad edit cannot push the
@@ -123,3 +126,77 @@ max_archive_bytes = 33554432
 max_prompt_document_bytes = 24576
 # Maximum number of skill documents included in prompt context.
 max_prompt_documents = 24
+
+[runtime.memory]
+# Memory stays disabled by default so rollout remains an explicit operator choice.
+enabled = false
+# Backend selection is provider-neutral even when a given deployment only enables one adapter.
+backend = "openviking"
+
+[runtime.memory.recall]
+# Future long-term recall is opt-in and stays under Roku-owned control.
+enabled = true
+top_k = 8
+
+[runtime.memory.write]
+# Future long-term write-back is opt-in and stays under Roku-owned control.
+enabled = true
+max_batch_size = 16
+
+# Provider-specific config now lives only under `runtime.memory.backends.*`.
+# These subtrees describe adapter details; they do not redefine Roku-owned
+# top-level memory semantics or lifecycle behavior.
+[runtime.memory.backends.openviking.client]
+# HTTP endpoint for the external OpenViking service when Roku calls it as a backend.
+base_url = "http://127.0.0.1:1933"
+connect_timeout_ms = 1000
+request_timeout_ms = 5000
+# Secrets such as client auth remain env-only.
+
+[runtime.memory.backends.openviking.adapter]
+# Roku-owned adapter settings for mapping memory records into OpenViking resources.
+resource_root_uri = "viking://resources/roku-memory"
+staging_dir = ".roku/openviking/staging"
+write_wait_timeout_ms = 120000
+strict = true
+
+[runtime.memory.backends.openviking.process]
+# Managed process startup remains opt-in; the generated ov.conf is a provider artifact,
+# not the system's source of truth.
+managed = false
+# Generated config artifact path; this file is rendered from typed config rather than hand-edited.
+config_output_path = ".roku/run/openviking/ov.conf"
+
+[runtime.memory.backends.openviking.process.storage]
+# Workspace root consumed by the generated OpenViking service config.
+workspace = ".roku/openviking/workspace"
+# These backend selectors remain Roku-owned process config for future managed-process wiring.
+# The current OpenViking release template only consumes `storage.workspace`.
+vectordb_backend = "local"
+agfs_backend = "local"
+
+[runtime.memory.backends.openviking.process.server]
+# Server binding hints are reserved for later dev process wiring.
+# The current OpenViking release template does not consume them from `ov.conf`.
+host = "127.0.0.1"
+port = 1933
+
+[runtime.memory.backends.openviking.process.embedding]
+provider = "openai"
+api_base = "https://openrouter.ai/api/v1"
+model = "thenlper/gte-base"
+dimension = 768
+max_concurrent = 8
+
+[runtime.memory.backends.openviking.process.vlm]
+provider = "openai"
+api_base = "https://openrouter.ai/api/v1"
+model = "qwen/qwen3.5-flash-02-23"
+max_concurrent = 16
+thinking = false
+
+[runtime.memory.backends.sqlite]
+# SQLite remains an adapter-level implementation for short-term continuity,
+# session-state, and pending-loop residue during the migration; it is not a
+# long-term owner of memory subsystem semantics.
+path = ".roku/state/control-plane.db"

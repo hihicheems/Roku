@@ -233,6 +233,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "ascii"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d92bec98840b8f03a5ff5413de5293bfcd8bf96467cf5452609f939ec6f5de16"
+
+[[package]]
 name = "atoi_simd"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -365,6 +371,12 @@ name = "cfg_aliases"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
+
+[[package]]
+name = "chunked_transfer"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e4de3bc4ea267985becf712dc6d9eed8b04c953b3fcfb339ebc87acd9804901"
 
 [[package]]
 name = "cipher"
@@ -1614,15 +1626,17 @@ dependencies = [
  "roku-artifact-store",
  "roku-common-types",
  "roku-experiment-registry",
+ "roku-memory",
  "roku-observability",
  "roku-orchestrator",
  "roku-plugin-core",
  "roku-plugin-host",
  "roku-plugin-llm",
+ "roku-plugin-memory-openviking",
+ "roku-plugin-memory-sqlite",
  "roku-plugin-skills",
  "roku-plugin-telegram",
  "roku-runtime-service",
- "roku-state-store",
  "serde",
  "serde_json",
  "tempfile",
@@ -1645,6 +1659,18 @@ version = "0.1.0"
 dependencies = [
  "roku-common-types",
  "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "roku-memory"
+version = "0.1.0"
+dependencies = [
+ "roku-artifact-store",
+ "roku-common-types",
+ "roku-experiment-registry",
+ "serde",
+ "tempfile",
  "thiserror",
 ]
 
@@ -1727,6 +1753,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "roku-plugin-memory-openviking"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "roku-common-types",
+ "roku-memory",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tiny_http",
+]
+
+[[package]]
+name = "roku-plugin-memory-sqlite"
+version = "0.1.0"
+dependencies = [
+ "roku-common-types",
+ "roku-memory",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "roku-plugin-skills"
 version = "0.1.0"
 dependencies = [
@@ -1791,25 +1844,15 @@ dependencies = [
  "roku-capability-auth",
  "roku-common-types",
  "roku-experiment-registry",
+ "roku-memory",
  "roku-observability",
  "roku-orchestrator",
  "roku-plugin-catalog",
  "roku-plugin-skills",
- "roku-state-store",
  "roku-validation-plane",
  "serde_json",
  "tempfile",
  "zip 8.2.0",
-]
-
-[[package]]
-name = "roku-state-store"
-version = "0.1.0"
-dependencies = [
- "roku-common-types",
- "rusqlite",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]
@@ -2214,6 +2257,18 @@ checksum = "2e70e4c5a0e0a8a4823ad65dfe1a6930e4f4d756dcd9dd7939022b5e8c501215"
 dependencies = [
  "num-conv",
  "time-core",
+]
+
+[[package]]
+name = "tiny_http"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "389915df6413a2e74fb181895f933386023c71110878cd0825588928e64cdc82"
+dependencies = [
+ "ascii",
+ "chunked_transfer",
+ "httpdate",
+ "log",
 ]
 
 [[package]]

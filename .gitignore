@@ -17,6 +17,7 @@ debug
 .cursor/
 .idea/
 /target
+outputs/
 
 # Common
 **/*.DS_Store

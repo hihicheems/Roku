@@ -638,6 +638,7 @@ impl GenericAgentRuntime {
 		task_id: &TaskId,
 		request: &RequestEnvelope,
 		loop_state: &mut LoopState,
+		memory_context: &str,
 		user_reply: Option<&str>,
 	) -> DirectRouteExecutionResult {
 		let grounding_input = user_reply.unwrap_or(&loop_state.goal).to_string();
@@ -670,6 +671,7 @@ impl GenericAgentRuntime {
 						request,
 						loop_state,
 						&context_projection,
+						memory_context,
 						tool_name,
 						next_step.arguments.clone().unwrap_or_else(|| json!({})),
 						&attachments,
@@ -826,6 +828,7 @@ impl GenericAgentRuntime {
 		task_id: &TaskId,
 		request: &RequestEnvelope,
 		result: &crate::router::RouteEscalationPlan,
+		memory_context: &str,
 	) -> DirectRouteExecutionResult {
 		let fallback_message = match result.action {
 			EscalationAction::AskForMoreInfo => {
@@ -893,6 +896,7 @@ impl GenericAgentRuntime {
 				crate::tool_config::BuiltinToolRole::General,
 			))],
 			None,
+			memory_context,
 		)
 	}
 
@@ -1012,6 +1016,7 @@ impl GenericAgentRuntime {
 		step_summary: &str,
 		resources: Vec<ResourceSelector>,
 		explicit_source_url: Option<&String>,
+		memory_context: &str,
 	) -> DirectRouteExecutionResult {
 		let capabilities = route_capabilities(&self.resource_catalog, &resources);
 		let node = TaskNode {
@@ -1041,6 +1046,7 @@ impl GenericAgentRuntime {
 				summary: node.description.clone(),
 				resources,
 				conversation_history: request.conversation_history.clone(),
+				memory_context: memory_context.to_string(),
 			},
 			capabilities,
 			capability_tokens: Vec::new(),
@@ -1175,6 +1181,7 @@ impl GenericAgentRuntime {
 		request: &RequestEnvelope,
 		selector: &ResourceSelector,
 		arguments: Value,
+		memory_context: &str,
 		attachments: &[PathBuf],
 		bound_resources: &[ResourceSelector],
 		step_summary: &str,
@@ -1213,6 +1220,7 @@ impl GenericAgentRuntime {
 				summary: node.description.clone(),
 				resources,
 				conversation_history: request.conversation_history.clone(),
+				memory_context: memory_context.to_string(),
 			},
 			capabilities: capabilities.clone(),
 			capability_tokens: Vec::new(),
@@ -1234,6 +1242,7 @@ impl GenericAgentRuntime {
 				.map(|resource| resource.display_key())
 				.collect::<Vec<_>>(),
 			"conversation_history": render_conversation_history(&request.conversation_history),
+			"memory_context": memory_context,
 			"budget_tokens": spec.policy_bindings.budget_tokens,
 			"time_budget_ms": spec.policy_bindings.time_budget_ms,
 		});
@@ -1288,6 +1297,7 @@ impl GenericAgentRuntime {
 		request: &RequestEnvelope,
 		loop_state: &LoopState,
 		context_projection: &ContextProjection,
+		memory_context: &str,
 		tool_name: &str,
 		arguments: Value,
 		attachments: &[PathBuf],
@@ -1307,6 +1317,7 @@ impl GenericAgentRuntime {
 			request,
 			&selector,
 			arguments,
+			memory_context,
 			attachments,
 			&loop_state.bound_resources,
 			&tool_loop_step_summary(context_projection, tool_name),
@@ -1768,6 +1779,7 @@ mod tests {
 				summary: "summary".to_string(),
 				resources: Vec::new(),
 				conversation_history: Vec::new(),
+				memory_context: String::new(),
 			},
 			capabilities: capabilities
 				.into_iter()
@@ -1839,7 +1851,7 @@ mod tests {
 			plan.bound_resources.clone(),
 		);
 		let task_id = TaskId(format!("task-{}", request.request_id.0));
-		let _ = runtime.execute_tool_loop(&task_id, &request, &mut loop_state, None);
+		let _ = runtime.execute_tool_loop(&task_id, &request, &mut loop_state, "", None);
 		crate::runtime_loop::runtime_loop_trace(&loop_state)
 	}
 
@@ -2417,6 +2429,7 @@ mod tests {
 			&TaskId("task-loop".to_string()),
 			&request,
 			&mut loop_state,
+			"",
 			None,
 		);
 
@@ -2515,6 +2528,7 @@ mod tests {
 			&TaskId("task-ask-user".to_string()),
 			&request,
 			&mut loop_state,
+			"",
 			None,
 		);
 
@@ -3534,7 +3548,7 @@ mod tests {
 		let mut loop_state =
 			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
 		let task_id = TaskId("task-react-recovery".to_string());
-		let result = runtime.execute_tool_loop(&task_id, &request, &mut loop_state, None);
+		let result = runtime.execute_tool_loop(&task_id, &request, &mut loop_state, "", None);
 
 		let tool_sequence = loop_state
 			.history

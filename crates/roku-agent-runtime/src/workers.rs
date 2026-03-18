@@ -65,6 +65,7 @@ impl ToolBackedWorker {
 				.map(|resource| resource.display_key())
 				.collect::<Vec<_>>(),
 			"conversation_history": render_conversation_history(&spec.context.conversation_history),
+			"memory_context": spec.context.memory_context.clone(),
 			"budget_tokens": spec.policy_bindings.budget_tokens,
 			"time_budget_ms": spec.policy_bindings.time_budget_ms,
 			"worker_id": self.worker_id,
@@ -244,4 +245,47 @@ fn tool_name_for_role(tool_config: &ToolCatalogConfig, role: BuiltinToolRole) ->
 		.tool_for_role(role)
 		.map(|tool| tool.name.clone())
 		.unwrap_or_else(|| role.as_str().to_string())
+}
+
+#[cfg(test)]
+mod test_workers {
+	use super::*;
+	use std::sync::Arc;
+
+	use roku_common_types::{
+		AgentContext, AgentInstanceSpec, NodeId, PolicyBindings, TaskId, TaskNode,
+	};
+	use roku_plugin_host::ToolRuntime;
+
+	#[test]
+	fn worker_invocation_adds_memory_context() {
+		let tool_runtime = Arc::new(ToolRuntime::default());
+		let worker = ToolBackedWorker::new("test-worker", "tool", &[], tool_runtime, 0.5);
+		let spec = AgentInstanceSpec {
+			instance_id: "agent-1".to_string(),
+			context: AgentContext {
+				task_id: TaskId("task-1".to_string()),
+				node_id: NodeId("node-1".to_string()),
+				summary: "summary".to_string(),
+				resources: Vec::new(),
+				conversation_history: Vec::new(),
+				memory_context: "long-term context".to_string(),
+			},
+			capabilities: Vec::new(),
+			capability_tokens: Vec::new(),
+			policy_bindings: PolicyBindings {
+				budget_tokens: 1,
+				time_budget_ms: 1,
+			},
+		};
+		let node = TaskNode::default();
+		let invocation = worker.invocation(&spec, &node);
+		assert_eq!(
+			invocation
+				.input
+				.get("memory_context")
+				.and_then(|value| value.as_str()),
+			Some("long-term context")
+		);
+	}
 }

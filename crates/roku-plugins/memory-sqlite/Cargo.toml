@@ -1,0 +1,17 @@
+[package]
+name = "roku-plugin-memory-sqlite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+roku-common-types = { path = "../../roku-common-types" }
+roku-memory = { path = "../../roku-memory" }
+rusqlite = { version = "0.39", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

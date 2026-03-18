@@ -18,8 +18,8 @@ use roku_common_types::{
 	ResultStatus, RuntimeError, Task, TaskEventKind, TaskNode, TaskState,
 };
 
-use crate::RuntimeService;
 use crate::helpers::{failure_message, result_message};
+use crate::{ContextBundle, RuntimeService};
 
 impl RuntimeService {
 	pub(super) fn process_direct_route(
@@ -28,11 +28,17 @@ impl RuntimeService {
 		request: &RequestEnvelope,
 		_plan: &DirectRoutePlan,
 		loop_state: &mut LoopState,
+		context_bundle: &ContextBundle,
+		memory_context: &str,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let initial_history_len = loop_state.history.len();
-		let execution = self
-			.runtime
-			.execute_tool_loop(&task.task_id, request, loop_state, None);
+		let execution = self.runtime.execute_tool_loop(
+			&task.task_id,
+			request,
+			loop_state,
+			memory_context,
+			None,
+		);
 		self.record_runtime_loop_history(loop_state, initial_history_len);
 		let response =
 			self.finalize_direct_path(task, execution.node, execution.result, execution.message)?;
@@ -47,6 +53,8 @@ impl RuntimeService {
 			self.record_runtime_loop_terminal_step(loop_state, response.status, &response.message);
 		}
 		self.sync_pending_loop(loop_state)?;
+		self.apply_memory_write_back(request, &response, context_bundle);
+		self.clear_memory_context(&task.task_id);
 		Ok(response)
 	}
 
@@ -56,10 +64,12 @@ impl RuntimeService {
 		request: &RequestEnvelope,
 		plan: &RouteEscalationPlan,
 		loop_state: &mut LoopState,
+		context_bundle: &ContextBundle,
+		memory_context: &str,
 	) -> Result<ResponseEnvelope, RuntimeError> {
-		let execution = self
-			.runtime
-			.execute_escalation_action(&task.task_id, request, plan);
+		let execution =
+			self.runtime
+				.execute_escalation_action(&task.task_id, request, plan, memory_context);
 		let response =
 			self.finalize_direct_path(task, execution.node, execution.result, execution.message)?;
 		if matches!(
@@ -84,6 +94,8 @@ impl RuntimeService {
 			);
 		}
 		self.sync_pending_loop(loop_state)?;
+		self.apply_memory_write_back(request, &response, context_bundle);
+		self.clear_memory_context(&task.task_id);
 		Ok(response)
 	}
 

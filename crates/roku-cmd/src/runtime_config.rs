@@ -16,17 +16,23 @@
 //!
 //! This module is intentionally narrow: it reads `runtime.toml`, applies env overrides, and hands
 //! typed config bundles back to the crates that actually enforce runtime semantics.
+//! For memory specifically, startup only performs parsing/materialization during the migration;
+//! provider-neutral ownership belongs to `roku-memory`.
 
 use std::fs;
+use std::path::PathBuf;
 
 use roku_agent_runtime::{
 	AgentRuntimeConfig, AgentRuntimeConfigPatch, ToolsRuntimeConfig, ToolsRuntimeConfigPatch,
 };
+use roku_memory::MemoryBackendId;
+use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_llm::{OpenRouterRuntimeConfig, OpenRouterRuntimeConfigPatch};
 use roku_plugin_skills::{SkillsRuntimeConfig, SkillsRuntimeConfigPatch};
 use roku_plugin_telegram::{TelegramRuntimeConfig, TelegramRuntimeConfigPatch};
 use serde::Deserialize;
 
+use crate::memory_runtime_config::{MemoryRuntimeConfig, MemoryRuntimeConfigPatch};
 use crate::{CommandError, storage::LocalStorageLayout};
 
 /// Effective runtime configuration bundle for startup-owned runtime defaults.
@@ -40,6 +46,7 @@ pub(crate) struct RuntimeConfigs {
 	pub openrouter: OpenRouterRuntimeConfig,
 	pub telegram: TelegramRuntimeConfig,
 	pub skills: SkillsRuntimeConfig,
+	pub memory: MemoryRuntimeConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -62,6 +69,8 @@ struct RuntimeSections {
 	telegram: TelegramRuntimeConfigPatch,
 	#[serde(default)]
 	skills: SkillsRuntimeConfigPatch,
+	#[serde(default)]
+	memory: MemoryRuntimeConfigPatch,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -135,21 +144,70 @@ pub(crate) fn load_runtime_configs(
 	skills.apply_env_overrides().map_err(CommandError::from)?;
 	skills.validate_and_clamp().map_err(CommandError::from)?;
 
+	let mut memory = MemoryRuntimeConfig::default();
+	memory.apply_patch(parsed.runtime.memory);
+	memory.apply_env_overrides().map_err(|error| {
+		CommandError::RuntimeConfigBootstrap(format!(
+			"failed to load runtime.memory config: {error}"
+		))
+	})?;
+	memory.validate_and_clamp().map_err(|error| {
+		CommandError::RuntimeConfigBootstrap(format!(
+			"failed to validate runtime.memory config: {error}"
+		))
+	})?;
+
 	Ok(RuntimeConfigs {
 		agent,
 		tools,
 		openrouter,
 		telegram,
 		skills,
+		memory,
 	})
+}
+
+pub(crate) fn prepare_runtime_generated_artifacts(
+	configs: &RuntimeConfigs,
+) -> Result<Option<PathBuf>, CommandError> {
+	let generated = configs
+		.memory
+		.backends
+		.openviking
+		.materialize_generated_config(
+			configs.memory.enabled && matches!(configs.memory.backend, MemoryBackendId::OpenViking),
+		)
+		.map_err(|error| {
+			CommandError::RuntimeConfigBootstrap(format!(
+				"failed to prepare runtime.memory generated artifacts: {error}"
+			))
+		})?;
+	if let Some(path) = generated.as_ref() {
+		let _ = emit_global_log(
+			LogRecord::new(
+				"roku-cmd",
+				LogLevel::Info,
+				"generated managed OpenViking config from typed runtime.memory settings",
+			)
+			.with_field("path", path.display().to_string()),
+		);
+	}
+	Ok(generated)
 }
 
 #[cfg(test)]
 mod tests {
 	use std::fs;
+	use std::path::PathBuf;
 	use std::sync::{LazyLock, Mutex};
 
+	use roku_memory::{HARD_MAX_MEMORY_RECALL_TOP_K, HARD_MAX_MEMORY_WRITE_BATCH_SIZE};
+
 	use super::*;
+	use crate::memory_runtime_config::{
+		HARD_MAX_MEMORY_REQUEST_TIMEOUT_MS, HARD_MAX_OPENVIKING_EMBED_MAX_CONCURRENT,
+		HARD_MAX_OPENVIKING_VLM_MAX_CONCURRENT,
+	};
 
 	const HARD_MAX_READ_BYTES: usize = 256 * 1024;
 	const HARD_MAX_DIR_ENTRIES: usize = 2_000;
@@ -205,7 +263,7 @@ mod tests {
 		LocalStorageLayout {
 			home_dir: root.join(".roku"),
 			state_dir: root.join(".roku/state"),
-			sqlite_path: root.join(".roku/state/control-plane.db"),
+			legacy_sqlite_compat_path: root.join(".roku/state/control-plane.db"),
 			artifact_root: root.join(".roku/artifacts"),
 			experiment_root: root.join(".roku/experiments"),
 			report_root: root.join(".roku/reports"),
@@ -247,6 +305,27 @@ mod tests {
 		assert_eq!(configs.openrouter.max_latency_ms, 60_000);
 		assert_eq!(configs.telegram.poll_timeout_seconds, 30);
 		assert_eq!(configs.skills.max_prompt_documents, 24);
+		assert!(!configs.memory.enabled);
+		assert_eq!(configs.memory.recall.top_k, 8);
+		assert_eq!(configs.memory.write.max_batch_size, 16);
+		assert_eq!(
+			configs
+				.memory
+				.backends
+				.openviking
+				.process
+				.config_output_path,
+			PathBuf::from(".roku")
+				.join("run")
+				.join("openviking")
+				.join("ov.conf")
+		);
+		assert_eq!(
+			configs.memory.backends.sqlite.path,
+			PathBuf::from(".roku")
+				.join("state")
+				.join("control-plane.db")
+		);
 	}
 
 	#[test]
@@ -282,6 +361,24 @@ poll_timeout_seconds = 999
 
 [runtime.skills]
 max_prompt_documents = 999
+
+[runtime.memory]
+enabled = true
+
+[runtime.memory.recall]
+top_k = 999
+
+[runtime.memory.write]
+max_batch_size = 999
+
+[runtime.memory.backends.openviking.client]
+request_timeout_ms = 999999
+
+[runtime.memory.backends.openviking.process.embedding]
+max_concurrent = 999
+
+[runtime.memory.backends.openviking.process.vlm]
+max_concurrent = 999
 "#,
 		);
 
@@ -310,6 +407,36 @@ max_prompt_documents = 999
 		assert_eq!(configs.openrouter.max_latency_ms, 300_000);
 		assert_eq!(configs.telegram.poll_timeout_seconds, 300);
 		assert_eq!(configs.skills.max_prompt_documents, 128);
+		assert!(configs.memory.enabled);
+		assert_eq!(configs.memory.recall.top_k, HARD_MAX_MEMORY_RECALL_TOP_K);
+		assert_eq!(
+			configs.memory.write.max_batch_size,
+			HARD_MAX_MEMORY_WRITE_BATCH_SIZE
+		);
+		assert_eq!(
+			configs.memory.backends.openviking.client.request_timeout_ms,
+			HARD_MAX_MEMORY_REQUEST_TIMEOUT_MS
+		);
+		assert_eq!(
+			configs
+				.memory
+				.backends
+				.openviking
+				.process
+				.embedding
+				.max_concurrent,
+			HARD_MAX_OPENVIKING_EMBED_MAX_CONCURRENT
+		);
+		assert_eq!(
+			configs
+				.memory
+				.backends
+				.openviking
+				.process
+				.vlm
+				.max_concurrent,
+			HARD_MAX_OPENVIKING_VLM_MAX_CONCURRENT
+		);
 	}
 
 	#[test]
@@ -331,6 +458,26 @@ api_key = "should-not-be-configurable"
 	}
 
 	#[test]
+	fn runtime_toml_rejects_provider_specific_memory_fields_at_top_level() {
+		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
+		let layout = temp_layout();
+		write_runtime_toml(
+			&layout,
+			r#"
+[runtime.memory]
+enabled = true
+base_url = "http://127.0.0.1:1933"
+"#,
+		);
+
+		let error = load_runtime_configs(&layout)
+			.expect_err("provider-specific memory fields should stay under backends.*");
+
+		assert!(matches!(error, CommandError::RuntimeConfigBootstrap(_)));
+		assert!(error.to_string().contains("unknown field `base_url`"));
+	}
+
+	#[test]
 	fn canonical_and_legacy_env_overrides_apply_on_top_of_toml() {
 		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
 		let layout = temp_layout();
@@ -348,6 +495,15 @@ poll_timeout_seconds = 12
 
 [runtime.agent.next_step]
 expected_output_tokens = 222
+
+[runtime.memory]
+enabled = false
+
+[runtime.memory.recall]
+top_k = 5
+
+[runtime.memory.backends.openviking.process]
+managed = false
 "#,
 		);
 
@@ -359,6 +515,14 @@ expected_output_tokens = 222
 		let _clear_poll_legacy = EnvGuard::remove("TELEGRAM_POLL_TIMEOUT_SECONDS");
 		let _clear_next_step =
 			EnvGuard::remove("ROKU_RUNTIME__AGENT__NEXT_STEP__EXPECTED_OUTPUT_TOKENS");
+		let _clear_memory_enabled = EnvGuard::remove("ROKU_RUNTIME__MEMORY__ENABLED");
+		let _clear_memory_top_k = EnvGuard::remove("ROKU_RUNTIME__MEMORY__RECALL__TOP_K");
+		let _clear_memory_embedding_key = EnvGuard::remove(
+			"ROKU_RUNTIME__MEMORY__BACKENDS__OPENVIKING__PROCESS__EMBEDDING__API_KEY",
+		);
+		let _clear_memory_vlm_key =
+			EnvGuard::remove("ROKU_RUNTIME__MEMORY__BACKENDS__OPENVIKING__PROCESS__VLM__API_KEY");
+		let _clear_memory_legacy_key = EnvGuard::remove("OPENROUTER_API_KEY");
 
 		let _legacy_tools = EnvGuard::set("ROKU_WEB_SEARCH_URL", "https://legacy.example/search");
 		let _canonical_tools = EnvGuard::set(
@@ -376,6 +540,9 @@ expected_output_tokens = 222
 			"ROKU_RUNTIME__AGENT__NEXT_STEP__EXPECTED_OUTPUT_TOKENS",
 			"321",
 		);
+		let _canonical_memory_enabled = EnvGuard::set("ROKU_RUNTIME__MEMORY__ENABLED", "true");
+		let _canonical_memory_top_k = EnvGuard::set("ROKU_RUNTIME__MEMORY__RECALL__TOP_K", "12");
+		let _legacy_memory_key = EnvGuard::set("OPENROUTER_API_KEY", "legacy-memory-key");
 
 		let configs = load_runtime_configs(&layout).expect("env overrides should load");
 
@@ -386,5 +553,73 @@ expected_output_tokens = 222
 		);
 		assert_eq!(configs.openrouter.primary_model, "canonical-model");
 		assert_eq!(configs.telegram.poll_timeout_seconds, 44);
+		assert!(configs.memory.enabled);
+		assert_eq!(configs.memory.recall.top_k, 12);
+		assert_eq!(
+			configs
+				.memory
+				.backends
+				.openviking
+				.process
+				.embedding
+				.api_key
+				.as_deref(),
+			Some("legacy-memory-key")
+		);
+		assert_eq!(
+			configs
+				.memory
+				.backends
+				.openviking
+				.process
+				.vlm
+				.api_key
+				.as_deref(),
+			Some("legacy-memory-key")
+		);
+	}
+
+	#[test]
+	fn managed_openviking_config_is_generated_from_typed_memory_config() {
+		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
+		let layout = temp_layout();
+		write_runtime_toml(
+			&layout,
+			r#"
+[runtime.memory]
+enabled = true
+
+[runtime.memory.backends.openviking.process]
+managed = true
+config_output_path = ".roku/run/openviking/generated.ov.conf"
+"#,
+		);
+
+		let _clear_embedding_key = EnvGuard::remove(
+			"ROKU_RUNTIME__MEMORY__BACKENDS__OPENVIKING__PROCESS__EMBEDDING__API_KEY",
+		);
+		let _clear_vlm_key =
+			EnvGuard::remove("ROKU_RUNTIME__MEMORY__BACKENDS__OPENVIKING__PROCESS__VLM__API_KEY");
+		let _clear_legacy = EnvGuard::remove("OPENROUTER_API_KEY");
+		let _legacy_key = EnvGuard::set("OPENROUTER_API_KEY", "phase1-generated-key");
+
+		let configs = load_runtime_configs(&layout).expect("memory config should load");
+		let generated_path = prepare_runtime_generated_artifacts(&configs)
+			.expect("generated config should be written")
+			.expect("managed config should produce file");
+		let content =
+			fs::read_to_string(&generated_path).expect("generated OpenViking config should exist");
+
+		assert!(generated_path.ends_with(".roku/run/openviking/generated.ov.conf"));
+		assert!(content.contains("\"storage\""));
+		assert!(content.contains("\"embedding\""));
+		assert!(content.contains("\"dense\""));
+		assert!(!content.contains("\"vectordb\""));
+		assert!(!content.contains("\"agfs\""));
+		assert!(!content.contains("\"server\""));
+		assert!(content.contains("\"model\": \"thenlper/gte-base\""));
+		assert!(content.contains("\"model\": \"qwen/qwen3.5-flash-02-23\""));
+		assert!(content.contains("\"max_concurrent\": 8"));
+		assert!(content.contains("\"api_key\": \"phase1-generated-key\""));
 	}
 }

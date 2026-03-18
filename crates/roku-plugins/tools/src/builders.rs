@@ -823,6 +823,14 @@ fn user_visible_prompt(
 			input.conversation_history
 		)
 	};
+	let memory_section = if input.memory_context.trim().is_empty() {
+		String::new()
+	} else {
+		format!(
+			"\n\nRelevant long-term memory (Roku-owned):\n{}",
+			input.memory_context
+		)
+	};
 	let runtime_context = runtime_context_block();
 	let skill_section = skill_context
 		.filter(|value| !value.trim().is_empty())
@@ -840,9 +848,10 @@ fn user_visible_prompt(
 	let output_rules = output_rules_for_worker(worker_id);
 
 	format!(
-		"User request:\n{goal}{history_section}\n\nTrusted runtime context:\n{runtime_context}{skill_section}{inventory_section}{execution_authority_section}\n\nInternal execution hint (do not quote or describe it unless it is directly useful for the answer):\n{summary}\n\nOutput rules:\n{output_rules}\n- Internal references for policy only: worker_id={worker_id}; invocation_key={invocation_key}; time_budget_ms={time_budget_ms}.",
+		"User request:\n{goal}{history_section}{memory_section}\n\nTrusted runtime context:\n{runtime_context}{skill_section}{inventory_section}{execution_authority_section}\n\nInternal execution hint (do not quote or describe it unless it is directly useful for the answer):\n{summary}\n\nOutput rules:\n{output_rules}\n- Internal references for policy only: worker_id={worker_id}; invocation_key={invocation_key}; time_budget_ms={time_budget_ms}.",
 		goal = input.goal,
 		history_section = history_section,
+		memory_section = memory_section,
 		runtime_context = runtime_context,
 		skill_section = skill_section,
 		inventory_section = inventory_section,
@@ -1819,6 +1828,7 @@ struct ToolInput<'a> {
 	goal: &'a str,
 	summary: &'a str,
 	conversation_history: &'a str,
+	memory_context: &'a str,
 	granted_capabilities: Vec<String>,
 	resource_selectors: Vec<String>,
 	budget_tokens: u64,
@@ -1849,6 +1859,10 @@ fn request_input(request: &ToolInvocationRequest) -> Result<ToolInput<'_>, ToolF
 			.unwrap_or_default(),
 		conversation_history: input
 			.get("conversation_history")
+			.and_then(Value::as_str)
+			.unwrap_or_default(),
+		memory_context: input
+			.get("memory_context")
 			.and_then(Value::as_str)
 			.unwrap_or_default(),
 		granted_capabilities: input
@@ -1900,6 +1914,7 @@ fn tool_descriptor(
 				"goal".to_string(),
 				"summary".to_string(),
 				"conversation_history".to_string(),
+				"memory_context".to_string(),
 				"budget_tokens".to_string(),
 				"time_budget_ms".to_string(),
 			],
@@ -1995,6 +2010,7 @@ fn configured_required_fields(tool: &ConfiguredTool) -> Vec<String> {
 		"goal".to_string(),
 		"summary".to_string(),
 		"conversation_history".to_string(),
+		"memory_context".to_string(),
 		"budget_tokens".to_string(),
 		"time_budget_ms".to_string(),
 	];
@@ -2178,11 +2194,12 @@ mod tests {
 			input: json!({
 				"task_id": "task-1",
 				"node_id": "node-1",
-				"goal": "今天是星期几？",
-				"summary": "Execute primary action",
-				"conversation_history": "user: 你好",
-				"granted_capabilities": ["inventory.read"],
-				"budget_tokens": 2048_u64,
+			"goal": "今天是星期几？",
+			"summary": "Execute primary action",
+			"conversation_history": "user: 你好",
+			"memory_context": "memory hit summary",
+			"granted_capabilities": ["inventory.read"],
+			"budget_tokens": 2048_u64,
 				"time_budget_ms": 45_000_u64
 			}),
 			attempt: 1,
@@ -2205,6 +2222,7 @@ mod tests {
 		assert!(prompt.contains("Never narrate your reasoning"));
 		assert!(prompt.contains("use the trusted runtime context above"));
 		assert!(prompt.contains("Conversation history"));
+		assert!(prompt.contains("Relevant long-term memory"));
 		assert!(prompt.contains("Authoritative local inventory JSON"));
 		assert!(prompt.contains("Execution authority"));
 		assert!(prompt.contains("side_effects_allowed"));
@@ -2720,6 +2738,7 @@ print("ok")
 			goal: "Use skill-creator to create a Python skill and tell me where it was created.",
 			summary: "Execute installed skill `skill-creator` using its local scripts",
 			conversation_history: "",
+			memory_context: "",
 			granted_capabilities: vec!["skill.execute".to_string()],
 			resource_selectors: vec![
 				"tool:skill.execute".to_string(),

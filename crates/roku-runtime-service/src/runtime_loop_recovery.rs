@@ -16,10 +16,10 @@ use std::collections::HashMap;
 use std::sync::MutexGuard;
 
 use roku_agent_runtime::LoopState;
-use roku_common_types::{RequestEnvelope, ResponseEnvelope, RuntimeError, Task};
+use roku_common_types::{RequestEnvelope, ResponseEnvelope, RuntimeError, Task, TaskId};
 use roku_observability::LogLevel;
 
-use crate::RuntimeService;
+use crate::{ContextBundle, RuntimeService};
 use crate::{log_runtime, truncate_for_log};
 
 impl RuntimeService {
@@ -102,11 +102,17 @@ impl RuntimeService {
 		task: &mut Task,
 		request: &RequestEnvelope,
 		loop_state: &mut LoopState,
+		context_bundle: &ContextBundle,
+		memory_context: &str,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let initial_history_len = loop_state.history.len();
-		let execution =
-			self.runtime
-				.execute_tool_loop(&task.task_id, request, loop_state, Some(&request.goal));
+		let execution = self.runtime.execute_tool_loop(
+			&task.task_id,
+			request,
+			loop_state,
+			memory_context,
+			Some(&request.goal),
+		);
 		self.record_runtime_loop_history(loop_state, initial_history_len);
 		let response =
 			self.finalize_direct_path(task, execution.node, execution.result, execution.message)?;
@@ -121,6 +127,8 @@ impl RuntimeService {
 			self.record_runtime_loop_terminal_step(loop_state, response.status, &response.message);
 		}
 		self.sync_pending_loop(loop_state)?;
+		self.apply_memory_write_back(request, &response, context_bundle);
+		self.clear_memory_context(&task.task_id);
 		Ok(response)
 	}
 
@@ -130,5 +138,24 @@ impl RuntimeService {
 		self.pending_loops
 			.lock()
 			.map_err(|error| RuntimeError::new(format!("pending loop state poisoned: {error}")))
+	}
+
+	pub(crate) fn cache_memory_context(&self, task_id: &TaskId, context: &str) {
+		if let Ok(mut map) = self.memory_contexts.lock() {
+			map.insert(task_id.0.clone(), context.to_string());
+		}
+	}
+
+	pub(crate) fn task_memory_context(&self, task_id: &TaskId) -> String {
+		if let Ok(map) = self.memory_contexts.lock() {
+			return map.get(&task_id.0).cloned().unwrap_or_default();
+		}
+		String::new()
+	}
+
+	pub(crate) fn clear_memory_context(&self, task_id: &TaskId) {
+		if let Ok(mut map) = self.memory_contexts.lock() {
+			map.remove(&task_id.0);
+		}
 	}
 }

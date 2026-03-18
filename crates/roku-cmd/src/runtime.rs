@@ -16,8 +16,12 @@
 //!
 //! This module translates CLI/env inputs into concrete runtime-service instances and request
 //! envelopes. It owns process-local bootstrap concerns such as plugin discovery, config loading,
-//! state-store wiring, and mode selection. It does not decide agent behavior inside a run once the
-//! request has entered the runtime loop.
+//! entry/runtime bundle resolution, and mode selection. It does not decide
+//! agent behavior inside a run once the request has entered the runtime loop.
+//!
+//! For memory specifically, this module now delegates adapter selection to the
+//! Roku-owned entry registry and keeps only composition-root duties such as
+//! config loading and service startup.
 
 use std::fs;
 use std::path::Path;
@@ -26,12 +30,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use roku_agent_runtime::{GenericAgentRuntime, PluginRegistrySnapshot, ToolCatalogConfig};
 use roku_api_gateway::{Gateway, RawRequest};
-use roku_artifact_store::ArtifactStore;
 use roku_common_types::{
 	ApprovalDecision, ApprovalId, ArtifactId, PlanningModeHint, ResponseEnvelope, RuntimeError,
 	TaskId,
 };
-use roku_experiment_registry::ExperimentRegistry;
+use roku_memory::{
+	ConservativeMemoryLifecyclePolicy, DisabledMemoryLifecyclePolicy, LongTermMemoryBackend,
+	MemoryBackendHealth, MemoryDeleteSelector, MemoryError, MemoryLifecyclePolicy, MemoryQuery,
+	MemoryWriteRequest,
+};
 use roku_observability::{InMemoryAuditSink, LogLevel, LogRecord, Metrics, emit_global_log};
 use roku_plugin_core::{PluginDisableReason, PluginPolicyConfig};
 use roku_plugin_host::{
@@ -42,14 +49,14 @@ use roku_plugin_llm::build_openrouter_router_with_metrics;
 use roku_plugin_skills::{SkillRegistry, SkillsRuntimeConfig};
 pub use roku_runtime_service::RunMode;
 use roku_runtime_service::{RuntimeModeReport, RuntimeService};
-use roku_state_store::{
-	SqliteApprovalRepository, SqliteDispatchQueue, SqliteEventRepository, SqliteResultRepository,
-	SqliteStoreConfig, SqliteTaskRepository,
-};
 use serde_json::json;
 
 use crate::CommandError;
-use crate::runtime_config::{RuntimeConfigs, load_runtime_configs};
+use crate::entry_registry::{resolve_entry_runtime_bundle, resolve_memory_subsystem};
+use crate::memory_runtime_config::MemoryRuntimeConfig;
+use crate::runtime_config::{
+	RuntimeConfigs, load_runtime_configs, prepare_runtime_generated_artifacts,
+};
 use crate::storage::LocalStorageLayout;
 
 /// Canonical request options shared by CLI entrypoints before a runtime request is normalized.
@@ -239,6 +246,62 @@ pub(crate) fn show_skill_from_env(skill_name: &str) -> Result<String, CommandErr
 	format_skill_detail(&registry, skill_name)
 }
 
+pub(crate) fn prepare_memory_artifacts_from_env() -> Result<String, CommandError> {
+	let layout = LocalStorageLayout::from_env();
+	layout.ensure_dirs().map_err(CommandError::Io)?;
+	let configs = load_runtime_configs(&layout)?;
+	let generated = prepare_runtime_generated_artifacts(&configs)?;
+	serde_json::to_string_pretty(&json!({
+		"enabled": configs.memory.enabled,
+		"backend": configs.memory.backend.as_str(),
+		"backends": {
+			"openviking": configs.memory.backends.openviking.summary_json(),
+			"sqlite": configs.memory.backends.sqlite.summary_json(),
+		},
+		"generated_openviking_config_path": generated
+			.as_ref()
+			.map(|path| path.display().to_string()),
+	}))
+	.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+}
+
+pub(crate) fn show_memory_health_from_env() -> Result<String, CommandError> {
+	let (_, backend) = build_enabled_memory_backend_from_env()?;
+	let health = backend.health().map_err(map_memory_error)?;
+	encode_memory_health(health)
+}
+
+pub(crate) fn search_memory_from_env(query: MemoryQuery) -> Result<String, CommandError> {
+	let (_, backend) = build_enabled_memory_backend_from_env()?;
+	let hits = backend.search(&query).map_err(map_memory_error)?;
+	serde_json::to_string_pretty(&hits)
+		.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+}
+
+pub(crate) fn write_memory_from_env(request: MemoryWriteRequest) -> Result<String, CommandError> {
+	let (_, backend) = build_enabled_memory_backend_from_env()?;
+	let ack = backend.write(&request).map_err(map_memory_error)?;
+	serde_json::to_string_pretty(&json!({
+		"accepted": ack.accepted,
+		"record_id": ack.record_id,
+	}))
+	.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+}
+
+pub(crate) fn delete_memory_from_env(record_id: &str) -> Result<String, CommandError> {
+	let (_, backend) = build_enabled_memory_backend_from_env()?;
+	backend
+		.delete(&MemoryDeleteSelector {
+			record_id: record_id.to_string(),
+		})
+		.map_err(map_memory_error)?;
+	serde_json::to_string_pretty(&json!({
+		"deleted": true,
+		"record_id": record_id,
+	}))
+	.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+}
+
 fn format_install_skill_report(
 	registry: &SkillRegistry,
 	source_url: &str,
@@ -261,6 +324,19 @@ fn format_skill_detail(registry: &SkillRegistry, skill_name: &str) -> Result<Str
 	serde_json::to_string_pretty(&json!({
 		"record": record,
 		"prompt_context": prompt_context,
+	}))
+	.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+}
+
+fn encode_memory_health(health: MemoryBackendHealth) -> Result<String, CommandError> {
+	serde_json::to_string_pretty(&json!({
+		"backend": health.backend,
+		"status": match health.status {
+			roku_memory::MemoryBackendStatus::Healthy => "healthy",
+			roku_memory::MemoryBackendStatus::Degraded => "degraded",
+			roku_memory::MemoryBackendStatus::Unavailable => "unavailable",
+		},
+		"detail": health.detail,
 	}))
 	.map_err(|error| CommandError::OutputEncoding(error.to_string()))
 }
@@ -310,23 +386,20 @@ fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandEr
 			bootstrap.runtime_configs.tools,
 			bootstrap.runtime_configs.agent,
 		);
-	let store_config = sqlite_store_config(&layout);
-	let (artifact_store, experiment_registry) = build_runtime_data_plane(&layout);
+	let bundle = resolve_entry_runtime_bundle(&bootstrap.runtime_configs.memory, &layout)?;
 
-	Ok(RuntimeService::new_with_runtime_data_plane_and_metrics(
-		roku_runtime_service::RuntimeDataPlane {
-			task_repo: Box::new(connect_sqlite_task_repository(&store_config)?),
-			event_repo: Box::new(connect_sqlite_event_repository(&store_config)?),
-			approval_repo: Box::new(connect_sqlite_approval_repository(&store_config)?),
-			result_repo: Box::new(connect_sqlite_result_repository(&store_config)?),
-			dispatch_queue: Box::new(connect_sqlite_dispatch_queue(&store_config)?),
-			artifact_store,
-			experiment_registry,
-		},
-		Arc::new(InMemoryAuditSink::default()),
-		runtime,
-		Arc::new(Metrics::default()),
-	))
+	wire_default_long_term_memory(
+		RuntimeService::new_with_bundles_and_runtime_and_metrics(
+			bundle.control_plane,
+			bundle.artifact_store,
+			bundle.experiment_registry,
+			Arc::new(InMemoryAuditSink::default()),
+			runtime,
+			Arc::new(Metrics::default()),
+		),
+		bundle.memory,
+		&bootstrap.runtime_configs.memory,
+	)
 }
 
 fn build_skill_registry_from_env() -> Result<SkillRegistry, CommandError> {
@@ -354,72 +427,6 @@ fn load_plugin_policy_config(
 		.map_err(CommandError::from)
 }
 
-fn connect_sqlite_task_repository(
-	config: &SqliteStoreConfig,
-) -> Result<SqliteTaskRepository, CommandError> {
-	log_state_store_backend("sqlite", &config.path);
-	SqliteTaskRepository::connect(config.clone())
-		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))
-}
-
-fn connect_sqlite_event_repository(
-	config: &SqliteStoreConfig,
-) -> Result<SqliteEventRepository, CommandError> {
-	SqliteEventRepository::connect(config.clone())
-		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))
-}
-
-fn connect_sqlite_approval_repository(
-	config: &SqliteStoreConfig,
-) -> Result<SqliteApprovalRepository, CommandError> {
-	SqliteApprovalRepository::connect(config.clone())
-		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))
-}
-
-fn connect_sqlite_result_repository(
-	config: &SqliteStoreConfig,
-) -> Result<SqliteResultRepository, CommandError> {
-	SqliteResultRepository::connect(config.clone())
-		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))
-}
-
-fn connect_sqlite_dispatch_queue(
-	config: &SqliteStoreConfig,
-) -> Result<SqliteDispatchQueue, CommandError> {
-	SqliteDispatchQueue::connect(config.clone())
-		.map_err(|error| CommandError::StateStoreBootstrap(error.to_string()))
-}
-
-fn log_state_store_backend(kind: &str, path: &Path) {
-	let mut record = LogRecord::new(
-		"roku-cmd",
-		LogLevel::Info,
-		format!("using {kind} orchestration state store"),
-	);
-	record = record.with_field("path", path.display().to_string());
-	let _ = emit_global_log(record);
-}
-
-fn build_runtime_data_plane(layout: &LocalStorageLayout) -> (ArtifactStore, ExperimentRegistry) {
-	log_data_plane_backend("artifact-store", &layout.artifact_root);
-	log_data_plane_backend("experiment-registry", &layout.experiment_root);
-	(
-		ArtifactStore::file_backed(layout.artifact_root.clone()),
-		ExperimentRegistry::file_backed(layout.experiment_root.clone()),
-	)
-}
-
-fn log_data_plane_backend(component: &str, path: &Path) {
-	let _ = emit_global_log(
-		LogRecord::new(
-			"roku-cmd",
-			LogLevel::Info,
-			format!("using local file-backed {component}"),
-		)
-		.with_field("path", path.display().to_string()),
-	);
-}
-
 #[derive(Clone)]
 pub(crate) struct PluginBootstrap {
 	pub(crate) plugin_snapshot: PluginRegistrySnapshot,
@@ -439,6 +446,7 @@ pub(crate) fn build_plugin_bootstrap_from_env()
 fn build_plugin_bootstrap(layout: &LocalStorageLayout) -> Result<PluginBootstrap, CommandError> {
 	let tool_config = load_tool_catalog_config(layout)?;
 	let runtime_configs = load_runtime_configs(layout)?;
+	let _ = prepare_runtime_generated_artifacts(&runtime_configs)?;
 	let policy = load_plugin_policy_config(layout)?;
 	let discovery = PluginDiscoveryConfig {
 		explicit_paths: policy.paths.clone(),
@@ -495,7 +503,7 @@ fn build_skill_registry(
 	skills_runtime_config: SkillsRuntimeConfig,
 ) -> SkillRegistry {
 	if plugin_snapshot.is_plugin_enabled("skill-source-local") {
-		log_data_plane_backend("skill-registry", &layout.skill_root);
+		log_local_backend("skill-registry", &layout.skill_root);
 		SkillRegistry::file_backed_with_config(layout.skill_root.clone(), skills_runtime_config)
 	} else {
 		let _ = emit_global_log(LogRecord::new(
@@ -508,7 +516,7 @@ fn build_skill_registry(
 }
 
 fn build_deterministic_runtime_service_from_env() -> Result<RuntimeService, CommandError> {
-	let (_, bootstrap) = build_plugin_bootstrap_from_env()?;
+	let (layout, bootstrap) = build_plugin_bootstrap_from_env()?;
 	let runtime =
 		GenericAgentRuntime::with_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
 			bootstrap.skill_registry,
@@ -518,8 +526,20 @@ fn build_deterministic_runtime_service_from_env() -> Result<RuntimeService, Comm
 			bootstrap.runtime_configs.agent,
 		);
 	log_runtime_bootstrap_mode(&RuntimeModeReport::deterministic());
-	Ok(RuntimeService::in_memory_with_agent_runtime(runtime)
-		.with_runtime_mode_report(RuntimeModeReport::deterministic()))
+	let bundle = resolve_entry_runtime_bundle(&bootstrap.runtime_configs.memory, &layout)?;
+	wire_default_long_term_memory(
+		RuntimeService::new_with_bundles_and_runtime_and_metrics(
+			bundle.control_plane,
+			bundle.artifact_store,
+			bundle.experiment_registry,
+			Arc::new(InMemoryAuditSink::default()),
+			runtime,
+			Arc::new(Metrics::default()),
+		)
+		.with_runtime_mode_report(RuntimeModeReport::deterministic()),
+		bundle.memory,
+		&bootstrap.runtime_configs.memory,
+	)
 }
 
 pub(crate) fn build_live_runtime_service_from_layout_and_bootstrap(
@@ -528,24 +548,59 @@ pub(crate) fn build_live_runtime_service_from_layout_and_bootstrap(
 ) -> Result<RuntimeService, CommandError> {
 	let metrics = Arc::new(Metrics::default());
 	let (runtime, runtime_mode) = build_live_runtime(bootstrap.clone(), metrics.clone())?;
-	let store_config = sqlite_store_config(layout);
-	let (artifact_store, experiment_registry) = build_runtime_data_plane(layout);
+	let bundle = resolve_entry_runtime_bundle(&bootstrap.runtime_configs.memory, layout)?;
 
-	Ok(RuntimeService::new_with_runtime_data_plane_and_metrics(
-		roku_runtime_service::RuntimeDataPlane {
-			task_repo: Box::new(connect_sqlite_task_repository(&store_config)?),
-			event_repo: Box::new(connect_sqlite_event_repository(&store_config)?),
-			approval_repo: Box::new(connect_sqlite_approval_repository(&store_config)?),
-			result_repo: Box::new(connect_sqlite_result_repository(&store_config)?),
-			dispatch_queue: Box::new(connect_sqlite_dispatch_queue(&store_config)?),
-			artifact_store,
-			experiment_registry,
-		},
-		Arc::new(InMemoryAuditSink::default()),
-		runtime,
-		metrics,
+	wire_default_long_term_memory(
+		RuntimeService::new_with_bundles_and_runtime_and_metrics(
+			bundle.control_plane,
+			bundle.artifact_store,
+			bundle.experiment_registry,
+			Arc::new(InMemoryAuditSink::default()),
+			runtime,
+			metrics,
+		)
+		.with_runtime_mode_report(runtime_mode),
+		bundle.memory,
+		&bootstrap.runtime_configs.memory,
 	)
-	.with_runtime_mode_report(runtime_mode))
+}
+
+fn wire_default_long_term_memory(
+	service: RuntimeService,
+	subsystem: roku_memory::ResolvedMemorySubsystem,
+	memory_config: &MemoryRuntimeConfig,
+) -> Result<RuntimeService, CommandError> {
+	let policy: Arc<dyn MemoryLifecyclePolicy> =
+		if memory_config.enabled && memory_config.recall.enabled {
+			Arc::new(ConservativeMemoryLifecyclePolicy {
+				recall_limit: memory_config.recall.top_k.max(1),
+			})
+		} else {
+			Arc::new(DisabledMemoryLifecyclePolicy)
+		};
+	Ok(service
+		.with_long_term_memory_backend(subsystem.long_term)
+		.with_memory_lifecycle_policy(policy))
+}
+
+fn build_enabled_memory_backend_from_env()
+-> Result<(RuntimeConfigs, Arc<dyn LongTermMemoryBackend>), CommandError> {
+	let layout = LocalStorageLayout::from_env();
+	layout.ensure_dirs().map_err(CommandError::Io)?;
+	let configs = load_runtime_configs(&layout)?;
+	let _ = prepare_runtime_generated_artifacts(&configs)?;
+	if !configs.memory.enabled {
+		return Err(CommandError::Usage(
+			"runtime.memory.enabled is false; enable memory before using memory commands"
+				.to_string(),
+		));
+	}
+	let backend = resolve_memory_subsystem(&configs.memory)?.long_term;
+	Ok((configs, backend))
+}
+
+fn map_memory_error(error: MemoryError) -> CommandError {
+	CommandError::MemoryBackend(error.to_string())
 }
 
 fn build_live_runtime(
@@ -614,6 +669,17 @@ fn build_live_runtime(
 		),
 		runtime_mode,
 	))
+}
+
+fn log_local_backend(component: &str, path: &Path) {
+	let _ = emit_global_log(
+		LogRecord::new(
+			"roku-cmd",
+			LogLevel::Info,
+			format!("using local file-backed {component}"),
+		)
+		.with_field("path", path.display().to_string()),
+	);
 }
 
 pub(crate) fn openrouter_api_key_from_env()
@@ -709,10 +775,6 @@ fn expand_home_path(value: &str) -> std::path::PathBuf {
 		return std::path::PathBuf::from(home).join(suffix);
 	}
 	std::path::PathBuf::from(value)
-}
-
-fn sqlite_store_config(layout: &LocalStorageLayout) -> SqliteStoreConfig {
-	SqliteStoreConfig::new(layout.sqlite_path.clone())
 }
 
 fn build_request(

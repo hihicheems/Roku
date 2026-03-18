@@ -22,6 +22,8 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+const LEGACY_SQLITE_PATH_ENV: &str = "ROKU_SQLITE_PATH";
+
 /// Resolved local storage layout for one command process.
 ///
 /// The layout is shared across command surfaces so Telegram, HTTP, and one-shot CLI paths all
@@ -30,7 +32,14 @@ use std::path::PathBuf;
 pub(crate) struct LocalStorageLayout {
 	pub home_dir: PathBuf,
 	pub state_dir: PathBuf,
-	pub sqlite_path: PathBuf,
+	/// Legacy startup residue retained for compatibility/debug output only.
+	///
+	/// Entry/control-plane assembly must use the canonical SQLite runtime config
+	/// path (`runtime.memory.backends.sqlite.path`) instead of treating this
+	/// field as the active source of truth. This residue must not participate in
+	/// backend selection, bundle resolution, control-plane builder selection, or
+	/// any other real bootstrap decision branch.
+	pub legacy_sqlite_compat_path: PathBuf,
 	pub artifact_root: PathBuf,
 	pub experiment_root: PathBuf,
 	pub report_root: PathBuf,
@@ -42,6 +51,11 @@ pub(crate) struct LocalStorageLayout {
 	pub workspace_plugin_root: PathBuf,
 	pub user_plugin_root: PathBuf,
 	pub prompt_archive_dir: PathBuf,
+	/// Legacy/export-only path retained for operator artifacts.
+	///
+	/// This directory is outside the canonical memory registry/runtime path and
+	/// exists only as migration residue until those exports are either replaced
+	/// or deleted.
 	pub memory_summary_dir: PathBuf,
 	pub audit_export_dir: PathBuf,
 	pub log_dir: PathBuf,
@@ -57,8 +71,8 @@ impl LocalStorageLayout {
 	pub fn from_env() -> Self {
 		let roku_home = env_path("ROKU_HOME").unwrap_or_else(default_roku_home);
 		let state_dir = env_path("ROKU_STATE_DIR").unwrap_or_else(|| roku_home.join("state"));
-		let sqlite_path =
-			env_path("ROKU_SQLITE_PATH").unwrap_or_else(|| state_dir.join("control-plane.db"));
+		let legacy_sqlite_compat_path =
+			env_path(LEGACY_SQLITE_PATH_ENV).unwrap_or_else(|| state_dir.join("control-plane.db"));
 		let artifact_root =
 			env_path("ROKU_ARTIFACT_ROOT").unwrap_or_else(|| roku_home.join("artifacts"));
 		let experiment_root =
@@ -90,7 +104,7 @@ impl LocalStorageLayout {
 		Self {
 			home_dir: roku_home,
 			state_dir,
-			sqlite_path,
+			legacy_sqlite_compat_path,
 			artifact_root,
 			experiment_root,
 			report_root,
@@ -197,7 +211,11 @@ mod tests {
 	fn defaults_to_hidden_roku_home() {
 		let layout = LocalStorageLayout::from_env();
 		assert!(layout.home_dir.ends_with(".roku"));
-		assert!(layout.sqlite_path.ends_with("state/control-plane.db"));
+		assert!(
+			layout
+				.legacy_sqlite_compat_path
+				.ends_with("state/control-plane.db")
+		);
 		assert!(layout.artifact_root.ends_with("artifacts"));
 		assert!(layout.skill_root.ends_with(".roku/skills"));
 		assert_eq!(layout.generated_skill_root, layout.skill_root);

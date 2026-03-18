@@ -83,7 +83,7 @@ invalid_when = ["It invents tools or capabilities that are not present in local 
 [[tools.contract.input.fields]]
 name = "conversation_history"
 required = false
-semantics = "Recent user context needed to preserve phrasing or language when presenting inventory."
+semantics = "Recent short-term continuity context used to preserve phrasing or language; it is not a long-term memory source."
 invalid_when = ["It is treated as authority over the actual local inventory snapshot."]
 
 [tools.contract.output]

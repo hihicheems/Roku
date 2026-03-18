@@ -288,6 +288,7 @@ impl LegacyTaskGraphScheduler {
 pub fn build_agent_instance_for_node_with_history(
 	task: &Task,
 	node: &TaskNode,
+	memory_context: &str,
 ) -> AgentInstanceSpec {
 	let profile = select_profile_for_node(node);
 	let policy_bindings = derive_policy_bindings(node, profile);
@@ -300,6 +301,7 @@ pub fn build_agent_instance_for_node_with_history(
 			summary: node.description.clone(),
 			resources: node.resources.clone(),
 			conversation_history: task.conversation_history.clone(),
+			memory_context: memory_context.to_string(),
 		},
 		capabilities: node.capabilities.clone(),
 		capability_tokens: Vec::new(),

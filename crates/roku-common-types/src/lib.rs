@@ -75,6 +75,7 @@ pub struct ConversationTurn {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionPreferences {
 	#[serde(default)]
+	/// Deprecated compatibility hint; does not control modern runtime memory policy.
 	pub planning_mode: Option<PlanningModeHint>,
 	#[serde(default)]
 	pub pending_loop: Option<PendingLoopBinding>,
@@ -92,8 +93,10 @@ pub struct RequestEnvelope {
 	pub session_id: String,
 	pub goal: String,
 	#[serde(default)]
+	/// Deprecated compatibility hint; new requests stay on the direct runtime path.
 	pub planning_mode_hint: Option<PlanningModeHint>,
 	#[serde(default)]
+	/// Short-term continuity only; long-term recall is injected through runtime-owned context.
 	pub conversation_history: Vec<ConversationTurn>,
 }
 
@@ -245,8 +248,10 @@ pub struct Task {
 	pub state: TaskState,
 	pub attempts: u32,
 	#[serde(default)]
+	/// Legacy compatibility hint preserved for replay/resume metadata only.
 	pub planning_mode_hint: Option<PlanningModeHint>,
 	#[serde(default)]
+	/// Legacy persisted short-term continuity snapshot; not a canonical long-term memory source.
 	pub conversation_history: Vec<ConversationTurn>,
 	#[serde(default)]
 	pub completed_nodes: Vec<NodeId>,
@@ -455,7 +460,11 @@ pub struct AgentContext {
 	#[serde(default)]
 	pub resources: Vec<ResourceSelector>,
 	#[serde(default)]
+	/// Legacy short-term continuity carrier; does not transport long-term recall hits.
 	pub conversation_history: Vec<ConversationTurn>,
+	#[serde(default)]
+	/// Provider-neutral runtime memory context (rendered from ContextBundle hits).
+	pub memory_context: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

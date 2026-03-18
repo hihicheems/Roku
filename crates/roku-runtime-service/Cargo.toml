@@ -11,10 +11,10 @@ roku-artifact-store = { path = "../roku-artifact-store" }
 roku-capability-auth = { path = "../roku-capability-auth" }
 roku-common-types = { path = "../roku-common-types" }
 roku-experiment-registry = { path = "../roku-experiment-registry" }
+roku-memory = { path = "../roku-memory" }
 roku-observability = { path = "../roku-observability" }
 roku-orchestrator = { path = "../roku-orchestrator" }
 roku-plugin-catalog = { path = "../roku-plugins/catalog" }
-roku-state-store = { path = "../roku-state-store" }
 roku-validation-plane = { path = "../roku-validation-plane" }
 serde_json = "1"
 

@@ -16,7 +16,7 @@ use std::collections::{HashMap, VecDeque};
 
 use roku_common_types::{NodeId, TaskId};
 
-use crate::StoreError;
+use super::ControlPlaneError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchEnvelope {
@@ -56,19 +56,19 @@ pub struct BackpressureSnapshot {
 }
 
 pub trait DispatchQueue {
-	fn publish(&mut self, envelope: DispatchEnvelope) -> Result<(), StoreError>;
+	fn publish(&mut self, envelope: DispatchEnvelope) -> Result<(), ControlPlaneError>;
 	fn claim(
 		&mut self,
 		consumer_id: &str,
 		now_unix_ms: u64,
-	) -> Result<Option<DispatchClaim>, StoreError>;
-	fn ack(&mut self, lease: &DispatchLease) -> Result<(), StoreError>;
-	fn nack(&mut self, lease: &DispatchLease, retry: RetryClaim) -> Result<(), StoreError>;
+	) -> Result<Option<DispatchClaim>, ControlPlaneError>;
+	fn ack(&mut self, lease: &DispatchLease) -> Result<(), ControlPlaneError>;
+	fn nack(&mut self, lease: &DispatchLease, retry: RetryClaim) -> Result<(), ControlPlaneError>;
 	fn renew_lease(
 		&mut self,
 		lease: &DispatchLease,
 		now_unix_ms: u64,
-	) -> Result<Option<DispatchLease>, StoreError>;
+	) -> Result<Option<DispatchLease>, ControlPlaneError>;
 	fn backpressure(&self) -> BackpressureSnapshot;
 }
 
@@ -133,16 +133,16 @@ impl InMemoryDispatchQueue {
 		}
 	}
 
-	fn verify_lease(&self, lease: &DispatchLease) -> Result<(), StoreError> {
+	fn verify_lease(&self, lease: &DispatchLease) -> Result<(), ControlPlaneError> {
 		let Some(entry) = self.leased.get(&lease.entry_id) else {
-			return Err(StoreError::Storage(format!(
+			return Err(ControlPlaneError::Backend(format!(
 				"dispatch lease not found for {}",
 				lease.entry_id
 			)));
 		};
 
 		if entry.lease != *lease {
-			return Err(StoreError::Storage(format!(
+			return Err(ControlPlaneError::Backend(format!(
 				"dispatch lease mismatch for {}",
 				lease.entry_id
 			)));
@@ -153,7 +153,7 @@ impl InMemoryDispatchQueue {
 }
 
 impl DispatchQueue for InMemoryDispatchQueue {
-	fn publish(&mut self, envelope: DispatchEnvelope) -> Result<(), StoreError> {
+	fn publish(&mut self, envelope: DispatchEnvelope) -> Result<(), ControlPlaneError> {
 		self.queued.push_back(envelope);
 		Ok(())
 	}
@@ -162,7 +162,7 @@ impl DispatchQueue for InMemoryDispatchQueue {
 		&mut self,
 		consumer_id: &str,
 		now_unix_ms: u64,
-	) -> Result<Option<DispatchClaim>, StoreError> {
+	) -> Result<Option<DispatchClaim>, ControlPlaneError> {
 		self.requeue_expired(now_unix_ms);
 		if self.leased.len() >= self.max_in_flight {
 			return Ok(None);
@@ -183,16 +183,16 @@ impl DispatchQueue for InMemoryDispatchQueue {
 		Ok(Some(DispatchClaim { envelope, lease }))
 	}
 
-	fn ack(&mut self, lease: &DispatchLease) -> Result<(), StoreError> {
+	fn ack(&mut self, lease: &DispatchLease) -> Result<(), ControlPlaneError> {
 		self.verify_lease(lease)?;
 		self.leased.remove(&lease.entry_id);
 		Ok(())
 	}
 
-	fn nack(&mut self, lease: &DispatchLease, retry: RetryClaim) -> Result<(), StoreError> {
+	fn nack(&mut self, lease: &DispatchLease, retry: RetryClaim) -> Result<(), ControlPlaneError> {
 		self.verify_lease(lease)?;
 		let Some(mut entry) = self.leased.remove(&lease.entry_id) else {
-			return Err(StoreError::Storage(format!(
+			return Err(ControlPlaneError::Backend(format!(
 				"dispatch lease not found for {}",
 				lease.entry_id
 			)));
@@ -206,7 +206,7 @@ impl DispatchQueue for InMemoryDispatchQueue {
 		&mut self,
 		lease: &DispatchLease,
 		now_unix_ms: u64,
-	) -> Result<Option<DispatchLease>, StoreError> {
+	) -> Result<Option<DispatchLease>, ControlPlaneError> {
 		self.requeue_expired(now_unix_ms);
 		self.verify_lease(lease)?;
 		let renewed = self.next_lease(&lease.entry_id, &lease.consumer_id, now_unix_ms);
