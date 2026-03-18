@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! SQLite adapter for Roku continuity/session memory contracts.
+//! SQLite adapter for Roku memory and control-plane contracts.
 //!
 //! This crate keeps SQLite at the same adapter layer as OpenViking. It
-//! implements Roku-owned short-term continuity, session-state, and pending-loop
-//! snapshot contracts without turning SQLite into a privileged core concern.
+//! implements Roku-owned short-term continuity, session-state, pending-loop
+//! snapshot, and control-plane persistence contracts without turning SQLite
+//! into a privileged core concern.
 
 mod backend;
 mod config;
+pub mod control_plane;
 mod registration;
 mod store;
 
@@ -28,4 +30,9 @@ pub use backend::{
 	SqliteSessionStateAdapter, SqliteShortTermContinuityAdapter,
 };
 pub use config::{SqliteMemoryConfig, SqliteMemoryConfigError, SqliteMemoryConfigPatch};
+pub use control_plane::{
+	SqliteApprovalRepository, SqliteControlPlaneConfig, SqliteControlPlaneDataPlane,
+	SqliteControlPlaneError, SqliteDispatchQueue, SqliteEventRepository, SqliteResultRepository,
+	SqliteTaskRepository,
+};
 pub use registration::{SqliteMemoryRegistration, SqliteMemorySubsystemRegistration};
