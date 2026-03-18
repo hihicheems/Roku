@@ -23,6 +23,12 @@ DEFAULT_OPENROUTER_FALLBACK_MODELS="gemini-2.0-flash"
 
 readonly ROOT_DIR RUN_DIR LOG_DIR DEFAULT_API_BIND_ADDR DEFAULT_OPENROUTER_PRIMARY_MODEL DEFAULT_OPENROUTER_FALLBACK_MODELS
 
+SQLITE_MEMORY_PATH_ENV='ROKU_RUNTIME__MEMORY__BACKENDS__SQLITE__PATH'
+SQLITE_MEMORY_PATH_LEGACY_ENV='ROKU_SQLITE_PATH'
+SQLITE_MEMORY_DEFAULT_PATH='.roku/state/control-plane.db'
+
+readonly SQLITE_MEMORY_PATH_ENV SQLITE_MEMORY_PATH_LEGACY_ENV SQLITE_MEMORY_DEFAULT_PATH
+
 services() {
 	printf '%s\n' "telegram-bot"
 }
@@ -38,11 +44,13 @@ managed_services() {
 
 embedded_components() {
 	printf '%s\n' \
+		"roku-memory" \
+		"roku-plugin-memory-sqlite" \
 		"roku-runtime-service" \
 		"roku-agent-runtime" \
 		"roku-validation-plane" \
-		"roku-state-store" \
 		"roku-artifact-store" \
+		"roku-experiment-registry" \
 		"roku-observability"
 }
 
@@ -416,6 +424,12 @@ service_row() {
 
 component_detail() {
 	case "${1:-}" in
+	roku-memory)
+		printf '%s\n' 'provider-neutral memory/session/control-plane ownership'
+		;;
+	roku-plugin-memory-sqlite)
+		printf '%s\n' 'sqlite adapter for short-term, session, pending-loop, and control-plane persistence'
+		;;
 	roku-runtime-service)
 		printf '%s\n' 'embedded via api-gateway, telegram-bot'
 		;;
@@ -425,11 +439,11 @@ component_detail() {
 	roku-validation-plane)
 		printf '%s\n' 'embedded via roku-runtime-service'
 		;;
-	roku-state-store)
-		printf '%s\n' 'sqlite-backed local state with file-backed artifacts/experiments'
-		;;
 	roku-artifact-store)
 		printf '%s\n' 'embedded via roku-runtime-service'
+		;;
+	roku-experiment-registry)
+		printf '%s\n' 'file-backed experiment runs embedded via roku-runtime-service'
 		;;
 	roku-observability)
 		printf '%s\n' 'async rotating file sink + stderr fanout'
@@ -494,6 +508,22 @@ endpoint_row() {
 		"${url} (${probe})"
 }
 
+sqlite_memory_adapter_detail() {
+	local path source
+	if [[ -n "${!SQLITE_MEMORY_PATH_ENV:-}" ]]; then
+		path="${!SQLITE_MEMORY_PATH_ENV}"
+		source="${SQLITE_MEMORY_PATH_ENV}"
+	elif [[ -n "${!SQLITE_MEMORY_PATH_LEGACY_ENV:-}" ]]; then
+		path="${!SQLITE_MEMORY_PATH_LEGACY_ENV}"
+		source="${SQLITE_MEMORY_PATH_LEGACY_ENV} (legacy alias)"
+	else
+		path="$SQLITE_MEMORY_DEFAULT_PATH"
+		source='typed sqlite config default'
+	fi
+
+	printf 'path=%s; source=%s\n' "$path" "$source"
+}
+
 doctor() {
 	ensure_layout
 	echo 'Roku doctor'
@@ -520,9 +550,6 @@ doctor() {
 	echo
 	printf '%s\n' 'Integrations'
 	printf '  %-4s %-20s %-12s %s\n' 'MARK' 'NAME' 'STATUS' 'DETAILS'
-	local roku_home sqlite_path
-	roku_home="${ROKU_HOME:-$HOME/.roku}"
-	sqlite_path="${ROKU_SQLITE_PATH:-${ROKU_STATE_DIR:-$roku_home/state}/control-plane.db}"
 	if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
 		integration_row 'OpenRouter' 'Configured' "primary=${OPENROUTER_PRIMARY_MODEL:-$DEFAULT_OPENROUTER_PRIMARY_MODEL}; fallback=${OPENROUTER_FALLBACK_MODELS:-$DEFAULT_OPENROUTER_FALLBACK_MODELS}"
 	else
@@ -533,7 +560,7 @@ doctor() {
 	else
 		integration_row 'Telegram Bot API' 'Missing' 'set TELOXIDE_TOKEN or TELEGRAM_BOT_TOKEN'
 	fi
-	integration_row 'SQLite State Store' 'Configured' "$sqlite_path"
+	integration_row 'SQLite memory/control-plane adapter' 'Configured' "$(sqlite_memory_adapter_detail)"
 	integration_row 'API bind address' 'Configured' "$(api_gateway_bind_addr)"
 	echo
 	printf '%s\n' 'Observability Logs'
