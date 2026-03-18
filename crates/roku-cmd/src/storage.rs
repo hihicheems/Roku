@@ -30,6 +30,11 @@ use std::path::PathBuf;
 pub(crate) struct LocalStorageLayout {
 	pub home_dir: PathBuf,
 	pub state_dir: PathBuf,
+	/// Legacy startup residue retained for compatibility/debug output only.
+	///
+	/// Entry/control-plane assembly must use the canonical SQLite runtime config
+	/// path (`runtime.memory.backends.sqlite.path`) instead of treating this
+	/// field as the active source of truth.
 	pub sqlite_path: PathBuf,
 	pub artifact_root: PathBuf,
 	pub experiment_root: PathBuf,

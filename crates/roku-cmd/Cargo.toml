@@ -7,7 +7,7 @@ authors.workspace = true
 
 [features]
 default = []
-memory-openviking = ["roku-entry-registry/memory-openviking"]
+memory-openviking = []
 
 [dependencies]
 actix-web = "4"
@@ -16,7 +16,6 @@ roku-agent-runtime = { path = "../roku-agent-runtime" }
 roku-artifact-store = { path = "../roku-artifact-store" }
 roku-api-gateway = { path = "../roku-api-gateway" }
 roku-common-types = { path = "../roku-common-types" }
-roku-entry-registry = { path = "../roku-entry-registry" }
 roku-experiment-registry = { path = "../roku-experiment-registry" }
 roku-memory = { path = "../roku-memory" }
 roku-observability = { path = "../roku-observability" }

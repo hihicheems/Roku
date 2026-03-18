@@ -12,54 +12,102 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Command-side adapter into the Roku-owned entry registry.
+//! Command-side private adapter-catalog shim into the Roku-owned entry registry.
 //!
 //! `roku-cmd` still owns local layout discovery and typed runtime config
-//! loading. Provider registration, resolution, and runtime bundle assembly live
-//! in `roku-entry-registry`; this module only bridges command-local inputs into
-//! that registry.
+//! loading. Provider registration, resolution, and runtime bundle assembly now
+//! live in `roku-memory::registry::entry`; this module only injects the
+//! concrete adapter registrations/builders that the provider-neutral entry API
+//! needs.
 
-use roku_entry_registry::{
-	EntryMemoryConfig, EntryRegistryError, EntryRuntimeLayout, ResolvedEntryRuntimeBundle,
+use roku_memory::registry::{
+	EntryAdapterCatalog, EntryControlPlaneBuilder, EntryMemoryConfig, EntryRegistryError,
+	EntryRuntimeLayout, ResolvedEntryRuntimeBundle,
 	resolve_entry_runtime_bundle as resolve_entry_runtime_bundle_from_registry,
 	resolve_memory_subsystem as resolve_memory_subsystem_from_registry,
 };
-use roku_memory::ResolvedMemorySubsystem;
+use roku_memory::{ControlPlaneDataPlane, ResolvedMemorySubsystem};
+#[cfg(feature = "memory-openviking")]
+use roku_plugin_memory_openviking::OpenVikingMemorySubsystemRegistration;
+use roku_plugin_memory_sqlite::{
+	SqliteControlPlaneConfig, SqliteControlPlaneDataPlane, SqliteMemorySubsystemRegistration,
+};
 
 use crate::CommandError;
 use crate::memory_runtime_config::MemoryRuntimeConfig;
 use crate::storage::LocalStorageLayout;
 
+#[derive(Debug, Clone)]
+struct SqliteControlPlaneBuilder {
+	config: SqliteControlPlaneConfig,
+}
+
+impl SqliteControlPlaneBuilder {
+	fn from_memory_config(memory_config: &MemoryRuntimeConfig) -> Self {
+		Self {
+			config: SqliteControlPlaneConfig::from_memory_config(&memory_config.backends.sqlite),
+		}
+	}
+}
+
+impl EntryControlPlaneBuilder for SqliteControlPlaneBuilder {
+	fn build_control_plane(&self) -> Result<ControlPlaneDataPlane, String> {
+		SqliteControlPlaneDataPlane::connect(self.config.clone()).map_err(|error| error.to_string())
+	}
+}
+
 pub(crate) fn resolve_memory_subsystem(
 	memory_config: &MemoryRuntimeConfig,
 ) -> Result<ResolvedMemorySubsystem, CommandError> {
-	resolve_memory_subsystem_from_registry(memory_config_view(memory_config))
-		.map_err(map_entry_registry_error)
+	with_entry_catalog(memory_config, |config, catalog| {
+		resolve_memory_subsystem_from_registry(config, catalog)
+	})
+	.map_err(map_entry_registry_error)
 }
 
 pub(crate) fn resolve_entry_runtime_bundle(
 	memory_config: &MemoryRuntimeConfig,
 	layout: &LocalStorageLayout,
 ) -> Result<ResolvedEntryRuntimeBundle, CommandError> {
-	resolve_entry_runtime_bundle_from_registry(
-		memory_config_view(memory_config),
-		&entry_layout(layout),
-	)
+	with_entry_catalog(memory_config, |config, catalog| {
+		resolve_entry_runtime_bundle_from_registry(config, &entry_layout(layout), catalog)
+	})
 	.map_err(map_entry_registry_error)
+}
+
+fn with_entry_catalog<T>(
+	memory_config: &MemoryRuntimeConfig,
+	resolve: impl FnOnce(
+		EntryMemoryConfig<'_>,
+		&EntryAdapterCatalog<'_>,
+	) -> Result<T, EntryRegistryError>,
+) -> Result<T, EntryRegistryError> {
+	let sqlite_memory =
+		SqliteMemorySubsystemRegistration::new(memory_config.backends.sqlite.clone());
+	let sqlite_control_plane = SqliteControlPlaneBuilder::from_memory_config(memory_config);
+	let mut catalog = EntryAdapterCatalog::new();
+	catalog
+		.register_memory(&sqlite_memory)
+		.register_control_plane(&sqlite_control_plane);
+
+	#[cfg(feature = "memory-openviking")]
+	let openviking_memory =
+		OpenVikingMemorySubsystemRegistration::new(memory_config.backends.openviking.clone());
+
+	#[cfg(feature = "memory-openviking")]
+	catalog.register_memory(&openviking_memory);
+
+	resolve(memory_config_view(memory_config), &catalog)
 }
 
 fn memory_config_view(memory_config: &MemoryRuntimeConfig) -> EntryMemoryConfig<'_> {
 	EntryMemoryConfig {
 		core: &memory_config.core,
-		sqlite: &memory_config.backends.sqlite,
-		#[cfg(feature = "memory-openviking")]
-		openviking: Some(&memory_config.backends.openviking),
 	}
 }
 
 fn entry_layout(layout: &LocalStorageLayout) -> EntryRuntimeLayout {
 	EntryRuntimeLayout {
-		control_plane_sqlite_path: layout.sqlite_path.clone(),
 		artifact_root: layout.artifact_root.clone(),
 		experiment_root: layout.experiment_root.clone(),
 	}
@@ -79,7 +127,7 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn resolves_sqlite_entry_bundle_from_provider_neutral_config() {
+	fn resolves_sqlite_entry_bundle_from_canonical_memory_config() {
 		let tempdir = tempfile::tempdir().expect("tempdir should exist");
 		let mut config = MemoryRuntimeConfig {
 			core: roku_memory::MemoryRuntimeConfig {
@@ -93,7 +141,7 @@ mod tests {
 		let layout = LocalStorageLayout {
 			home_dir: tempdir.path().join(".roku"),
 			state_dir: tempdir.path().join(".roku").join("state"),
-			sqlite_path: tempdir.path().join("control-plane.db"),
+			sqlite_path: tempdir.path().join("legacy-control-plane.db"),
 			artifact_root: tempdir.path().join("artifacts"),
 			experiment_root: tempdir.path().join("experiments"),
 			report_root: tempdir.path().join("reports"),
@@ -115,6 +163,8 @@ mod tests {
 		let bundle =
 			resolve_entry_runtime_bundle(&config, &layout).expect("entry bundle should resolve");
 
+		assert!(config.backends.sqlite.path.exists());
+		assert!(!layout.sqlite_path.exists());
 		assert_eq!(bundle.memory.long_term.backend_name(), "noop");
 		assert!(
 			bundle
