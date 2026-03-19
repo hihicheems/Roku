@@ -33,6 +33,12 @@ pub struct TelegramOutboundMessage {
 	pub reply_markup: Option<TelegramReplyMarkup>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TelegramHandlerResponse {
+	pub response: ResponseEnvelope,
+	pub reply_markup: Option<TelegramReplyMarkup>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TelegramReplyMarkup {
 	pub inline_keyboard: Vec<Vec<TelegramInlineKeyboardButton>>,
@@ -70,6 +76,14 @@ impl TelegramOutboundMessage {
 
 	pub fn from_response(chat_id: i64, response: &ResponseEnvelope) -> Self {
 		Self::from_response_with_options(chat_id, response, TelegramRenderOptions::default())
+	}
+
+	pub fn from_handler_response(chat_id: i64, handler_response: &TelegramHandlerResponse) -> Self {
+		Self::from_handler_response_with_options(
+			chat_id,
+			handler_response,
+			TelegramRenderOptions::default(),
+		)
 	}
 
 	pub(crate) fn from_response_with_options(
@@ -113,6 +127,19 @@ impl TelegramOutboundMessage {
 		}
 	}
 
+	pub(crate) fn from_handler_response_with_options(
+		chat_id: i64,
+		handler_response: &TelegramHandlerResponse,
+		options: TelegramRenderOptions,
+	) -> Self {
+		let mut message =
+			Self::from_response_with_options(chat_id, &handler_response.response, options);
+		if let Some(reply_markup) = handler_response.reply_markup.clone() {
+			message.reply_markup = Some(reply_markup);
+		}
+		message
+	}
+
 	pub fn from_error(chat_id: i64, message: &str) -> Self {
 		Self {
 			chat_id,
@@ -121,6 +148,22 @@ impl TelegramOutboundMessage {
 			disable_web_page_preview: true,
 			reply_markup: None,
 		}
+	}
+}
+
+impl From<ResponseEnvelope> for TelegramHandlerResponse {
+	fn from(response: ResponseEnvelope) -> Self {
+		Self {
+			response,
+			reply_markup: None,
+		}
+	}
+}
+
+impl TelegramHandlerResponse {
+	pub fn with_reply_markup(mut self, reply_markup: TelegramReplyMarkup) -> Self {
+		self.reply_markup = Some(reply_markup);
+		self
 	}
 }
 

@@ -16,9 +16,10 @@
 //!
 //! This module binds the Telegram transport layer to the runtime service and Telegram-scoped
 //! session state. It owns chat-local concerns such as conversation history, pending-loop resume
-//! bindings, and out-of-band control commands. It does not introduce a separate Telegram
-//! strategy-selection layer or a multi-session model.
+//! bindings, out-of-band control commands, and Telegram-local session UX. Session truth still
+//! lives in the memory subsystem; this module does not introduce a provider-specific state system.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,16 +28,21 @@ use roku_common_types::{
 	ResponseEnvelope, ResponseStatus, RuntimeError,
 };
 use roku_memory::{
-	InMemorySessionStateBackend, InMemoryShortTermContinuityBackend, PendingLoopSnapshot,
-	PendingLoopSnapshotBackend, PendingLoopSnapshotError, ResolvedMemorySubsystem, SessionState,
-	SessionStateBackend, SessionStateError, ShortTermContinuityBackend, ShortTermContinuityError,
+	InMemorySessionManagementBackend, InMemorySessionStateBackend,
+	InMemoryShortTermContinuityBackend, PendingLoopSnapshot, PendingLoopSnapshotBackend,
+	PendingLoopSnapshotError, ResolvedMemorySubsystem, SessionCreateRequest, SessionDeleteMode,
+	SessionDescriptor, SessionManagementBackend, SessionManagementError, SessionState,
+	SessionStateBackend, SessionStateError, SessionSummary, ShortTermContinuityBackend,
+	ShortTermContinuityError,
 };
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_telegram::{
 	TelegramBotConfig, TelegramChat, TelegramConnector, TelegramControlCommand,
-	TelegramControlCommandRequest, TelegramInteraction, TelegramInteractionHandler,
-	TelegramMessage, TelegramOutboundMessage, TelegramParseMode, TelegramRuntimeConfig,
-	TelegramUpdate, TelegramUser,
+	TelegramControlCommandRequest, TelegramHandlerResponse, TelegramInlineKeyboardButton,
+	TelegramInteraction, TelegramInteractionHandler, TelegramMessage, TelegramOutboundMessage,
+	TelegramParseMode, TelegramReplyMarkup, TelegramRuntimeConfig, TelegramSessionCallbackAction,
+	TelegramSessionCallbackKind, TelegramUpdate, TelegramUser, session_delete_cancel_callback_data,
+	session_delete_confirm_callback_data, session_page_callback_data, session_select_callback_data,
 };
 use roku_runtime_service::{RuntimeExecutionMode, RuntimeModeReport};
 use serde_json::json;
@@ -74,6 +80,7 @@ pub fn run_telegram_bot_from_env() -> Result<(), CommandError> {
 			&layout, bootstrap,
 		)?),
 		transport_state: Arc::new(TelegramTransportState::from_env()?),
+		pending_session_rename_by_chat: Mutex::new(HashMap::new()),
 	};
 	let _ = emit_global_log(LogRecord::new(
 		"roku-cmd",
@@ -131,6 +138,9 @@ pub(crate) fn run_telegram_once_with_options_from_env(
 			command.session_id = options.session_id;
 			render_telegram_preview(chat_id, handler.handle_control_command(command))
 		}
+		TelegramInteraction::SessionCallback(_) => Err(CommandError::Usage(
+			"telegram-once preview should not produce session callbacks".to_string(),
+		)),
 		TelegramInteraction::ApprovalDecision(_) => Err(CommandError::Usage(
 			"telegram-once preview should not produce approval callbacks".to_string(),
 		)),
@@ -150,6 +160,7 @@ fn build_live_telegram_handler_from_env() -> Result<RuntimeServiceTelegramHandle
 			&layout, bootstrap,
 		)?),
 		transport_state: Arc::new(TelegramTransportState::from_env()?),
+		pending_session_rename_by_chat: Mutex::new(HashMap::new()),
 	})
 }
 
@@ -173,10 +184,12 @@ fn telegram_bot_config_from_env(
 ///
 /// Owns one shared runtime service and one [`TelegramTransportState`]; each request restores
 /// pending loop from session, runs the runtime, then syncs pending loop and conversation back.
-/// Does not perform strategy selection or multi-session routing; that stays in the runtime.
+/// Active-session selection stays in the entry + memory session subsystem; runtime only receives
+/// the resolved provider-neutral session_id.
 struct RuntimeServiceTelegramHandler {
 	service: Arc<roku_runtime_service::RuntimeService>,
 	transport_state: Arc<TelegramTransportState>,
+	pending_session_rename_by_chat: Mutex<HashMap<i64, PendingRenameState>>,
 }
 
 /// Stable snapshot for Telegram session management commands.
@@ -186,6 +199,7 @@ struct RuntimeServiceTelegramHandler {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TelegramSessionSnapshot {
 	session_id: String,
+	session_name: String,
 	/// When present, the chat has a resumable pending loop; consumed by `/status` and `/cancel`.
 	pending_run_id: Option<String>,
 	recent_turn_count: usize,
@@ -193,12 +207,27 @@ struct TelegramSessionSnapshot {
 	latest_activity: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingRenameState {
+	target_session_id: String,
+}
+
 impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegramHandler {
 	fn handle_request(
 		&self,
 		mut request: RequestEnvelope,
-	) -> Result<ResponseEnvelope, RuntimeError> {
-		let session_id = request.session_id.clone();
+	) -> Result<TelegramHandlerResponse, RuntimeError> {
+		let binding_id = request.session_id.clone();
+		if let Some(chat_id) = binding_chat_id(&binding_id)
+			&& let Some(rename_response) =
+				self.try_handle_pending_session_rename(chat_id, &binding_id, &request.goal)?
+		{
+			return Ok(rename_response);
+		}
+
+		let active_session = self.resolve_or_bootstrap_active_session(&binding_id)?;
+		let session_id = active_session.session_id.clone();
+		request.session_id = session_id.clone();
 		// Restore pending loop so this request continues from last saved state; then load history.
 		restore_pending_loop_from_session(&self.service, &*self.transport_state, &session_id)?;
 		request.conversation_history = self
@@ -225,7 +254,7 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 						created_at_unix_ms: now_unix_ms(),
 					},
 				)?;
-				Ok(response)
+				Ok(response.into())
 			}
 			Err(error) => {
 				// Same sync and append on error so conversation history and pending state stay consistent.
@@ -246,75 +275,187 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 	fn handle_control_command(
 		&self,
 		command: TelegramControlCommandRequest,
-	) -> Result<ResponseEnvelope, RuntimeError> {
+	) -> Result<TelegramHandlerResponse, RuntimeError> {
+		self.clear_pending_session_rename(command.chat_id)?;
 		// Reject inline args for commands that do not allow them (e.g. /clear, /cancel).
 		if command.argument.is_some() && !command.command.allows_inline_argument() {
-			return Ok(self.control_command_response(
-				command.command,
-				ResponseStatus::Failed,
-				format!(
-					"`/{}` does not accept extra arguments. Use it on its own.",
-					command.command.as_str()
-				),
-			));
+			return Ok(self
+				.control_command_response(
+					command.command,
+					ResponseStatus::Failed,
+					format!(
+						"`/{}` does not accept extra arguments. Use it on its own.",
+						command.command.as_str()
+					),
+				)
+				.into());
 		}
 
 		match command.command {
-			TelegramControlCommand::Help => Ok(self.control_command_response(
-				command.command,
-				ResponseStatus::Succeeded,
-				self.help_message(),
-			)),
+			TelegramControlCommand::Help => Ok(self
+				.control_command_response(
+					command.command,
+					ResponseStatus::Succeeded,
+					self.help_message(),
+				)
+				.into()),
 			TelegramControlCommand::Status => {
-				self.refresh_session_pending_state(&command.session_id)?;
-				let snapshot = self.transport_state.status_snapshot(&command.session_id)?;
-				Ok(self.control_command_response(
-					command.command,
-					ResponseStatus::Succeeded,
-					self.status_message(&snapshot),
-				))
-			}
-			TelegramControlCommand::Sessions => {
-				self.refresh_session_pending_state(&command.session_id)?;
-				let snapshot = self.transport_state.status_snapshot(&command.session_id)?;
-				Ok(self.control_command_response(
-					command.command,
-					ResponseStatus::Succeeded,
-					self.sessions_message(&snapshot),
-				))
-			}
-			TelegramControlCommand::Cancel => {
-				self.refresh_session_pending_state(&command.session_id)?;
-				let snapshot = self.transport_state.status_snapshot(&command.session_id)?;
-				if snapshot.pending_run_id.is_none() {
-					return Ok(self.control_command_response(
+				let active_session = self
+					.transport_state
+					.get_active_session(&command.session_id)?;
+				let snapshot = match active_session {
+					Some(active_session) => {
+						self.refresh_session_pending_state(&active_session.session_id)?;
+						Some(self.transport_state.status_snapshot(&active_session)?)
+					}
+					None => None,
+				};
+				Ok(self
+					.control_command_response(
 						command.command,
 						ResponseStatus::Succeeded,
-						self.cancel_message(&snapshot, false),
-					));
+						self.status_message(snapshot.as_ref()),
+					)
+					.into())
+			}
+			TelegramControlCommand::Sessions => {
+				self.sessions_response(&command.session_id, 0, None, None)
+			}
+			TelegramControlCommand::Cancel => {
+				let Some(active_session) = self
+					.transport_state
+					.get_active_session(&command.session_id)?
+				else {
+					return Ok(self
+						.control_command_response(
+							command.command,
+							ResponseStatus::Succeeded,
+							self.cancel_without_active_message(),
+						)
+						.into());
+				};
+				self.refresh_session_pending_state(&active_session.session_id)?;
+				let snapshot = self.transport_state.status_snapshot(&active_session)?;
+				if snapshot.pending_run_id.is_none() {
+					return Ok(self
+						.control_command_response(
+							command.command,
+							ResponseStatus::Succeeded,
+							self.cancel_message(Some(&snapshot), false),
+						)
+						.into());
 				}
 				// Clear both runtime and session binding so no stale pending loop remains.
-				self.service.clear_pending_loop(&command.session_id)?;
+				self.service
+					.clear_pending_loop(&active_session.session_id)?;
 				self.transport_state
-					.clear_pending_loop_snapshot(&command.session_id)
+					.clear_pending_loop_snapshot(&active_session.session_id)
 					.map_err(|error| RuntimeError::new(error.to_string()))?;
-				let snapshot = self.transport_state.status_snapshot(&command.session_id)?;
-				Ok(self.control_command_response(
-					command.command,
-					ResponseStatus::Succeeded,
-					self.cancel_message(&snapshot, true),
-				))
+				let snapshot = self.transport_state.status_snapshot(&active_session)?;
+				Ok(self
+					.control_command_response(
+						command.command,
+						ResponseStatus::Succeeded,
+						self.cancel_message(Some(&snapshot), true),
+					)
+					.into())
 			}
 			TelegramControlCommand::Clear => {
-				self.service.clear_pending_loop(&command.session_id)?;
+				let Some(active_session) = self
+					.transport_state
+					.get_active_session(&command.session_id)?
+				else {
+					return Ok(self
+						.control_command_response(
+							command.command,
+							ResponseStatus::Succeeded,
+							self.clear_without_active_message(),
+						)
+						.into());
+				};
+				self.service
+					.clear_pending_loop(&active_session.session_id)?;
 				self.transport_state
-					.clear_transport_session(&command.session_id)?;
-				let snapshot = self.transport_state.status_snapshot(&command.session_id)?;
-				Ok(self.control_command_response(
+					.clear_transport_session(&active_session.session_id)?;
+				let snapshot = self.transport_state.status_snapshot(&active_session)?;
+				Ok(self
+					.control_command_response(
+						command.command,
+						ResponseStatus::Succeeded,
+						self.clear_message(Some(&snapshot)),
+					)
+					.into())
+			}
+			TelegramControlCommand::New => {
+				let descriptor = self.create_and_select_session(
+					&command.session_id,
+					SessionCreateRequest::default(),
+				)?;
+				Ok(self
+					.control_command_response(
+						command.command,
+						ResponseStatus::Succeeded,
+						format!(
+							"Created and switched to a new session.\nSession: {}\nName: {}",
+							descriptor.session_id, descriptor.name
+						),
+					)
+					.into())
+			}
+			TelegramControlCommand::Delete => {
+				let Some(active_session) = self
+					.transport_state
+					.get_active_session(&command.session_id)?
+				else {
+					return Ok(self
+						.control_command_response(
+							command.command,
+							ResponseStatus::Succeeded,
+							"No active session is currently selected for this chat.".to_string(),
+						)
+						.into());
+				};
+				Ok(TelegramHandlerResponse::from(self.control_command_response(
 					command.command,
 					ResponseStatus::Succeeded,
-					self.clear_message(&snapshot),
+					format!(
+						"Delete the current active session?\nSession: {}\nName: {}\nThis removes session state, short-term continuity, and pending-loop snapshots for that session. Long-term memory is kept.",
+						active_session.session_id, active_session.name
+					),
 				))
+				.with_reply_markup(delete_session_confirmation_markup(
+					&active_session.session_id,
+				)))
+			}
+			TelegramControlCommand::SessionSetting => {
+				let Some(active_session) = self
+					.transport_state
+					.get_active_session(&command.session_id)?
+				else {
+					return Ok(self
+						.control_command_response(
+							command.command,
+							ResponseStatus::Failed,
+							"No active session is currently selected for this chat.".to_string(),
+						)
+						.into());
+				};
+				self.set_pending_session_rename(
+					command.chat_id,
+					PendingRenameState {
+						target_session_id: active_session.session_id.clone(),
+					},
+				)?;
+				Ok(self
+					.control_command_response(
+						command.command,
+						ResponseStatus::Succeeded,
+						format!(
+							"Send the new name for the current session.\nCurrent session: {}\nCurrent name: {}\nName length must be 1..=50 Unicode characters.",
+							active_session.session_id, active_session.name
+						),
+					)
+					.into())
 			}
 		}
 	}
@@ -323,8 +464,96 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 		&self,
 		approval_id: ApprovalId,
 		decision: ApprovalDecision,
-	) -> Result<ResponseEnvelope, RuntimeError> {
-		self.service.decide_approval(&approval_id, decision)
+	) -> Result<TelegramHandlerResponse, RuntimeError> {
+		self.service
+			.decide_approval(&approval_id, decision)
+			.map(Into::into)
+	}
+
+	fn handle_session_callback(
+		&self,
+		action: TelegramSessionCallbackAction,
+	) -> Result<TelegramHandlerResponse, RuntimeError> {
+		let binding_id = action.chat_id.to_string();
+		match action.action {
+			TelegramSessionCallbackKind::ShowPage { page } => {
+				self.sessions_response(&binding_id, page, None, None)
+			}
+			TelegramSessionCallbackKind::SelectSession { session_id, page } => {
+				let descriptor = self
+					.transport_state
+					.select_active_session(&binding_id, &session_id)?;
+				self.sessions_response(
+					&binding_id,
+					page,
+					Some(format!(
+						"Switched active session to {} ({})",
+						descriptor.name, descriptor.session_id
+					)),
+					None,
+				)
+			}
+			TelegramSessionCallbackKind::DeleteCancel => Ok(self
+				.control_command_response(
+					TelegramControlCommand::Delete,
+					ResponseStatus::Succeeded,
+					"Session deletion cancelled.".to_string(),
+				)
+				.into()),
+			TelegramSessionCallbackKind::DeleteConfirm { session_id } => {
+				let Some(active_session) = self.transport_state.get_active_session(&binding_id)?
+				else {
+					return Ok(self
+						.control_command_response(
+							TelegramControlCommand::Delete,
+							ResponseStatus::Failed,
+							"No active session is currently selected for this chat.".to_string(),
+						)
+						.into());
+				};
+				if active_session.session_id != session_id {
+					return Ok(self
+						.control_command_response(
+							TelegramControlCommand::Delete,
+							ResponseStatus::Failed,
+							"Active session changed before confirmation. Run /delete again."
+								.to_string(),
+						)
+						.into());
+				}
+
+				self.transport_state.delete_session(
+					&binding_id,
+					&active_session.session_id,
+					SessionDeleteMode::RetainLongTermMemory,
+				)?;
+				match self.create_and_select_session(
+					&binding_id,
+					SessionCreateRequest::default(),
+				) {
+					Ok(new_session) => Ok(self
+						.control_command_response(
+							TelegramControlCommand::Delete,
+							ResponseStatus::Succeeded,
+							format!(
+								"Deleted the previous session and switched to a new one.\nSession: {}\nName: {}",
+								new_session.session_id, new_session.name
+							),
+						)
+						.into()),
+					Err(error) => Ok(self
+						.control_command_response(
+							TelegramControlCommand::Delete,
+							ResponseStatus::Failed,
+							format!(
+								"Deleted the previous session, but failed to create and select a replacement session: {}\nThe chat currently has no active session. Sending a normal message will bootstrap a new one.",
+								error.message
+							),
+						)
+						.into()),
+				}
+			}
+		}
 	}
 }
 
@@ -357,8 +586,11 @@ impl RuntimeServiceTelegramHandler {
 		[
 			"Telegram control commands:".to_string(),
 			"/help - Show available control commands.".to_string(),
+			"/new - Create and switch to a new session for this chat.".to_string(),
 			"/status - Show the current chat session status.".to_string(),
-			"/sessions - Show the current active session overview.".to_string(),
+			"/sessions - Show and switch the sessions bound to this chat.".to_string(),
+			"/session-setting - Rename the current active session.".to_string(),
+			"/delete - Delete the current active session after confirmation.".to_string(),
 			"/cancel - Cancel the current pending loop without clearing chat history.".to_string(),
 			"/clear - Clear the current chat session state and pending loop.".to_string(),
 			"".to_string(),
@@ -367,24 +599,56 @@ impl RuntimeServiceTelegramHandler {
 		.join("\n")
 	}
 
-	fn status_message(&self, snapshot: &TelegramSessionSnapshot) -> String {
+	fn status_message(&self, snapshot: Option<&TelegramSessionSnapshot>) -> String {
 		let mut lines = vec!["Current chat session status".to_string()];
-		append_session_snapshot_lines(&mut lines, snapshot);
+		match snapshot {
+			Some(snapshot) => append_session_snapshot_lines(&mut lines, snapshot),
+			None => lines.push("Active session: none".to_string()),
+		}
 		append_runtime_mode_lines(&mut lines, &self.service.runtime_mode_report());
 		lines.join("\n")
 	}
 
-	fn sessions_message(&self, snapshot: &TelegramSessionSnapshot) -> String {
-		let mut lines = vec!["Active session".to_string()];
-		append_session_snapshot_lines(&mut lines, snapshot);
+	fn sessions_message(
+		&self,
+		active_snapshot: Option<&TelegramSessionSnapshot>,
+		sessions: &[SessionSummary],
+		page: usize,
+		total_pages: usize,
+		header_note: Option<&str>,
+	) -> String {
+		let mut lines = Vec::new();
+		if let Some(header_note) = header_note {
+			lines.push(header_note.to_string());
+			lines.push(String::new());
+		}
+		lines.push("Current chat sessions".to_string());
+		match active_snapshot {
+			Some(snapshot) => append_session_snapshot_lines(&mut lines, snapshot),
+			None => lines.push("Active session: none".to_string()),
+		}
 		append_runtime_mode_lines(&mut lines, &self.service.runtime_mode_report());
-		lines.push(
-			"Multi-session switching is not enabled yet. `/new` will arrive later.".to_string(),
-		);
+		lines.push(String::new());
+		if sessions.is_empty() {
+			lines.push("No sessions exist for this chat yet. Use /new to create one.".to_string());
+			return lines.join("\n");
+		}
+		lines.push(format!(
+			"Sessions page {}/{}",
+			page.saturating_add(1),
+			total_pages.max(1)
+		));
+		for session in sessions {
+			lines.push(format!("• {} ({})", session.name, session.session_id));
+		}
 		lines.join("\n")
 	}
 
-	fn cancel_message(&self, snapshot: &TelegramSessionSnapshot, cancelled: bool) -> String {
+	fn cancel_message(
+		&self,
+		snapshot: Option<&TelegramSessionSnapshot>,
+		cancelled: bool,
+	) -> String {
 		let mut lines = if cancelled {
 			vec![
 				"Cancelled the pending runtime loop for this chat session.".to_string(),
@@ -394,13 +658,17 @@ impl RuntimeServiceTelegramHandler {
 		} else {
 			vec!["No pending runtime loop is currently stored for this chat session.".to_string()]
 		};
-		append_session_snapshot_lines(&mut lines, snapshot);
+		if let Some(snapshot) = snapshot {
+			append_session_snapshot_lines(&mut lines, snapshot);
+		}
 		lines.join("\n")
 	}
 
-	fn clear_message(&self, snapshot: &TelegramSessionSnapshot) -> String {
+	fn clear_message(&self, snapshot: Option<&TelegramSessionSnapshot>) -> String {
 		let mut lines = vec!["Cleared the current chat session state.".to_string()];
-		append_session_snapshot_lines(&mut lines, snapshot);
+		if let Some(snapshot) = snapshot {
+			append_session_snapshot_lines(&mut lines, snapshot);
+		}
 		lines.push(
 			"Only Telegram session state was cleared. Runtime global config and cross-channel shared state were left untouched."
 				.to_string(),
@@ -408,11 +676,305 @@ impl RuntimeServiceTelegramHandler {
 		lines.push("Stored task records and artifacts were not deleted.".to_string());
 		lines.join("\n")
 	}
+
+	fn cancel_without_active_message(&self) -> String {
+		"No active session is currently selected for this chat, so there is no pending loop to cancel."
+			.to_string()
+	}
+
+	fn clear_without_active_message(&self) -> String {
+		"No active session is currently selected for this chat, so there is no session state to clear."
+			.to_string()
+	}
+
+	fn resolve_or_bootstrap_active_session(
+		&self,
+		binding_id: &str,
+	) -> Result<SessionDescriptor, RuntimeError> {
+		if let Some(active_session) = self.transport_state.get_active_session(binding_id)? {
+			return Ok(active_session);
+		}
+		self.create_and_select_session(binding_id, SessionCreateRequest::default())
+	}
+
+	fn create_and_select_session(
+		&self,
+		binding_id: &str,
+		request: SessionCreateRequest,
+	) -> Result<SessionDescriptor, RuntimeError> {
+		let descriptor = self.transport_state.create_session(binding_id, request)?;
+		self.transport_state
+			.select_active_session(binding_id, &descriptor.session_id)
+	}
+
+	fn sessions_response(
+		&self,
+		binding_id: &str,
+		requested_page: usize,
+		header_note: Option<String>,
+		override_active_session: Option<SessionDescriptor>,
+	) -> Result<TelegramHandlerResponse, RuntimeError> {
+		let active_session = match override_active_session {
+			Some(active_session) => Some(active_session),
+			None => self.transport_state.get_active_session(binding_id)?,
+		};
+		let active_snapshot = match active_session.as_ref() {
+			Some(active_session) => {
+				self.refresh_session_pending_state(&active_session.session_id)?;
+				Some(self.transport_state.status_snapshot(active_session)?)
+			}
+			None => None,
+		};
+		let mut sessions = self.transport_state.list_sessions(binding_id)?;
+		sessions.sort_by(|left, right| {
+			right
+				.updated_at_unix_ms
+				.cmp(&left.updated_at_unix_ms)
+				.then_with(|| left.session_id.cmp(&right.session_id))
+		});
+		let page_state = paginate_sessions(&sessions, requested_page, 5);
+		let page_sessions = sessions[page_state.start..page_state.end].to_vec();
+		let mut response = TelegramHandlerResponse::from(self.control_command_response(
+			TelegramControlCommand::Sessions,
+			ResponseStatus::Succeeded,
+			self.sessions_message(
+				active_snapshot.as_ref(),
+				&page_sessions,
+				page_state.page,
+				page_state.total_pages,
+				header_note.as_deref(),
+			),
+		));
+		if let Some(markup) = build_sessions_markup(
+			&sessions,
+			active_snapshot
+				.as_ref()
+				.map(|snapshot| snapshot.session_id.as_str()),
+			page_state.page,
+			5,
+		) {
+			response = response.with_reply_markup(markup);
+		}
+		Ok(response)
+	}
+
+	fn try_handle_pending_session_rename(
+		&self,
+		chat_id: i64,
+		binding_id: &str,
+		candidate_name: &str,
+	) -> Result<Option<TelegramHandlerResponse>, RuntimeError> {
+		let Some(pending) = self.pending_session_rename(chat_id)? else {
+			return Ok(None);
+		};
+		if candidate_name.trim().is_empty() {
+			return Ok(Some(
+				self.control_command_response(
+					TelegramControlCommand::SessionSetting,
+					ResponseStatus::Failed,
+					"Session name cannot be blank. Send a non-empty text value, or use another slash command to cancel rename."
+						.to_string(),
+				)
+				.into(),
+			));
+		}
+		if candidate_name.trim().chars().count() > 50 {
+			return Ok(Some(
+				self.control_command_response(
+					TelegramControlCommand::SessionSetting,
+					ResponseStatus::Failed,
+					"Session name must be 1..=50 Unicode characters. Send another text value, or use another slash command to cancel rename."
+						.to_string(),
+				)
+				.into(),
+			));
+		}
+
+		match self.transport_state.rename_session(
+			binding_id,
+			&pending.target_session_id,
+			candidate_name,
+		) {
+			Ok(descriptor) => {
+				self.clear_pending_session_rename(chat_id)?;
+				Ok(Some(
+					self.control_command_response(
+						TelegramControlCommand::SessionSetting,
+						ResponseStatus::Succeeded,
+						format!(
+							"Renamed the current session.\nSession: {}\nName: {}",
+							descriptor.session_id, descriptor.name
+						),
+					)
+					.into(),
+				))
+			}
+			Err(RuntimeError { message })
+				if message.contains("validation")
+					|| message.contains("must not be empty")
+					|| message.contains("must be 1..=50") =>
+			{
+				Ok(Some(
+					self.control_command_response(
+						TelegramControlCommand::SessionSetting,
+						ResponseStatus::Failed,
+						format!(
+							"Session name is invalid: {message}\nSend another text value, or use another slash command to cancel rename."
+						),
+					)
+					.into(),
+				))
+			}
+			Err(error) => {
+				self.clear_pending_session_rename(chat_id)?;
+				Ok(Some(
+					self.control_command_response(
+						TelegramControlCommand::SessionSetting,
+						ResponseStatus::Failed,
+						format!(
+							"Failed to rename the current session: {}\nRename mode was cleared.",
+							error.message
+						),
+					)
+					.into(),
+				))
+			}
+		}
+	}
+
+	fn set_pending_session_rename(
+		&self,
+		chat_id: i64,
+		state: PendingRenameState,
+	) -> Result<(), RuntimeError> {
+		self.pending_session_rename_by_chat
+			.lock()
+			.map_err(|_| RuntimeError::new("telegram session rename state is poisoned"))?
+			.insert(chat_id, state);
+		Ok(())
+	}
+
+	fn clear_pending_session_rename(&self, chat_id: i64) -> Result<(), RuntimeError> {
+		self.pending_session_rename_by_chat
+			.lock()
+			.map_err(|_| RuntimeError::new("telegram session rename state is poisoned"))?
+			.remove(&chat_id);
+		Ok(())
+	}
+
+	fn pending_session_rename(
+		&self,
+		chat_id: i64,
+	) -> Result<Option<PendingRenameState>, RuntimeError> {
+		Ok(self
+			.pending_session_rename_by_chat
+			.lock()
+			.map_err(|_| RuntimeError::new("telegram session rename state is poisoned"))?
+			.get(&chat_id)
+			.cloned())
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionPageState {
+	page: usize,
+	start: usize,
+	end: usize,
+	total_pages: usize,
+}
+
+fn paginate_sessions(
+	sessions: &[SessionSummary],
+	requested_page: usize,
+	page_size: usize,
+) -> SessionPageState {
+	if sessions.is_empty() || page_size == 0 {
+		return SessionPageState {
+			page: 0,
+			start: 0,
+			end: 0,
+			total_pages: 1,
+		};
+	}
+
+	let total_pages = sessions.len().div_ceil(page_size);
+	let page = requested_page.min(total_pages.saturating_sub(1));
+	let start = page.saturating_mul(page_size);
+	let end = (start + page_size).min(sessions.len());
+	SessionPageState {
+		page,
+		start,
+		end,
+		total_pages,
+	}
+}
+
+fn build_sessions_markup(
+	sessions: &[SessionSummary],
+	active_session_id: Option<&str>,
+	requested_page: usize,
+	page_size: usize,
+) -> Option<TelegramReplyMarkup> {
+	if sessions.is_empty() {
+		return None;
+	}
+	let page_state = paginate_sessions(sessions, requested_page, page_size);
+	let mut inline_keyboard = sessions[page_state.start..page_state.end]
+		.iter()
+		.map(|session| {
+			let marker = if active_session_id.is_some_and(|active| active == session.session_id) {
+				"* "
+			} else {
+				""
+			};
+			vec![TelegramInlineKeyboardButton {
+				text: format!("{marker}{}", session.name),
+				callback_data: session_select_callback_data(page_state.page, &session.session_id),
+			}]
+		})
+		.collect::<Vec<_>>();
+	let mut pager_row = Vec::new();
+	if page_state.page > 0 {
+		pager_row.push(TelegramInlineKeyboardButton {
+			text: "Prev".to_string(),
+			callback_data: session_page_callback_data(page_state.page - 1),
+		});
+	}
+	if page_state.page + 1 < page_state.total_pages {
+		pager_row.push(TelegramInlineKeyboardButton {
+			text: "Next".to_string(),
+			callback_data: session_page_callback_data(page_state.page + 1),
+		});
+	}
+	if !pager_row.is_empty() {
+		inline_keyboard.push(pager_row);
+	}
+	Some(TelegramReplyMarkup { inline_keyboard })
+}
+
+fn delete_session_confirmation_markup(session_id: &str) -> TelegramReplyMarkup {
+	TelegramReplyMarkup {
+		inline_keyboard: vec![vec![
+			TelegramInlineKeyboardButton {
+				text: "Confirm delete".to_string(),
+				callback_data: session_delete_confirm_callback_data(session_id),
+			},
+			TelegramInlineKeyboardButton {
+				text: "Cancel".to_string(),
+				callback_data: session_delete_cancel_callback_data(),
+			},
+		]],
+	}
+}
+
+fn binding_chat_id(binding_id: &str) -> Option<i64> {
+	binding_id.parse::<i64>().ok()
 }
 
 /// Appends human-readable snapshot lines for `/status` and `/sessions`; order is fixed for tests.
 fn append_session_snapshot_lines(lines: &mut Vec<String>, snapshot: &TelegramSessionSnapshot) {
-	lines.push(format!("Session: {}", snapshot.session_id));
+	lines.push(format!("Active session name: {}", snapshot.session_name));
+	lines.push(format!("Active session id: {}", snapshot.session_id));
 	match snapshot.pending_run_id.as_deref() {
 		Some(run_id) => {
 			lines.push("Pending loop: yes".to_string());
@@ -468,16 +1030,17 @@ fn truncate_preview(value: &str, max_chars: usize) -> String {
 /// Renders the result of a single telegram-once run as pretty JSON (runtime_status, telegram_message, etc.).
 fn render_telegram_preview(
 	chat_id: i64,
-	response: Result<ResponseEnvelope, RuntimeError>,
+	response: Result<TelegramHandlerResponse, RuntimeError>,
 ) -> Result<String, CommandError> {
 	let preview = match response {
 		Ok(response) => {
-			let outbound = TelegramOutboundMessage::from_response(chat_id, &response);
+			let outbound = TelegramOutboundMessage::from_handler_response(chat_id, &response);
 			json!({
-				"runtime_status": format!("{:?}", response.status),
-				"request_id": response.request_id.0,
+				"runtime_status": format!("{:?}", response.response.status),
+				"request_id": response.response.request_id.0,
 				"telegram_message": outbound.text,
 				"parse_mode": telegram_parse_mode_label(outbound.parse_mode),
+				"has_reply_markup": outbound.reply_markup.is_some(),
 			})
 		}
 		Err(error) => {
@@ -510,6 +1073,8 @@ pub(crate) struct TelegramTransportState {
 	session_state_store: Mutex<Box<dyn SessionStateBackend + Send>>,
 	/// Conversation turns per session_id; one store per process.
 	conversation_store: Mutex<Box<dyn ShortTermContinuityBackend + Send>>,
+	/// Provider-neutral session-management store used to resolve/create/select sessions.
+	session_management_store: Mutex<Box<dyn SessionManagementBackend + Send>>,
 }
 
 impl TelegramTransportState {
@@ -535,15 +1100,21 @@ impl TelegramTransportState {
 	fn new(
 		session_state_store: Box<dyn SessionStateBackend + Send>,
 		conversation_store: Box<dyn ShortTermContinuityBackend + Send>,
+		session_management_store: Box<dyn SessionManagementBackend + Send>,
 	) -> Self {
 		Self {
 			session_state_store: Mutex::new(session_state_store),
 			conversation_store: Mutex::new(conversation_store),
+			session_management_store: Mutex::new(session_management_store),
 		}
 	}
 
 	fn from_memory_subsystem(subsystem: ResolvedMemorySubsystem) -> Self {
-		Self::new(subsystem.session_state, subsystem.short_term)
+		Self::new(
+			subsystem.session_state,
+			subsystem.short_term,
+			subsystem.session_management,
+		)
 	}
 
 	/// Persists transport-owned session state for the given session.
@@ -608,15 +1179,76 @@ impl TelegramTransportState {
 	///
 	/// The snapshot is intentionally small and deterministic so Telegram control surfaces can stay
 	/// testable even if the underlying repositories evolve.
-	fn status_snapshot(&self, session_id: &str) -> Result<TelegramSessionSnapshot, RuntimeError> {
-		let session_state = self.load_session_state_or_default(session_id)?;
-		let turns = self.load_short_term_continuity(session_id, 12)?;
+	fn status_snapshot(
+		&self,
+		descriptor: &SessionDescriptor,
+	) -> Result<TelegramSessionSnapshot, RuntimeError> {
+		let session_state = self.load_session_state_or_default(&descriptor.session_id)?;
+		let turns = self.load_short_term_continuity(&descriptor.session_id, 12)?;
 		Ok(TelegramSessionSnapshot {
-			session_id: session_id.to_string(),
+			session_id: descriptor.session_id.clone(),
+			session_name: descriptor.name.clone(),
 			pending_run_id: session_state.pending_loop.map(|binding| binding.run_id),
 			recent_turn_count: turns.len(),
 			latest_activity: turns.last().map(latest_activity_summary),
 		})
+	}
+
+	fn create_session(
+		&self,
+		binding_id: &str,
+		request: SessionCreateRequest,
+	) -> Result<SessionDescriptor, RuntimeError> {
+		self.lock_session_management_store()?
+			.create_session(binding_id, request)
+			.map_err(runtime_session_management_error)
+	}
+
+	fn get_active_session(
+		&self,
+		binding_id: &str,
+	) -> Result<Option<SessionDescriptor>, RuntimeError> {
+		self.lock_session_management_store()?
+			.get_active_session(binding_id)
+			.map_err(runtime_session_management_error)
+	}
+
+	fn list_sessions(&self, binding_id: &str) -> Result<Vec<SessionSummary>, RuntimeError> {
+		self.lock_session_management_store()?
+			.list_sessions(binding_id)
+			.map_err(runtime_session_management_error)
+	}
+
+	fn rename_session(
+		&self,
+		binding_id: &str,
+		session_id: &str,
+		new_name: &str,
+	) -> Result<SessionDescriptor, RuntimeError> {
+		self.lock_session_management_store()?
+			.rename_session(binding_id, session_id, new_name)
+			.map_err(runtime_session_management_error)
+	}
+
+	fn delete_session(
+		&self,
+		binding_id: &str,
+		session_id: &str,
+		mode: SessionDeleteMode,
+	) -> Result<(), RuntimeError> {
+		self.lock_session_management_store()?
+			.delete_session(binding_id, session_id, mode)
+			.map_err(runtime_session_management_error)
+	}
+
+	fn select_active_session(
+		&self,
+		binding_id: &str,
+		session_id: &str,
+	) -> Result<SessionDescriptor, RuntimeError> {
+		self.lock_session_management_store()?
+			.select_active_session(binding_id, session_id)
+			.map_err(runtime_session_management_error)
 	}
 
 	/// Locks the session-state store; returns a runtime error if the mutex is poisoned.
@@ -636,6 +1268,15 @@ impl TelegramTransportState {
 		self.conversation_store
 			.lock()
 			.map_err(|_| RuntimeError::new("conversation store is poisoned"))
+	}
+
+	fn lock_session_management_store(
+		&self,
+	) -> Result<std::sync::MutexGuard<'_, Box<dyn SessionManagementBackend + Send>>, RuntimeError>
+	{
+		self.session_management_store
+			.lock()
+			.map_err(|_| RuntimeError::new("session management store is poisoned"))
 	}
 }
 
@@ -669,6 +1310,7 @@ impl Default for TelegramTransportState {
 		Self::new(
 			Box::new(InMemorySessionStateBackend::default()),
 			Box::new(InMemoryShortTermContinuityBackend::default()),
+			Box::new(InMemorySessionManagementBackend::default()),
 		)
 	}
 }
@@ -678,6 +1320,10 @@ fn runtime_session_state_error(error: SessionStateError) -> RuntimeError {
 }
 
 fn runtime_short_term_error(error: ShortTermContinuityError) -> RuntimeError {
+	RuntimeError::new(error.to_string())
+}
+
+fn runtime_session_management_error(error: SessionManagementError) -> RuntimeError {
 	RuntimeError::new(error.to_string())
 }
 
@@ -804,6 +1450,7 @@ mod tests {
 				Box::new(InMemoryShortTermContinuityBackend::default()),
 				Box::new(InMemorySessionStateBackend::default()),
 				Box::new(NoopPendingLoopSnapshotBackend),
+				Box::new(InMemorySessionManagementBackend::default()),
 			));
 		let session_id = "telegram-seam-session";
 		let state = SessionState {
@@ -863,36 +1510,39 @@ mod tests {
 		let handler = RuntimeServiceTelegramHandler {
 			service: Arc::new(RuntimeService::in_memory_with_agent_runtime(runtime)),
 			transport_state: Arc::new(TelegramTransportState::default()),
+			pending_session_rename_by_chat: Mutex::new(HashMap::new()),
 		};
-		let session_id = "telegram-session-1";
+		let binding_id = "telegram-session-1";
 
 		let first = handler
-			.handle_request(request(session_id, "今天周几？"))
+			.handle_request(request(binding_id, "今天周几？"))
 			.expect("first request should succeed");
-		assert_eq!(first.status, ResponseStatus::Succeeded);
-		assert_eq!(first.message, "今天是星期三。");
+		assert_eq!(first.response.status, ResponseStatus::Succeeded);
+		assert_eq!(first.response.message, "今天是星期三。");
 
 		let second = handler
-			.handle_request(request(session_id, "沙县小吃是什么？"))
+			.handle_request(request(binding_id, "沙县小吃是什么？"))
 			.expect("second request should succeed");
-		assert_eq!(second.status, ResponseStatus::Succeeded);
-		assert!(second.message.contains("福建沙县"));
+		assert_eq!(second.response.status, ResponseStatus::Succeeded);
+		assert!(second.response.message.contains("福建沙县"));
 
 		let third = handler
-			.handle_request(request(session_id, "我刚问了你什么？"))
+			.handle_request(request(binding_id, "我刚问了你什么？"))
 			.expect("third request should succeed");
-		assert_eq!(third.status, ResponseStatus::Succeeded);
-		assert_eq!(third.message, "你刚才问的是：沙县小吃是什么？");
+		assert_eq!(third.response.status, ResponseStatus::Succeeded);
+		assert_eq!(third.response.message, "你刚才问的是：沙县小吃是什么？");
+
+		let session = active_session(&handler, binding_id);
 
 		let session_state = handler
 			.transport_state
-			.load_session_state_or_default(session_id)
+			.load_session_state_or_default(&session.session_id)
 			.expect("session state should load");
 		assert_eq!(session_state.planning_mode, None);
 
 		let turns = handler
 			.transport_state
-			.load_short_term_continuity(session_id, 8)
+			.load_short_term_continuity(&session.session_id, 8)
 			.expect("turns should load");
 		assert_eq!(turns.len(), 6);
 		assert_eq!(turns[0].content, "今天周几？");
@@ -903,11 +1553,12 @@ mod tests {
 	#[test]
 	fn telegram_control_cancel_clears_pending_loop_without_clearing_continuity() {
 		let handler = test_handler();
-		let session_id = "telegram-control-cancel";
+		let binding_id = "telegram-control-cancel";
+		let session = bootstrap_session(&handler, binding_id);
 		handler
 			.transport_state
 			.append_turn(
-				session_id,
+				&session.session_id,
 				ConversationTurn {
 					role: ConversationRole::User,
 					content: "hello".to_string(),
@@ -915,34 +1566,39 @@ mod tests {
 				},
 			)
 			.expect("conversation turn should save");
-		let loop_state = awaiting_user_loop_state(session_id, "loop-cancel-1");
+		let loop_state = awaiting_user_loop_state(&session.session_id, "loop-cancel-1");
 		handler
 			.service
 			.restore_pending_loop(loop_state)
 			.expect("pending loop should restore");
-		sync_pending_loop_to_session(&handler.service, &*handler.transport_state, session_id)
-			.expect("pending loop should sync");
+		sync_pending_loop_to_session(
+			&handler.service,
+			&*handler.transport_state,
+			&session.session_id,
+		)
+		.expect("pending loop should sync");
 
 		let response = handler
-			.handle_control_command(control_command(session_id, TelegramControlCommand::Cancel))
+			.handle_control_command(control_command(binding_id, TelegramControlCommand::Cancel))
 			.expect("cancel command should succeed");
-		assert_eq!(response.status, ResponseStatus::Succeeded);
+		assert_eq!(response.response.status, ResponseStatus::Succeeded);
 		assert!(
 			response
+				.response
 				.message
 				.contains("Cancelled the pending runtime loop")
 		);
 		assert!(
 			handler
 				.service
-				.pending_loop(session_id)
+				.pending_loop(&session.session_id)
 				.expect("pending lookup should succeed")
 				.is_none()
 		);
 		assert!(
 			handler
 				.transport_state
-				.load_session_state_or_default(session_id)
+				.load_session_state_or_default(&session.session_id)
 				.expect("session state should load")
 				.pending_loop
 				.is_none()
@@ -950,7 +1606,7 @@ mod tests {
 		assert_eq!(
 			handler
 				.transport_state
-				.load_short_term_continuity(session_id, 8)
+				.load_short_term_continuity(&session.session_id, 8)
 				.expect("turns should load")
 				.len(),
 			1
@@ -960,11 +1616,12 @@ mod tests {
 	#[test]
 	fn telegram_control_clear_clears_session_state() {
 		let handler = test_handler();
-		let session_id = "telegram-control-clear";
+		let binding_id = "telegram-control-clear";
+		let session = bootstrap_session(&handler, binding_id);
 		handler
 			.transport_state
 			.save_session_state(
-				session_id,
+				&session.session_id,
 				SessionState {
 					planning_mode: None,
 					pending_loop: None,
@@ -974,7 +1631,7 @@ mod tests {
 		handler
 			.transport_state
 			.append_turn(
-				session_id,
+				&session.session_id,
 				ConversationTurn {
 					role: ConversationRole::Assistant,
 					content: "hi".to_string(),
@@ -982,34 +1639,39 @@ mod tests {
 				},
 			)
 			.expect("conversation should save");
-		let loop_state = awaiting_user_loop_state(session_id, "loop-clear-1");
+		let loop_state = awaiting_user_loop_state(&session.session_id, "loop-clear-1");
 		handler
 			.service
 			.restore_pending_loop(loop_state)
 			.expect("pending loop should restore");
-		sync_pending_loop_to_session(&handler.service, &*handler.transport_state, session_id)
-			.expect("pending loop should sync");
+		sync_pending_loop_to_session(
+			&handler.service,
+			&*handler.transport_state,
+			&session.session_id,
+		)
+		.expect("pending loop should sync");
 
 		let response = handler
-			.handle_control_command(control_command(session_id, TelegramControlCommand::Clear))
+			.handle_control_command(control_command(binding_id, TelegramControlCommand::Clear))
 			.expect("clear command should succeed");
-		assert_eq!(response.status, ResponseStatus::Succeeded);
+		assert_eq!(response.response.status, ResponseStatus::Succeeded);
 		assert!(
 			response
+				.response
 				.message
 				.contains("Cleared the current chat session state.")
 		);
 		assert!(
 			handler
 				.service
-				.pending_loop(session_id)
+				.pending_loop(&session.session_id)
 				.expect("pending loop lookup should succeed")
 				.is_none()
 		);
 		assert_eq!(
 			handler
 				.transport_state
-				.load_short_term_continuity(session_id, 8)
+				.load_short_term_continuity(&session.session_id, 8)
 				.expect("turns should load")
 				.len(),
 			0
@@ -1017,7 +1679,7 @@ mod tests {
 		assert!(
 			handler
 				.transport_state
-				.load_session_state_or_default(session_id)
+				.load_session_state_or_default(&session.session_id)
 				.expect("session state should load")
 				.pending_loop
 				.is_none()
@@ -1027,11 +1689,12 @@ mod tests {
 	#[test]
 	fn telegram_control_status_reports_current_snapshot() {
 		let handler = test_handler();
-		let session_id = "telegram-control-status";
+		let binding_id = "telegram-control-status";
+		let session = bootstrap_session(&handler, binding_id);
 		handler
 			.transport_state
 			.append_turn(
-				session_id,
+				&session.session_id,
 				ConversationTurn {
 					role: ConversationRole::Assistant,
 					content: "ready".to_string(),
@@ -1039,53 +1702,85 @@ mod tests {
 				},
 			)
 			.expect("conversation should save");
-		let loop_state = awaiting_user_loop_state(session_id, "loop-status-1");
+		let loop_state = awaiting_user_loop_state(&session.session_id, "loop-status-1");
 		handler
 			.service
 			.restore_pending_loop(loop_state)
 			.expect("pending loop should restore");
-		sync_pending_loop_to_session(&handler.service, &*handler.transport_state, session_id)
-			.expect("pending loop should sync");
+		sync_pending_loop_to_session(
+			&handler.service,
+			&*handler.transport_state,
+			&session.session_id,
+		)
+		.expect("pending loop should sync");
 
 		let response = handler
-			.handle_control_command(control_command(session_id, TelegramControlCommand::Status))
+			.handle_control_command(control_command(binding_id, TelegramControlCommand::Status))
 			.expect("status command should succeed");
-		assert_eq!(response.status, ResponseStatus::Succeeded);
-		assert!(response.message.contains("Current chat session status"));
+		assert_eq!(response.response.status, ResponseStatus::Succeeded);
 		assert!(
 			response
+				.response
 				.message
-				.contains("Session: telegram-control-status")
+				.contains("Current chat session status")
 		);
-		assert!(response.message.contains("Pending loop: yes"));
-		assert!(response.message.contains("Pending run: loop-status-1"));
-		assert!(response.message.contains("Recent turns: 1"));
-		assert!(response.message.contains("Runtime mode: requested="));
+		assert!(
+			response
+				.response
+				.message
+				.contains(&format!("Active session id: {}", session.session_id))
+		);
+		assert!(response.response.message.contains("Pending loop: yes"));
+		assert!(
+			response
+				.response
+				.message
+				.contains("Pending run: loop-status-1")
+		);
+		assert!(response.response.message.contains("Recent turns: 1"));
+		assert!(
+			response
+				.response
+				.message
+				.contains("Runtime mode: requested=")
+		);
 	}
 
 	#[test]
-	fn telegram_control_sessions_reports_single_active_session() {
+	fn telegram_status_without_active_session_does_not_bootstrap() {
 		let handler = test_handler();
-		let session_id = "telegram-control-sessions";
+		let binding_id = "status-no-active";
+
+		let response = handler
+			.handle_control_command(control_command(binding_id, TelegramControlCommand::Status))
+			.expect("status command should succeed");
+		assert_eq!(response.response.status, ResponseStatus::Succeeded);
+		assert!(response.response.message.contains("Active session: none"));
+		assert!(
+			handler
+				.transport_state
+				.get_active_session(binding_id)
+				.expect("active session lookup should succeed")
+				.is_none()
+		);
+	}
+
+	#[test]
+	fn telegram_control_sessions_reports_current_session_list() {
+		let handler = test_handler();
+		let binding_id = "telegram-control-sessions";
+		let session = bootstrap_session(&handler, binding_id);
 
 		let response = handler
 			.handle_control_command(control_command(
-				session_id,
+				binding_id,
 				TelegramControlCommand::Sessions,
 			))
 			.expect("sessions command should succeed");
-		assert_eq!(response.status, ResponseStatus::Succeeded);
-		assert!(response.message.contains("Active session"));
-		assert!(
-			response
-				.message
-				.contains("Session: telegram-control-sessions")
-		);
-		assert!(
-			response
-				.message
-				.contains("Multi-session switching is not enabled yet.")
-		);
+		assert_eq!(response.response.status, ResponseStatus::Succeeded);
+		assert!(response.response.message.contains("Current chat sessions"));
+		assert!(response.response.message.contains(&session.name));
+		assert!(response.reply_markup.is_some());
 	}
 
 	#[test]
@@ -1098,34 +1793,242 @@ mod tests {
 				TelegramControlCommand::Help,
 			))
 			.expect("help command should succeed");
-		assert_eq!(response.status, ResponseStatus::Succeeded);
-		assert!(response.message.contains("/cancel"));
-		assert!(response.message.contains("/clear"));
-		assert!(response.message.contains("/status"));
-		assert!(response.message.contains("/help"));
-		assert!(response.message.contains("/sessions"));
-		assert!(response.message.contains("Send natural language directly"));
+		assert_eq!(response.response.status, ResponseStatus::Succeeded);
+		assert!(response.response.message.contains("/cancel"));
+		assert!(response.response.message.contains("/clear"));
+		assert!(response.response.message.contains("/status"));
+		assert!(response.response.message.contains("/help"));
+		assert!(response.response.message.contains("/sessions"));
+		assert!(response.response.message.contains("/new"));
+		assert!(response.response.message.contains("/delete"));
+		assert!(response.response.message.contains("/session-setting"));
+		assert!(
+			response
+				.response
+				.message
+				.contains("Send natural language directly")
+		);
+	}
+
+	#[test]
+	fn telegram_control_new_creates_and_switches_session() {
+		let handler = test_handler();
+		let binding_id = "telegram-new";
+
+		let response = handler
+			.handle_control_command(control_command(binding_id, TelegramControlCommand::New))
+			.expect("new command should succeed");
+		assert_eq!(response.response.status, ResponseStatus::Succeeded);
+		assert!(
+			response
+				.response
+				.message
+				.contains("Created and switched to a new session.")
+		);
+
+		let active = active_session(&handler, binding_id);
+		assert!(response.response.message.contains(&active.session_id));
+		assert_eq!(active.name, active.session_id);
+	}
+
+	#[test]
+	fn telegram_session_setting_waits_for_valid_text_and_renames_session() {
+		let handler = test_handler();
+		let binding_id = "1";
+		let session = bootstrap_session(&handler, binding_id);
+
+		let response = handler
+			.handle_control_command(control_command(
+				binding_id,
+				TelegramControlCommand::SessionSetting,
+			))
+			.expect("session-setting should succeed");
+		assert_eq!(response.response.status, ResponseStatus::Succeeded);
+		assert!(
+			handler
+				.pending_session_rename(1)
+				.expect("rename state lookup")
+				.is_some()
+		);
+
+		let blank = handler
+			.handle_request(request(binding_id, "   "))
+			.expect("blank rename input should return a response");
+		assert_eq!(blank.response.status, ResponseStatus::Failed);
+		assert!(
+			handler
+				.pending_session_rename(1)
+				.expect("rename state lookup")
+				.is_some()
+		);
+
+		let renamed = handler
+			.handle_request(request(binding_id, "Renamed Session"))
+			.expect("rename input should succeed");
+		assert_eq!(renamed.response.status, ResponseStatus::Succeeded);
+		assert!(
+			renamed
+				.response
+				.message
+				.contains("Renamed the current session.")
+		);
+		assert!(
+			handler
+				.pending_session_rename(1)
+				.expect("rename state lookup")
+				.is_none()
+		);
+
+		let active = active_session(&handler, binding_id);
+		assert_eq!(active.session_id, session.session_id);
+		assert_eq!(active.name, "Renamed Session");
+	}
+
+	#[test]
+	fn telegram_session_setting_is_cancelled_by_new_slash_command() {
+		let handler = test_handler();
+		let binding_id = "1";
+		let session = bootstrap_session(&handler, binding_id);
+
+		handler
+			.handle_control_command(control_command(
+				binding_id,
+				TelegramControlCommand::SessionSetting,
+			))
+			.expect("session-setting should succeed");
+		assert!(
+			handler
+				.pending_session_rename(1)
+				.expect("rename state lookup")
+				.is_some()
+		);
+
+		let help = handler
+			.handle_control_command(control_command(binding_id, TelegramControlCommand::Help))
+			.expect("help command should succeed");
+		assert_eq!(help.response.status, ResponseStatus::Succeeded);
+		assert!(
+			handler
+				.pending_session_rename(1)
+				.expect("rename state lookup")
+				.is_none()
+		);
+		assert_eq!(active_session(&handler, binding_id).name, session.name);
+	}
+
+	#[test]
+	fn telegram_session_callback_selects_active_session() {
+		let handler = test_handler();
+		let binding_id = "1";
+		let first = bootstrap_session(&handler, binding_id);
+		let second = handler
+			.transport_state
+			.create_session(binding_id, SessionCreateRequest::default())
+			.expect("second session should create");
+
+		let response = handler
+			.handle_session_callback(TelegramSessionCallbackAction {
+				chat_id: 1,
+				callback_query_id: "cb-select".to_string(),
+				action: TelegramSessionCallbackKind::SelectSession {
+					session_id: second.session_id.clone(),
+					page: 0,
+				},
+			})
+			.expect("select callback should succeed");
+		assert_eq!(response.response.status, ResponseStatus::Succeeded);
+		assert!(
+			response
+				.response
+				.message
+				.contains("Switched active session")
+		);
+		assert_eq!(
+			active_session(&handler, binding_id).session_id,
+			second.session_id
+		);
+		assert_ne!(first.session_id, second.session_id);
+	}
+
+	#[test]
+	fn telegram_delete_flow_requires_confirmation_and_replaces_active_session() {
+		let handler = test_handler();
+		let binding_id = "1";
+		let active = bootstrap_session(&handler, binding_id);
+
+		let prompt = handler
+			.handle_control_command(control_command(binding_id, TelegramControlCommand::Delete))
+			.expect("delete command should respond");
+		assert_eq!(prompt.response.status, ResponseStatus::Succeeded);
+		assert!(prompt.reply_markup.is_some());
+		assert_eq!(
+			active_session(&handler, binding_id).session_id,
+			active.session_id
+		);
+
+		let cancelled = handler
+			.handle_session_callback(TelegramSessionCallbackAction {
+				chat_id: 1,
+				callback_query_id: "cb-cancel".to_string(),
+				action: TelegramSessionCallbackKind::DeleteCancel,
+			})
+			.expect("delete cancel should succeed");
+		assert_eq!(cancelled.response.status, ResponseStatus::Succeeded);
+		assert_eq!(
+			active_session(&handler, binding_id).session_id,
+			active.session_id
+		);
+
+		let confirmed = handler
+			.handle_session_callback(TelegramSessionCallbackAction {
+				chat_id: 1,
+				callback_query_id: "cb-confirm".to_string(),
+				action: TelegramSessionCallbackKind::DeleteConfirm {
+					session_id: active.session_id.clone(),
+				},
+			})
+			.expect("delete confirm should succeed");
+		assert_eq!(confirmed.response.status, ResponseStatus::Succeeded);
+		assert_ne!(
+			active_session(&handler, binding_id).session_id,
+			active.session_id
+		);
+	}
+
+	#[test]
+	fn telegram_delete_without_active_session_returns_noop_without_keyboard() {
+		let handler = test_handler();
+		let response = handler
+			.handle_control_command(control_command(
+				"delete-no-active",
+				TelegramControlCommand::Delete,
+			))
+			.expect("delete command should succeed");
+		assert_eq!(response.response.status, ResponseStatus::Succeeded);
+		assert!(response.response.message.contains("No active session"));
+		assert!(response.reply_markup.is_none());
 	}
 
 	#[test]
 	fn recognized_control_commands_do_not_pollute_continuity() {
 		let handler = test_handler();
-		let session_id = "telegram-control-memory";
+		let binding_id = "telegram-control-memory";
 		handler
-			.handle_request(request(session_id, "今天周几？"))
+			.handle_request(request(binding_id, "今天周几？"))
 			.expect("request should succeed");
+		let session = active_session(&handler, binding_id);
 		let turns_before = handler
 			.transport_state
-			.load_short_term_continuity(session_id, 8)
+			.load_short_term_continuity(&session.session_id, 8)
 			.expect("turns should load");
 
 		handler
-			.handle_control_command(control_command(session_id, TelegramControlCommand::Status))
+			.handle_control_command(control_command(binding_id, TelegramControlCommand::Status))
 			.expect("status command should succeed");
 
 		let turns_after = handler
 			.transport_state
-			.load_short_term_continuity(session_id, 8)
+			.load_short_term_continuity(&session.session_id, 8)
 			.expect("turns should load");
 		assert_eq!(turns_before, turns_after);
 	}
@@ -1141,8 +2044,13 @@ mod tests {
 				argument: Some("now".to_string()),
 			})
 			.expect("command should return a response");
-		assert_eq!(response.status, ResponseStatus::Failed);
-		assert!(response.message.contains("does not accept extra arguments"));
+		assert_eq!(response.response.status, ResponseStatus::Failed);
+		assert!(
+			response
+				.response
+				.message
+				.contains("does not accept extra arguments")
+		);
 	}
 
 	#[test]
@@ -1162,6 +2070,7 @@ mod tests {
 				GenericAgentRuntime::with_skill_registry(registry),
 			)),
 			transport_state: Arc::new(TelegramTransportState::default()),
+			pending_session_rename_by_chat: Mutex::new(HashMap::new()),
 		};
 
 		let response = handler
@@ -1170,8 +2079,13 @@ mod tests {
 				"Install skill from https://github.com/anthropics/skills/tree/main/skills/claude-api",
 			))
 			.expect("skill install request should succeed");
-		assert_eq!(response.status, ResponseStatus::Succeeded);
-		assert!(response.message.contains("Installed skill `claude-api`"));
+		assert_eq!(response.response.status, ResponseStatus::Succeeded);
+		assert!(
+			response
+				.response
+				.message
+				.contains("Installed skill `claude-api`")
+		);
 
 		let preview = render_telegram_preview(1001, Ok(response)).expect("preview should render");
 		let json: Value = serde_json::from_str(&preview).expect("preview should be valid json");
@@ -1210,7 +2124,28 @@ mod tests {
 		RuntimeServiceTelegramHandler {
 			service: Arc::new(RuntimeService::in_memory()),
 			transport_state: Arc::new(TelegramTransportState::default()),
+			pending_session_rename_by_chat: Mutex::new(HashMap::new()),
 		}
+	}
+
+	fn bootstrap_session(
+		handler: &RuntimeServiceTelegramHandler,
+		binding_id: &str,
+	) -> SessionDescriptor {
+		handler
+			.create_and_select_session(binding_id, SessionCreateRequest::default())
+			.expect("session should bootstrap")
+	}
+
+	fn active_session(
+		handler: &RuntimeServiceTelegramHandler,
+		binding_id: &str,
+	) -> SessionDescriptor {
+		handler
+			.transport_state
+			.get_active_session(binding_id)
+			.expect("active session lookup should succeed")
+			.expect("active session should exist")
 	}
 
 	fn awaiting_user_loop_state(session_id: &str, run_id: &str) -> LoopState {
