@@ -30,10 +30,11 @@ use roku_common_types::{
 use roku_memory::{
 	InMemorySessionManagementBackend, InMemorySessionStateBackend,
 	InMemoryShortTermContinuityBackend, PendingLoopSnapshot, PendingLoopSnapshotBackend,
-	PendingLoopSnapshotError, ResolvedMemorySubsystem, SessionCreateRequest, SessionDeleteMode,
-	SessionDescriptor, SessionManagementBackend, SessionManagementError, SessionState,
-	SessionStateBackend, SessionStateError, SessionSummary, ShortTermContinuityBackend,
-	ShortTermContinuityError,
+	PendingLoopSnapshotError, ResolvedMemorySubsystem, SESSION_NAME_MAX_CHARS,
+	SESSION_NAME_MIN_CHARS, SessionCreateRequest, SessionDeleteMode, SessionDescriptor,
+	SessionManagementBackend, SessionManagementError, SessionState, SessionStateBackend,
+	SessionStateError, SessionSummary, ShortTermContinuityBackend, ShortTermContinuityError,
+	normalize_session_name,
 };
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_telegram::{
@@ -59,6 +60,7 @@ use crate::storage::LocalStorageLayout;
 use crate::telegram_loop_bridge::{
 	restore_pending_loop_from_session, sync_pending_loop_to_session,
 };
+use crate::telegram_session_ux_config::TelegramSessionUxConfig;
 
 /// Starts the Telegram bot polling loop using env-driven layout and plugin bootstrap.
 ///
@@ -80,6 +82,7 @@ pub fn run_telegram_bot_from_env() -> Result<(), CommandError> {
 			&layout, bootstrap,
 		)?),
 		transport_state: Arc::new(TelegramTransportState::from_env()?),
+		session_ux_config: TelegramSessionUxConfig::default(),
 		pending_session_rename_by_chat: Mutex::new(HashMap::new()),
 	};
 	let _ = emit_global_log(LogRecord::new(
@@ -160,6 +163,7 @@ fn build_live_telegram_handler_from_env() -> Result<RuntimeServiceTelegramHandle
 			&layout, bootstrap,
 		)?),
 		transport_state: Arc::new(TelegramTransportState::from_env()?),
+		session_ux_config: TelegramSessionUxConfig::default(),
 		pending_session_rename_by_chat: Mutex::new(HashMap::new()),
 	})
 }
@@ -189,6 +193,7 @@ fn telegram_bot_config_from_env(
 struct RuntimeServiceTelegramHandler {
 	service: Arc<roku_runtime_service::RuntimeService>,
 	transport_state: Arc<TelegramTransportState>,
+	session_ux_config: TelegramSessionUxConfig,
 	pending_session_rename_by_chat: Mutex<HashMap<i64, PendingRenameState>>,
 }
 
@@ -231,9 +236,10 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 		request.session_id = session_id.clone();
 		// Restore pending loop so this request continues from last saved state; then load history.
 		restore_pending_loop_from_session(&self.service, &*self.transport_state, &session_id)?;
-		request.conversation_history = self
-			.transport_state
-			.load_short_term_continuity(&session_id, 12)?;
+		request.conversation_history = self.transport_state.load_short_term_continuity(
+			&session_id,
+			self.session_ux_config.short_term_history_turn_limit,
+		)?;
 		self.transport_state.append_turn(
 			&session_id,
 			ConversationTurn {
@@ -307,7 +313,10 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 				let snapshot = match active_session {
 					Some(active_session) => {
 						self.refresh_session_pending_state(&active_session.session_id)?;
-						Some(self.transport_state.status_snapshot(&active_session)?)
+						Some(
+							self.transport_state
+								.status_snapshot(&active_session, &self.session_ux_config)?,
+						)
 					}
 					None => None,
 				};
@@ -336,7 +345,9 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 						.into());
 				};
 				self.refresh_session_pending_state(&active_session.session_id)?;
-				let snapshot = self.transport_state.status_snapshot(&active_session)?;
+				let snapshot = self
+					.transport_state
+					.status_snapshot(&active_session, &self.session_ux_config)?;
 				if snapshot.pending_run_id.is_none() {
 					return Ok(self
 						.control_command_response(
@@ -352,7 +363,9 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 				self.transport_state
 					.clear_pending_loop_snapshot(&active_session.session_id)
 					.map_err(|error| RuntimeError::new(error.to_string()))?;
-				let snapshot = self.transport_state.status_snapshot(&active_session)?;
+				let snapshot = self
+					.transport_state
+					.status_snapshot(&active_session, &self.session_ux_config)?;
 				Ok(self
 					.control_command_response(
 						command.command,
@@ -378,7 +391,9 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 					.clear_pending_loop(&active_session.session_id)?;
 				self.transport_state
 					.clear_transport_session(&active_session.session_id)?;
-				let snapshot = self.transport_state.status_snapshot(&active_session)?;
+				let snapshot = self
+					.transport_state
+					.status_snapshot(&active_session, &self.session_ux_config)?;
 				Ok(self
 					.control_command_response(
 						command.command,
@@ -452,8 +467,11 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 						command.command,
 						ResponseStatus::Succeeded,
 						format!(
-							"Send the new name for the current session.\nCurrent session: {}\nCurrent name: {}\nName length must be 1..=50 Unicode characters.",
-							active_session.session_id, active_session.name
+							"Send the new name for the current session.\nCurrent session: {}\nCurrent name: {}\nName length must be {}..={} Unicode characters.",
+							active_session.session_id,
+							active_session.name,
+							SESSION_NAME_MIN_CHARS,
+							SESSION_NAME_MAX_CHARS
 						),
 					)
 					.into())
@@ -721,7 +739,10 @@ impl RuntimeServiceTelegramHandler {
 		let active_snapshot = match active_session.as_ref() {
 			Some(active_session) => {
 				self.refresh_session_pending_state(&active_session.session_id)?;
-				Some(self.transport_state.status_snapshot(active_session)?)
+				Some(
+					self.transport_state
+						.status_snapshot(active_session, &self.session_ux_config)?,
+				)
 			}
 			None => None,
 		};
@@ -732,7 +753,11 @@ impl RuntimeServiceTelegramHandler {
 				.cmp(&left.updated_at_unix_ms)
 				.then_with(|| left.session_id.cmp(&right.session_id))
 		});
-		let page_state = paginate_sessions(&sessions, requested_page, 5);
+		let page_state = paginate_sessions(
+			&sessions,
+			requested_page,
+			self.session_ux_config.sessions_page_size,
+		);
 		let page_sessions = sessions[page_state.start..page_state.end].to_vec();
 		let mut response = TelegramHandlerResponse::from(self.control_command_response(
 			TelegramControlCommand::Sessions,
@@ -751,7 +776,7 @@ impl RuntimeServiceTelegramHandler {
 				.as_ref()
 				.map(|snapshot| snapshot.session_id.as_str()),
 			page_state.page,
-			5,
+			self.session_ux_config.sessions_page_size,
 		) {
 			response = response.with_reply_markup(markup);
 		}
@@ -767,33 +792,27 @@ impl RuntimeServiceTelegramHandler {
 		let Some(pending) = self.pending_session_rename(chat_id)? else {
 			return Ok(None);
 		};
-		if candidate_name.trim().is_empty() {
-			return Ok(Some(
-				self.control_command_response(
-					TelegramControlCommand::SessionSetting,
-					ResponseStatus::Failed,
-					"Session name cannot be blank. Send a non-empty text value, or use another slash command to cancel rename."
-						.to_string(),
-				)
-				.into(),
-			));
-		}
-		if candidate_name.trim().chars().count() > 50 {
-			return Ok(Some(
-				self.control_command_response(
-					TelegramControlCommand::SessionSetting,
-					ResponseStatus::Failed,
-					"Session name must be 1..=50 Unicode characters. Send another text value, or use another slash command to cancel rename."
-						.to_string(),
-				)
-				.into(),
-			));
-		}
+		let normalized_name = match normalize_session_name(candidate_name) {
+			Ok(value) => value,
+			Err(SessionManagementError::Validation(message)) => {
+				return Ok(Some(
+					self.control_command_response(
+						TelegramControlCommand::SessionSetting,
+						ResponseStatus::Failed,
+						format!(
+							"Session name is invalid: {message}\nSend another text value, or use another slash command to cancel rename."
+						),
+					)
+					.into(),
+				));
+			}
+			Err(error) => return Err(runtime_session_management_error(error)),
+		};
 
 		match self.transport_state.rename_session(
 			binding_id,
 			&pending.target_session_id,
-			candidate_name,
+			&normalized_name,
 		) {
 			Ok(descriptor) => {
 				self.clear_pending_session_rename(chat_id)?;
@@ -812,7 +831,7 @@ impl RuntimeServiceTelegramHandler {
 			Err(RuntimeError { message })
 				if message.contains("validation")
 					|| message.contains("must not be empty")
-					|| message.contains("must be 1..=50") =>
+					|| message.contains("must be between") =>
 			{
 				Ok(Some(
 					self.control_command_response(
@@ -1015,7 +1034,10 @@ fn runtime_execution_mode_label(mode: RuntimeExecutionMode) -> &'static str {
 	mode.as_str()
 }
 
-fn latest_activity_summary(turn: &ConversationTurn) -> String {
+fn latest_activity_summary(
+	turn: &ConversationTurn,
+	session_ux_config: &TelegramSessionUxConfig,
+) -> String {
 	format!(
 		"{}: {}",
 		match turn.role {
@@ -1023,7 +1045,10 @@ fn latest_activity_summary(turn: &ConversationTurn) -> String {
 			ConversationRole::Assistant => "assistant",
 			ConversationRole::System => "system",
 		},
-		truncate_preview(&turn.content, 96)
+		truncate_preview(
+			&turn.content,
+			session_ux_config.latest_activity_preview_chars,
+		)
 	)
 }
 
@@ -1191,15 +1216,21 @@ impl TelegramTransportState {
 	fn status_snapshot(
 		&self,
 		descriptor: &SessionDescriptor,
+		session_ux_config: &TelegramSessionUxConfig,
 	) -> Result<TelegramSessionSnapshot, RuntimeError> {
 		let session_state = self.load_session_state_or_default(&descriptor.session_id)?;
-		let turns = self.load_short_term_continuity(&descriptor.session_id, 12)?;
+		let turns = self.load_short_term_continuity(
+			&descriptor.session_id,
+			session_ux_config.short_term_history_turn_limit,
+		)?;
 		Ok(TelegramSessionSnapshot {
 			session_id: descriptor.session_id.clone(),
 			session_name: descriptor.name.clone(),
 			pending_run_id: session_state.pending_loop.map(|binding| binding.run_id),
 			recent_turn_count: turns.len(),
-			latest_activity: turns.last().map(latest_activity_summary),
+			latest_activity: turns
+				.last()
+				.map(|turn| latest_activity_summary(turn, session_ux_config)),
 		})
 	}
 
@@ -1519,6 +1550,7 @@ mod tests {
 		let handler = RuntimeServiceTelegramHandler {
 			service: Arc::new(RuntimeService::in_memory_with_agent_runtime(runtime)),
 			transport_state: Arc::new(TelegramTransportState::default()),
+			session_ux_config: TelegramSessionUxConfig::default(),
 			pending_session_rename_by_chat: Mutex::new(HashMap::new()),
 		};
 		let binding_id = "telegram-session-1";
@@ -2089,6 +2121,7 @@ mod tests {
 				GenericAgentRuntime::with_skill_registry(registry),
 			)),
 			transport_state: Arc::new(TelegramTransportState::default()),
+			session_ux_config: TelegramSessionUxConfig::default(),
 			pending_session_rename_by_chat: Mutex::new(HashMap::new()),
 		};
 
@@ -2143,6 +2176,7 @@ mod tests {
 		RuntimeServiceTelegramHandler {
 			service: Arc::new(RuntimeService::in_memory()),
 			transport_state: Arc::new(TelegramTransportState::default()),
+			session_ux_config: TelegramSessionUxConfig::default(),
 			pending_session_rename_by_chat: Mutex::new(HashMap::new()),
 		}
 	}

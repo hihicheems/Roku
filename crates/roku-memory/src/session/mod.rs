@@ -25,6 +25,11 @@ use roku_common_types::SessionPreferences;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Minimum allowed Unicode character count for one provider-neutral session name.
+pub const SESSION_NAME_MIN_CHARS: usize = 1;
+/// Maximum allowed Unicode character count for one provider-neutral session name.
+pub const SESSION_NAME_MAX_CHARS: usize = 50;
+
 /// Session-scoped transport/runtime continuity state.
 ///
 /// This currently reuses [`SessionPreferences`] for wire compatibility while
@@ -103,9 +108,9 @@ pub fn normalize_session_name(value: &str) -> Result<String, SessionManagementEr
 	}
 
 	let char_count = normalized.chars().count();
-	if char_count > 50 {
+	if char_count > SESSION_NAME_MAX_CHARS {
 		return Err(SessionManagementError::Validation(format!(
-			"session name must be between 1 and 50 Unicode characters; got {char_count}"
+			"session name must be between {SESSION_NAME_MIN_CHARS} and {SESSION_NAME_MAX_CHARS} Unicode characters; got {char_count}"
 		)));
 	}
 

@@ -66,9 +66,10 @@ pub use registry::{
 };
 pub use session::{
 	InMemorySessionManagementBackend, InMemorySessionStateBackend, NoopSessionManagementBackend,
-	NoopSessionStateBackend, SessionCreateRequest, SessionDeleteMode, SessionDescriptor,
-	SessionManagementBackend, SessionManagementError, SessionState, SessionStateBackend,
-	SessionStateError, SessionSummary, normalize_session_name, resolve_session_name,
+	NoopSessionStateBackend, SESSION_NAME_MAX_CHARS, SESSION_NAME_MIN_CHARS, SessionCreateRequest,
+	SessionDeleteMode, SessionDescriptor, SessionManagementBackend, SessionManagementError,
+	SessionState, SessionStateBackend, SessionStateError, SessionSummary, normalize_session_name,
+	resolve_session_name,
 };
 pub use short_term::{
 	InMemoryShortTermContinuityBackend, NoopShortTermContinuityBackend, ShortTermContinuityBackend,
