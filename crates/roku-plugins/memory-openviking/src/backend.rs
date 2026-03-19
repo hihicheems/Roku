@@ -342,6 +342,44 @@ impl OpenVikingLongTermMemoryBackend {
 		)?;
 		Ok(())
 	}
+
+	/// Returns the adapter-local timeout budget used for runtime-state visibility checks.
+	pub(crate) fn runtime_state_wait_timeout(&self) -> Duration {
+		Duration::from_millis(self.config.write_wait_timeout_ms)
+	}
+
+	/// Waits until one provider URI is no longer visible.
+	pub(crate) fn wait_until_resource_absent(&self, uri: &str) -> Result<(), MemoryError> {
+		let deadline = std::time::Instant::now() + self.runtime_state_wait_timeout();
+		let poll_interval = Duration::from_millis(50).min(self.runtime_state_wait_timeout());
+		loop {
+			if !self.resource_exists(uri)? {
+				return Ok(());
+			}
+			if std::time::Instant::now() >= deadline {
+				return Err(MemoryError::Internal(format!(
+					"timed out waiting for OpenViking resource to disappear uri={uri}"
+				)));
+			}
+			std::thread::sleep(poll_interval);
+		}
+	}
+
+	/// Removes one provider subtree, treating already-absent targets as a no-op.
+	pub(crate) fn remove_resource_tree_if_absent_ok(&self, uri: &str) -> Result<(), MemoryError> {
+		if !self.resource_exists(uri)? {
+			return Ok(());
+		}
+
+		if let Err(error) = self.remove_resource_if_exists(uri, true) {
+			if !self.resource_exists(uri)? {
+				return Ok(());
+			}
+			return Err(error);
+		}
+
+		self.wait_until_resource_absent(uri)
+	}
 }
 
 impl LongTermMemoryBackend for OpenVikingLongTermMemoryBackend {
@@ -627,7 +665,7 @@ impl ShortTermContinuityBackend for OpenVikingShortTermContinuityAdapter {
 		let root_uri =
 			runtime_continuity_root_uri(&self.inner.config.resource_root_uri, session_id);
 		self.inner
-			.remove_resource_if_exists(&root_uri, true)
+			.remove_resource_tree_if_absent_ok(&root_uri)
 			.map_err(map_short_term_memory_error)
 	}
 }
@@ -1740,6 +1778,7 @@ mod tests {
 	use std::collections::{BTreeSet, HashMap};
 	use std::sync::{Arc, Mutex};
 	use std::thread;
+	use std::time::Duration;
 
 	use super::{
 		OpenVikingBackendConfig, OpenVikingMemoryAdapters, canonical_record_uri,
@@ -1761,6 +1800,7 @@ mod tests {
 	enum MockStorageShape {
 		Flat,
 		MaterializedRuntimeState,
+		DelayedMaterializedRuntimeState,
 	}
 
 	#[derive(Debug, Default)]
@@ -1776,6 +1816,7 @@ mod tests {
 					self.files.insert(target_uri.to_string(), content);
 				}
 				MockStorageShape::MaterializedRuntimeState
+				| MockStorageShape::DelayedMaterializedRuntimeState
 					if target_uri.contains("/runtime-state/") =>
 				{
 					let root_uri = target_uri.trim_end_matches('/').to_string();
@@ -1787,7 +1828,8 @@ mod tests {
 					self.files
 						.insert(format!("{root_uri}/.overview.md"), "overview".to_string());
 				}
-				MockStorageShape::MaterializedRuntimeState => {
+				MockStorageShape::MaterializedRuntimeState
+				| MockStorageShape::DelayedMaterializedRuntimeState => {
 					self.files.insert(target_uri.to_string(), content);
 				}
 			}
@@ -1877,6 +1919,10 @@ mod tests {
 			Self::start_with_shape(MockStorageShape::MaterializedRuntimeState)
 		}
 
+		fn start_delayed_materialized_runtime_state() -> Self {
+			Self::start_with_shape(MockStorageShape::DelayedMaterializedRuntimeState)
+		}
+
 		fn start_with_shape(shape: MockStorageShape) -> Self {
 			let server = Server::http("127.0.0.1:0").expect("mock server should bind");
 			let base_url = format!("http://{}", server.server_addr());
@@ -1917,11 +1963,32 @@ mod tests {
 									.to_string();
 								let content = std::fs::read_to_string(path)
 									.expect("staged resource should exist");
-								state.lock().expect("state mutex").store_resource(
-									&target_uri,
-									content,
-									shape,
-								);
+								match shape {
+									MockStorageShape::DelayedMaterializedRuntimeState
+										if target_uri.contains("/runtime-state/") =>
+									{
+										let delayed_state = Arc::clone(&state);
+										let delayed_target_uri = target_uri.clone();
+										thread::spawn(move || {
+											thread::sleep(Duration::from_millis(125));
+											delayed_state
+												.lock()
+												.expect("state mutex")
+												.store_resource(
+													&delayed_target_uri,
+													content,
+													MockStorageShape::MaterializedRuntimeState,
+												);
+										});
+									}
+									_ => {
+										state.lock().expect("state mutex").store_resource(
+											&target_uri,
+											content,
+											shape,
+										);
+									}
+								}
 								respond_json(
 									request,
 									200,
@@ -2534,6 +2601,118 @@ mod tests {
 				.load_pending_loop_snapshot(&descriptor.session_id)
 				.expect("pending loop should reload")
 				.is_none()
+		);
+	}
+
+	#[test]
+	fn openviking_missing_session_state_delete_is_noop() {
+		let server = MockOpenVikingServer::start_materialized_runtime_state();
+		let tempdir = tempfile::tempdir().expect("tempdir should exist");
+		let adapters = OpenVikingMemoryAdapters::connect(OpenVikingBackendConfig {
+			base_url: server.base_url.clone(),
+			api_key: None,
+			connect_timeout_ms: 1_000,
+			request_timeout_ms: 1_000,
+			resource_root_uri: "viking://resources/roku-memory".to_string(),
+			staging_dir: tempdir.path().join("staging"),
+			write_wait_timeout_ms: 5_000,
+			strict: true,
+		})
+		.expect("openviking adapters should connect");
+		let mut session_state = adapters.session_state;
+
+		session_state
+			.delete_session_state("missing-session")
+			.expect("missing session-state delete should be a no-op");
+		assert!(
+			session_state
+				.load_session_state("missing-session")
+				.expect("missing session-state should still load")
+				.is_none()
+		);
+	}
+
+	#[test]
+	fn openviking_missing_continuity_delete_is_noop() {
+		let server = MockOpenVikingServer::start_materialized_runtime_state();
+		let tempdir = tempfile::tempdir().expect("tempdir should exist");
+		let adapters = OpenVikingMemoryAdapters::connect(OpenVikingBackendConfig {
+			base_url: server.base_url.clone(),
+			api_key: None,
+			connect_timeout_ms: 1_000,
+			request_timeout_ms: 1_000,
+			resource_root_uri: "viking://resources/roku-memory".to_string(),
+			staging_dir: tempdir.path().join("staging"),
+			write_wait_timeout_ms: 5_000,
+			strict: true,
+		})
+		.expect("openviking adapters should connect");
+		let mut short_term = adapters.short_term;
+
+		short_term
+			.delete_continuity("missing-session")
+			.expect("missing continuity delete should be a no-op");
+		assert!(
+			short_term
+				.load_short_term_continuity("missing-session", 8)
+				.expect("missing continuity should still load")
+				.is_empty()
+		);
+	}
+
+	#[test]
+	fn openviking_runtime_state_writes_are_visible_to_new_instances() {
+		let server = MockOpenVikingServer::start_delayed_materialized_runtime_state();
+		let tempdir = tempfile::tempdir().expect("tempdir should exist");
+		let writer = OpenVikingMemoryAdapters::connect(OpenVikingBackendConfig {
+			base_url: server.base_url.clone(),
+			api_key: None,
+			connect_timeout_ms: 1_000,
+			request_timeout_ms: 1_000,
+			resource_root_uri: "viking://resources/roku-memory".to_string(),
+			staging_dir: tempdir.path().join("writer-staging"),
+			write_wait_timeout_ms: 2_000,
+			strict: true,
+		})
+		.expect("writer adapters should connect");
+		let mut session_management = writer.session_management;
+		let binding_id = "chat-visibility";
+
+		let descriptor = session_management
+			.create_session(binding_id, SessionCreateRequest::default())
+			.expect("session should create");
+		session_management
+			.select_active_session(binding_id, &descriptor.session_id)
+			.expect("session should select");
+
+		let reader = OpenVikingMemoryAdapters::connect(OpenVikingBackendConfig {
+			base_url: server.base_url.clone(),
+			api_key: None,
+			connect_timeout_ms: 1_000,
+			request_timeout_ms: 1_000,
+			resource_root_uri: "viking://resources/roku-memory".to_string(),
+			staging_dir: tempdir.path().join("reader-staging"),
+			write_wait_timeout_ms: 2_000,
+			strict: true,
+		})
+		.expect("reader adapters should connect");
+		let session_management = reader.session_management;
+
+		assert_eq!(
+			session_management
+				.get_session(binding_id, &descriptor.session_id)
+				.expect("session should load from a new adapter")
+				.expect("descriptor should be visible")
+				.session_id,
+			descriptor.session_id
+		);
+		assert_eq!(
+			session_management
+				.get_active_session(binding_id)
+				.expect("active session should load from a new adapter")
+				.expect("active descriptor should be visible")
+				.session_id,
+			descriptor.session_id
 		);
 	}
 

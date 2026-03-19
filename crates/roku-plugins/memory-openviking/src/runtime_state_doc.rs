@@ -20,10 +20,16 @@
 //! OpenViking adapter crate.
 
 use std::path::Path;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 use roku_memory::MemoryError;
 
 use super::OpenVikingLongTermMemoryBackend;
+
+const MIN_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const MAX_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const MAX_STABLE_VISIBILITY_WINDOW: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RuntimeStateDocument {
@@ -80,6 +86,7 @@ pub(super) fn replace_runtime_state_document(
 ) -> Result<(), MemoryError> {
 	if backend.resource_exists(target_uri)? {
 		backend.remove_resource_if_exists(target_uri, true)?;
+		wait_until_runtime_state_document_absent(backend, target_uri)?;
 	}
 	backend.write_text_resource(
 		target_uri,
@@ -87,14 +94,121 @@ pub(super) fn replace_runtime_state_document(
 		content,
 		reason,
 		instruction,
-	)
+	)?;
+	wait_until_runtime_state_document_matches(backend, target_uri, content)
 }
 
 pub(super) fn delete_runtime_state_document(
 	backend: &OpenVikingLongTermMemoryBackend,
 	target_uri: &str,
 ) -> Result<(), MemoryError> {
-	backend.remove_resource_if_exists(target_uri, true)
+	if !backend.resource_exists(target_uri)? {
+		return Ok(());
+	}
+
+	if let Err(error) = backend.remove_resource_if_exists(target_uri, true) {
+		if !backend.resource_exists(target_uri)? {
+			return Ok(());
+		}
+		return Err(error);
+	}
+
+	wait_until_runtime_state_document_absent(backend, target_uri)
+}
+
+fn wait_until_runtime_state_document_matches(
+	backend: &OpenVikingLongTermMemoryBackend,
+	document_uri: &str,
+	expected_content: &str,
+) -> Result<(), MemoryError> {
+	let deadline = Instant::now() + backend.runtime_state_wait_timeout();
+	let poll_interval = runtime_state_poll_interval(backend.runtime_state_wait_timeout());
+	let stable_visibility_window =
+		runtime_state_stability_window(backend.runtime_state_wait_timeout());
+	let mut stable_since = None;
+
+	loop {
+		let observation = match read_runtime_state_document(backend, document_uri) {
+			Ok(Some(document)) if document.content == expected_content => {
+				let now = Instant::now();
+				let visible_since = stable_since.get_or_insert(now);
+				if now.duration_since(*visible_since) >= stable_visibility_window {
+					return Ok(());
+				}
+				format!(
+					"document is readable at {} and is waiting for a stable visibility window of {}ms",
+					document.content_uri,
+					stable_visibility_window.as_millis()
+				)
+			}
+			Ok(Some(document)) => {
+				stable_since = None;
+				format!(
+					"document became readable at {} but content did not match expected payload",
+					document.content_uri
+				)
+			}
+			Ok(None) => {
+				stable_since = None;
+				"document is still missing".to_string()
+			}
+			Err(error) if is_runtime_state_visibility_retryable(&error) => {
+				stable_since = None;
+				error.to_string()
+			}
+			Err(error) => return Err(error),
+		};
+
+		if Instant::now() >= deadline {
+			return Err(MemoryError::Internal(format!(
+				"timed out waiting for OpenViking runtime-state document to become readable root_uri={document_uri}; last_observation={}",
+				observation
+			)));
+		}
+
+		sleep(poll_interval);
+	}
+}
+
+fn wait_until_runtime_state_document_absent(
+	backend: &OpenVikingLongTermMemoryBackend,
+	document_uri: &str,
+) -> Result<(), MemoryError> {
+	let deadline = Instant::now() + backend.runtime_state_wait_timeout();
+	let poll_interval = runtime_state_poll_interval(backend.runtime_state_wait_timeout());
+
+	loop {
+		if !backend.resource_exists(document_uri)? {
+			return Ok(());
+		}
+
+		if Instant::now() >= deadline {
+			return Err(MemoryError::Internal(format!(
+				"timed out waiting for OpenViking runtime-state document to disappear root_uri={document_uri}"
+			)));
+		}
+
+		sleep(poll_interval);
+	}
+}
+
+fn runtime_state_poll_interval(timeout: Duration) -> Duration {
+	if timeout <= MIN_POLL_INTERVAL {
+		return MIN_POLL_INTERVAL;
+	}
+
+	let candidate = Duration::from_millis((timeout.as_millis() / 20).max(1) as u64);
+	candidate.clamp(MIN_POLL_INTERVAL, MAX_POLL_INTERVAL)
+}
+
+fn runtime_state_stability_window(timeout: Duration) -> Duration {
+	timeout
+		.min(MAX_STABLE_VISIBILITY_WINDOW)
+		.max(MIN_POLL_INTERVAL)
+}
+
+fn is_runtime_state_visibility_retryable(error: &MemoryError) -> bool {
+	matches!(error, MemoryError::Internal(message) if message.contains("OpenViking runtime-state document compatibility error"))
 }
 
 fn resolve_materialized_content_entry(
