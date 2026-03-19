@@ -75,10 +75,10 @@ require_known_service() {
 service_command() {
 	case "${1:-}" in
 	api-gateway)
-		printf '%s\n' "cargo run -p roku-cmd -- api-gateway"
+		printf '%s\n' "cargo run -p roku-cmd --features memory-openviking -- api-gateway"
 		;;
 	telegram-bot)
-		printf '%s\n' "env ROKU_PLUGIN_CONFIG_PATH='$ROOT_DIR/config/plugins.messaging.toml' cargo run -p roku-cmd -- telegram-bot"
+		printf '%s\n' "env ROKU_PLUGIN_CONFIG_PATH='$ROOT_DIR/config/plugins.messaging.toml' cargo run -p roku-cmd --features memory-openviking -- telegram-bot"
 		;;
 	*)
 		echo "unknown service: ${1:-}" >&2

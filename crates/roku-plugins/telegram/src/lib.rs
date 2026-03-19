@@ -26,9 +26,12 @@ pub use client::{
 pub use inbound::{
 	TelegramApprovalAction, TelegramCallbackQuery, TelegramChat, TelegramConnector,
 	TelegramConnectorError, TelegramControlCommand, TelegramControlCommandRequest,
-	TelegramInteraction, TelegramMessage, TelegramUpdate, TelegramUser,
+	TelegramInteraction, TelegramMessage, TelegramSessionCallbackAction,
+	TelegramSessionCallbackKind, TelegramUpdate, TelegramUser, session_delete_cancel_callback_data,
+	session_delete_confirm_callback_data, session_page_callback_data, session_select_callback_data,
 };
 pub use outbound::{
-	TelegramInlineKeyboardButton, TelegramOutboundMessage, TelegramParseMode, TelegramReplyMarkup,
+	TelegramHandlerResponse, TelegramInlineKeyboardButton, TelegramOutboundMessage,
+	TelegramParseMode, TelegramReplyMarkup,
 };
 pub use runner::{TelegramInteractionHandler, TelegramPollingRunner};

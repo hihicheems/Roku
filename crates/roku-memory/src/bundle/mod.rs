@@ -21,7 +21,10 @@
 
 use crate::long_term::{LongTermMemoryBackend, NoopLongTermMemoryBackend};
 use crate::pending_loop::{NoopPendingLoopSnapshotBackend, PendingLoopSnapshotBackend};
-use crate::session::{NoopSessionStateBackend, SessionStateBackend};
+use crate::session::{
+	NoopSessionManagementBackend, NoopSessionStateBackend, SessionManagementBackend,
+	SessionStateBackend,
+};
 use crate::short_term::{NoopShortTermContinuityBackend, ShortTermContinuityBackend};
 
 /// Provider-neutral memory subsystem bundle returned by registry resolution.
@@ -30,6 +33,7 @@ pub struct ResolvedMemorySubsystem {
 	pub short_term: Box<dyn ShortTermContinuityBackend>,
 	pub session_state: Box<dyn SessionStateBackend>,
 	pub pending_loop: Box<dyn PendingLoopSnapshotBackend>,
+	pub session_management: Box<dyn SessionManagementBackend>,
 }
 
 impl ResolvedMemorySubsystem {
@@ -40,6 +44,7 @@ impl ResolvedMemorySubsystem {
 			short_term: Box::new(NoopShortTermContinuityBackend),
 			session_state: Box::new(NoopSessionStateBackend),
 			pending_loop: Box::new(NoopPendingLoopSnapshotBackend),
+			session_management: Box::new(NoopSessionManagementBackend),
 		}
 	}
 
@@ -49,12 +54,14 @@ impl ResolvedMemorySubsystem {
 		short_term: Box<dyn ShortTermContinuityBackend>,
 		session_state: Box<dyn SessionStateBackend>,
 		pending_loop: Box<dyn PendingLoopSnapshotBackend>,
+		session_management: Box<dyn SessionManagementBackend>,
 	) -> Self {
 		Self {
 			long_term,
 			short_term,
 			session_state,
 			pending_loop,
+			session_management,
 		}
 	}
 }

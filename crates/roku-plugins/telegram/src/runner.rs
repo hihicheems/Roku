@@ -22,15 +22,14 @@
 use std::thread;
 use std::time::Duration;
 
-use roku_common_types::{
-	ApprovalDecision, ApprovalId, RequestEnvelope, ResponseEnvelope, RuntimeError,
-};
+use roku_common_types::{ApprovalDecision, ApprovalId, RequestEnvelope, RuntimeError};
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
 
 use crate::outbound::TelegramRenderOptions;
 use crate::{
 	TelegramBotClient, TelegramBotConfig, TelegramConnector, TelegramConnectorError,
-	TelegramInteraction, TelegramOutboundMessage, TelegramTransportError, TelegramUpdate,
+	TelegramHandlerResponse, TelegramInteraction, TelegramOutboundMessage,
+	TelegramSessionCallbackAction, TelegramTransportError, TelegramUpdate,
 };
 
 /// Runtime-facing Telegram interaction adapter.
@@ -38,19 +37,27 @@ use crate::{
 /// The handler receives already-normalized Telegram interactions. In particular, control commands
 /// arrive as structured management actions and must not be re-parsed from raw text.
 pub trait TelegramInteractionHandler: Send + Sync {
-	fn handle_request(&self, request: RequestEnvelope) -> Result<ResponseEnvelope, RuntimeError>;
+	fn handle_request(
+		&self,
+		request: RequestEnvelope,
+	) -> Result<TelegramHandlerResponse, RuntimeError>;
 
 	/// Handles an out-of-band Telegram control command such as `/status` or `/clear`.
 	fn handle_control_command(
 		&self,
 		command: crate::TelegramControlCommandRequest,
-	) -> Result<ResponseEnvelope, RuntimeError>;
+	) -> Result<TelegramHandlerResponse, RuntimeError>;
 
 	fn handle_approval_decision(
 		&self,
 		approval_id: ApprovalId,
 		decision: ApprovalDecision,
-	) -> Result<ResponseEnvelope, RuntimeError>;
+	) -> Result<TelegramHandlerResponse, RuntimeError>;
+
+	fn handle_session_callback(
+		&self,
+		action: TelegramSessionCallbackAction,
+	) -> Result<TelegramHandlerResponse, RuntimeError>;
 }
 
 /// Long-running Telegram polling runner.
@@ -237,6 +244,23 @@ impl TelegramPollingRunner {
 				)?;
 				self.dispatch_response(action.chat_id, response)
 			}
+			Ok(TelegramInteraction::SessionCallback(action)) => {
+				log_telegram(
+					LogLevel::Info,
+					"received session callback",
+					[
+						("update_type", "session_callback".to_string()),
+						("chat_id", action.chat_id.to_string()),
+						("callback_query_id", action.callback_query_id.clone()),
+					],
+				);
+				let response = handler.handle_session_callback(action.clone());
+				self.client.answer_callback_query(
+					&action.callback_query_id,
+					session_callback_acknowledgement(&response),
+				)?;
+				self.dispatch_response(action.chat_id, response)
+			}
 			Err(TelegramConnectorError::BotOriginIgnored) => {
 				log_telegram(
 					LogLevel::Debug,
@@ -267,10 +291,11 @@ impl TelegramPollingRunner {
 	fn dispatch_response(
 		&self,
 		chat_id: i64,
-		response: Result<ResponseEnvelope, RuntimeError>,
+		response: Result<TelegramHandlerResponse, RuntimeError>,
 	) -> Result<(), TelegramTransportError> {
 		match response {
-			Ok(response) => {
+			Ok(handler_response) => {
+				let response = &handler_response.response;
 				log_telegram(
 					LogLevel::Info,
 					"dispatching telegram response",
@@ -281,12 +306,13 @@ impl TelegramPollingRunner {
 						("message", truncate_for_log(&response.message, 200)),
 					],
 				);
-				self.client
-					.send_message(&TelegramOutboundMessage::from_response_with_options(
+				self.client.send_message(
+					&TelegramOutboundMessage::from_handler_response_with_options(
 						chat_id,
-						&response,
+						&handler_response,
 						self.render_options,
-					))
+					),
+				)
 			}
 			Err(error) => {
 				log_telegram(
@@ -308,14 +334,27 @@ impl TelegramPollingRunner {
 	}
 }
 
-fn callback_acknowledgement(response: &Result<ResponseEnvelope, RuntimeError>) -> &str {
+fn callback_acknowledgement(response: &Result<TelegramHandlerResponse, RuntimeError>) -> &str {
 	match response {
-		Ok(response) => match response.status {
+		Ok(response) => match response.response.status {
 			roku_common_types::ResponseStatus::Succeeded => "Approval recorded",
 			roku_common_types::ResponseStatus::PendingApproval => "Still waiting on approval",
 			roku_common_types::ResponseStatus::Failed => "Decision processed with failure",
 		},
 		Err(_) => "Approval decision failed",
+	}
+}
+
+fn session_callback_acknowledgement(
+	response: &Result<TelegramHandlerResponse, RuntimeError>,
+) -> &str {
+	match response {
+		Ok(response) => match response.response.status {
+			roku_common_types::ResponseStatus::Succeeded => "Session action recorded",
+			roku_common_types::ResponseStatus::PendingApproval => "Session action pending",
+			roku_common_types::ResponseStatus::Failed => "Session action failed",
+		},
+		Err(_) => "Session action failed",
 	}
 }
 

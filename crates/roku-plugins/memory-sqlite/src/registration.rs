@@ -33,6 +33,7 @@ impl SqliteMemoryRegistration {
 			short_term: true,
 			session_state: true,
 			pending_loop: true,
+			session_management: true,
 		}
 	}
 
@@ -46,6 +47,7 @@ impl SqliteMemoryRegistration {
 			Box::new(adapters.short_term),
 			Box::new(adapters.session_state),
 			Box::new(adapters.pending_loop),
+			Box::new(adapters.session_management),
 		))
 	}
 }

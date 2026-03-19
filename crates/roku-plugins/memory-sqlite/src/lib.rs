@@ -27,7 +27,7 @@ mod store;
 
 pub use backend::{
 	SqliteMemoryAdapterError, SqliteMemoryAdapters, SqlitePendingLoopSnapshotAdapter,
-	SqliteSessionStateAdapter, SqliteShortTermContinuityAdapter,
+	SqliteSessionManagementAdapter, SqliteSessionStateAdapter, SqliteShortTermContinuityAdapter,
 };
 pub use config::{SqliteMemoryConfig, SqliteMemoryConfigError, SqliteMemoryConfigPatch};
 pub use control_plane::{

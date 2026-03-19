@@ -181,7 +181,7 @@ mod tests {
 	};
 
 	use crate::pending_loop::NoopPendingLoopSnapshotBackend;
-	use crate::session::NoopSessionStateBackend;
+	use crate::session::{NoopSessionManagementBackend, NoopSessionStateBackend};
 	use crate::short_term::NoopShortTermContinuityBackend;
 	use crate::{
 		ControlPlaneDataPlane, MemoryAdapterAvailability, MemoryBackendId,
@@ -216,6 +216,7 @@ mod tests {
 				Box::new(NoopShortTermContinuityBackend),
 				Box::new(NoopSessionStateBackend),
 				Box::new(NoopPendingLoopSnapshotBackend),
+				Box::new(NoopSessionManagementBackend),
 			))
 		}
 	}
@@ -229,6 +230,7 @@ mod tests {
 				short_term: true,
 				session_state: true,
 				pending_loop: true,
+				session_management: true,
 			},
 		};
 		let mut catalog = EntryAdapterCatalog::new();
@@ -291,6 +293,7 @@ mod tests {
 				short_term: true,
 				session_state: true,
 				pending_loop: true,
+				session_management: true,
 			},
 		};
 		let builder = StubControlPlaneBuilder;
@@ -336,6 +339,7 @@ mod tests {
 				short_term: true,
 				session_state: true,
 				pending_loop: true,
+				session_management: true,
 			},
 		};
 		let builder = StubControlPlaneBuilder;
@@ -427,6 +431,7 @@ mod tests {
 				short_term: true,
 				session_state: true,
 				pending_loop: true,
+				session_management: true,
 			},
 		};
 		let tempdir = tempfile::tempdir().expect("tempdir should exist");

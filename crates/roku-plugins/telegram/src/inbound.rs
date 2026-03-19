@@ -85,6 +85,8 @@ pub enum TelegramInteraction {
 	ControlCommand(TelegramControlCommandRequest),
 	/// An approval callback mapped from Telegram inline keyboard actions.
 	ApprovalDecision(TelegramApprovalAction),
+	/// A session-management callback mapped from Telegram inline keyboard actions.
+	SessionCallback(TelegramSessionCallbackAction),
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +95,21 @@ pub struct TelegramApprovalAction {
 	pub callback_query_id: String,
 	pub approval_id: ApprovalId,
 	pub decision: ApprovalDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramSessionCallbackAction {
+	pub chat_id: i64,
+	pub callback_query_id: String,
+	pub action: TelegramSessionCallbackKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TelegramSessionCallbackKind {
+	SelectSession { session_id: String, page: usize },
+	ShowPage { page: usize },
+	DeleteConfirm { session_id: String },
+	DeleteCancel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +125,12 @@ pub enum TelegramControlCommand {
 	Help,
 	/// Show the currently active Telegram session overview.
 	Sessions,
+	/// Create and switch to a new session for the current chat.
+	New,
+	/// Delete the current active session after explicit confirmation.
+	Delete,
+	/// Rename the current active session via a follow-up text input.
+	SessionSetting,
 }
 
 /// Parsed Telegram-side control command.
@@ -155,7 +178,7 @@ impl TelegramConnector {
 		update: TelegramUpdate,
 	) -> Result<TelegramInteraction, TelegramConnectorError> {
 		if let Some(callback_query) = update.callback_query {
-			return self.approval_action_from_callback(callback_query);
+			return self.callback_interaction_from_callback(callback_query);
 		}
 
 		if let Some(command) = self.control_command_from_message(&update)? {
@@ -220,7 +243,7 @@ impl TelegramConnector {
 		Ok(parse_control_command(message.chat.id, text))
 	}
 
-	fn approval_action_from_callback(
+	fn callback_interaction_from_callback(
 		&self,
 		callback_query: TelegramCallbackQuery,
 	) -> Result<TelegramInteraction, TelegramConnectorError> {
@@ -232,29 +255,57 @@ impl TelegramConnector {
 			.data
 			.as_deref()
 			.ok_or(TelegramConnectorError::MissingCallbackData)?;
-		let (approval_id, approved) = parse_approval_callback_data(data)?;
 		let message = callback_query
 			.message
 			.ok_or(TelegramConnectorError::MissingCallbackMessage)?;
-
-		Ok(TelegramInteraction::ApprovalDecision(
-			TelegramApprovalAction {
-				chat_id: message.chat.id,
-				callback_query_id: callback_query.id,
-				approval_id,
-				decision: ApprovalDecision {
-					approved,
-					actor: callback_actor(&callback_query.from),
-					comment: None,
+		if data.starts_with("ap:") {
+			let (approval_id, approved) = parse_approval_callback_data(data)?;
+			return Ok(TelegramInteraction::ApprovalDecision(
+				TelegramApprovalAction {
+					chat_id: message.chat.id,
+					callback_query_id: callback_query.id,
+					approval_id,
+					decision: ApprovalDecision {
+						approved,
+						actor: callback_actor(&callback_query.from),
+						comment: None,
+					},
 				},
-			},
-		))
+			));
+		}
+		if data.starts_with("sc:") {
+			return Ok(TelegramInteraction::SessionCallback(
+				TelegramSessionCallbackAction {
+					chat_id: message.chat.id,
+					callback_query_id: callback_query.id,
+					action: parse_session_callback_data(data)?,
+				},
+			));
+		}
+
+		Err(TelegramConnectorError::UnsupportedCallbackAction)
 	}
 }
 
 pub(crate) fn approval_callback_data(approval_id: &ApprovalId, approved: bool) -> String {
 	let action = if approved { "a" } else { "r" };
 	format!("ap:{action}:{}", approval_id.0)
+}
+
+pub fn session_select_callback_data(page: usize, session_id: &str) -> String {
+	format!("sc:s:{page}:{session_id}")
+}
+
+pub fn session_page_callback_data(page: usize) -> String {
+	format!("sc:p:{page}")
+}
+
+pub fn session_delete_confirm_callback_data(session_id: &str) -> String {
+	format!("sc:d:{session_id}")
+}
+
+pub fn session_delete_cancel_callback_data() -> String {
+	"sc:c".to_string()
 }
 
 fn parse_approval_callback_data(data: &str) -> Result<(ApprovalId, bool), TelegramConnectorError> {
@@ -275,6 +326,51 @@ fn parse_approval_callback_data(data: &str) -> Result<(ApprovalId, bool), Telegr
 		.ok_or(TelegramConnectorError::InvalidCallbackData)?;
 
 	Ok((ApprovalId(approval_id.to_string()), approved))
+}
+
+fn parse_session_callback_data(
+	data: &str,
+) -> Result<TelegramSessionCallbackKind, TelegramConnectorError> {
+	let mut parts = data.splitn(4, ':');
+	if parts.next() != Some("sc") {
+		return Err(TelegramConnectorError::InvalidCallbackData);
+	}
+
+	match parts.next() {
+		Some("s") => {
+			let page = parse_callback_page(parts.next())?;
+			let session_id = parts
+				.next()
+				.filter(|value| !value.trim().is_empty())
+				.ok_or(TelegramConnectorError::InvalidCallbackData)?;
+			Ok(TelegramSessionCallbackKind::SelectSession {
+				session_id: session_id.to_string(),
+				page,
+			})
+		}
+		Some("p") => Ok(TelegramSessionCallbackKind::ShowPage {
+			page: parse_callback_page(parts.next())?,
+		}),
+		Some("d") => {
+			let session_id = parts
+				.next()
+				.filter(|value| !value.trim().is_empty())
+				.ok_or(TelegramConnectorError::InvalidCallbackData)?;
+			Ok(TelegramSessionCallbackKind::DeleteConfirm {
+				session_id: session_id.to_string(),
+			})
+		}
+		Some("c") => Ok(TelegramSessionCallbackKind::DeleteCancel),
+		Some(_) => Err(TelegramConnectorError::UnsupportedCallbackAction),
+		None => Err(TelegramConnectorError::InvalidCallbackData),
+	}
+}
+
+fn parse_callback_page(value: Option<&str>) -> Result<usize, TelegramConnectorError> {
+	value
+		.ok_or(TelegramConnectorError::InvalidCallbackData)?
+		.parse::<usize>()
+		.map_err(|_| TelegramConnectorError::InvalidCallbackData)
 }
 
 fn callback_actor(user: &TelegramUser) -> String {
@@ -320,6 +416,21 @@ const TELEGRAM_CONTROL_COMMANDS: &[TelegramControlCommandSpec] = &[
 	TelegramControlCommandSpec {
 		name: "sessions",
 		command: TelegramControlCommand::Sessions,
+		allows_inline_argument: false,
+	},
+	TelegramControlCommandSpec {
+		name: "new",
+		command: TelegramControlCommand::New,
+		allows_inline_argument: false,
+	},
+	TelegramControlCommandSpec {
+		name: "delete",
+		command: TelegramControlCommand::Delete,
+		allows_inline_argument: false,
+	},
+	TelegramControlCommandSpec {
+		name: "sessionsetting",
+		command: TelegramControlCommand::SessionSetting,
 		allows_inline_argument: false,
 	},
 ];
@@ -488,6 +599,54 @@ mod tests {
 			TelegramInteraction::ControlCommand(_) => {
 				panic!("callback query should not become a control command")
 			}
+			TelegramInteraction::SessionCallback(_) => {
+				panic!("approval callback should not become a session callback")
+			}
+		}
+	}
+
+	#[test]
+	fn into_interaction_maps_session_callback_query() {
+		let connector = TelegramConnector;
+		let interaction = connector
+			.interaction_from_update(TelegramUpdate {
+				update_id: 48,
+				message: None,
+				callback_query: Some(TelegramCallbackQuery {
+					id: "callback-2".to_string(),
+					from: TelegramUser {
+						id: 78,
+						is_bot: false,
+						username: Some("jojo".to_string()),
+					},
+					message: Some(TelegramMessage {
+						message_id: 8,
+						chat: TelegramChat {
+							id: 1006,
+							title: None,
+							kind: "private".to_string(),
+						},
+						from: None,
+						text: Some("sessions".to_string()),
+					}),
+					data: Some(session_select_callback_data(2, "session-9")),
+				}),
+			})
+			.expect("session callback should be recognized");
+
+		match interaction {
+			TelegramInteraction::SessionCallback(action) => {
+				assert_eq!(action.chat_id, 1006);
+				assert_eq!(action.callback_query_id, "callback-2");
+				assert_eq!(
+					action.action,
+					TelegramSessionCallbackKind::SelectSession {
+						session_id: "session-9".to_string(),
+						page: 2,
+					}
+				);
+			}
+			other => panic!("expected session callback, got {other:?}"),
 		}
 	}
 

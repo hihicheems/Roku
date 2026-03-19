@@ -84,6 +84,7 @@ pub struct MemoryAdapterAvailability {
 	pub short_term: bool,
 	pub session_state: bool,
 	pub pending_loop: bool,
+	pub session_management: bool,
 }
 
 impl MemoryAdapterAvailability {
@@ -95,6 +96,7 @@ impl MemoryAdapterAvailability {
 			short_term: false,
 			session_state: false,
 			pending_loop: false,
+			session_management: false,
 		}
 	}
 }
@@ -216,7 +218,7 @@ mod tests {
 
 	use crate::NoopLongTermMemoryBackend;
 	use crate::pending_loop::NoopPendingLoopSnapshotBackend;
-	use crate::session::NoopSessionStateBackend;
+	use crate::session::{NoopSessionManagementBackend, NoopSessionStateBackend};
 	use crate::short_term::NoopShortTermContinuityBackend;
 
 	use super::{
@@ -235,6 +237,7 @@ mod tests {
 				short_term: true,
 				session_state: true,
 				pending_loop: true,
+				session_management: true,
 			},
 		);
 
@@ -252,6 +255,7 @@ mod tests {
 				short_term: false,
 				session_state: false,
 				pending_loop: false,
+				session_management: false,
 			},
 		);
 
@@ -276,6 +280,7 @@ mod tests {
 				Box::new(NoopShortTermContinuityBackend),
 				Box::new(NoopSessionStateBackend),
 				Box::new(NoopPendingLoopSnapshotBackend),
+				Box::new(NoopSessionManagementBackend),
 			))
 		}
 	}
@@ -299,6 +304,7 @@ mod tests {
 				short_term: true,
 				session_state: true,
 				pending_loop: true,
+				session_management: true,
 			},
 		};
 		let openviking = StubRegistration {
@@ -308,6 +314,7 @@ mod tests {
 				short_term: true,
 				session_state: true,
 				pending_loop: true,
+				session_management: true,
 			},
 		};
 		let mut registry = MemoryEntryRegistry::new();
