@@ -75,3 +75,15 @@ alias t := test
 # Show one named dev service status
 @status service="telegram-bot":
     ./scripts/dev-services.sh status {{service}}
+
+# Start the external OpenViking provider used by live Roku memory/runtime flows.
+@openviking-start:
+    ./scripts/dev-openviking.sh start
+
+# Stop the background OpenViking provider started by `just openviking-start`.
+@openviking-stop:
+    ./scripts/dev-openviking.sh stop
+
+# Restart the background OpenViking provider with the same health-gated flow.
+@openviking-restart:
+    ./scripts/dev-openviking.sh restart
