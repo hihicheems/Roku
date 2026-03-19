@@ -194,8 +194,9 @@ struct RuntimeServiceTelegramHandler {
 
 /// Stable snapshot for Telegram session management commands.
 ///
-/// This is a view-model for `/status` and `/sessions`, not the source of truth. The underlying
-/// truth still lives in the runtime service's pending-loop store and the session repositories.
+/// This is a view-model for `/status` and the active-session summary shown by `/sessions`, not
+/// the source of truth. The underlying truth still lives in the runtime service's pending-loop
+/// store and the session repositories.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TelegramSessionSnapshot {
 	session_id: String,
@@ -624,10 +625,9 @@ impl RuntimeServiceTelegramHandler {
 		}
 		lines.push("Current chat sessions".to_string());
 		match active_snapshot {
-			Some(snapshot) => append_session_snapshot_lines(&mut lines, snapshot),
+			Some(snapshot) => append_active_session_summary_lines(&mut lines, snapshot),
 			None => lines.push("Active session: none".to_string()),
 		}
-		append_runtime_mode_lines(&mut lines, &self.service.runtime_mode_report());
 		lines.push(String::new());
 		if sessions.is_empty() {
 			lines.push("No sessions exist for this chat yet. Use /new to create one.".to_string());
@@ -923,7 +923,7 @@ fn build_sessions_markup(
 		.iter()
 		.map(|session| {
 			let marker = if active_session_id.is_some_and(|active| active == session.session_id) {
-				"* "
+				"✅ "
 			} else {
 				""
 			};
@@ -956,11 +956,11 @@ fn delete_session_confirmation_markup(session_id: &str) -> TelegramReplyMarkup {
 	TelegramReplyMarkup {
 		inline_keyboard: vec![vec![
 			TelegramInlineKeyboardButton {
-				text: "Confirm delete".to_string(),
+				text: "✅ Confirm".to_string(),
 				callback_data: session_delete_confirm_callback_data(session_id),
 			},
 			TelegramInlineKeyboardButton {
-				text: "Cancel".to_string(),
+				text: "❌ Cancel".to_string(),
 				callback_data: session_delete_cancel_callback_data(),
 			},
 		]],
@@ -971,7 +971,7 @@ fn binding_chat_id(binding_id: &str) -> Option<i64> {
 	binding_id.parse::<i64>().ok()
 }
 
-/// Appends human-readable snapshot lines for `/status` and `/sessions`; order is fixed for tests.
+/// Appends human-readable snapshot lines for `/status`; order is fixed for tests.
 fn append_session_snapshot_lines(lines: &mut Vec<String>, snapshot: &TelegramSessionSnapshot) {
 	lines.push(format!("Active session name: {}", snapshot.session_name));
 	lines.push(format!("Active session id: {}", snapshot.session_id));
@@ -989,6 +989,15 @@ fn append_session_snapshot_lines(lines: &mut Vec<String>, snapshot: &TelegramSes
 	if let Some(activity) = snapshot.latest_activity.as_deref() {
 		lines.push(format!("Latest activity: {activity}"));
 	}
+}
+
+/// Appends the minimal active-session summary shown by `/sessions`.
+fn append_active_session_summary_lines(
+	lines: &mut Vec<String>,
+	snapshot: &TelegramSessionSnapshot,
+) {
+	lines.push(format!("Active session name: {}", snapshot.session_name));
+	lines.push(format!("Active session id: {}", snapshot.session_id));
 }
 
 fn append_runtime_mode_lines(lines: &mut Vec<String>, report: &RuntimeModeReport) {
@@ -1780,6 +1789,16 @@ mod tests {
 		assert_eq!(response.response.status, ResponseStatus::Succeeded);
 		assert!(response.response.message.contains("Current chat sessions"));
 		assert!(response.response.message.contains(&session.name));
+		assert!(
+			response
+				.response
+				.message
+				.contains(&format!("Active session id: {}", session.session_id))
+		);
+		assert!(!response.response.message.contains("Pending loop:"));
+		assert!(!response.response.message.contains("Pending run:"));
+		assert!(!response.response.message.contains("Recent turns:"));
+		assert!(!response.response.message.contains("Runtime mode:"));
 		assert!(response.reply_markup.is_some());
 	}
 
