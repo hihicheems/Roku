@@ -28,8 +28,8 @@ mod runtime_state_doc;
 
 pub use backend::{
 	OpenVikingBackendBootstrapError, OpenVikingLongTermMemoryBackend, OpenVikingMemoryAdapters,
-	OpenVikingPendingLoopSnapshotAdapter, OpenVikingSessionStateAdapter,
-	OpenVikingShortTermContinuityAdapter,
+	OpenVikingPendingLoopSnapshotAdapter, OpenVikingSessionManagementAdapter,
+	OpenVikingSessionStateAdapter, OpenVikingShortTermContinuityAdapter,
 };
 pub use config::{
 	OpenVikingAdapterConfig, OpenVikingAdapterConfigPatch, OpenVikingBackendConfig,

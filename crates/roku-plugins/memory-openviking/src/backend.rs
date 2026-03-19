@@ -33,8 +33,10 @@ use roku_memory::{
 	MemoryError, MemoryHit, MemoryKind, MemoryMetadata, MemoryProvenance, MemoryQuery,
 	MemoryRecord, MemoryScope, MemorySourceRef, MemoryWriteAck, MemoryWriteReason,
 	MemoryWriteRequest, PendingLoopSnapshot, PendingLoopSnapshotBackend, PendingLoopSnapshotError,
-	SessionState, SessionStateBackend, SessionStateError, ShortTermContinuityBackend,
-	ShortTermContinuityError,
+	SessionCreateRequest, SessionDeleteMode, SessionDescriptor, SessionManagementBackend,
+	SessionManagementError, SessionState, SessionStateBackend, SessionStateError, SessionSummary,
+	ShortTermContinuityBackend, ShortTermContinuityError, normalize_session_name,
+	resolve_session_name,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -43,11 +45,12 @@ use thiserror::Error;
 use crate::config::{OpenVikingBackendConfig, OpenVikingBackendConfigError};
 use crate::runtime_state_doc::{
 	RuntimeStateDocument, delete_runtime_state_document, read_runtime_state_document,
-	replace_runtime_state_document,
+	replace_runtime_state_document, runtime_state_entry_name,
 };
 
 static NEXT_RECORD_COUNTER: AtomicU64 = AtomicU64::new(1);
 static NEXT_CONTINUITY_RECORD_COUNTER: AtomicU64 = AtomicU64::new(1);
+static NEXT_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// OpenViking adapter that implements Roku's provider-neutral memory backend trait.
 ///
@@ -452,6 +455,7 @@ pub struct OpenVikingMemoryAdapters {
 	pub short_term: OpenVikingShortTermContinuityAdapter,
 	pub session_state: OpenVikingSessionStateAdapter,
 	pub pending_loop: OpenVikingPendingLoopSnapshotAdapter,
+	pub session_management: OpenVikingSessionManagementAdapter,
 }
 
 impl OpenVikingMemoryAdapters {
@@ -464,7 +468,8 @@ impl OpenVikingMemoryAdapters {
 			long_term: backend.clone(),
 			short_term: OpenVikingShortTermContinuityAdapter::new(backend.clone()),
 			session_state: OpenVikingSessionStateAdapter::new(backend.clone()),
-			pending_loop: OpenVikingPendingLoopSnapshotAdapter::new(backend),
+			pending_loop: OpenVikingPendingLoopSnapshotAdapter::new(backend.clone()),
+			session_management: OpenVikingSessionManagementAdapter::new(backend),
 		})
 	}
 }
@@ -667,6 +672,275 @@ impl PendingLoopSnapshotBackend for OpenVikingPendingLoopSnapshotAdapter {
 		adapter
 			.save_session_state(session_id, session_state)
 			.map_err(|error| PendingLoopSnapshotError::Backend(error.to_string()))
+	}
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ActiveSessionPointerDocument {
+	session_id: String,
+}
+
+/// OpenViking-backed session-management adapter.
+#[derive(Debug, Clone)]
+pub struct OpenVikingSessionManagementAdapter {
+	inner: OpenVikingLongTermMemoryBackend,
+}
+
+impl OpenVikingSessionManagementAdapter {
+	fn new(inner: OpenVikingLongTermMemoryBackend) -> Self {
+		Self { inner }
+	}
+}
+
+impl SessionManagementBackend for OpenVikingSessionManagementAdapter {
+	fn create_session(
+		&mut self,
+		binding_id: &str,
+		request: SessionCreateRequest,
+	) -> Result<SessionDescriptor, SessionManagementError> {
+		let binding_id = normalize_binding_id(binding_id)?;
+		let session_id = generate_session_id();
+		let now = unix_ms_now() as i64;
+		let descriptor = SessionDescriptor {
+			name: resolve_session_name(&request, &session_id)?,
+			session_id: session_id.clone(),
+			created_at_unix_ms: now,
+			updated_at_unix_ms: now,
+		};
+		let target_uri = runtime_binding_session_descriptor_uri(
+			&self.inner.config.resource_root_uri,
+			&binding_id,
+			&session_id,
+		);
+		let stage_path = runtime_binding_session_descriptor_stage_path(&binding_id, &session_id);
+		let content = serde_json::to_string_pretty(&descriptor)
+			.map_err(|error| SessionManagementError::Backend(error.to_string()))?;
+		replace_runtime_state_document(
+			&self.inner,
+			&target_uri,
+			&stage_path,
+			&content,
+			"roku-memory:session-catalog",
+			"persist Roku session descriptor",
+		)
+		.map_err(|error| SessionManagementError::Backend(error.to_string()))?;
+		Ok(descriptor)
+	}
+
+	fn get_session(
+		&self,
+		binding_id: &str,
+		session_id: &str,
+	) -> Result<Option<SessionDescriptor>, SessionManagementError> {
+		let binding_id = normalize_binding_id(binding_id)?;
+		let session_id = normalize_session_id(session_id)?;
+		let target_uri = runtime_binding_session_descriptor_uri(
+			&self.inner.config.resource_root_uri,
+			&binding_id,
+			&session_id,
+		);
+		let document = read_runtime_state_document(&self.inner, &target_uri)
+			.map_err(|error| SessionManagementError::Backend(error.to_string()))?;
+		document
+			.map(|value| {
+				parse_runtime_state_json_document::<SessionDescriptor>(&target_uri, &value)
+					.map_err(|error| SessionManagementError::Backend(error.to_string()))
+			})
+			.transpose()
+	}
+
+	fn list_sessions(
+		&self,
+		binding_id: &str,
+	) -> Result<Vec<SessionSummary>, SessionManagementError> {
+		let binding_id = normalize_binding_id(binding_id)?;
+		let root_uri =
+			runtime_binding_sessions_root_uri(&self.inner.config.resource_root_uri, &binding_id);
+		let mut entries = self
+			.inner
+			.list_simple_entries(&root_uri)
+			.map_err(|error| SessionManagementError::Backend(error.to_string()))?;
+		entries.retain(|entry| runtime_state_entry_name(entry).ends_with(".json"));
+		let mut sessions = Vec::with_capacity(entries.len());
+		for entry in entries {
+			let descriptor_uri = if entry.contains("://") {
+				entry
+			} else {
+				format!(
+					"{}/{}",
+					root_uri.trim_end_matches('/'),
+					entry.trim_start_matches('/')
+				)
+			};
+			let document = read_runtime_state_document(&self.inner, &descriptor_uri)
+				.map_err(|error| SessionManagementError::Backend(error.to_string()))?;
+			let Some(document) = document else {
+				continue;
+			};
+			let descriptor =
+				parse_runtime_state_json_document::<SessionDescriptor>(&descriptor_uri, &document)
+					.map_err(|error| SessionManagementError::Backend(error.to_string()))?;
+			sessions.push(SessionSummary::from(&descriptor));
+		}
+		Ok(sessions)
+	}
+
+	fn rename_session(
+		&mut self,
+		binding_id: &str,
+		session_id: &str,
+		new_name: &str,
+	) -> Result<SessionDescriptor, SessionManagementError> {
+		let binding_id = normalize_binding_id(binding_id)?;
+		let session_id = normalize_session_id(session_id)?;
+		let normalized_name = normalize_session_name(new_name)?;
+		let mut descriptor = self
+			.get_session(&binding_id, &session_id)?
+			.ok_or_else(|| SessionManagementError::NotFound(session_id.clone()))?;
+		descriptor.name = normalized_name;
+		descriptor.updated_at_unix_ms = unix_ms_now() as i64;
+		let target_uri = runtime_binding_session_descriptor_uri(
+			&self.inner.config.resource_root_uri,
+			&binding_id,
+			&session_id,
+		);
+		let stage_path = runtime_binding_session_descriptor_stage_path(&binding_id, &session_id);
+		let content = serde_json::to_string_pretty(&descriptor)
+			.map_err(|error| SessionManagementError::Backend(error.to_string()))?;
+		replace_runtime_state_document(
+			&self.inner,
+			&target_uri,
+			&stage_path,
+			&content,
+			"roku-memory:session-catalog",
+			"rename Roku session descriptor",
+		)
+		.map_err(|error| SessionManagementError::Backend(error.to_string()))?;
+		Ok(descriptor)
+	}
+
+	fn delete_session(
+		&mut self,
+		binding_id: &str,
+		session_id: &str,
+		_mode: SessionDeleteMode,
+	) -> Result<(), SessionManagementError> {
+		let binding_id = normalize_binding_id(binding_id)?;
+		let session_id = normalize_session_id(session_id)?;
+		let Some(_) = self.get_session(&binding_id, &session_id)? else {
+			return Err(SessionManagementError::NotFound(session_id));
+		};
+		let active_uri =
+			runtime_binding_active_session_uri(&self.inner.config.resource_root_uri, &binding_id);
+		let active_document = read_runtime_state_document(&self.inner, &active_uri)
+			.map_err(|error| SessionManagementError::Backend(error.to_string()))?;
+		let pointer_matches = active_document
+			.as_ref()
+			.map(|document| {
+				parse_runtime_state_json_document::<ActiveSessionPointerDocument>(
+					&active_uri,
+					document,
+				)
+				.map(|pointer| pointer.session_id == session_id)
+			})
+			.transpose()
+			.map_err(|error| SessionManagementError::Backend(error.to_string()))?
+			.unwrap_or(false);
+		let mut state_adapter = OpenVikingSessionStateAdapter::new(self.inner.clone());
+		state_adapter
+			.delete_session_state(&session_id)
+			.map_err(|error| SessionManagementError::Backend(error.to_string()))?;
+		let mut continuity_adapter = OpenVikingShortTermContinuityAdapter::new(self.inner.clone());
+		continuity_adapter
+			.delete_continuity(&session_id)
+			.map_err(|error| SessionManagementError::Backend(error.to_string()))?;
+		let descriptor_uri = runtime_binding_session_descriptor_uri(
+			&self.inner.config.resource_root_uri,
+			&binding_id,
+			&session_id,
+		);
+		delete_runtime_state_document(&self.inner, &descriptor_uri)
+			.map_err(|error| SessionManagementError::Backend(error.to_string()))?;
+		if pointer_matches {
+			delete_runtime_state_document(&self.inner, &active_uri)
+				.map_err(|error| SessionManagementError::Backend(error.to_string()))?;
+		}
+		Ok(())
+	}
+
+	fn get_active_session(
+		&self,
+		binding_id: &str,
+	) -> Result<Option<SessionDescriptor>, SessionManagementError> {
+		let binding_id = normalize_binding_id(binding_id)?;
+		let target_uri =
+			runtime_binding_active_session_uri(&self.inner.config.resource_root_uri, &binding_id);
+		let document = read_runtime_state_document(&self.inner, &target_uri)
+			.map_err(|error| SessionManagementError::Backend(error.to_string()))?;
+		let Some(document) = document else {
+			return Ok(None);
+		};
+		let pointer = parse_runtime_state_json_document::<ActiveSessionPointerDocument>(
+			&target_uri,
+			&document,
+		)
+		.map_err(|error| SessionManagementError::Backend(error.to_string()))?;
+		let descriptor = self.get_session(&binding_id, &pointer.session_id)?;
+		if descriptor.is_none() {
+			return Err(SessionManagementError::Backend(format!(
+				"active session pointer references missing descriptor binding_id={binding_id} session_id={}",
+				pointer.session_id
+			)));
+		}
+		Ok(descriptor)
+	}
+
+	fn select_active_session(
+		&mut self,
+		binding_id: &str,
+		session_id: &str,
+	) -> Result<SessionDescriptor, SessionManagementError> {
+		let binding_id = normalize_binding_id(binding_id)?;
+		let session_id = normalize_session_id(session_id)?;
+		let mut descriptor = self
+			.get_session(&binding_id, &session_id)?
+			.ok_or_else(|| SessionManagementError::NotFound(session_id.clone()))?;
+		descriptor.updated_at_unix_ms = unix_ms_now() as i64;
+		let descriptor_uri = runtime_binding_session_descriptor_uri(
+			&self.inner.config.resource_root_uri,
+			&binding_id,
+			&session_id,
+		);
+		let descriptor_stage =
+			runtime_binding_session_descriptor_stage_path(&binding_id, &session_id);
+		let descriptor_content = serde_json::to_string_pretty(&descriptor)
+			.map_err(|error| SessionManagementError::Backend(error.to_string()))?;
+		replace_runtime_state_document(
+			&self.inner,
+			&descriptor_uri,
+			&descriptor_stage,
+			&descriptor_content,
+			"roku-memory:session-catalog",
+			"touch Roku session descriptor during selection",
+		)
+		.map_err(|error| SessionManagementError::Backend(error.to_string()))?;
+		let pointer_uri =
+			runtime_binding_active_session_uri(&self.inner.config.resource_root_uri, &binding_id);
+		let pointer_stage = runtime_binding_active_session_stage_path(&binding_id);
+		let pointer_content = serde_json::to_string_pretty(&ActiveSessionPointerDocument {
+			session_id: session_id.clone(),
+		})
+		.map_err(|error| SessionManagementError::Backend(error.to_string()))?;
+		replace_runtime_state_document(
+			&self.inner,
+			&pointer_uri,
+			&pointer_stage,
+			&pointer_content,
+			"roku-memory:session-catalog",
+			"persist Roku active session pointer",
+		)
+		.map_err(|error| SessionManagementError::Backend(error.to_string()))?;
+		Ok(descriptor)
 	}
 }
 
@@ -1045,6 +1319,44 @@ fn runtime_session_root_uri(resource_root_uri: &str, session_id: &str) -> String
 	)
 }
 
+/// Returns the per-binding runtime-state root used for session catalogs and active pointers.
+fn runtime_binding_root_uri(resource_root_uri: &str, binding_id: &str) -> String {
+	format!(
+		"{}/binding/{}",
+		runtime_state_root_uri(resource_root_uri),
+		sanitize_segment(binding_id)
+	)
+}
+
+/// Returns the provider URI used to store active-session pointer state for one binding.
+fn runtime_binding_active_session_uri(resource_root_uri: &str, binding_id: &str) -> String {
+	format!(
+		"{}/active-session.json",
+		runtime_binding_root_uri(resource_root_uri, binding_id)
+	)
+}
+
+/// Returns the provider URI used to store session descriptor documents for one binding.
+fn runtime_binding_sessions_root_uri(resource_root_uri: &str, binding_id: &str) -> String {
+	format!(
+		"{}/sessions",
+		runtime_binding_root_uri(resource_root_uri, binding_id)
+	)
+}
+
+/// Returns the provider URI used to store one session descriptor document.
+fn runtime_binding_session_descriptor_uri(
+	resource_root_uri: &str,
+	binding_id: &str,
+	session_id: &str,
+) -> String {
+	format!(
+		"{}/{}.json",
+		runtime_binding_sessions_root_uri(resource_root_uri, binding_id),
+		sanitize_segment(session_id)
+	)
+}
+
 /// Returns the provider URI used to store one session-state document.
 fn runtime_session_state_uri(resource_root_uri: &str, session_id: &str) -> String {
 	format!(
@@ -1080,6 +1392,23 @@ fn runtime_session_state_stage_path(session_id: &str) -> PathBuf {
 		.join("session")
 		.join(sanitize_segment(session_id))
 		.join("session-state.json")
+}
+
+/// Returns the relative staging path used for one binding active-session document.
+fn runtime_binding_active_session_stage_path(binding_id: &str) -> PathBuf {
+	PathBuf::from("runtime-state")
+		.join("binding")
+		.join(sanitize_segment(binding_id))
+		.join("active-session.json")
+}
+
+/// Returns the relative staging path used for one session descriptor document.
+fn runtime_binding_session_descriptor_stage_path(binding_id: &str, session_id: &str) -> PathBuf {
+	PathBuf::from("runtime-state")
+		.join("binding")
+		.join(sanitize_segment(binding_id))
+		.join("sessions")
+		.join(format!("{}.json", sanitize_segment(session_id)))
 }
 
 /// Returns the relative staging path used for one continuity record.
@@ -1318,6 +1647,31 @@ fn memory_write_reason_segment(reason: MemoryWriteReason) -> &'static str {
 	}
 }
 
+fn normalize_binding_id(binding_id: &str) -> Result<String, SessionManagementError> {
+	let binding_id = binding_id.trim();
+	if binding_id.is_empty() {
+		return Err(SessionManagementError::Validation(
+			"binding_id must not be empty".to_string(),
+		));
+	}
+	Ok(binding_id.to_string())
+}
+
+fn normalize_session_id(session_id: &str) -> Result<String, SessionManagementError> {
+	let session_id = session_id.trim();
+	if session_id.is_empty() {
+		return Err(SessionManagementError::Validation(
+			"session_id must not be empty".to_string(),
+		));
+	}
+	Ok(session_id.to_string())
+}
+
+fn generate_session_id() -> String {
+	let counter = NEXT_SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+	format!("session-{:020}-{:06}", unix_ms_now(), counter)
+}
+
 /// Returns the current Unix timestamp in milliseconds.
 fn unix_ms_now() -> u64 {
 	SystemTime::now()
@@ -1397,7 +1751,8 @@ mod tests {
 	use roku_common_types::{ConversationRole, ConversationTurn, PendingLoopBinding};
 	use roku_memory::{
 		MemoryKind, MemoryScope, MemoryWriteReason, MemoryWriteRequest, PendingLoopSnapshotBackend,
-		SessionState, SessionStateBackend, ShortTermContinuityBackend,
+		SessionCreateRequest, SessionDeleteMode, SessionManagementBackend, SessionState,
+		SessionStateBackend, ShortTermContinuityBackend,
 	};
 	use serde_json::json;
 	use tiny_http::{Header, Method, Response, Server, StatusCode};
@@ -2065,6 +2420,119 @@ mod tests {
 			session_state
 				.load_session_state("session-1")
 				.expect("deleted materialized state should load")
+				.is_none()
+		);
+	}
+
+	#[test]
+	fn openviking_materialized_session_management_roundtrip_over_http() {
+		let server = MockOpenVikingServer::start_materialized_runtime_state();
+		let tempdir = tempfile::tempdir().expect("tempdir should exist");
+		let adapters = OpenVikingMemoryAdapters::connect(OpenVikingBackendConfig {
+			base_url: server.base_url.clone(),
+			api_key: None,
+			connect_timeout_ms: 1_000,
+			request_timeout_ms: 1_000,
+			resource_root_uri: "viking://resources/roku-memory".to_string(),
+			staging_dir: tempdir.path().join("staging"),
+			write_wait_timeout_ms: 5_000,
+			strict: true,
+		})
+		.expect("openviking adapters should connect");
+
+		let OpenVikingMemoryAdapters {
+			mut session_state,
+			mut short_term,
+			pending_loop,
+			mut session_management,
+			..
+		} = adapters;
+		let binding_id = "chat-1";
+
+		let descriptor = session_management
+			.create_session(binding_id, SessionCreateRequest::default())
+			.expect("session should create");
+		let selected = session_management
+			.select_active_session(binding_id, &descriptor.session_id)
+			.expect("session should select");
+		assert_eq!(selected.session_id, descriptor.session_id);
+
+		session_state
+			.save_session_state(
+				&descriptor.session_id,
+				SessionState {
+					planning_mode: None,
+					pending_loop: None,
+				},
+			)
+			.expect("session state should save");
+		short_term
+			.append_continuity_turn(
+				&descriptor.session_id,
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: "hello".to_string(),
+					created_at_unix_ms: 1,
+				},
+			)
+			.expect("continuity should save");
+		pending_loop
+			.save_pending_loop_snapshot(
+				&descriptor.session_id,
+				Some(PendingLoopBinding {
+					run_id: "run-1".to_string(),
+					loop_state_json: "{\"status\":\"waiting\"}".to_string(),
+				}),
+			)
+			.expect("pending loop should save");
+
+		let renamed = session_management
+			.rename_session(binding_id, &descriptor.session_id, "Renamed Session")
+			.expect("session should rename");
+		assert_eq!(renamed.name, "Renamed Session");
+		let listed = session_management
+			.list_sessions(binding_id)
+			.expect("sessions should list");
+		assert_eq!(listed.len(), 1);
+		assert_eq!(listed[0].session_id, descriptor.session_id);
+		assert_eq!(
+			session_management
+				.get_active_session(binding_id)
+				.expect("active session should load")
+				.expect("active session should exist")
+				.session_id,
+			descriptor.session_id
+		);
+
+		session_management
+			.delete_session(
+				binding_id,
+				&descriptor.session_id,
+				SessionDeleteMode::RetainLongTermMemory,
+			)
+			.expect("session should delete");
+		assert!(
+			session_management
+				.get_active_session(binding_id)
+				.expect("active session should load")
+				.is_none()
+		);
+		assert!(
+			session_state
+				.load_session_state(&descriptor.session_id)
+				.expect("session state should reload")
+				.is_none()
+		);
+		assert!(
+			short_term
+				.load_short_term_continuity(&descriptor.session_id, 8)
+				.expect("continuity should reload")
+				.is_empty()
+		);
+		assert!(
+			pending_loop
+				.load_pending_loop_snapshot(&descriptor.session_id)
+				.expect("pending loop should reload")
 				.is_none()
 		);
 	}

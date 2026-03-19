@@ -161,7 +161,7 @@ fn last_uri_segment(uri: &str) -> &str {
 	uri.rsplit('/').next().unwrap_or(uri)
 }
 
-fn runtime_state_entry_name(entry: &str) -> &str {
+pub(super) fn runtime_state_entry_name(entry: &str) -> &str {
 	last_uri_segment(entry.trim_end_matches('/'))
 }
 

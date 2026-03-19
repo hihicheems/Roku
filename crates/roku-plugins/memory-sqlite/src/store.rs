@@ -17,13 +17,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use roku_common_types::{ConversationTurn, SessionPreferences};
+use roku_memory::{SessionDescriptor, SessionSummary};
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 const SQLITE_WAL_AUTOCHECKPOINT_PAGES: i64 = 200;
 const SQLITE_APPLICATION_ID: i64 = 0x524f_4b55;
-const SQLITE_USER_VERSION: i64 = 1;
+const SQLITE_USER_VERSION: i64 = 2;
 
 #[derive(Debug, Error)]
 pub enum SqliteMemoryStoreError {
@@ -169,6 +170,217 @@ impl SqliteConversationRepository {
 	}
 }
 
+#[derive(Debug, Clone)]
+pub struct SqliteSessionCatalogRepository {
+	config: SqliteMemoryStoreConfig,
+}
+
+impl SqliteSessionCatalogRepository {
+	pub fn connect(config: SqliteMemoryStoreConfig) -> Result<Self, SqliteMemoryStoreError> {
+		open_connection(&config.path)?;
+		Ok(Self { config })
+	}
+
+	fn open(&self) -> Result<Connection, SqliteMemoryStoreError> {
+		open_connection(&self.config.path)
+	}
+
+	pub fn insert_session(
+		&mut self,
+		binding_id: &str,
+		descriptor: &SessionDescriptor,
+	) -> Result<(), SqliteMemoryStoreError> {
+		let connection = self.open()?;
+		connection.execute(
+			"INSERT INTO session_descriptors (
+				binding_id,
+				session_id,
+				name,
+				created_at_unix_ms,
+				updated_at_unix_ms
+			) VALUES (?1, ?2, ?3, ?4, ?5)",
+			params![
+				binding_id,
+				descriptor.session_id,
+				descriptor.name,
+				descriptor.created_at_unix_ms,
+				descriptor.updated_at_unix_ms,
+			],
+		)?;
+		Ok(())
+	}
+
+	pub fn load_session(
+		&self,
+		binding_id: &str,
+		session_id: &str,
+	) -> Result<Option<SessionDescriptor>, SqliteMemoryStoreError> {
+		let connection = self.open()?;
+		connection
+			.query_row(
+				"SELECT session_id, name, created_at_unix_ms, updated_at_unix_ms
+				 FROM session_descriptors
+				 WHERE binding_id = ?1 AND session_id = ?2",
+				params![binding_id, session_id],
+				session_descriptor_from_row,
+			)
+			.optional()
+			.map_err(SqliteMemoryStoreError::from)
+	}
+
+	pub fn list_sessions(
+		&self,
+		binding_id: &str,
+	) -> Result<Vec<SessionSummary>, SqliteMemoryStoreError> {
+		let connection = self.open()?;
+		let mut statement = connection.prepare(
+			"SELECT session_id, name, updated_at_unix_ms
+			 FROM session_descriptors
+			 WHERE binding_id = ?1",
+		)?;
+		statement
+			.query_map(params![binding_id], |row| {
+				Ok(SessionSummary {
+					session_id: row.get(0)?,
+					name: row.get(1)?,
+					updated_at_unix_ms: row.get(2)?,
+				})
+			})?
+			.collect::<Result<Vec<_>, _>>()
+			.map_err(SqliteMemoryStoreError::from)
+	}
+
+	pub fn rename_session(
+		&mut self,
+		binding_id: &str,
+		session_id: &str,
+		name: &str,
+		updated_at_unix_ms: i64,
+	) -> Result<Option<SessionDescriptor>, SqliteMemoryStoreError> {
+		let connection = self.open()?;
+		let rows = connection.execute(
+			"UPDATE session_descriptors
+			 SET name = ?3, updated_at_unix_ms = ?4
+			 WHERE binding_id = ?1 AND session_id = ?2",
+			params![binding_id, session_id, name, updated_at_unix_ms],
+		)?;
+		if rows == 0 {
+			return Ok(None);
+		}
+		self.load_session(binding_id, session_id)
+	}
+
+	pub fn load_active_session(
+		&self,
+		binding_id: &str,
+	) -> Result<Option<SessionDescriptor>, SqliteMemoryStoreError> {
+		let connection = self.open()?;
+		connection
+			.query_row(
+				"SELECT d.session_id, d.name, d.created_at_unix_ms, d.updated_at_unix_ms
+				 FROM active_session_bindings AS a
+				 JOIN session_descriptors AS d
+				   ON d.binding_id = a.binding_id AND d.session_id = a.session_id
+				 WHERE a.binding_id = ?1",
+				params![binding_id],
+				session_descriptor_from_row,
+			)
+			.optional()
+			.map_err(SqliteMemoryStoreError::from)
+	}
+
+	pub fn active_session_exists(&self, binding_id: &str) -> Result<bool, SqliteMemoryStoreError> {
+		let connection = self.open()?;
+		let exists = connection.query_row(
+			"SELECT EXISTS(
+					SELECT 1 FROM active_session_bindings WHERE binding_id = ?1
+				)",
+			params![binding_id],
+			|row| row.get::<_, i64>(0),
+		)? != 0;
+		Ok(exists)
+	}
+
+	pub fn select_active_session(
+		&mut self,
+		binding_id: &str,
+		session_id: &str,
+		updated_at_unix_ms: i64,
+	) -> Result<Option<SessionDescriptor>, SqliteMemoryStoreError> {
+		let mut connection = self.open()?;
+		let transaction = connection.transaction()?;
+		let descriptor = transaction
+			.query_row(
+				"SELECT session_id, name, created_at_unix_ms, updated_at_unix_ms
+				 FROM session_descriptors
+				 WHERE binding_id = ?1 AND session_id = ?2",
+				params![binding_id, session_id],
+				session_descriptor_from_row,
+			)
+			.optional()?;
+		let Some(mut descriptor) = descriptor else {
+			return Ok(None);
+		};
+		transaction.execute(
+			"UPDATE session_descriptors
+			 SET updated_at_unix_ms = ?3
+			 WHERE binding_id = ?1 AND session_id = ?2",
+			params![binding_id, session_id, updated_at_unix_ms],
+		)?;
+		transaction.execute(
+			"INSERT INTO active_session_bindings (binding_id, session_id, updated_at_unix_ms)
+			 VALUES (?1, ?2, ?3)
+			 ON CONFLICT(binding_id) DO UPDATE
+			 SET session_id = excluded.session_id, updated_at_unix_ms = excluded.updated_at_unix_ms",
+			params![binding_id, session_id, updated_at_unix_ms],
+		)?;
+		transaction.commit()?;
+		descriptor.updated_at_unix_ms = updated_at_unix_ms;
+		Ok(Some(descriptor))
+	}
+
+	pub fn delete_session(
+		&mut self,
+		binding_id: &str,
+		session_id: &str,
+	) -> Result<bool, SqliteMemoryStoreError> {
+		let mut connection = self.open()?;
+		let transaction = connection.transaction()?;
+		let exists = transaction.query_row(
+			"SELECT EXISTS(
+					SELECT 1
+					FROM session_descriptors
+					WHERE binding_id = ?1 AND session_id = ?2
+				)",
+			params![binding_id, session_id],
+			|row| row.get::<_, i64>(0),
+		)? != 0;
+		if !exists {
+			return Ok(false);
+		}
+		transaction.execute(
+			"DELETE FROM active_session_bindings
+			 WHERE binding_id = ?1 AND session_id = ?2",
+			params![binding_id, session_id],
+		)?;
+		transaction.execute(
+			"DELETE FROM session_preferences WHERE session_id = ?1",
+			params![session_id],
+		)?;
+		transaction.execute(
+			"DELETE FROM conversation_turns WHERE session_id = ?1",
+			params![session_id],
+		)?;
+		transaction.execute(
+			"DELETE FROM session_descriptors
+			 WHERE binding_id = ?1 AND session_id = ?2",
+			params![binding_id, session_id],
+		)?;
+		transaction.commit()?;
+		Ok(true)
+	}
+}
+
 fn open_connection(path: &Path) -> Result<Connection, SqliteMemoryStoreError> {
 	ensure_parent_dir(path)?;
 	let connection = Connection::open(path)?;
@@ -201,10 +413,36 @@ fn ensure_schema_objects(connection: &Connection) -> Result<(), SqliteMemoryStor
 			session_id TEXT NOT NULL,
 			turn_json TEXT NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS session_descriptors (
+			binding_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			name TEXT NOT NULL,
+			created_at_unix_ms INTEGER NOT NULL,
+			updated_at_unix_ms INTEGER NOT NULL,
+			PRIMARY KEY(binding_id, session_id)
+		);
+		CREATE TABLE IF NOT EXISTS active_session_bindings (
+			binding_id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			updated_at_unix_ms INTEGER NOT NULL DEFAULT 0
+		);
 		CREATE INDEX IF NOT EXISTS idx_conversation_turns_session_seq
-			ON conversation_turns(session_id, seq);",
+			ON conversation_turns(session_id, seq);
+		CREATE INDEX IF NOT EXISTS idx_session_descriptors_binding_updated
+			ON session_descriptors(binding_id, updated_at_unix_ms DESC, session_id);",
 	)?;
 	Ok(())
+}
+
+fn session_descriptor_from_row(
+	row: &rusqlite::Row<'_>,
+) -> Result<SessionDescriptor, rusqlite::Error> {
+	Ok(SessionDescriptor {
+		session_id: row.get(0)?,
+		name: row.get(1)?,
+		created_at_unix_ms: row.get(2)?,
+		updated_at_unix_ms: row.get(3)?,
+	})
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<(), SqliteMemoryStoreError> {
