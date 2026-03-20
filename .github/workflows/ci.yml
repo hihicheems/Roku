@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - dev
   pull_request:
     branches:
       - main
@@ -55,10 +56,6 @@ jobs:
     env:
       CARGO_PROFILE_RELEASE_LTO: true
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
-    strategy:
-      matrix:
-        os:
-          - ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -68,10 +65,6 @@ jobs:
 
   unit:
     runs-on: roku-arc
-    strategy:
-      matrix:
-        os:
-          - ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
