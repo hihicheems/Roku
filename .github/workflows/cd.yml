@@ -14,13 +14,7 @@ on:
 jobs:
   generate-changelog:
     name: Generate Changelog
-    # Temporarily moved off GitHub-hosted runners because the free Actions
-    # quota is exhausted. Keep the original target here for easy rollback:
-    # runs-on: ubuntu-latest
-    runs-on:
-      - self-hosted
-      - linux
-      - x64
+    runs-on: roku-arc
     permissions:
       contents: write
       pull-requests: read
@@ -102,13 +96,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    # Temporarily moved off GitHub-hosted runners because the free Actions
-    # quota is exhausted. Keep the original target here for easy rollback:
-    # runs-on: ubuntu-latest
-    runs-on:
-      - self-hosted
-      - linux
-      - x64
+    runs-on: roku-arc
     needs: generate-changelog
     permissions:
       contents: write

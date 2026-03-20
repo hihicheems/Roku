@@ -19,13 +19,7 @@ concurrency:
 
 jobs:
   check:
-    # Temporarily moved off GitHub-hosted runners because the free Actions
-    # quota is exhausted. Keep the original target here for easy rollback:
-    # runs-on: ubuntu-latest
-    runs-on:
-      - self-hosted
-      - linux
-      - x64
+    runs-on: roku-arc
     steps:
       - uses: actions/checkout@v6
 
@@ -57,13 +51,7 @@ jobs:
         run: cargo clippy --locked --all-targets --workspace -- -D warnings
 
   build:
-    # Temporarily moved off GitHub-hosted runners because the free Actions
-    # quota is exhausted. Keep the original target here for easy rollback:
-    # runs-on: ${{ matrix.os }}
-    runs-on:
-      - self-hosted
-      - linux
-      - x64
+    runs-on: roku-arc
     env:
       CARGO_PROFILE_RELEASE_LTO: true
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
@@ -79,13 +67,7 @@ jobs:
         run: cargo build --release --locked
 
   unit:
-    # Temporarily moved off GitHub-hosted runners because the free Actions
-    # quota is exhausted. Keep the original target here for easy rollback:
-    # runs-on: ${{ matrix.os }}
-    runs-on:
-      - self-hosted
-      - linux
-      - x64
+    runs-on: roku-arc
     strategy:
       matrix:
         os:
