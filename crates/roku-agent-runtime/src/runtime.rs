@@ -53,6 +53,7 @@ use roku_plugin_core::PluginRegistrySnapshot;
 use roku_plugin_host::{ToolExecutionResult, ToolInvocation, ToolRuntime, ToolRuntimeError};
 use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier};
 use roku_plugin_skills::SkillRegistry;
+use roku_plugin_tools::canonical_execution_for_builtin_tool_input;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -1247,9 +1248,12 @@ impl GenericAgentRuntime {
 			"time_budget_ms": spec.policy_bindings.time_budget_ms,
 		});
 		merge_json_object(&mut input, arguments);
+		let canonical_execution =
+			canonical_execution_for_builtin_tool_input(selector.name(), &input);
 		let invocation = ToolInvocation {
 			tool_name: selector.name().to_string(),
 			input,
+			canonical_execution: canonical_execution.clone(),
 			granted_capabilities: spec.capabilities.clone(),
 			invocation_key: Some(format!(
 				"{}:{}:{}",
@@ -1278,8 +1282,14 @@ impl GenericAgentRuntime {
 				}
 			}
 			Err(error) => {
-				let result =
-					tool_failure_result(&spec, &node, "direct-route", selector.name(), error);
+				let result = tool_failure_result(
+					&spec,
+					&node,
+					"direct-route",
+					selector.name(),
+					canonical_execution,
+					error,
+				);
 				let message = extract_result_message(&result);
 				DirectRouteExecutionResult {
 					node,
