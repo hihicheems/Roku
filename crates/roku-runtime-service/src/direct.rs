@@ -18,6 +18,7 @@ use roku_common_types::{
 	ResultStatus, RuntimeError, Task, TaskEventKind, TaskNode, TaskState,
 };
 
+use crate::execution::pending_execution_approval_fact;
 use crate::helpers::{failure_message, result_message};
 use crate::{ContextBundle, RuntimeService};
 
@@ -127,6 +128,15 @@ impl RuntimeService {
 		self.metrics.inc_artifacts();
 
 		if matches!(result.status, ResultStatus::Error) {
+			if let Some(pending_execution_approval) = pending_execution_approval_fact(&result) {
+				return self.freeze_pending_execution_approval(
+					task,
+					&node,
+					pending_execution_approval,
+					&result.payload,
+					&result.schema_version,
+				);
+			}
 			self.metrics.inc_failures();
 			let reason = result_message(&result);
 			let terminal_state = self.fail_task(task, &reason, ErrorClass::NonRetriable)?;
@@ -240,5 +250,165 @@ fn build_direct_validation_result(
 			value: format!("accepted={accepted}"),
 		}],
 		confidence: if accepted { 1.0 } else { 0.0 },
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use roku_common_types::{
+		ApprovalDecision, ApprovalRequirement, ApprovalRequirementScope, CanonicalDigest,
+		CanonicalExecution, ExecutionActionClass, ExecutionEnvPolicy, ExecutionEnvPolicyMode,
+		ExecutionResourceScope, InvocationMode, NodeId, PolicyDecision, PolicyOutcome,
+		PolicyReasonCode, RequestId, ResponseStatus, RetryPolicy, TaskId, TaskNodeKind,
+	};
+	use serde_json::json;
+	use tempfile::tempdir;
+
+	use super::*;
+
+	fn sample_policy_decision() -> PolicyDecision {
+		PolicyDecision {
+			outcome: PolicyOutcome::RequireApproval,
+			reason_code: PolicyReasonCode::ApprovalRequiredByUntrustedProgram,
+			approval_requirement: Some(ApprovalRequirement {
+				scope: ApprovalRequirementScope::Invocation,
+				reason_code: PolicyReasonCode::ApprovalRequiredByUntrustedProgram,
+			}),
+		}
+	}
+
+	fn sample_canonical_execution(cwd: &str) -> CanonicalExecution {
+		CanonicalExecution {
+			tool_name: "command.run".to_string(),
+			program: "pwd".to_string(),
+			argv: vec!["pwd".to_string()],
+			invocation_mode: InvocationMode::DirectExec,
+			shell_context: None,
+			cwd: cwd.to_string(),
+			env_policy: ExecutionEnvPolicy {
+				mode: ExecutionEnvPolicyMode::InheritSelected,
+				allowed_keys: vec!["ROKU_COMMAND_SCOPE_ROOT".to_string()],
+			},
+			resource_scope: ExecutionResourceScope {
+				working_directory: cwd.to_string(),
+				resolved_targets: vec![cwd.to_string()],
+				effective_read_roots: vec![cwd.to_string()],
+				effective_write_roots: Vec::new(),
+			},
+			action_class: ExecutionActionClass::Exec,
+			digest: CanonicalDigest("direct-route-digest".to_string()),
+		}
+	}
+
+	fn sample_direct_route_result(task_id: &TaskId, node_id: &NodeId, cwd: &str) -> ResultEnvelope {
+		ResultEnvelope {
+			task_id: task_id.clone(),
+			node_id: node_id.clone(),
+			producer: "runtime-loop".to_string(),
+			schema_version: "result.v1".to_string(),
+			status: ResultStatus::Error,
+			payload: json!({
+				"error_code": "approval_required",
+				"message": "approval required",
+				"policy_decision": sample_policy_decision(),
+				"canonical_execution": sample_canonical_execution(cwd),
+				"digest": "direct-route-digest",
+				"direct_route": true,
+				"runtime_loop": "tool"
+			})
+			.to_string(),
+			evidence: Vec::new(),
+			confidence: 0.0,
+		}
+	}
+
+	fn direct_route_task(task_id: &str, request_id: &str, goal: &str) -> Task {
+		Task {
+			task_id: TaskId(task_id.to_string()),
+			request_id: RequestId(request_id.to_string()),
+			session_id: "session-direct-route".to_string(),
+			goal: goal.to_string(),
+			state: TaskState::Planning,
+			attempts: 0,
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+			completed_nodes: Vec::new(),
+			next_node_index: 0,
+			pending_approval_id: None,
+			last_result: None,
+			compensation_records: Vec::new(),
+			graph: None,
+		}
+	}
+
+	#[test]
+	fn finalize_direct_path_freezes_and_resumes_execution_approval() {
+		let service = RuntimeService::default();
+		let directory = tempdir().expect("tempdir should succeed");
+		let cwd = directory
+			.path()
+			.canonicalize()
+			.expect("tempdir should canonicalize");
+		let cwd_text = cwd.display().to_string();
+		let mut task = direct_route_task(
+			"task-direct-route-approval",
+			"req-direct-route-approval",
+			"run the approved direct-route command",
+		);
+		let node = TaskNode {
+			node_id: NodeId("direct-route".to_string()),
+			kind: TaskNodeKind::Execution,
+			description: "direct route command review".to_string(),
+			retry_policy: RetryPolicy::default(),
+			..TaskNode::default()
+		};
+		service
+			.start_experiment_run(&task, &task.goal, "direct_route")
+			.expect("direct route experiment should start");
+		let result = sample_direct_route_result(&task.task_id, &node.node_id, &cwd_text);
+
+		let response = service
+			.finalize_direct_path(&mut task, node.clone(), result, "ignored".to_string())
+			.expect("direct route approval should freeze instead of failing");
+
+		assert_eq!(response.status, ResponseStatus::PendingApproval);
+		assert_eq!(
+			response.message,
+			format!("approval required: Run command pwd from {cwd_text}")
+		);
+		assert_eq!(task.state, TaskState::WaitingApproval);
+		assert!(task.graph.is_some());
+		assert_eq!(
+			task.graph
+				.as_ref()
+				.expect("direct route approval should synthesize a resume graph")
+				.nodes
+				.iter()
+				.map(|node| node.node_id.0.as_str())
+				.collect::<Vec<_>>(),
+			vec!["direct-route"]
+		);
+
+		let approval_id = task
+			.pending_approval_id
+			.clone()
+			.expect("approval id should be stored on the task");
+		let resumed = service
+			.decide_approval(
+				&approval_id,
+				ApprovalDecision {
+					actor: "reviewer".to_string(),
+					approved: true,
+					comment: Some("looks good".to_string()),
+				},
+			)
+			.expect("approved direct-route ticket should resume");
+
+		assert_eq!(resumed.status, ResponseStatus::Succeeded);
+		let persisted_task = service
+			.get_task(&task.task_id)
+			.expect("task lookup should succeed")
+			.expect("task should persist");
+		assert_eq!(persisted_task.state, TaskState::Succeeded);
 	}
 }

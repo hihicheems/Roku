@@ -22,8 +22,8 @@ use roku_common_types::{
 	CapabilityToken, CompensationAction, CompensationRecord, CompensationStatus, ErrorClass,
 	EvidenceItem, ExecutionEnvPolicyMode, ExecutionPreview, InvocationMode,
 	PendingExecutionApproval, PolicyDecision, PolicyOutcome, RecoveryEligibility, ResponseEnvelope,
-	ResponseStatus, ResultEnvelope, ResultStatus, RuntimeError, Task, TaskEventKind, TaskId,
-	TaskNode, TaskNodeKind, TaskState, ToolOutputEnvelope, project_execution_preview,
+	ResponseStatus, ResultEnvelope, ResultStatus, RuntimeError, Task, TaskEventKind, TaskGraph,
+	TaskId, TaskNode, TaskNodeKind, TaskState, ToolOutputEnvelope, project_execution_preview,
 };
 use roku_observability::{AuditCorrelation, AuditRecord};
 use serde_json::{Value, json};
@@ -35,7 +35,7 @@ use crate::legacy_graph::{
 use crate::{RunMode, RuntimeService, compact_approval_id};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingExecutionApprovalFact {
+pub(super) struct PendingExecutionApprovalFact {
 	policy_decision: PolicyDecision,
 	canonical_execution: CanonicalExecution,
 }
@@ -714,7 +714,7 @@ impl RuntimeService {
 		Ok(())
 	}
 
-	fn freeze_pending_execution_approval(
+	pub(super) fn freeze_pending_execution_approval(
 		&self,
 		task: &mut Task,
 		node: &TaskNode,
@@ -722,6 +722,7 @@ impl RuntimeService {
 		frozen_payload: &str,
 		frozen_payload_schema_version: &str,
 	) -> Result<ResponseEnvelope, RuntimeError> {
+		ensure_pending_execution_resume_graph(task, node);
 		let approval_id = ApprovalId(compact_approval_id(&task.task_id.0, &node.node_id.0));
 		let digest = fact.canonical_execution.digest.clone();
 		let frozen_payload_ref = self.persist_frozen_execution_snapshot_artifact(
@@ -1163,7 +1164,7 @@ fn node_budget_timeout_result(
 	}
 }
 
-fn pending_execution_approval_fact(
+pub(super) fn pending_execution_approval_fact(
 	result: &ResultEnvelope,
 ) -> Option<PendingExecutionApprovalFact> {
 	let payload = serde_json::from_str::<serde_json::Value>(&result.payload).ok()?;
@@ -1185,6 +1186,17 @@ fn pending_execution_approval_fact(
 		policy_decision,
 		canonical_execution,
 	})
+}
+
+fn ensure_pending_execution_resume_graph(task: &mut Task, node: &TaskNode) {
+	if task.graph.is_some() {
+		return;
+	}
+	task.graph = Some(TaskGraph {
+		task_id: task.task_id.clone(),
+		nodes: vec![node.clone()],
+		edges: Vec::new(),
+	});
 }
 
 fn validate_frozen_execution_payload(
