@@ -42,9 +42,9 @@ use crate::workers::{
 	skill_worker_with_config,
 };
 use roku_common_types::{
-	AgentContext, AggregationMode, ConversationRole, ConversationTurn, EvidenceItem,
-	GeneralExecuteCompletion, JoinPolicy, NodeBudgetSnapshot, NodeId, PolicyBindings,
-	RequestEnvelope, RerunPolicy, ResourceSelector, ResultStatus, RetryPolicy, TaskId,
+	AgentContext, AggregationMode, CanonicalExecution, ConversationRole, ConversationTurn,
+	EvidenceItem, GeneralExecuteCompletion, JoinPolicy, NodeBudgetSnapshot, NodeId, PolicyBindings,
+	RequestEnvelope, RerunPolicy, ResourceSelector, ResultStatus, RetryPolicy, Task, TaskId,
 	TaskNodeDispatchPolicy, TaskNodeKind,
 };
 use roku_common_types::{AgentInstanceSpec, ResultEnvelope, TaskNode};
@@ -1186,6 +1186,65 @@ impl GenericAgentRuntime {
 		}
 	}
 
+	pub fn execute_approved_tool_invocation(
+		&self,
+		task: &Task,
+		node: &TaskNode,
+		tool_name: &str,
+		input: Value,
+		canonical_execution: CanonicalExecution,
+	) -> ResultEnvelope {
+		let capabilities = if node.capabilities.is_empty() {
+			route_capabilities(&self.resource_catalog, &node.resources)
+		} else {
+			node.capabilities.clone()
+		};
+		let spec = AgentInstanceSpec {
+			instance_id: format!("approval-resume:{}", node.node_id.0),
+			context: AgentContext {
+				task_id: task.task_id.clone(),
+				node_id: node.node_id.clone(),
+				summary: node.description.clone(),
+				resources: node.resources.clone(),
+				conversation_history: task.conversation_history.clone(),
+				memory_context: String::new(),
+			},
+			capabilities: capabilities.clone(),
+			capability_tokens: Vec::new(),
+			policy_bindings: PolicyBindings {
+				budget_tokens: node.budget_snapshot.token_budget.max(1),
+				time_budget_ms: node.budget_snapshot.time_budget_ms.max(1),
+			},
+		};
+		let invocation = ToolInvocation {
+			tool_name: tool_name.to_string(),
+			input: input.clone(),
+			canonical_execution: Some(canonical_execution.clone()),
+			approved_scope: Some(approved_scope_for_resume(
+				&canonical_execution.resource_scope,
+			)),
+			skip_policy_check: true,
+			granted_capabilities: capabilities,
+			invocation_key: Some(format!("{}:{}:approved", task.task_id.0, node.node_id.0)),
+			attachments: Vec::new(),
+		};
+
+		match self.tool_runtime.invoke(invocation) {
+			Ok(execution) => {
+				tool_success_result(&spec, node, "approval-resume", tool_name, execution, 0.9)
+			}
+			Err(error) => tool_failure_result(
+				&spec,
+				node,
+				"approval-resume",
+				tool_name,
+				Some(input),
+				Some(canonical_execution),
+				error,
+			),
+		}
+	}
+
 	fn execute_tool_invocation_with_resources_and_summary(
 		&self,
 		task_id: &TaskId,
@@ -1264,6 +1323,8 @@ impl GenericAgentRuntime {
 			tool_name: selector.name().to_string(),
 			input,
 			canonical_execution: canonical_execution.clone(),
+			approved_scope: None,
+			skip_policy_check: false,
 			granted_capabilities: spec.capabilities.clone(),
 			invocation_key: Some(format!(
 				"{}:{}:{}",
@@ -1273,6 +1334,7 @@ impl GenericAgentRuntime {
 			)),
 			attachments: attachments.to_vec(),
 		};
+		let tool_input = invocation.input.clone();
 		match self.tool_runtime.invoke(invocation) {
 			Ok(execution) => {
 				let result = tool_success_result(
@@ -1297,6 +1359,7 @@ impl GenericAgentRuntime {
 					&node,
 					"direct-route",
 					selector.name(),
+					Some(tool_input),
 					canonical_execution,
 					error,
 				);
@@ -1440,6 +1503,22 @@ impl Default for GenericAgentRuntime {
 	fn default() -> Self {
 		Self::with_skill_registry(SkillRegistry::disabled())
 	}
+}
+
+fn approved_scope_for_resume(
+	scope: &roku_common_types::ExecutionResourceScope,
+) -> roku_common_types::ExecutionResourceScope {
+	let mut approved = scope.clone();
+	for target in &scope.resolved_targets {
+		if !approved
+			.effective_read_roots
+			.iter()
+			.any(|existing| existing == target)
+		{
+			approved.effective_read_roots.push(target.clone());
+		}
+	}
+	approved
 }
 
 fn step_description(goal: &str, step: &str) -> String {
