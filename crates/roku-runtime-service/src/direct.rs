@@ -255,11 +255,14 @@ fn build_direct_validation_result(
 
 #[cfg(test)]
 mod tests {
+	use std::env;
+
 	use roku_common_types::{
 		ApprovalDecision, ApprovalRequirement, ApprovalRequirementScope, CanonicalDigest,
 		CanonicalExecution, ExecutionActionClass, ExecutionEnvPolicy, ExecutionEnvPolicyMode,
 		ExecutionResourceScope, InvocationMode, NodeId, PolicyDecision, PolicyOutcome,
-		PolicyReasonCode, RequestId, ResponseStatus, RetryPolicy, TaskId, TaskNodeKind,
+		PolicyReasonCode, RequestId, ResourceSelector, ResponseStatus, RetryPolicy, TaskId,
+		TaskNodeKind,
 	};
 	use serde_json::json;
 	use tempfile::tempdir;
@@ -273,6 +276,17 @@ mod tests {
 			approval_requirement: Some(ApprovalRequirement {
 				scope: ApprovalRequirementScope::Invocation,
 				reason_code: PolicyReasonCode::ApprovalRequiredByUntrustedProgram,
+			}),
+		}
+	}
+
+	fn sample_fs_policy_decision() -> PolicyDecision {
+		PolicyDecision {
+			outcome: PolicyOutcome::RequireApproval,
+			reason_code: PolicyReasonCode::ApprovalRequiredByOutOfScopePath,
+			approval_requirement: Some(ApprovalRequirement {
+				scope: ApprovalRequirementScope::Invocation,
+				reason_code: PolicyReasonCode::ApprovalRequiredByOutOfScopePath,
 			}),
 		}
 	}
@@ -310,9 +324,71 @@ mod tests {
 			payload: json!({
 				"error_code": "approval_required",
 				"message": "approval required",
+				"tool_name": "command.run",
+				"tool_input": {
+					"command": "pwd",
+					"cwd": cwd
+				},
 				"policy_decision": sample_policy_decision(),
 				"canonical_execution": sample_canonical_execution(cwd),
 				"digest": "direct-route-digest",
+				"direct_route": true,
+				"runtime_loop": "tool"
+			})
+			.to_string(),
+			evidence: Vec::new(),
+			confidence: 0.0,
+		}
+	}
+
+	fn sample_fs_direct_route_result(
+		task_id: &TaskId,
+		node_id: &NodeId,
+		workspace_cwd: &str,
+		target_path: &str,
+	) -> ResultEnvelope {
+		ResultEnvelope {
+			task_id: task_id.clone(),
+			node_id: node_id.clone(),
+			producer: "runtime-loop".to_string(),
+			schema_version: "result.v1".to_string(),
+			status: ResultStatus::Error,
+			payload: json!({
+				"error_code": "approval_required",
+				"message": "approval required",
+				"tool_name": "fs.list_dir",
+				"tool_input": {
+					"task_id": task_id.0,
+					"node_id": node_id.0,
+					"goal": "list an out-of-scope directory after approval",
+					"summary": "direct route filesystem review",
+					"conversation_history": "",
+					"budget_tokens": 8000,
+					"time_budget_ms": 60000,
+					"path": target_path
+				},
+				"policy_decision": sample_fs_policy_decision(),
+				"canonical_execution": {
+					"tool_name": "fs.list_dir",
+					"program": "fs.list_dir",
+					"argv": ["fs.list_dir", target_path],
+					"invocation_mode": "direct_exec",
+					"shell_context": null,
+					"cwd": workspace_cwd,
+					"env_policy": {
+						"mode": "clean",
+						"allowed_keys": []
+					},
+					"resource_scope": {
+						"working_directory": workspace_cwd,
+						"resolved_targets": [target_path],
+						"effective_read_roots": [workspace_cwd],
+						"effective_write_roots": []
+					},
+					"action_class": "read",
+					"digest": "direct-route-fs-digest"
+				},
+				"digest": "direct-route-fs-digest",
 				"direct_route": true,
 				"runtime_loop": "tool"
 			})
@@ -374,7 +450,9 @@ mod tests {
 		assert_eq!(response.status, ResponseStatus::PendingApproval);
 		assert_eq!(
 			response.message,
-			format!("approval required: Run command pwd from {cwd_text}")
+			format!(
+				"🛡️ Approval Request\n\nTool: command.run\nAction: Run command pwd from {cwd_text}\nRisk: medium\nReason: the command is outside the constrained built-in allowlist"
+			)
 		);
 		assert_eq!(task.state, TaskState::WaitingApproval);
 		assert!(task.graph.is_some());
@@ -410,5 +488,85 @@ mod tests {
 			.expect("task lookup should succeed")
 			.expect("task should persist");
 		assert_eq!(persisted_task.state, TaskState::Succeeded);
+	}
+
+	#[test]
+	fn finalize_direct_path_freezes_and_resumes_filesystem_path_approval() {
+		let service = RuntimeService::default();
+		let workspace_cwd = env::current_dir()
+			.expect("cwd should resolve")
+			.canonicalize()
+			.expect("cwd should canonicalize");
+		let workspace_cwd_text = workspace_cwd.display().to_string();
+		let directory = tempdir().expect("tempdir should succeed");
+		std::fs::write(directory.path().join("visible.txt"), "hello")
+			.expect("tempdir seed file should write");
+		let target_path = directory
+			.path()
+			.canonicalize()
+			.expect("tempdir should canonicalize");
+		let target_path_text = target_path.display().to_string();
+		let mut task = direct_route_task(
+			"task-direct-route-fs-approval",
+			"req-direct-route-fs-approval",
+			"list an out-of-scope directory after approval",
+		);
+		let node = TaskNode {
+			node_id: NodeId("direct-route".to_string()),
+			kind: TaskNodeKind::Execution,
+			description: "direct route filesystem review".to_string(),
+			resources: vec![ResourceSelector::tool("fs.list_dir".to_string())],
+			capabilities: vec!["fs.list_dir".to_string()],
+			retry_policy: RetryPolicy::default(),
+			..TaskNode::default()
+		};
+		service
+			.start_experiment_run(&task, &task.goal, "direct_route")
+			.expect("direct route experiment should start");
+		let result = sample_fs_direct_route_result(
+			&task.task_id,
+			&node.node_id,
+			&workspace_cwd_text,
+			&target_path_text,
+		);
+
+		let response = service
+			.finalize_direct_path(&mut task, node.clone(), result, "ignored".to_string())
+			.expect("filesystem approval should freeze instead of failing");
+
+		assert_eq!(response.status, ResponseStatus::PendingApproval);
+		assert_eq!(
+			response.message,
+			format!(
+				"🛡️ Approval Request\n\nTool: fs.list_dir\nAction: List directory {target_path_text}\nRisk: high\nReason: the requested path is outside the current allowed workspace roots"
+			)
+		);
+
+		let approval_id = task
+			.pending_approval_id
+			.clone()
+			.expect("approval id should be stored on the task");
+		let resumed = service
+			.decide_approval(
+				&approval_id,
+				ApprovalDecision {
+					actor: "reviewer".to_string(),
+					approved: true,
+					comment: Some("allow one directory listing".to_string()),
+				},
+			)
+			.expect("approved filesystem ticket should resume");
+
+		assert_eq!(resumed.status, ResponseStatus::Succeeded);
+		let result = service
+			.list_results(&task.task_id)
+			.expect("result lookup should succeed")
+			.into_iter()
+			.find(|result| result.node_id == node.node_id)
+			.expect("execution result should be persisted");
+		let payload = serde_json::from_str::<serde_json::Value>(&result.payload)
+			.expect("payload should decode");
+		assert_eq!(payload["tool_name"], "fs.list_dir");
+		assert_eq!(payload["output"]["data"]["path"], target_path_text);
 	}
 }
