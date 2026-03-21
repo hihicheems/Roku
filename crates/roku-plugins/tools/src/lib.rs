@@ -20,6 +20,9 @@ mod config;
 mod contract;
 mod runtime_config;
 
+use roku_common_types::CanonicalExecution;
+use serde_json::Value;
+
 pub use builders::{
 	build_builtin_tool_runtime, build_builtin_tool_runtime_with_plugin_snapshot,
 	build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities,
@@ -40,3 +43,13 @@ pub use runtime_config::{
 	ToolWorkerRuntimeConfigPatch, ToolsRuntimeConfig, ToolsRuntimeConfigError,
 	ToolsRuntimeConfigPatch, WebToolRuntimeConfig, WebToolRuntimeConfigPatch,
 };
+
+pub fn canonical_execution_for_builtin_tool_input(
+	tool_name: &str,
+	input: &Value,
+) -> Option<CanonicalExecution> {
+	match tool_name {
+		"command.run" => builtin::command::canonical_execution_from_runtime_input(input),
+		_ => None,
+	}
+}
