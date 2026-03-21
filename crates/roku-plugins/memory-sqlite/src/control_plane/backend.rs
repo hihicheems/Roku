@@ -894,7 +894,11 @@ mod tests {
 	use std::path::PathBuf;
 
 	use roku_common_types::{
-		ApprovalStatus, EvidenceItem, RequestId, ResultStatus, TaskEventKind, TaskState,
+		ApprovalRequirement, ApprovalRequirementScope, ApprovalStatus, ApprovedExecutionRef,
+		CanonicalDigest, CanonicalExecution, EvidenceItem, ExecutionActionClass,
+		ExecutionEnvPolicy, ExecutionEnvPolicyMode, ExecutionResourceScope, InvocationMode,
+		PendingExecutionApproval, PolicyDecision, PolicyOutcome, PolicyReasonCode, RequestId,
+		ResultStatus, TaskEventKind, TaskState,
 	};
 
 	use super::*;
@@ -952,6 +956,7 @@ mod tests {
 			status: ApprovalStatus::Pending,
 			decided_by: None,
 			comment: None,
+			pending_execution: None,
 		}
 	}
 
@@ -1023,6 +1028,88 @@ mod tests {
 				.load_result(&TaskId("task-1".to_string()), &NodeId("node-1".to_string()))
 				.expect("load result")
 				.is_some()
+		);
+
+		let _ = fs::remove_file(path);
+	}
+
+	#[test]
+	fn sqlite_approval_ticket_roundtrips_frozen_pending_execution() {
+		let path = unique_path("approval-ticket");
+		let config = SqliteControlPlaneConfig::new(path.clone());
+		let mut repo =
+			SqliteApprovalRepository::connect(config).expect("approval repository should connect");
+		let digest = CanonicalDigest("digest-123".to_string());
+		let approval_id = ApprovalId("approval-frozen-1".to_string());
+
+		repo.save_ticket(ApprovalTicket {
+			approval_id: approval_id.clone(),
+			task_id: TaskId("task-1".to_string()),
+			request_id: RequestId("req-1".to_string()),
+			node_id: NodeId("node-1".to_string()),
+			summary: "review risky action".to_string(),
+			status: ApprovalStatus::Pending,
+			decided_by: None,
+			comment: None,
+			pending_execution: Some(PendingExecutionApproval {
+				approval_id: approval_id.clone(),
+				digest: digest.clone(),
+				canonical_execution: CanonicalExecution {
+					tool_name: "command.run".to_string(),
+					program: "rm".to_string(),
+					argv: vec!["rm".to_string(), "-rf".to_string(), "tmp".to_string()],
+					invocation_mode: InvocationMode::DirectExec,
+					shell_context: None,
+					cwd: "/workspace".to_string(),
+					env_policy: ExecutionEnvPolicy {
+						mode: ExecutionEnvPolicyMode::InheritSelected,
+						allowed_keys: vec!["ROKU_COMMAND_SCOPE_ROOT".to_string()],
+					},
+					resource_scope: ExecutionResourceScope {
+						working_directory: "/workspace".to_string(),
+						resolved_targets: vec!["/workspace/tmp".to_string()],
+						effective_read_roots: vec!["/workspace".to_string()],
+						effective_write_roots: vec!["/workspace".to_string()],
+					},
+					action_class: ExecutionActionClass::Exec,
+					digest: digest.clone(),
+				},
+				policy_decision: PolicyDecision {
+					outcome: PolicyOutcome::RequireApproval,
+					reason_code: PolicyReasonCode::ApprovalRequiredByUntrustedProgram,
+					approval_requirement: Some(ApprovalRequirement {
+						scope: ApprovalRequirementScope::Invocation,
+						reason_code: PolicyReasonCode::ApprovalRequiredByUntrustedProgram,
+					}),
+				},
+				execution_ref: Some(ApprovedExecutionRef {
+					digest: digest.clone(),
+					frozen_payload_ref: Some("artifact://frozen-result".to_string()),
+				}),
+			}),
+		})
+		.expect("save frozen approval ticket");
+
+		let ticket = repo
+			.load_ticket(&approval_id)
+			.expect("load frozen approval ticket")
+			.expect("ticket should exist");
+		let pending = ticket
+			.pending_execution
+			.expect("frozen execution payload should round-trip");
+
+		assert_eq!(pending.digest, digest);
+		assert_eq!(pending.canonical_execution.program, "rm");
+		assert_eq!(
+			pending.policy_decision.outcome,
+			PolicyOutcome::RequireApproval
+		);
+		assert_eq!(
+			pending.execution_ref,
+			Some(ApprovedExecutionRef {
+				digest,
+				frozen_payload_ref: Some("artifact://frozen-result".to_string()),
+			})
 		);
 
 		let _ = fs::remove_file(path);

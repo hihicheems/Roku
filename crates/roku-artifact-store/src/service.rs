@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_common_types::{Artifact, ArtifactId, ArtifactMetadataEntry, ResultEnvelope, TaskId};
+use roku_common_types::{
+	Artifact, ArtifactId, ArtifactMetadataEntry, CanonicalDigest, NodeId, ResultEnvelope, TaskId,
+};
 
 use crate::repository::{
 	ArtifactRepository, ArtifactStoreError, FileArtifactRepository, InMemoryArtifactRepository,
@@ -67,6 +69,45 @@ impl ArtifactStore {
 		Ok(artifact)
 	}
 
+	pub fn persist_frozen_execution_snapshot_artifact(
+		&mut self,
+		task_id: &TaskId,
+		node_id: &NodeId,
+		digest: &CanonicalDigest,
+		schema_version: &str,
+		payload: &str,
+	) -> Result<Artifact, ArtifactStoreError> {
+		let artifact = Artifact {
+			artifact_id: ArtifactId(format!(
+				"artifact-snapshot-{}-{}-{}",
+				task_id.0, node_id.0, digest.0
+			)),
+			task_id: task_id.clone(),
+			node_id: node_id.clone(),
+			kind: "frozen_execution_snapshot".to_string(),
+			uri: frozen_execution_snapshot_uri(task_id, node_id, digest),
+			schema_version: schema_version.to_string(),
+			checksum: payload_checksum(payload),
+			metadata: vec![
+				ArtifactMetadataEntry {
+					key: "snapshot_kind".to_string(),
+					value: "frozen_execution".to_string(),
+				},
+				ArtifactMetadataEntry {
+					key: "digest".to_string(),
+					value: digest.0.clone(),
+				},
+				ArtifactMetadataEntry {
+					key: "immutable".to_string(),
+					value: "true".to_string(),
+				},
+			],
+		};
+		self.repository
+			.save_immutable_artifact(artifact.clone(), payload.to_string())?;
+		Ok(artifact)
+	}
+
 	pub fn load_artifact(
 		&self,
 		artifact_id: &ArtifactId,
@@ -97,6 +138,17 @@ fn result_artifact_uri(task_id: &TaskId, node_id: &roku_common_types::NodeId) ->
 	format!("artifact://{}/{}", task_id.0, node_id.0)
 }
 
+fn frozen_execution_snapshot_uri(
+	task_id: &TaskId,
+	node_id: &NodeId,
+	digest: &CanonicalDigest,
+) -> String {
+	format!(
+		"artifact://snapshots/{}/{}/{}",
+		task_id.0, node_id.0, digest.0
+	)
+}
+
 fn payload_checksum(payload: &str) -> String {
 	format!("bytes:{}", payload.len())
 }
@@ -105,7 +157,7 @@ fn payload_checksum(payload: &str) -> String {
 mod tests {
 	use std::time::{SystemTime, UNIX_EPOCH};
 
-	use roku_common_types::{EvidenceItem, NodeId, ResultStatus, TaskId};
+	use roku_common_types::{CanonicalDigest, EvidenceItem, NodeId, ResultStatus, TaskId};
 
 	use super::*;
 
@@ -174,5 +226,40 @@ mod tests {
 		assert_eq!(content, "payload");
 
 		let _ = std::fs::remove_dir_all(path);
+	}
+
+	#[test]
+	fn persist_frozen_execution_snapshot_artifact_rejects_overwrite_with_different_content() {
+		let mut store = ArtifactStore::default();
+		let task_id = TaskId("task-1".to_string());
+		let node_id = NodeId("node-1".to_string());
+		let digest = CanonicalDigest("digest-123".to_string());
+		let artifact = store
+			.persist_frozen_execution_snapshot_artifact(
+				&task_id,
+				&node_id,
+				&digest,
+				"result.v1",
+				"{\"digest\":\"digest-123\"}",
+			)
+			.expect("first snapshot persistence should succeed");
+		assert_eq!(
+			artifact.uri,
+			"artifact://snapshots/task-1/node-1/digest-123"
+		);
+
+		let error = store
+			.persist_frozen_execution_snapshot_artifact(
+				&task_id,
+				&node_id,
+				&digest,
+				"result.v1",
+				"{\"digest\":\"digest-123\",\"changed\":true}",
+			)
+			.expect_err("different content for the same immutable snapshot ref should fail");
+		assert!(matches!(
+			error,
+			ArtifactStoreError::ImmutableSnapshotConflict { .. }
+		));
 	}
 }

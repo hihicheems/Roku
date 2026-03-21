@@ -621,6 +621,11 @@ impl RuntimeService {
 			));
 		}
 		task = self.reconstruct_task_progress(&task)?;
+		let execution_resume = if decision.approved {
+			self.validated_execution_resume(&task, &ticket)?
+		} else {
+			None
+		};
 
 		ticket.status = if decision.approved {
 			ApprovalStatus::Approved
@@ -656,6 +661,9 @@ impl RuntimeService {
 
 		task.pending_approval_id = None;
 		if decision.approved {
+			if let Some(execution_resume) = execution_resume {
+				return self.resume_approved_execution_ticket(&mut task, &ticket, execution_resume);
+			}
 			self.mark_node_completed_by_id(&mut task, &ticket.node_id);
 			if let Some(graph_node) = task.graph.as_ref().and_then(|graph| {
 				graph
@@ -720,6 +728,7 @@ impl RuntimeService {
 			status: ApprovalStatus::Pending,
 			decided_by: None,
 			comment: None,
+			pending_execution: None,
 		};
 
 		self.record_transition(task, TaskState::WaitingApproval, "approval required")?;
@@ -731,13 +740,14 @@ impl RuntimeService {
 			"approval required",
 		)?;
 		self.metrics.inc_approvals_created();
+		let response_message = crate::execution::pending_approval_message(&ticket);
 		self.save_approval_ticket(ticket)?;
 		self.save_task(task.clone())?;
 
 		Ok(ResponseEnvelope {
 			request_id: task.request_id.clone(),
 			status: ResponseStatus::PendingApproval,
-			message: format!("approval required for {}", node.node_id.0),
+			message: response_message,
 			artifacts: vec![approval_artifact(&approval_id)],
 		})
 	}

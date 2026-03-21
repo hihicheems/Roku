@@ -26,6 +26,8 @@ pub enum ArtifactStoreError {
 	Io(#[from] std::io::Error),
 	#[error("serialization error: {0}")]
 	Serde(#[from] serde_json::Error),
+	#[error("immutable snapshot ref conflict for uri `{uri}`")]
+	ImmutableSnapshotConflict { uri: String },
 }
 
 pub trait ArtifactRepository {
@@ -38,6 +40,36 @@ pub trait ArtifactRepository {
 	fn list_by_task(&self, task_id: &TaskId) -> Result<Vec<Artifact>, ArtifactStoreError>;
 	fn save_content(&mut self, uri: &str, content: String) -> Result<(), ArtifactStoreError>;
 	fn load_content_by_uri(&self, uri: &str) -> Result<Option<String>, ArtifactStoreError>;
+
+	fn save_immutable_artifact(
+		&mut self,
+		artifact: Artifact,
+		content: String,
+	) -> Result<(), ArtifactStoreError> {
+		let conflict = || ArtifactStoreError::ImmutableSnapshotConflict {
+			uri: artifact.uri.clone(),
+		};
+
+		if let Some(existing) = self.load_artifact(&artifact.artifact_id)?
+			&& !artifacts_match(&existing, &artifact)
+		{
+			return Err(conflict());
+		}
+		if let Some(existing) = self.load_by_uri(&artifact.uri)?
+			&& !artifacts_match(&existing, &artifact)
+		{
+			return Err(conflict());
+		}
+		if let Some(existing_content) = self.load_content_by_uri(&artifact.uri)?
+			&& existing_content != content
+		{
+			return Err(conflict());
+		}
+
+		self.save_artifact(artifact.clone())?;
+		self.save_content(&artifact.uri, content)?;
+		Ok(())
+	}
 }
 
 #[derive(Debug, Default)]
@@ -266,4 +298,26 @@ fn write_text_atomically(path: &Path, content: &str) -> Result<(), ArtifactStore
 	fs::write(&temp_path, content)?;
 	fs::rename(temp_path, path)?;
 	Ok(())
+}
+
+fn artifacts_match(left: &Artifact, right: &Artifact) -> bool {
+	left.artifact_id.0 == right.artifact_id.0
+		&& left.task_id == right.task_id
+		&& left.node_id == right.node_id
+		&& left.kind == right.kind
+		&& left.uri == right.uri
+		&& left.schema_version == right.schema_version
+		&& left.checksum == right.checksum
+		&& metadata_matches(&left.metadata, &right.metadata)
+}
+
+fn metadata_matches(
+	left: &[roku_common_types::ArtifactMetadataEntry],
+	right: &[roku_common_types::ArtifactMetadataEntry],
+) -> bool {
+	left.len() == right.len()
+		&& left
+			.iter()
+			.zip(right.iter())
+			.all(|(left, right)| left.key == right.key && left.value == right.value)
 }
