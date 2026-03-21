@@ -750,6 +750,16 @@ impl GenericAgentRuntime {
 							"Runtime could not continue after the latest tool observation.",
 							Some(message.clone()),
 						);
+						if execution.result.status == ResultStatus::Error {
+							return terminalize_existing_tool_execution_result(
+								execution,
+								message,
+								StepAction::Fail,
+								ResultStatus::Error,
+								"tool",
+								Some(loop_state),
+							);
+						}
 						return self.synthetic_loop_terminal_result(
 							task_id,
 							"tool",
@@ -1507,6 +1517,69 @@ fn raw_tool_output_from_result(result: &ResultEnvelope) -> Value {
 fn loop_probe_trace_payload(loop_state: &LoopState) -> Value {
 	serde_json::to_value(runtime_loop_trace(loop_state))
 		.unwrap_or_else(|_| json!({ "schema_version": "runtime_loop_trace.v1" }))
+}
+
+fn terminalize_existing_tool_execution_result(
+	mut execution: DirectRouteExecutionResult,
+	message: String,
+	terminal_step_action: StepAction,
+	status: ResultStatus,
+	loop_name: &str,
+	loop_state: Option<&LoopState>,
+) -> DirectRouteExecutionResult {
+	execution.result.status = status;
+	execution.result.payload =
+		terminalized_result_payload(&execution.result.payload, &message, loop_name, loop_state);
+	if !execution
+		.result
+		.evidence
+		.iter()
+		.any(|item| item.kind == "runtime" && item.value == "runtime-loop")
+	{
+		execution.result.evidence.push(EvidenceItem {
+			kind: "runtime".to_string(),
+			value: "runtime-loop".to_string(),
+		});
+	}
+	if status == ResultStatus::Error {
+		execution.result.confidence = 0.0;
+	}
+	execution.message = message;
+	execution.terminal_step_action = Some(terminal_step_action);
+	execution
+}
+
+fn terminalized_result_payload(
+	upstream_payload: &str,
+	message: &str,
+	loop_name: &str,
+	loop_state: Option<&LoopState>,
+) -> String {
+	let mut payload = serde_json::from_str::<Value>(upstream_payload).unwrap_or_else(|_| {
+		json!({
+			"upstream_payload": upstream_payload,
+		})
+	});
+	if !payload.is_object() {
+		payload = json!({
+			"upstream_payload": payload,
+		});
+	}
+	payload["message"] = Value::String(message.to_string());
+	payload["direct_route"] = Value::Bool(true);
+	payload["runtime_loop"] = Value::String(loop_name.to_string());
+	if let Some(loop_state) = loop_state {
+		payload["probe_trace"] = loop_probe_trace_payload(loop_state);
+	}
+	serde_json::to_string(&payload).unwrap_or_else(|error| {
+		json!({
+			"message": message,
+			"direct_route": true,
+			"runtime_loop": loop_name,
+			"serialization_error": error.to_string(),
+		})
+		.to_string()
+	})
 }
 
 fn terminal_decision(
@@ -2553,6 +2626,83 @@ mod tests {
 	}
 
 	#[test]
+	fn execute_tool_loop_preserves_approval_required_command_payload_for_terminal_failures() {
+		let (route_router, _prompts) = router_with_json_responses(vec![serde_json::json!({
+			"action": "call_tool",
+			"tool_name": "command.run",
+			"arguments": {
+				"command": "just lint"
+			},
+			"reason": "Run the requested command directly.",
+			"final_message": null
+		})]);
+		let execution_router = router_with_text_output("unused-execution-provider", "unused");
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+			);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-command-approval".to_string()),
+			session_id: "session-command-approval".to_string(),
+			goal: "执行下 just lint".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::CodeExec,
+			0.95,
+			false,
+			crate::router::RouteRisk::Low,
+			vec!["command.run".to_string()],
+			vec!["core-command".to_string()],
+			Vec::new(),
+			"command execution request",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+
+		let execution = runtime.execute_tool_loop(
+			&TaskId("task-command-approval".to_string()),
+			&request,
+			&mut loop_state,
+			"",
+			None,
+		);
+
+		let payload = payload_value(&execution.result);
+		assert_eq!(execution.result.status, ResultStatus::Error);
+		assert_eq!(execution.node.node_id.0, "direct-route");
+		assert_eq!(execution.terminal_step_action, Some(StepAction::Fail));
+		assert_eq!(
+			payload
+				.get("policy_decision")
+				.and_then(|value| value.get("outcome"))
+				.and_then(serde_json::Value::as_str),
+			Some("require_approval")
+		);
+		assert_eq!(
+			payload
+				.get("canonical_execution")
+				.and_then(|value| value.get("tool_name"))
+				.and_then(serde_json::Value::as_str),
+			Some("command.run")
+		);
+		assert_eq!(
+			payload
+				.get("runtime_loop")
+				.and_then(serde_json::Value::as_str),
+			Some("tool")
+		);
+		assert!(payload.get("probe_trace").is_some());
+	}
+
+	#[test]
 	fn classify_route_routes_unknown_requests_into_generic_loop() {
 		let (route_router, _prompts) = router_with_json_responses(vec![serde_json::json!({
 			"intent_family": "unknown",
@@ -3289,7 +3439,7 @@ mod tests {
 				expected_tool: Some("command.run".to_string()),
 				forbidden_tools: Vec::new(),
 				expected_terminal_action: Some("fail".to_string()),
-				expected_error_type: Some("command_not_allowed".to_string()),
+				expected_error_type: Some("approval_required".to_string()),
 				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
 					field: "should_fail".to_string(),
 					expected: true,
