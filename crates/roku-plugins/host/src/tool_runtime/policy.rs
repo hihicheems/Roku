@@ -66,6 +66,9 @@ fn policy_reason_label(reason_code: PolicyReasonCode) -> &'static str {
 		PolicyReasonCode::DeniedByOutOfScopeCwd => "denied_by_out_of_scope_cwd",
 		PolicyReasonCode::DeniedByOutOfScopeTarget => "denied_by_out_of_scope_target",
 		PolicyReasonCode::DeniedByUncanonicalizableInput => "denied_by_uncanonicalizable_input",
+		PolicyReasonCode::ApprovalRequiredByOutOfScopePath => {
+			"approval_required_by_out_of_scope_path"
+		}
 		PolicyReasonCode::ApprovalRequiredByWriteScope => "approval_required_by_write_scope",
 		PolicyReasonCode::ApprovalRequiredByNetwork => "approval_required_by_network",
 		PolicyReasonCode::ApprovalRequiredByUntrustedProgram => {

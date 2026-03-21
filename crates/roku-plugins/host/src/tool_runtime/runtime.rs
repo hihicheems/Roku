@@ -18,7 +18,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use roku_common_types::{CanonicalExecution, PolicyDecision, PolicyOutcome};
+use roku_common_types::{
+	CanonicalExecution, ExecutionResourceScope, PolicyDecision, PolicyOutcome,
+};
 use serde_json::Value;
 
 use crate::{
@@ -33,6 +35,8 @@ pub struct ToolInvocation {
 	pub tool_name: String,
 	pub input: Value,
 	pub canonical_execution: Option<CanonicalExecution>,
+	pub approved_scope: Option<ExecutionResourceScope>,
+	pub skip_policy_check: bool,
 	pub granted_capabilities: Vec<String>,
 	pub invocation_key: Option<String>,
 	pub attachments: Vec<PathBuf>,
@@ -150,7 +154,34 @@ impl ToolRuntime {
 			.invocation_key
 			.clone()
 			.unwrap_or_else(|| default_invocation_key(&invocation.tool_name, &invocation.input));
-		if let Some(canonical_execution) = invocation.canonical_execution.as_ref() {
+		if let Some(canonical_execution) = invocation.canonical_execution.as_ref()
+			&& canonical_execution.tool_name != invocation.tool_name
+		{
+			let message = policy::decision_message(&policy::deny(
+				roku_common_types::PolicyReasonCode::DeniedByUncanonicalizableInput,
+			));
+			self.emit_event(
+				&invocation_key,
+				&invocation.tool_name,
+				ExecutionEventKind::Rejected,
+				0,
+				&registered.descriptor.runtime_constraints.sandbox_profile,
+				None,
+				Some(message.clone()),
+			);
+			return Err(ToolRuntimeError::ExecutionFailed {
+				tool: invocation.tool_name,
+				attempts: 0,
+				message,
+				retriable: false,
+				policy_decision: Some(policy::deny(
+					roku_common_types::PolicyReasonCode::DeniedByUncanonicalizableInput,
+				)),
+			});
+		}
+		if let Some(canonical_execution) = invocation.canonical_execution.as_ref()
+			&& !invocation.skip_policy_check
+		{
 			let decision = policy::evaluate_execution_policy(
 				&invocation.tool_name,
 				canonical_execution,
@@ -199,22 +230,34 @@ impl ToolRuntime {
 				None,
 			);
 
+			let override_read_roots = invocation
+				.approved_scope
+				.as_ref()
+				.map(|scope| scope_paths(&scope.effective_read_roots));
+			let override_write_roots = invocation
+				.approved_scope
+				.as_ref()
+				.map(|scope| scope_paths(&scope.effective_write_roots));
 			let request = ToolInvocationRequest {
 				invocation_key: invocation_key.clone(),
 				attempt,
 				input: invocation.input.clone(),
 				sandbox_profile: sandbox_profile.clone(),
 				attachments: invocation.attachments.clone(),
-				allowed_read_roots: registered
-					.descriptor
-					.runtime_constraints
-					.allowed_read_roots
-					.clone(),
-				allowed_write_roots: registered
-					.descriptor
-					.runtime_constraints
-					.allowed_write_roots
-					.clone(),
+				allowed_read_roots: override_read_roots.clone().unwrap_or_else(|| {
+					registered
+						.descriptor
+						.runtime_constraints
+						.allowed_read_roots
+						.clone()
+				}),
+				allowed_write_roots: override_write_roots.clone().unwrap_or_else(|| {
+					registered
+						.descriptor
+						.runtime_constraints
+						.allowed_write_roots
+						.clone()
+				}),
 			};
 			let started_at = Instant::now();
 			let invocation_outcome = registered.tool.invoke(request);
@@ -393,6 +436,10 @@ fn missing_capabilities(required: &[String], granted: &[String]) -> Vec<String> 
 		.filter(|capability| !granted.contains(capability))
 		.cloned()
 		.collect()
+}
+
+fn scope_paths(values: &[String]) -> Vec<PathBuf> {
+	values.iter().map(PathBuf::from).collect()
 }
 
 fn default_invocation_key(tool_name: &str, input: &Value) -> String {
