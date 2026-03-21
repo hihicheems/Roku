@@ -34,6 +34,7 @@ pub enum PolicyReasonCode {
 	DeniedByOutOfScopeCwd,
 	DeniedByOutOfScopeTarget,
 	DeniedByUncanonicalizableInput,
+	ApprovalRequiredByOutOfScopePath,
 	ApprovalRequiredByWriteScope,
 	ApprovalRequiredByNetwork,
 	ApprovalRequiredByUntrustedProgram,
