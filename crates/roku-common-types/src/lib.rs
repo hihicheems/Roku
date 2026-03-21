@@ -16,8 +16,26 @@
 
 use std::fmt;
 
+pub mod approval;
+pub mod canonical_execution;
+pub mod execution_policy;
+pub mod execution_preview;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+pub use approval::{
+	ApprovalDecision, ApprovalStatus, ApprovalTicket, ApprovalTicketStatus, ApprovedExecutionRef,
+	PendingExecutionApproval,
+};
+pub use canonical_execution::{
+	CanonicalDigest, CanonicalExecution, ExecutionActionClass, ExecutionEnvPolicy,
+	ExecutionEnvPolicyMode, ExecutionResourceScope, ExecutionShellContext, InvocationMode,
+};
+pub use execution_policy::{
+	ApprovalRequirement, ApprovalRequirementScope, PolicyDecision, PolicyOutcome, PolicyReasonCode,
+};
+pub use execution_preview::{ExecutionPreview, project_execution_preview};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TaskId(pub String);
@@ -869,9 +887,38 @@ pub struct RuntimeLoopTraceStep {
 	pub observation: Option<Value>,
 	#[serde(default)]
 	pub interpreted_observation: Option<Value>,
+	#[serde(default)]
+	pub execution_trace: Option<RuntimeLoopExecutionTrace>,
 	pub remaining_step_budget_after: u32,
 	pub remaining_recovery_budget_after: u32,
 	pub working_directory_after: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeLoopExecutionTrace {
+	pub tool_name: String,
+	pub digest: String,
+	#[serde(default)]
+	pub stages: Vec<RuntimeLoopExecutionTraceStageRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeLoopExecutionTraceStageRecord {
+	pub stage: RuntimeLoopExecutionTraceStage,
+	#[serde(default)]
+	pub policy_decision: Option<PolicyDecision>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeLoopExecutionTraceStage {
+	Canonicalized,
+	PolicyDecided,
+	ApprovalRequested,
+	ApprovalResolved,
+	ExecutionStarted,
+	ExecutionFinished,
+	ObservationRecorded,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1052,33 +1099,6 @@ pub struct NodeResultSet {
 pub struct ValidationReport {
 	pub accepted: bool,
 	pub failures: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ApprovalStatus {
-	Pending,
-	Approved,
-	Rejected,
-	Cancelled,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApprovalDecision {
-	pub actor: String,
-	pub approved: bool,
-	pub comment: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApprovalTicket {
-	pub approval_id: ApprovalId,
-	pub task_id: TaskId,
-	pub request_id: RequestId,
-	pub node_id: NodeId,
-	pub summary: String,
-	pub status: ApprovalStatus,
-	pub decided_by: Option<String>,
-	pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
