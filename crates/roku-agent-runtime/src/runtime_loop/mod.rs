@@ -15,6 +15,7 @@
 mod ask_user;
 mod context_assembly;
 mod context_projection;
+mod execution_trace;
 mod grounding;
 mod loop_state;
 mod next_step;
