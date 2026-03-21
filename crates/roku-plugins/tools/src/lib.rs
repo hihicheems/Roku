@@ -50,6 +50,9 @@ pub fn canonical_execution_for_builtin_tool_input(
 ) -> Option<CanonicalExecution> {
 	match tool_name {
 		"command.run" => builtin::command::canonical_execution_from_runtime_input(input),
+		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => {
+			builtin::fs::canonical_execution_from_runtime_input(tool_name, input)
+		}
 		_ => None,
 	}
 }

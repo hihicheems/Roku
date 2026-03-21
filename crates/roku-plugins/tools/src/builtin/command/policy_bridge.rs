@@ -31,7 +31,7 @@ pub(super) fn evaluate_command_policy(execution: &CanonicalExecution) -> PolicyD
 		&execution.cwd,
 		&execution.resource_scope.effective_read_roots,
 	) {
-		return deny(PolicyReasonCode::DeniedByOutOfScopeCwd);
+		return require_approval(PolicyReasonCode::ApprovalRequiredByOutOfScopePath);
 	}
 
 	if execution
@@ -42,7 +42,7 @@ pub(super) fn evaluate_command_policy(execution: &CanonicalExecution) -> PolicyD
 			!path_in_any_root(target, &execution.resource_scope.effective_read_roots)
 				&& !path_in_any_root(target, &execution.resource_scope.effective_write_roots)
 		}) {
-		return deny(PolicyReasonCode::DeniedByOutOfScopeTarget);
+		return require_approval(PolicyReasonCode::ApprovalRequiredByOutOfScopePath);
 	}
 
 	match execution.action_class {

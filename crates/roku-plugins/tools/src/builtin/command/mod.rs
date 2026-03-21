@@ -219,7 +219,9 @@ fn command_contract(timeout_ms: u64) -> ToolContract {
 					"cwd",
 					false,
 					"Optional working directory resolved under the allowed read roots.",
-					&["Reject when the directory resolves outside the allowed workspace roots."],
+					&[
+						"Require approval when the directory resolves outside the allowed workspace roots.",
+					],
 				),
 				input_field(
 					"timeout_ms",
@@ -229,14 +231,14 @@ fn command_contract(timeout_ms: u64) -> ToolContract {
 				),
 			],
 			&[
-				"Execution stays inside read-only workspace roots and a constrained command allowlist.",
+				"Execution stays inside read-only workspace roots unless an invocation-scoped approval widens access for one exact frozen command.",
 			],
 		),
 		output: output_contract(
 			"Returns grounded subprocess facts such as argv, cwd, exit code, stdout, stderr, truncation, and scope_root.",
 			"Successful commands with no stdout still return ok=true and a message explaining that stdout was empty.",
 			&[
-				"Unsupported commands, unsafe shell syntax, out-of-scope paths, and timeouts surface as explicit error_type values.",
+				"Unsupported commands, unsafe shell syntax, out-of-scope paths, and timeouts surface as explicit error_type values or approval-required policy payloads.",
 				"Non-zero exit codes remain non-terminal tool observations and do not by themselves declare task completion.",
 			],
 			true,
