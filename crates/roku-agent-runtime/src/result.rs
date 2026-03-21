@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_common_types::{AgentInstanceSpec, EvidenceItem, ResultEnvelope, ResultStatus, TaskNode};
+use roku_common_types::{
+	AgentInstanceSpec, CanonicalExecution, EvidenceItem, PolicyDecision, PolicyOutcome,
+	ResultEnvelope, ResultStatus, TaskNode,
+};
 use roku_plugin_host::{SandboxProfile, ToolExecutionResult, ToolRuntimeError};
 use serde_json::{Value, json};
 
@@ -112,16 +115,24 @@ pub(crate) fn tool_failure_result(
 	node: &TaskNode,
 	worker_id: &str,
 	tool_name: &str,
+	canonical_execution: Option<CanonicalExecution>,
 	error: ToolRuntimeError,
 ) -> ResultEnvelope {
 	let error_code = tool_error_code(&error);
-	let payload = json!({
+	let mut payload = json!({
 		"error_code": error_code,
 		"message": error.to_string(),
 		"tool_name": tool_name,
 		"worker_id": worker_id,
 		"node_id": node.node_id.0,
 	});
+	if let Some(execution) = canonical_execution.as_ref() {
+		payload["canonical_execution"] = serde_json::to_value(execution).unwrap_or(Value::Null);
+		payload["digest"] = Value::String(execution.digest.0.clone());
+	}
+	if let Some(policy_decision) = error.policy_decision() {
+		payload["policy_decision"] = serde_json::to_value(policy_decision).unwrap_or(Value::Null);
+	}
 
 	ResultEnvelope {
 		task_id: spec.context.task_id.clone(),
@@ -149,6 +160,10 @@ pub(crate) fn tool_failure_result(
 }
 
 fn tool_error_code(error: &ToolRuntimeError) -> &'static str {
+	if let Some(policy_decision) = error.policy_decision() {
+		return policy_error_code(policy_decision);
+	}
+
 	match error {
 		ToolRuntimeError::ToolNotFound(_) => "tool_not_found",
 		ToolRuntimeError::ToolAlreadyRegistered(_) => "tool_already_registered",
@@ -163,6 +178,14 @@ fn tool_error_code(error: &ToolRuntimeError) -> &'static str {
 				"execution_failed"
 			}
 		}
+	}
+}
+
+fn policy_error_code(policy_decision: &PolicyDecision) -> &'static str {
+	match policy_decision.outcome {
+		PolicyOutcome::Allow => "execution_failed",
+		PolicyOutcome::Deny => "policy_denied",
+		PolicyOutcome::RequireApproval => "approval_required",
 	}
 }
 
@@ -224,4 +247,136 @@ fn derived_execution_evidence(output: &Value) -> Vec<EvidenceItem> {
 
 fn tool_output_data(output: &Value) -> &Value {
 	output.get("data").unwrap_or(output)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use roku_common_types::{
+		ApprovalRequirement, ApprovalRequirementScope, CanonicalDigest, ExecutionActionClass,
+		ExecutionEnvPolicy, ExecutionEnvPolicyMode, ExecutionResourceScope, InvocationMode, NodeId,
+		PolicyBindings, PolicyReasonCode, TaskId,
+	};
+	use roku_plugin_host::ToolRuntimeError;
+
+	fn sample_spec() -> AgentInstanceSpec {
+		AgentInstanceSpec {
+			instance_id: "worker-1".to_string(),
+			context: roku_common_types::AgentContext {
+				task_id: TaskId("task-1".to_string()),
+				node_id: NodeId("node-1".to_string()),
+				summary: "run command".to_string(),
+				resources: Vec::new(),
+				conversation_history: Vec::new(),
+				memory_context: String::new(),
+			},
+			capabilities: Vec::new(),
+			capability_tokens: Vec::new(),
+			policy_bindings: PolicyBindings {
+				budget_tokens: 8_000,
+				time_budget_ms: 60_000,
+			},
+		}
+	}
+
+	fn sample_node() -> TaskNode {
+		TaskNode {
+			node_id: NodeId("node-1".to_string()),
+			description: "execute".to_string(),
+			..TaskNode::default()
+		}
+	}
+
+	fn sample_execution() -> CanonicalExecution {
+		CanonicalExecution {
+			tool_name: "command.run".to_string(),
+			program: "rm".to_string(),
+			argv: vec!["rm".to_string(), "-rf".to_string(), "tmp".to_string()],
+			invocation_mode: InvocationMode::DirectExec,
+			shell_context: None,
+			cwd: "/workspace".to_string(),
+			env_policy: ExecutionEnvPolicy {
+				mode: ExecutionEnvPolicyMode::InheritSelected,
+				allowed_keys: vec!["ROKU_COMMAND_SCOPE_ROOT".to_string()],
+			},
+			resource_scope: ExecutionResourceScope {
+				working_directory: "/workspace".to_string(),
+				resolved_targets: vec!["/workspace/tmp".to_string()],
+				effective_read_roots: vec!["/workspace".to_string()],
+				effective_write_roots: Vec::new(),
+			},
+			action_class: ExecutionActionClass::Exec,
+			digest: CanonicalDigest("digest-123".to_string()),
+		}
+	}
+
+	fn require_approval_error() -> ToolRuntimeError {
+		ToolRuntimeError::ExecutionFailed {
+			tool: "command.run".to_string(),
+			attempts: 0,
+			message:
+				"policy_outcome=require_approval reason_code=approval_required_by_untrusted_program"
+					.to_string(),
+			retriable: false,
+			policy_decision: Some(PolicyDecision {
+				outcome: PolicyOutcome::RequireApproval,
+				reason_code: PolicyReasonCode::ApprovalRequiredByUntrustedProgram,
+				approval_requirement: Some(ApprovalRequirement {
+					scope: ApprovalRequirementScope::Invocation,
+					reason_code: PolicyReasonCode::ApprovalRequiredByUntrustedProgram,
+				}),
+			}),
+		}
+	}
+
+	fn command_not_allowed_error() -> ToolRuntimeError {
+		ToolRuntimeError::ExecutionFailed {
+			tool: "command.run".to_string(),
+			attempts: 0,
+			message: "command_not_allowed: metacharacters are not allowed".to_string(),
+			retriable: false,
+			policy_decision: None,
+		}
+	}
+
+	#[test]
+	fn tool_failure_result_preserves_require_approval_fact() {
+		let result = tool_failure_result(
+			&sample_spec(),
+			&sample_node(),
+			"worker-1",
+			"command.run",
+			Some(sample_execution()),
+			require_approval_error(),
+		);
+		let payload =
+			serde_json::from_str::<Value>(&result.payload).expect("payload should decode");
+
+		assert_eq!(payload["error_code"], "approval_required");
+		assert_eq!(payload["digest"], Value::String("digest-123".to_string()));
+		assert_eq!(
+			payload["policy_decision"]["reason_code"],
+			"approval_required_by_untrusted_program"
+		);
+		assert_eq!(payload["canonical_execution"]["program"], "rm");
+	}
+
+	#[test]
+	fn tool_failure_result_preserves_canonical_execution_without_policy_decision() {
+		let result = tool_failure_result(
+			&sample_spec(),
+			&sample_node(),
+			"worker-1",
+			"command.run",
+			Some(sample_execution()),
+			command_not_allowed_error(),
+		);
+		let payload =
+			serde_json::from_str::<Value>(&result.payload).expect("payload should decode");
+
+		assert_eq!(payload["error_code"], "execution_failed");
+		assert_eq!(payload["digest"], Value::String("digest-123".to_string()));
+		assert_eq!(payload["canonical_execution"]["program"], "rm");
+		assert_eq!(payload.get("policy_decision"), None);
+	}
 }

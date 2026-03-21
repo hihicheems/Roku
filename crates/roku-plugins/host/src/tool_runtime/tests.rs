@@ -16,6 +16,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use roku_common_types::{
+	ApprovalRequirement, ApprovalRequirementScope, CanonicalDigest, CanonicalExecution,
+	ExecutionActionClass, ExecutionEnvPolicy, ExecutionEnvPolicyMode, ExecutionResourceScope,
+	InvocationMode, PolicyDecision, PolicyOutcome, PolicyReasonCode,
+};
 use serde_json::{Value, json};
 
 use crate::{
@@ -146,6 +151,58 @@ impl Tool for SlowTool {
 	}
 }
 
+struct PolicyAwareTool {
+	descriptor: ToolDescriptor,
+	decision: Option<PolicyDecision>,
+	invocations: Arc<Mutex<u8>>,
+}
+
+impl PolicyAwareTool {
+	fn new(name: &str, decision: Option<PolicyDecision>) -> (Self, Arc<Mutex<u8>>) {
+		let invocations = Arc::new(Mutex::new(0));
+		(
+			Self {
+				descriptor: ToolDescriptor {
+					name: name.to_string(),
+					version: "1.0.0".to_string(),
+					input_schema: ToolSchema::default(),
+					output_schema: "policy-aware.v1".to_string(),
+					required_capabilities: Vec::new(),
+					runtime_constraints: RuntimeConstraints {
+						timeout_ms: 1_000,
+						max_retries: 0,
+						retry_backoff_ms: 0,
+						sandbox_profile: SandboxProfile::NoIsolation,
+						deterministic_hooks: true,
+						allowed_read_roots: Vec::new(),
+						allowed_write_roots: Vec::new(),
+					},
+					contract: None,
+				},
+				decision,
+				invocations: invocations.clone(),
+			},
+			invocations,
+		)
+	}
+}
+
+impl Tool for PolicyAwareTool {
+	fn descriptor(&self) -> ToolDescriptor {
+		self.descriptor.clone()
+	}
+
+	fn invoke(&self, _request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
+		let mut invocations = self.invocations.lock().expect("poisoned lock");
+		*invocations += 1;
+		Ok(json!({"status": "ok"}))
+	}
+
+	fn policy_decision(&self, _execution: &CanonicalExecution) -> Option<PolicyDecision> {
+		self.decision.clone()
+	}
+}
+
 #[derive(Default)]
 struct RecordingHook {
 	events: Mutex<Vec<ExecutionEvent>>,
@@ -163,6 +220,56 @@ impl ExecutionHook for RecordingHook {
 			.lock()
 			.expect("poisoned lock")
 			.push(event.clone());
+	}
+}
+
+fn sample_canonical_execution(tool_name: &str, program: &str) -> CanonicalExecution {
+	CanonicalExecution {
+		tool_name: tool_name.to_string(),
+		program: program.to_string(),
+		argv: vec![program.to_string()],
+		invocation_mode: InvocationMode::DirectExec,
+		shell_context: None,
+		cwd: "/workspace".to_string(),
+		env_policy: ExecutionEnvPolicy {
+			mode: ExecutionEnvPolicyMode::Clean,
+			allowed_keys: Vec::new(),
+		},
+		resource_scope: ExecutionResourceScope {
+			working_directory: "/workspace".to_string(),
+			resolved_targets: vec!["/workspace".to_string()],
+			effective_read_roots: vec!["/workspace".to_string()],
+			effective_write_roots: vec!["/workspace/out".to_string()],
+		},
+		action_class: ExecutionActionClass::Read,
+		digest: CanonicalDigest(format!("digest:{tool_name}:{program}")),
+	}
+}
+
+fn allow_decision() -> PolicyDecision {
+	PolicyDecision {
+		outcome: PolicyOutcome::Allow,
+		reason_code: PolicyReasonCode::AllowedByPolicy,
+		approval_requirement: None,
+	}
+}
+
+fn deny_decision(reason_code: PolicyReasonCode) -> PolicyDecision {
+	PolicyDecision {
+		outcome: PolicyOutcome::Deny,
+		reason_code,
+		approval_requirement: None,
+	}
+}
+
+fn require_approval_decision(reason_code: PolicyReasonCode) -> PolicyDecision {
+	PolicyDecision {
+		outcome: PolicyOutcome::RequireApproval,
+		reason_code,
+		approval_requirement: Some(ApprovalRequirement {
+			scope: ApprovalRequirementScope::Invocation,
+			reason_code,
+		}),
 	}
 }
 
@@ -187,6 +294,7 @@ fn invoke_registered_tool_with_descriptor_constraints() {
 		.invoke(ToolInvocation {
 			tool_name: "echo-json".to_string(),
 			input: json!({"text":"hello"}),
+			canonical_execution: None,
 			granted_capabilities: vec!["artifact:read:dataset/*".to_string()],
 			invocation_key: None,
 			attachments: Vec::new(),
@@ -215,6 +323,7 @@ fn reject_when_capability_is_missing() {
 		.invoke(ToolInvocation {
 			tool_name: "echo-json".to_string(),
 			input: json!({"text":"hello"}),
+			canonical_execution: None,
 			granted_capabilities: Vec::new(),
 			invocation_key: Some("cap-denied".to_string()),
 			attachments: Vec::new(),
@@ -254,6 +363,7 @@ fn retry_retriable_failure_then_succeed() {
 		.invoke(ToolInvocation {
 			tool_name: "flaky".to_string(),
 			input: json!({}),
+			canonical_execution: None,
 			granted_capabilities: Vec::new(),
 			invocation_key: Some("flaky-invoke".to_string()),
 			attachments: Vec::new(),
@@ -281,6 +391,7 @@ fn timeout_is_reported_when_execution_exceeds_budget() {
 		.invoke(ToolInvocation {
 			tool_name: "slow".to_string(),
 			input: json!({}),
+			canonical_execution: None,
 			granted_capabilities: Vec::new(),
 			invocation_key: Some("slow-invoke".to_string()),
 			attachments: Vec::new(),
@@ -325,6 +436,7 @@ fn deterministic_hook_trace_ids_follow_stable_order() {
 		.invoke(ToolInvocation {
 			tool_name: "echo-json".to_string(),
 			input: json!({"text":"order"}),
+			canonical_execution: None,
 			granted_capabilities: Vec::new(),
 			invocation_key: Some("inv-001".to_string()),
 			attachments: Vec::new(),
@@ -342,4 +454,180 @@ fn deterministic_hook_trace_ids_follow_stable_order() {
 		]
 	);
 	assert!(events[2].fingerprint.is_some());
+}
+
+#[test]
+fn command_run_allow_policy_invokes_tool() {
+	let mut runtime = ToolRuntime::default();
+	let (tool, invocations) = PolicyAwareTool::new("command.run", Some(allow_decision()));
+	runtime.register_tool(tool).expect("register tool");
+
+	let result = runtime
+		.invoke(ToolInvocation {
+			tool_name: "command.run".to_string(),
+			input: json!({}),
+			canonical_execution: Some(sample_canonical_execution("command.run", "pwd")),
+			granted_capabilities: Vec::new(),
+			invocation_key: Some("command-allow".to_string()),
+			attachments: Vec::new(),
+		})
+		.expect("invoke command.run");
+
+	assert_eq!(result.output["status"], "ok");
+	assert_eq!(*invocations.lock().expect("poisoned lock"), 1);
+}
+
+#[test]
+fn command_run_deny_policy_rejects_before_invoke() {
+	let mut runtime = ToolRuntime::default();
+	let hook = Arc::new(RecordingHook::default());
+	runtime.register_hook(hook.clone());
+	let (tool, invocations) = PolicyAwareTool::new(
+		"command.run",
+		Some(deny_decision(PolicyReasonCode::DeniedByCommandPolicy)),
+	);
+	runtime.register_tool(tool).expect("register tool");
+
+	let error = runtime
+		.invoke(ToolInvocation {
+			tool_name: "command.run".to_string(),
+			input: json!({}),
+			canonical_execution: Some(sample_canonical_execution("command.run", "pwd")),
+			granted_capabilities: Vec::new(),
+			invocation_key: Some("command-deny".to_string()),
+			attachments: Vec::new(),
+		})
+		.expect_err("command.run should be rejected");
+
+	match &error {
+		ToolRuntimeError::ExecutionFailed {
+			tool,
+			attempts,
+			retriable,
+			policy_decision,
+			..
+		} => {
+			assert_eq!(tool, "command.run");
+			assert_eq!(*attempts, 0);
+			assert!(!retriable);
+			assert_eq!(
+				*policy_decision,
+				Some(deny_decision(PolicyReasonCode::DeniedByCommandPolicy))
+			);
+		}
+		other => panic!("unexpected error: {other:?}"),
+	}
+
+	assert_eq!(*invocations.lock().expect("poisoned lock"), 0);
+	let events = hook.events();
+	assert_eq!(events.len(), 1);
+	assert_eq!(events[0].kind, ExecutionEventKind::Rejected);
+	assert!(events[0].message.is_some());
+	assert_eq!(
+		error.policy_decision(),
+		Some(&deny_decision(PolicyReasonCode::DeniedByCommandPolicy))
+	);
+}
+
+#[test]
+fn command_run_require_approval_rejects_before_invoke() {
+	let mut runtime = ToolRuntime::default();
+	let hook = Arc::new(RecordingHook::default());
+	runtime.register_hook(hook.clone());
+	let (tool, invocations) = PolicyAwareTool::new(
+		"command.run",
+		Some(require_approval_decision(
+			PolicyReasonCode::ApprovalRequiredByWriteScope,
+		)),
+	);
+	runtime.register_tool(tool).expect("register tool");
+
+	let error = runtime
+		.invoke(ToolInvocation {
+			tool_name: "command.run".to_string(),
+			input: json!({}),
+			canonical_execution: Some(sample_canonical_execution("command.run", "pwd")),
+			granted_capabilities: Vec::new(),
+			invocation_key: Some("command-approval".to_string()),
+			attachments: Vec::new(),
+		})
+		.expect_err("command.run should require approval");
+
+	match &error {
+		ToolRuntimeError::ExecutionFailed {
+			tool,
+			attempts,
+			retriable,
+			policy_decision,
+			..
+		} => {
+			assert_eq!(tool, "command.run");
+			assert_eq!(*attempts, 0);
+			assert!(!retriable);
+			assert_eq!(
+				*policy_decision,
+				Some(require_approval_decision(
+					PolicyReasonCode::ApprovalRequiredByWriteScope
+				))
+			);
+		}
+		other => panic!("unexpected error: {other:?}"),
+	}
+
+	assert_eq!(*invocations.lock().expect("poisoned lock"), 0);
+	let events = hook.events();
+	assert_eq!(events.len(), 1);
+	assert_eq!(events[0].kind, ExecutionEventKind::Rejected);
+	assert!(events[0].message.is_some());
+	assert_eq!(
+		error.policy_decision(),
+		Some(&require_approval_decision(
+			PolicyReasonCode::ApprovalRequiredByWriteScope
+		))
+	);
+}
+
+#[test]
+fn non_command_tool_with_canonical_execution_does_not_trigger_command_policy() {
+	let mut runtime = ToolRuntime::default();
+	let (tool, invocations) = PolicyAwareTool::new("echo-json", None);
+	runtime.register_tool(tool).expect("register tool");
+
+	let result = runtime
+		.invoke(ToolInvocation {
+			tool_name: "echo-json".to_string(),
+			input: json!({}),
+			canonical_execution: Some(sample_canonical_execution("echo-json", "rm")),
+			granted_capabilities: Vec::new(),
+			invocation_key: Some("echo-policy-bypass".to_string()),
+			attachments: Vec::new(),
+		})
+		.expect("non-command tool should still execute");
+
+	assert_eq!(result.output["status"], "ok");
+	assert_eq!(*invocations.lock().expect("poisoned lock"), 1);
+}
+
+#[test]
+fn command_run_without_canonical_execution_skips_policy_gate() {
+	let mut runtime = ToolRuntime::default();
+	let (tool, invocations) = PolicyAwareTool::new(
+		"command.run",
+		Some(deny_decision(PolicyReasonCode::DeniedByCommandPolicy)),
+	);
+	runtime.register_tool(tool).expect("register tool");
+
+	let result = runtime
+		.invoke(ToolInvocation {
+			tool_name: "command.run".to_string(),
+			input: json!({}),
+			canonical_execution: None,
+			granted_capabilities: Vec::new(),
+			invocation_key: Some("command-no-canonical".to_string()),
+			attachments: Vec::new(),
+		})
+		.expect("missing canonical execution should keep current behavior");
+
+	assert_eq!(result.output["status"], "ok");
+	assert_eq!(*invocations.lock().expect("poisoned lock"), 1);
 }
