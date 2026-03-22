@@ -107,7 +107,11 @@ pub(crate) fn canonical_execution_from_runtime_input(input: &Value) -> Option<Ca
 
 	match prepare_command(&request, &CommandToolRuntimeConfig::default()).ok()? {
 		PrepareCommandOutcome::Ready(prepared) => Some(prepared.execution),
-		PrepareCommandOutcome::Rejected(_) => None,
+		PrepareCommandOutcome::Rejected(output) => output
+			.get("data")
+			.and_then(|value| value.get("canonical_execution"))
+			.cloned()
+			.and_then(|value| serde_json::from_value(value).ok()),
 	}
 }
 
@@ -215,7 +219,9 @@ fn command_contract(timeout_ms: u64) -> ToolContract {
 					"cwd",
 					false,
 					"Optional working directory resolved under the allowed read roots.",
-					&["Reject when the directory resolves outside the allowed workspace roots."],
+					&[
+						"Require approval when the directory resolves outside the allowed workspace roots.",
+					],
 				),
 				input_field(
 					"timeout_ms",
@@ -225,14 +231,14 @@ fn command_contract(timeout_ms: u64) -> ToolContract {
 				),
 			],
 			&[
-				"Execution stays inside read-only workspace roots and a constrained command allowlist.",
+				"Execution stays inside read-only workspace roots unless an invocation-scoped approval widens access for one exact frozen command.",
 			],
 		),
 		output: output_contract(
 			"Returns grounded subprocess facts such as argv, cwd, exit code, stdout, stderr, truncation, and scope_root.",
 			"Successful commands with no stdout still return ok=true and a message explaining that stdout was empty.",
 			&[
-				"Unsupported commands, unsafe shell syntax, out-of-scope paths, and timeouts surface as explicit error_type values.",
+				"Unsupported commands, unsafe shell syntax, out-of-scope paths, and timeouts surface as explicit error_type values or approval-required policy payloads.",
 				"Non-zero exit codes remain non-terminal tool observations and do not by themselves declare task completion.",
 			],
 			true,
@@ -243,5 +249,24 @@ fn command_contract(timeout_ms: u64) -> ToolContract {
 			ToolSideEffectPolicy::ReadOnly,
 			ToolRetryPolicy::Never,
 		),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use serde_json::json;
+
+	use super::canonical_execution_from_runtime_input;
+
+	#[test]
+	fn canonical_execution_from_runtime_input_preserves_untrusted_command_execution() {
+		let execution = canonical_execution_from_runtime_input(&json!({
+			"command": "just lint"
+		}))
+		.expect("untrusted commands should still project canonical execution for policy gating");
+
+		assert_eq!(execution.tool_name, "command.run");
+		assert_eq!(execution.program, "just");
+		assert_eq!(execution.argv, vec!["just".to_string(), "lint".to_string()]);
 	}
 }

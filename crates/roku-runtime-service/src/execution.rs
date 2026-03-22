@@ -21,9 +21,10 @@ use roku_common_types::{
 	ApprovalId, ApprovalStatus, ApprovalTicket, ApprovedExecutionRef, CanonicalExecution,
 	CapabilityToken, CompensationAction, CompensationRecord, CompensationStatus, ErrorClass,
 	EvidenceItem, ExecutionEnvPolicyMode, ExecutionPreview, InvocationMode,
-	PendingExecutionApproval, PolicyDecision, PolicyOutcome, RecoveryEligibility, ResponseEnvelope,
-	ResponseStatus, ResultEnvelope, ResultStatus, RuntimeError, Task, TaskEventKind, TaskId,
-	TaskNode, TaskNodeKind, TaskState, ToolOutputEnvelope, project_execution_preview,
+	PendingExecutionApproval, PolicyDecision, PolicyOutcome, PolicyReasonCode, RecoveryEligibility,
+	ResponseEnvelope, ResponseStatus, ResultEnvelope, ResultStatus, RuntimeError, Task,
+	TaskEventKind, TaskGraph, TaskId, TaskNode, TaskNodeKind, TaskState, ToolOutputEnvelope,
+	project_execution_preview,
 };
 use roku_observability::{AuditCorrelation, AuditRecord};
 use serde_json::{Value, json};
@@ -35,7 +36,7 @@ use crate::legacy_graph::{
 use crate::{RunMode, RuntimeService, compact_approval_id};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingExecutionApprovalFact {
+pub(super) struct PendingExecutionApprovalFact {
 	policy_decision: PolicyDecision,
 	canonical_execution: CanonicalExecution,
 }
@@ -45,6 +46,7 @@ pub(super) struct ValidatedExecutionResume {
 	node: TaskNode,
 	pending_execution: PendingExecutionApproval,
 	frozen_payload_ref: String,
+	frozen_tool_input: Value,
 }
 
 impl RuntimeService {
@@ -714,7 +716,7 @@ impl RuntimeService {
 		Ok(())
 	}
 
-	fn freeze_pending_execution_approval(
+	pub(super) fn freeze_pending_execution_approval(
 		&self,
 		task: &mut Task,
 		node: &TaskNode,
@@ -722,6 +724,7 @@ impl RuntimeService {
 		frozen_payload: &str,
 		frozen_payload_schema_version: &str,
 	) -> Result<ResponseEnvelope, RuntimeError> {
+		ensure_pending_execution_resume_graph(task, node);
 		let approval_id = ApprovalId(compact_approval_id(&task.task_id.0, &node.node_id.0));
 		let digest = fact.canonical_execution.digest.clone();
 		let frozen_payload_ref = self.persist_frozen_execution_snapshot_artifact(
@@ -762,13 +765,13 @@ impl RuntimeService {
 			"approval required",
 		)?;
 		self.metrics.inc_approvals_created();
-		self.save_approval_ticket(ticket)?;
+		self.save_approval_ticket(ticket.clone())?;
 		self.save_task(task.clone())?;
 
 		Ok(ResponseEnvelope {
 			request_id: task.request_id.clone(),
 			status: ResponseStatus::PendingApproval,
-			message: pending_approval_message_from_summary(&ticket_summary),
+			message: pending_approval_message(&ticket),
 			artifacts: vec![approval_artifact(&approval_id)],
 		})
 	}
@@ -818,27 +821,29 @@ impl RuntimeService {
 				"execution approval ticket digest does not match the frozen canonical execution",
 			));
 		}
-		if pending_execution.canonical_execution.tool_name != "command.run" {
-			return Err(RuntimeError::new(
-				"execution approval resume currently supports only command.run",
-			));
-		}
-		if pending_execution.canonical_execution.invocation_mode != InvocationMode::DirectExec
-			|| pending_execution
-				.canonical_execution
-				.shell_context
-				.is_some()
-		{
-			return Err(RuntimeError::new(
-				"execution approval resume requires a direct-exec frozen command payload",
-			));
-		}
-		if pending_execution.canonical_execution.env_policy.mode
-			!= ExecutionEnvPolicyMode::InheritSelected
-		{
-			return Err(RuntimeError::new(
-				"execution approval resume requires an inherit_selected env policy",
-			));
+		let approved_tool_name = pending_execution.canonical_execution.tool_name.as_str();
+		if approved_tool_name == "command.run" {
+			if pending_execution.canonical_execution.invocation_mode != InvocationMode::DirectExec
+				|| pending_execution
+					.canonical_execution
+					.shell_context
+					.is_some()
+			{
+				return Err(RuntimeError::new(
+					"execution approval resume requires a direct-exec frozen command payload",
+				));
+			}
+			if pending_execution.canonical_execution.env_policy.mode
+				!= ExecutionEnvPolicyMode::InheritSelected
+			{
+				return Err(RuntimeError::new(
+					"execution approval resume requires an inherit_selected env policy",
+				));
+			}
+		} else if !approved_tool_name.starts_with("fs.") {
+			return Err(RuntimeError::new(format!(
+				"execution approval resume does not support `{approved_tool_name}`",
+			)));
 		}
 
 		let execution_ref = pending_execution.execution_ref.as_ref().ok_or_else(|| {
@@ -853,12 +858,14 @@ impl RuntimeService {
 			RuntimeError::new("execution approval ticket is missing its frozen payload reference")
 		})?;
 		let frozen_payload = self.load_frozen_execution_payload(&frozen_payload_ref)?;
-		validate_frozen_execution_payload(&frozen_payload, &pending_execution)?;
+		let frozen_tool_input =
+			validate_frozen_execution_payload(&frozen_payload, &pending_execution)?;
 
 		Ok(Some(ValidatedExecutionResume {
 			node,
 			pending_execution,
 			frozen_payload_ref,
+			frozen_tool_input,
 		}))
 	}
 
@@ -917,8 +924,18 @@ impl RuntimeService {
 		self.record_transition(task, TaskState::Executing, "approval granted")?;
 		self.save_task(task.clone())?;
 
-		let mut result =
-			execute_frozen_command_result(task, &resume.node, &resume.pending_execution);
+		let mut result = if resume.pending_execution.canonical_execution.tool_name == "command.run"
+		{
+			execute_frozen_command_result(task, &resume.node, &resume.pending_execution)
+		} else {
+			self.runtime.execute_approved_tool_invocation(
+				task,
+				&resume.node,
+				&resume.pending_execution.canonical_execution.tool_name,
+				resume.frozen_tool_input.clone(),
+				resume.pending_execution.canonical_execution.clone(),
+			)
+		};
 		let artifact = self.persist_result_artifact(&result)?;
 		result.evidence.push(EvidenceItem {
 			kind: "artifact_ref".to_string(),
@@ -1163,7 +1180,7 @@ fn node_budget_timeout_result(
 	}
 }
 
-fn pending_execution_approval_fact(
+pub(super) fn pending_execution_approval_fact(
 	result: &ResultEnvelope,
 ) -> Option<PendingExecutionApprovalFact> {
 	let payload = serde_json::from_str::<serde_json::Value>(&result.payload).ok()?;
@@ -1187,10 +1204,21 @@ fn pending_execution_approval_fact(
 	})
 }
 
+fn ensure_pending_execution_resume_graph(task: &mut Task, node: &TaskNode) {
+	if task.graph.is_some() {
+		return;
+	}
+	task.graph = Some(TaskGraph {
+		task_id: task.task_id.clone(),
+		nodes: vec![node.clone()],
+		edges: Vec::new(),
+	});
+}
+
 fn validate_frozen_execution_payload(
 	frozen_payload: &str,
 	pending_execution: &PendingExecutionApproval,
-) -> Result<(), RuntimeError> {
+) -> Result<Value, RuntimeError> {
 	let payload = serde_json::from_str::<Value>(frozen_payload).map_err(|error| {
 		RuntimeError::new(format!(
 			"failed to decode frozen execution payload: {error}"
@@ -1233,7 +1261,19 @@ fn validate_frozen_execution_payload(
 			"frozen execution payload canonical execution does not match the approved ticket",
 		));
 	}
-	Ok(())
+	let payload_tool_name = payload
+		.get("tool_name")
+		.and_then(Value::as_str)
+		.ok_or_else(|| RuntimeError::new("frozen execution payload is missing its tool_name"))?;
+	if payload_tool_name != pending_execution.canonical_execution.tool_name {
+		return Err(RuntimeError::new(
+			"frozen execution payload tool_name does not match the approved ticket",
+		));
+	}
+	payload
+		.get("tool_input")
+		.cloned()
+		.ok_or_else(|| RuntimeError::new("frozen execution payload is missing its tool_input"))
 }
 
 fn execute_frozen_command_result(
@@ -1439,11 +1479,14 @@ fn observed_frozen_command_output(
 }
 
 pub(crate) fn pending_approval_message(ticket: &ApprovalTicket) -> String {
+	if let Some(pending_execution) = ticket.pending_execution.as_ref() {
+		return execution_approval_message(pending_execution);
+	}
 	pending_approval_message_from_summary(&approval_ticket_summary(ticket))
 }
 
 fn pending_approval_message_from_summary(summary: &str) -> String {
-	format!("approval required: {summary}")
+	format!("🛡️ Approval Request\n\nAction: {summary}")
 }
 
 fn approval_ticket_summary(ticket: &ApprovalTicket) -> String {
@@ -1465,6 +1508,89 @@ fn execution_ticket_summary(execution: &CanonicalExecution, fallback: &str) -> S
 
 fn projected_execution_preview(execution: &CanonicalExecution) -> Option<ExecutionPreview> {
 	project_execution_preview(execution)
+}
+
+fn execution_approval_message(pending_execution: &PendingExecutionApproval) -> String {
+	let execution = &pending_execution.canonical_execution;
+	let lines = [
+		"🛡️ Approval Request".to_string(),
+		String::new(),
+		format!("Tool: {}", execution.tool_name),
+		format!("Action: {}", approval_action_text(execution)),
+		format!(
+			"Risk: {}",
+			approval_risk_label(&pending_execution.policy_decision)
+		),
+		format!(
+			"Reason: {}",
+			approval_reason_text(&pending_execution.policy_decision)
+		),
+	];
+	lines.join("\n")
+}
+
+fn approval_action_text(execution: &CanonicalExecution) -> String {
+	if execution.tool_name == "command.run" {
+		if let Some(preview) = projected_execution_preview(execution) {
+			return preview.summary;
+		}
+		return format!("Run command {} from {}", execution.program, execution.cwd);
+	}
+
+	let target = execution
+		.resource_scope
+		.resolved_targets
+		.first()
+		.cloned()
+		.unwrap_or_else(|| execution.cwd.clone());
+	match execution.tool_name.as_str() {
+		"fs.inspect" => format!("Inspect path {target}"),
+		"fs.list_dir" => format!("List directory {target}"),
+		"fs.read_text" => format!("Read text from {target}"),
+		"fs.exists" => format!("Check whether {target} exists"),
+		other => format!("Execute {other} against {target}"),
+	}
+}
+
+fn approval_risk_label(decision: &PolicyDecision) -> &'static str {
+	match decision.reason_code {
+		PolicyReasonCode::ApprovalRequiredByOutOfScopePath
+		| PolicyReasonCode::ApprovalRequiredByWriteScope
+		| PolicyReasonCode::ApprovalRequiredByNetwork => "high",
+		PolicyReasonCode::ApprovalRequiredByUntrustedProgram => "medium",
+		_ => "medium",
+	}
+}
+
+fn approval_reason_text(decision: &PolicyDecision) -> &'static str {
+	match decision.reason_code {
+		PolicyReasonCode::ApprovalRequiredByOutOfScopePath => {
+			"the requested path is outside the current allowed workspace roots"
+		}
+		PolicyReasonCode::ApprovalRequiredByWriteScope => {
+			"the action may modify the filesystem and needs explicit confirmation"
+		}
+		PolicyReasonCode::ApprovalRequiredByNetwork => {
+			"the action may reach the network and needs explicit confirmation"
+		}
+		PolicyReasonCode::ApprovalRequiredByUntrustedProgram => {
+			"the command is outside the constrained built-in allowlist"
+		}
+		PolicyReasonCode::AllowedByPolicy => "the current execution policy requires confirmation",
+		PolicyReasonCode::DeniedByShellSyntax => {
+			"shell-wrapped syntax is not eligible for approval"
+		}
+		PolicyReasonCode::DeniedByCommandPolicy => "the command policy rejected the request",
+		PolicyReasonCode::DeniedByOutOfScopeCwd => {
+			"the working directory is outside the allowed workspace roots"
+		}
+		PolicyReasonCode::DeniedByOutOfScopeTarget => {
+			"the requested target is outside the allowed workspace roots"
+		}
+		PolicyReasonCode::DeniedByUncanonicalizableInput => {
+			"the runtime could not freeze a canonical execution payload"
+		}
+	}
 }
 
 fn classify_result_error(result: &ResultEnvelope) -> ErrorClass {
@@ -1513,6 +1639,17 @@ mod tests {
 		}
 	}
 
+	fn sample_fs_policy_decision() -> PolicyDecision {
+		PolicyDecision {
+			outcome: PolicyOutcome::RequireApproval,
+			reason_code: PolicyReasonCode::ApprovalRequiredByOutOfScopePath,
+			approval_requirement: Some(ApprovalRequirement {
+				scope: ApprovalRequirementScope::Invocation,
+				reason_code: PolicyReasonCode::ApprovalRequiredByOutOfScopePath,
+			}),
+		}
+	}
+
 	fn sample_canonical_execution() -> CanonicalExecution {
 		CanonicalExecution {
 			tool_name: "command.run".to_string(),
@@ -1533,6 +1670,29 @@ mod tests {
 			},
 			action_class: ExecutionActionClass::Exec,
 			digest: CanonicalDigest("digest-123".to_string()),
+		}
+	}
+
+	fn sample_fs_execution() -> CanonicalExecution {
+		CanonicalExecution {
+			tool_name: "fs.list_dir".to_string(),
+			program: "fs.list_dir".to_string(),
+			argv: vec!["fs.list_dir".to_string(), "/Users/jojo".to_string()],
+			invocation_mode: InvocationMode::DirectExec,
+			shell_context: None,
+			cwd: "/workspace".to_string(),
+			env_policy: ExecutionEnvPolicy {
+				mode: ExecutionEnvPolicyMode::Clean,
+				allowed_keys: Vec::new(),
+			},
+			resource_scope: ExecutionResourceScope {
+				working_directory: "/workspace".to_string(),
+				resolved_targets: vec!["/Users/jojo".to_string()],
+				effective_read_roots: vec!["/workspace".to_string()],
+				effective_write_roots: Vec::new(),
+			},
+			action_class: ExecutionActionClass::Read,
+			digest: CanonicalDigest("digest-fs-123".to_string()),
 		}
 	}
 
@@ -1645,6 +1805,11 @@ mod tests {
 		let frozen_payload = serde_json::json!({
 			"error_code": "approval_required",
 			"message": "approval required",
+			"tool_name": "command.run",
+			"tool_input": {
+				"command": "rm -rf tmp",
+				"cwd": "/workspace"
+			},
 			"policy_decision": sample_policy_decision(),
 			"canonical_execution": sample_canonical_execution(),
 			"digest": expected_digest.0.clone(),
@@ -1667,7 +1832,7 @@ mod tests {
 		assert_eq!(response.status, ResponseStatus::PendingApproval);
 		assert_eq!(
 			response.message,
-			"approval required: Run command rm -rf tmp from /workspace"
+			"🛡️ Approval Request\n\nTool: command.run\nAction: Run command rm -rf tmp from /workspace\nRisk: medium\nReason: the command is outside the constrained built-in allowlist"
 		);
 		assert_eq!(task.state, TaskState::WaitingApproval);
 		let approval_id = task
@@ -1727,5 +1892,32 @@ mod tests {
 			.expect("frozen execution snapshot should load")
 			.expect("frozen execution snapshot content should exist");
 		assert_eq!(persisted_frozen_payload, frozen_payload);
+	}
+
+	#[test]
+	fn pending_approval_message_describes_filesystem_path_approval() {
+		let approval_id = roku_common_types::ApprovalId("approval-fs-1".to_string());
+		let ticket = ApprovalTicket {
+			approval_id: approval_id.clone(),
+			task_id: TaskId("task-fs-1".to_string()),
+			request_id: roku_common_types::RequestId("req-fs-1".to_string()),
+			node_id: NodeId("node-fs-1".to_string()),
+			summary: "list home directory".to_string(),
+			status: roku_common_types::ApprovalStatus::Pending,
+			decided_by: None,
+			comment: None,
+			pending_execution: Some(PendingExecutionApproval {
+				approval_id,
+				digest: CanonicalDigest("digest-fs-123".to_string()),
+				canonical_execution: sample_fs_execution(),
+				policy_decision: sample_fs_policy_decision(),
+				execution_ref: None,
+			}),
+		};
+
+		assert_eq!(
+			pending_approval_message(&ticket),
+			"🛡️ Approval Request\n\nTool: fs.list_dir\nAction: List directory /Users/jojo\nRisk: high\nReason: the requested path is outside the current allowed workspace roots"
+		);
 	}
 }

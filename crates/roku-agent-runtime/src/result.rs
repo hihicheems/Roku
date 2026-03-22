@@ -115,6 +115,7 @@ pub(crate) fn tool_failure_result(
 	node: &TaskNode,
 	worker_id: &str,
 	tool_name: &str,
+	tool_input: Option<Value>,
 	canonical_execution: Option<CanonicalExecution>,
 	error: ToolRuntimeError,
 ) -> ResultEnvelope {
@@ -129,6 +130,9 @@ pub(crate) fn tool_failure_result(
 	if let Some(execution) = canonical_execution.as_ref() {
 		payload["canonical_execution"] = serde_json::to_value(execution).unwrap_or(Value::Null);
 		payload["digest"] = Value::String(execution.digest.0.clone());
+	}
+	if let Some(tool_input) = tool_input {
+		payload["tool_input"] = tool_input;
 	}
 	if let Some(policy_decision) = error.policy_decision() {
 		payload["policy_decision"] = serde_json::to_value(policy_decision).unwrap_or(Value::Null);
@@ -346,6 +350,7 @@ mod tests {
 			&sample_node(),
 			"worker-1",
 			"command.run",
+			Some(json!({ "command": "rm -rf tmp" })),
 			Some(sample_execution()),
 			require_approval_error(),
 		);
@@ -359,6 +364,7 @@ mod tests {
 			"approval_required_by_untrusted_program"
 		);
 		assert_eq!(payload["canonical_execution"]["program"], "rm");
+		assert_eq!(payload["tool_input"]["command"], "rm -rf tmp");
 	}
 
 	#[test]
@@ -368,6 +374,7 @@ mod tests {
 			&sample_node(),
 			"worker-1",
 			"command.run",
+			Some(json!({ "command": "rm -rf tmp" })),
 			Some(sample_execution()),
 			command_not_allowed_error(),
 		);

@@ -25,13 +25,19 @@ use crate::runtime_config::{
 	FsToolRuntimeConfig, HARD_MAX_DESCENDANT_SCAN_ENTRIES, HARD_MAX_READ_BYTES,
 };
 use glob::glob;
-use roku_common_types::{ToolContract, ToolOutputEnvelope, ToolRetryPolicy, ToolSideEffectPolicy};
+use roku_common_types::{
+	ApprovalRequirement, ApprovalRequirementScope, CanonicalDigest, CanonicalExecution,
+	ExecutionActionClass, ExecutionEnvPolicy, ExecutionEnvPolicyMode, ExecutionResourceScope,
+	InvocationMode, PolicyDecision, PolicyOutcome, PolicyReasonCode, ToolContract,
+	ToolOutputEnvelope, ToolRetryPolicy, ToolSideEffectPolicy,
+};
 use roku_plugin_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
 use roku_plugin_host::{
 	RuntimeConstraints, SandboxProfile, Tool, ToolDescriptor, ToolFailure, ToolInvocationRequest,
 	ToolRuntime, ToolRuntimeError,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 /// Returns catalog metadata for all fs builtin tools (`fs.find`, `fs.inspect`, `fs.list_dir`,
 /// `fs.read_text`, `fs.glob`, `fs.exists`).
@@ -211,6 +217,29 @@ pub(crate) fn register_tools_with_config(
 	Ok(())
 }
 
+pub(crate) fn canonical_execution_from_runtime_input(
+	tool_name: &str,
+	input: &Value,
+) -> Option<CanonicalExecution> {
+	if !matches!(
+		tool_name,
+		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text"
+	) {
+		return None;
+	}
+
+	let request = ToolInvocationRequest {
+		invocation_key: format!("{tool_name}:agent-runtime-canonicalization"),
+		attempt: 1,
+		input: input.clone(),
+		sandbox_profile: SandboxProfile::ReadOnlyFs,
+		attachments: Vec::new(),
+		allowed_read_roots: default_allowed_roots(),
+		allowed_write_roots: Vec::new(),
+	};
+	canonical_fs_execution(tool_name, &request).ok()
+}
+
 #[derive(Clone)]
 struct FsFindTool {
 	config: FsToolRuntimeConfig,
@@ -316,6 +345,10 @@ impl Tool for FsInspectTool {
 		});
 		Ok(observation_like_output(message, true, None, false, data))
 	}
+
+	fn policy_decision(&self, execution: &CanonicalExecution) -> Option<PolicyDecision> {
+		(execution.tool_name == "fs.inspect").then(|| evaluate_fs_policy(execution))
+	}
 }
 
 impl Tool for FsListDirTool {
@@ -364,6 +397,10 @@ impl Tool for FsListDirTool {
 		});
 		Ok(observation_like_output(message, true, None, false, data))
 	}
+
+	fn policy_decision(&self, execution: &CanonicalExecution) -> Option<PolicyDecision> {
+		(execution.tool_name == "fs.list_dir").then(|| evaluate_fs_policy(execution))
+	}
 }
 
 impl Tool for FsReadTextTool {
@@ -411,6 +448,10 @@ impl Tool for FsReadTextTool {
 			"encoding": "utf-8-lossy",
 		});
 		Ok(observation_like_output(message, true, None, false, data))
+	}
+
+	fn policy_decision(&self, execution: &CanonicalExecution) -> Option<PolicyDecision> {
+		(execution.tool_name == "fs.read_text").then(|| evaluate_fs_policy(execution))
 	}
 }
 
@@ -496,6 +537,10 @@ impl Tool for FsExistsTool {
 			false,
 			data,
 		))
+	}
+
+	fn policy_decision(&self, execution: &CanonicalExecution) -> Option<PolicyDecision> {
+		(execution.tool_name == "fs.exists").then(|| evaluate_fs_policy(execution))
 	}
 }
 
@@ -724,6 +769,190 @@ fn default_allowed_roots() -> Vec<PathBuf> {
 		.unwrap_or_default()
 }
 
+fn canonical_fs_execution(
+	tool_name: &str,
+	request: &ToolInvocationRequest,
+) -> Result<CanonicalExecution, ToolFailure> {
+	let path = required_string(&request.input, "path")?;
+	let roots = allowed_read_roots(request)?;
+	let working_directory = roots.first().cloned().ok_or_else(|| {
+		ToolFailure::terminal("no allowed read roots are configured for filesystem tools")
+	})?;
+	let resolved_target = resolve_scope_target(path, &working_directory)?;
+	let env_policy = ExecutionEnvPolicy {
+		mode: ExecutionEnvPolicyMode::Clean,
+		allowed_keys: Vec::new(),
+	};
+	let resource_scope = ExecutionResourceScope {
+		working_directory: working_directory.display().to_string(),
+		resolved_targets: vec![resolved_target.display().to_string()],
+		effective_read_roots: path_strings(&roots),
+		effective_write_roots: Vec::new(),
+	};
+	let digest = compute_fs_digest(tool_name, &working_directory, &env_policy, &resource_scope)?;
+
+	Ok(CanonicalExecution {
+		tool_name: tool_name.to_string(),
+		program: tool_name.to_string(),
+		argv: vec![tool_name.to_string(), resolved_target.display().to_string()],
+		invocation_mode: InvocationMode::DirectExec,
+		shell_context: None,
+		cwd: working_directory.display().to_string(),
+		env_policy,
+		resource_scope,
+		action_class: ExecutionActionClass::Read,
+		digest,
+	})
+}
+
+fn compute_fs_digest(
+	tool_name: &str,
+	working_directory: &Path,
+	env_policy: &ExecutionEnvPolicy,
+	resource_scope: &ExecutionResourceScope,
+) -> Result<CanonicalDigest, ToolFailure> {
+	let payload = json!({
+		"tool_name": tool_name,
+		"program": tool_name,
+		"argv": [
+			tool_name,
+			resource_scope
+				.resolved_targets
+				.first()
+				.cloned()
+				.unwrap_or_default()
+		],
+		"invocation_mode": InvocationMode::DirectExec,
+		"cwd": working_directory.display().to_string(),
+		"env_policy": env_policy,
+		"resource_scope": resource_scope,
+		"action_class": ExecutionActionClass::Read,
+	});
+	let bytes = serde_json::to_vec(&payload).map_err(|error| {
+		ToolFailure::terminal(format!(
+			"failed to encode canonical fs digest input: {error}"
+		))
+	})?;
+	let mut hasher = Sha256::new();
+	hasher.update(bytes);
+	let digest = hasher.finalize();
+	Ok(CanonicalDigest(format!("{digest:x}")))
+}
+
+fn path_strings(paths: &[PathBuf]) -> Vec<String> {
+	paths
+		.iter()
+		.map(|path| path.display().to_string())
+		.collect()
+}
+
+fn evaluate_fs_policy(execution: &CanonicalExecution) -> PolicyDecision {
+	if !path_in_any_root(
+		&execution.cwd,
+		&execution.resource_scope.effective_read_roots,
+	) {
+		return require_fs_approval(PolicyReasonCode::ApprovalRequiredByOutOfScopePath);
+	}
+	if execution
+		.resource_scope
+		.resolved_targets
+		.iter()
+		.any(|target| !path_in_any_root(target, &execution.resource_scope.effective_read_roots))
+	{
+		return require_fs_approval(PolicyReasonCode::ApprovalRequiredByOutOfScopePath);
+	}
+	allow_fs()
+}
+
+fn allow_fs() -> PolicyDecision {
+	PolicyDecision {
+		outcome: PolicyOutcome::Allow,
+		reason_code: PolicyReasonCode::AllowedByPolicy,
+		approval_requirement: None,
+	}
+}
+
+fn require_fs_approval(reason_code: PolicyReasonCode) -> PolicyDecision {
+	PolicyDecision {
+		outcome: PolicyOutcome::RequireApproval,
+		reason_code,
+		approval_requirement: Some(ApprovalRequirement {
+			scope: ApprovalRequirementScope::Invocation,
+			reason_code,
+		}),
+	}
+}
+
+fn path_in_any_root(path: &str, roots: &[String]) -> bool {
+	if roots.is_empty() {
+		return true;
+	}
+
+	roots
+		.iter()
+		.any(|root| Path::new(path).starts_with(Path::new(root)))
+}
+
+fn resolve_scope_target(raw: &str, working_directory: &Path) -> Result<PathBuf, ToolFailure> {
+	let candidate = expand_user_path(raw, working_directory);
+	if candidate.exists() {
+		return candidate
+			.canonicalize()
+			.map_err(|error| ToolFailure::terminal(format!("failed to resolve `{raw}`: {error}")));
+	}
+	if let Some(parent) = candidate.parent()
+		&& parent.exists()
+	{
+		let canonical_parent = parent.canonicalize().map_err(|error| {
+			ToolFailure::terminal(format!("failed to resolve parent of `{raw}`: {error}"))
+		})?;
+		if let Some(name) = candidate.file_name() {
+			return Ok(canonical_parent.join(name));
+		}
+		return Ok(canonical_parent);
+	}
+	Ok(candidate)
+}
+
+fn expand_user_path(raw: &str, working_directory: &Path) -> PathBuf {
+	let trimmed = raw.trim();
+	if trimmed == "~" {
+		return home_dir().unwrap_or_else(|| PathBuf::from(trimmed));
+	}
+	if let Some(suffix) = trimmed
+		.strip_prefix("~/")
+		.or_else(|| trimmed.strip_prefix("~\\"))
+		&& let Some(home) = home_dir()
+	{
+		return if suffix.is_empty() {
+			home
+		} else {
+			home.join(suffix)
+		};
+	}
+	let candidate = PathBuf::from(trimmed);
+	if candidate.is_absolute() {
+		candidate
+	} else {
+		working_directory.join(candidate)
+	}
+}
+
+fn home_dir() -> Option<PathBuf> {
+	env::var_os("HOME")
+		.map(PathBuf::from)
+		.or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
+		.or_else(|| {
+			let drive = env::var_os("HOMEDRIVE")?;
+			let path = env::var_os("HOMEPATH")?;
+			Some(PathBuf::from(format!(
+				"{}{}",
+				drive.to_string_lossy(),
+				path.to_string_lossy()
+			)))
+		})
+}
+
 fn required_string<'a>(input: &'a Value, field: &str) -> Result<&'a str, ToolFailure> {
 	input
 		.get(field)
@@ -777,16 +1006,12 @@ fn resolve_candidate_path(
 	roots: &[PathBuf],
 	descendant_scan_limit: usize,
 ) -> Result<PathBuf, ToolFailure> {
+	let base = roots
+		.first()
+		.cloned()
+		.unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 	let path = PathBuf::from(raw);
-	let candidate = if path.is_absolute() {
-		path.clone()
-	} else {
-		roots
-			.first()
-			.cloned()
-			.unwrap_or_else(|| PathBuf::from("."))
-			.join(&path)
-	};
+	let candidate = expand_user_path(raw, &base);
 	if candidate.exists() {
 		let canonical = candidate.canonicalize().map_err(|error| {
 			ToolFailure::terminal(format!("failed to resolve `{raw}`: {error}"))
@@ -795,6 +1020,7 @@ fn resolve_candidate_path(
 		return Ok(canonical);
 	}
 	if !path.is_absolute()
+		&& !raw.starts_with('~')
 		&& !raw.contains('/')
 		&& !raw.contains('\\')
 		&& let Some(resolved) = find_unique_descendant_match(raw, roots, descendant_scan_limit)?
@@ -1055,4 +1281,63 @@ fn render_directory_message(path: &Path, entries: &[Value], truncated: bool) -> 
 		lines.push(format!("... truncated to {} entries", entries.len()));
 	}
 	lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use serde_json::json;
+	use tempfile::tempdir;
+
+	#[test]
+	fn canonical_execution_from_runtime_input_preserves_out_of_scope_target() {
+		let directory = tempdir().expect("tempdir should succeed");
+		let target = directory
+			.path()
+			.canonicalize()
+			.expect("tempdir should canonicalize");
+
+		let execution = canonical_execution_from_runtime_input(
+			"fs.list_dir",
+			&json!({ "path": target.display().to_string() }),
+		)
+		.expect("filesystem canonical execution should project");
+
+		assert_eq!(execution.tool_name, "fs.list_dir");
+		assert_eq!(
+			execution.resource_scope.resolved_targets,
+			vec![target.display().to_string()]
+		);
+	}
+
+	#[test]
+	fn fs_policy_requires_approval_for_out_of_scope_paths() {
+		let execution = CanonicalExecution {
+			tool_name: "fs.list_dir".to_string(),
+			program: "fs.list_dir".to_string(),
+			argv: vec!["fs.list_dir".to_string(), "/tmp/outside".to_string()],
+			invocation_mode: InvocationMode::DirectExec,
+			shell_context: None,
+			cwd: "/workspace".to_string(),
+			env_policy: ExecutionEnvPolicy {
+				mode: ExecutionEnvPolicyMode::Clean,
+				allowed_keys: Vec::new(),
+			},
+			resource_scope: ExecutionResourceScope {
+				working_directory: "/workspace".to_string(),
+				resolved_targets: vec!["/tmp/outside".to_string()],
+				effective_read_roots: vec!["/workspace".to_string()],
+				effective_write_roots: Vec::new(),
+			},
+			action_class: ExecutionActionClass::Read,
+			digest: CanonicalDigest("digest-fs-out-of-scope".to_string()),
+		};
+
+		let decision = evaluate_fs_policy(&execution);
+		assert_eq!(decision.outcome, PolicyOutcome::RequireApproval);
+		assert_eq!(
+			decision.reason_code,
+			PolicyReasonCode::ApprovalRequiredByOutOfScopePath
+		);
+	}
 }
