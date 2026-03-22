@@ -29,6 +29,7 @@ run/
 tmp/
 prompts/
 plans/
+AGENTS.md
 
 # Python
 **/__pycache__/

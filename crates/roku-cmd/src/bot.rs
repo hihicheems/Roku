@@ -101,7 +101,7 @@ pub fn run_telegram_bot_from_env() -> Result<(), CommandError> {
 pub(crate) fn run_telegram_once_with_options_from_env(
 	options: ExecutionRequestOptions,
 ) -> Result<String, CommandError> {
-	apply_request_env_overrides(&options);
+	let _env_override_guard = apply_request_env_overrides(&options);
 	let handler = build_live_telegram_handler_from_env()?;
 	let chat_id = 1;
 	let interaction = TelegramConnector

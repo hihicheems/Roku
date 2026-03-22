@@ -20,6 +20,7 @@ use roku_common_types::{
 	AgentInstanceSpec, ConversationRole, ConversationTurn, ResultEnvelope, TaskNode,
 };
 use roku_plugin_host::{ToolInvocation, ToolRuntime};
+use roku_plugin_tools::canonical_execution_for_builtin_tool_input;
 use serde_json::json;
 
 use crate::result::{tool_failure_result, tool_success_result};
@@ -78,9 +79,12 @@ impl ToolBackedWorker {
 				input[key] = value;
 			}
 		}
+		let canonical_execution =
+			canonical_execution_for_builtin_tool_input(&self.tool_name, &input);
 		ToolInvocation {
 			tool_name: self.tool_name.clone(),
 			input,
+			canonical_execution,
 			granted_capabilities: spec.capabilities.clone(),
 			invocation_key: Some(format!(
 				"{}:{}:{}",
@@ -109,7 +113,9 @@ impl RuntimeWorker for ToolBackedWorker {
 	}
 
 	fn execute(&self, spec: &AgentInstanceSpec, node: &TaskNode) -> ResultEnvelope {
-		match self.tool_runtime.invoke(self.invocation(spec, node)) {
+		let invocation = self.invocation(spec, node);
+		let canonical_execution = invocation.canonical_execution.clone();
+		match self.tool_runtime.invoke(invocation) {
 			Ok(execution) => tool_success_result(
 				spec,
 				node,
@@ -118,7 +124,14 @@ impl RuntimeWorker for ToolBackedWorker {
 				execution,
 				self.confidence,
 			),
-			Err(error) => tool_failure_result(spec, node, self.worker_id, &self.tool_name, error),
+			Err(error) => tool_failure_result(
+				spec,
+				node,
+				self.worker_id,
+				&self.tool_name,
+				canonical_execution,
+				error,
+			),
 		}
 	}
 }
@@ -222,6 +235,26 @@ fn goal_and_step(description: &str) -> (String, String) {
 	}
 
 	(String::new(), description.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn canonical_execution_for_command_run_invocation_includes_digest() {
+		let input = json!({
+			"command": "pwd",
+		});
+
+		let execution = canonical_execution_for_builtin_tool_input("command.run", &input)
+			.expect("command.run canonical execution should build");
+
+		assert_eq!(execution.tool_name, "command.run");
+		assert_eq!(execution.program, "pwd");
+		assert_eq!(execution.argv, vec!["pwd".to_string()]);
+		assert_eq!(execution.digest.0.len(), 64);
+	}
 }
 
 fn render_conversation_history(history: &[ConversationTurn]) -> String {

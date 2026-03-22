@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use roku_common_types::{CanonicalExecution, PolicyDecision, PolicyOutcome};
 use serde_json::Value;
 
 use crate::{
@@ -25,10 +26,13 @@ use crate::{
 	ToolRuntimeError, ToolSchema,
 };
 
+use super::policy;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolInvocation {
 	pub tool_name: String,
 	pub input: Value,
+	pub canonical_execution: Option<CanonicalExecution>,
 	pub granted_capabilities: Vec<String>,
 	pub invocation_key: Option<String>,
 	pub attachments: Vec<PathBuf>,
@@ -58,6 +62,10 @@ pub struct ToolExecutionResult {
 pub trait Tool: Send + Sync {
 	fn descriptor(&self) -> ToolDescriptor;
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure>;
+
+	fn policy_decision(&self, _execution: &CanonicalExecution) -> Option<PolicyDecision> {
+		None
+	}
 }
 
 struct RegisteredTool {
@@ -142,6 +150,32 @@ impl ToolRuntime {
 			.invocation_key
 			.clone()
 			.unwrap_or_else(|| default_invocation_key(&invocation.tool_name, &invocation.input));
+		if let Some(canonical_execution) = invocation.canonical_execution.as_ref() {
+			let decision = policy::evaluate_execution_policy(
+				&invocation.tool_name,
+				canonical_execution,
+				registered.tool.policy_decision(canonical_execution),
+			);
+			if decision.outcome != PolicyOutcome::Allow {
+				let message = policy::decision_message(&decision);
+				self.emit_event(
+					&invocation_key,
+					&invocation.tool_name,
+					ExecutionEventKind::Rejected,
+					0,
+					&registered.descriptor.runtime_constraints.sandbox_profile,
+					None,
+					Some(message.clone()),
+				);
+				return Err(ToolRuntimeError::ExecutionFailed {
+					tool: invocation.tool_name,
+					attempts: 0,
+					message,
+					retriable: false,
+					policy_decision: Some(decision),
+				});
+			}
+		}
 		self.emit_event(
 			&invocation_key,
 			&invocation.tool_name,
@@ -276,6 +310,7 @@ impl ToolRuntime {
 						attempts: attempt,
 						message: failure.message,
 						retriable: failure.retriable,
+						policy_decision: None,
 					});
 				}
 			}
@@ -286,6 +321,7 @@ impl ToolRuntime {
 			attempts: max_attempts,
 			message: "execution exhausted without result".to_string(),
 			retriable: false,
+			policy_decision: None,
 		})
 	}
 

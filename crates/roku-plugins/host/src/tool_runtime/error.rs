@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use roku_common_types::PolicyDecision;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +33,17 @@ impl ToolFailure {
 		Self {
 			message: message.into(),
 			retriable: false,
+		}
+	}
+}
+
+impl ToolRuntimeError {
+	pub fn policy_decision(&self) -> Option<&PolicyDecision> {
+		match self {
+			Self::ExecutionFailed {
+				policy_decision, ..
+			} => policy_decision.as_ref(),
+			_ => None,
 		}
 	}
 }
@@ -66,5 +78,6 @@ pub enum ToolRuntimeError {
 		attempts: u8,
 		message: String,
 		retriable: bool,
+		policy_decision: Option<PolicyDecision>,
 	},
 }

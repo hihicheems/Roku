@@ -257,6 +257,7 @@ mod tests {
 			status: ApprovalStatus::Pending,
 			decided_by: None,
 			comment: None,
+			pending_execution: None,
 		}
 	}
 

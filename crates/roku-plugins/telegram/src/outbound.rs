@@ -108,7 +108,7 @@ impl TelegramOutboundMessage {
 				Some(&attachments),
 			),
 			ResponseStatus::PendingApproval => {
-				let mut lines = vec!["Approval required.".to_string(), response.message.clone()];
+				let mut lines = vec![response.message.clone()];
 				if options.include_request_metadata {
 					lines.insert(0, format!("Request: {}", response.request_id.0));
 				}
@@ -372,7 +372,7 @@ mod tests {
 			},
 		);
 
-		assert!(message.text.contains("Approval required."));
+		assert_eq!(message.text, "approval required");
 		let markup = message
 			.reply_markup
 			.expect("pending approval should render inline keyboard");
@@ -385,6 +385,28 @@ mod tests {
 		assert_eq!(
 			markup.inline_keyboard[0][1].callback_data,
 			"ap:r:approval-42"
+		);
+	}
+
+	#[test]
+	fn outbound_message_pending_approval_uses_runtime_message_as_authority() {
+		let message = TelegramOutboundMessage::from_response_with_options(
+			1001,
+			&ResponseEnvelope {
+				request_id: RequestId("req-approval".to_string()),
+				status: ResponseStatus::PendingApproval,
+				message: "approval required: Run command rm -rf tmp from /workspace".to_string(),
+				artifacts: vec!["approval://approval-77".to_string()],
+			},
+			TelegramRenderOptions {
+				include_request_metadata: false,
+				show_attachments: false,
+			},
+		);
+
+		assert_eq!(
+			message.text,
+			"approval required: Run command rm -rf tmp from /workspace"
 		);
 	}
 

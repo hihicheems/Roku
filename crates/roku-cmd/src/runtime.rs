@@ -23,6 +23,7 @@
 //! Roku-owned entry registry and keeps only composition-root duties such as
 //! config loading and service startup.
 
+use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -108,7 +109,7 @@ pub(crate) fn run_with_mode_and_options(
 	options: ExecutionRequestOptions,
 	mode: RunMode,
 ) -> Result<ResponseEnvelope, RuntimeError> {
-	apply_request_env_overrides(&options);
+	let _env_override_guard = apply_request_env_overrides(&options);
 	let gateway = Gateway;
 	let service = build_deterministic_runtime_service_from_env()
 		.map_err(|error| RuntimeError::new(error.to_string()))?;
@@ -132,7 +133,7 @@ pub fn run_live_once_from_env(goal: &str) -> Result<ResponseEnvelope, CommandErr
 pub(crate) fn run_live_once_with_options_from_env(
 	options: ExecutionRequestOptions,
 ) -> Result<ResponseEnvelope, CommandError> {
-	apply_request_env_overrides(&options);
+	let _env_override_guard = apply_request_env_overrides(&options);
 	let gateway = Gateway;
 	let service = build_live_runtime_service_from_env()?;
 	let request = build_request(&gateway, options, next_cli_request_sequence());
@@ -800,13 +801,51 @@ fn next_cli_request_sequence() -> u64 {
 		.unwrap_or(1)
 }
 
-pub(crate) fn apply_request_env_overrides(options: &ExecutionRequestOptions) {
-	if let Some(path) = &options.generated_skill_root {
+pub(crate) struct RequestEnvOverrideGuard {
+	_guards: Vec<EnvOverrideGuard>,
+}
+
+struct EnvOverrideGuard {
+	key: &'static str,
+	original: Option<OsString>,
+}
+
+impl EnvOverrideGuard {
+	fn set_path(key: &'static str, value: &Path) -> Self {
+		let original = std::env::var_os(key);
 		unsafe {
-			std::env::set_var("ROKU_SKILL_ROOT", path);
-			std::env::set_var("ROKU_GENERATED_SKILL_ROOT", path);
+			std::env::set_var(key, value);
+		}
+		Self { key, original }
+	}
+}
+
+impl Drop for EnvOverrideGuard {
+	fn drop(&mut self) {
+		if let Some(value) = &self.original {
+			unsafe {
+				std::env::set_var(self.key, value);
+			}
+		} else {
+			unsafe {
+				std::env::remove_var(self.key);
+			}
 		}
 	}
+}
+
+pub(crate) fn apply_request_env_overrides(
+	options: &ExecutionRequestOptions,
+) -> RequestEnvOverrideGuard {
+	let mut guards = Vec::new();
+	if let Some(path) = &options.generated_skill_root {
+		guards.push(EnvOverrideGuard::set_path("ROKU_SKILL_ROOT", path));
+		guards.push(EnvOverrideGuard::set_path(
+			"ROKU_GENERATED_SKILL_ROOT",
+			path,
+		));
+	}
+	RequestEnvOverrideGuard { _guards: guards }
 }
 
 #[cfg(test)]
@@ -905,6 +944,37 @@ mod tests {
 			annotated
 				.message
 				.contains("fallback_reason=openrouter plugin disabled by startup policy")
+		);
+	}
+
+	#[test]
+	fn request_env_overrides_restore_skill_roots_after_drop() {
+		let original_skill_root = std::env::var_os("ROKU_SKILL_ROOT");
+		let original_generated_root = std::env::var_os("ROKU_GENERATED_SKILL_ROOT");
+		let tempdir = tempfile::tempdir().expect("temp skill root should exist");
+		let generated_root = tempdir.path().join("skills");
+
+		{
+			let _guard = apply_request_env_overrides(&ExecutionRequestOptions {
+				session_id: "session-1".to_string(),
+				goal: "test".to_string(),
+				planning_mode_hint: None,
+				generated_skill_root: Some(generated_root.clone()),
+			});
+			assert_eq!(
+				std::env::var_os("ROKU_SKILL_ROOT"),
+				Some(generated_root.clone().into())
+			);
+			assert_eq!(
+				std::env::var_os("ROKU_GENERATED_SKILL_ROOT"),
+				Some(generated_root.clone().into())
+			);
+		}
+
+		assert_eq!(std::env::var_os("ROKU_SKILL_ROOT"), original_skill_root);
+		assert_eq!(
+			std::env::var_os("ROKU_GENERATED_SKILL_ROOT"),
+			original_generated_root
 		);
 	}
 
