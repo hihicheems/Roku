@@ -85,6 +85,8 @@ impl ToolBackedWorker {
 			tool_name: self.tool_name.clone(),
 			input,
 			canonical_execution,
+			approved_scope: None,
+			skip_policy_check: false,
 			granted_capabilities: spec.capabilities.clone(),
 			invocation_key: Some(format!(
 				"{}:{}:{}",
@@ -115,6 +117,7 @@ impl RuntimeWorker for ToolBackedWorker {
 	fn execute(&self, spec: &AgentInstanceSpec, node: &TaskNode) -> ResultEnvelope {
 		let invocation = self.invocation(spec, node);
 		let canonical_execution = invocation.canonical_execution.clone();
+		let tool_input = invocation.input.clone();
 		match self.tool_runtime.invoke(invocation) {
 			Ok(execution) => tool_success_result(
 				spec,
@@ -129,6 +132,7 @@ impl RuntimeWorker for ToolBackedWorker {
 				node,
 				self.worker_id,
 				&self.tool_name,
+				Some(tool_input),
 				canonical_execution,
 				error,
 			),

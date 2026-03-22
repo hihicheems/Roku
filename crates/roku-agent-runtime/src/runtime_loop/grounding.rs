@@ -431,7 +431,7 @@ fn looks_like_path_candidate(token: &str) -> bool {
 	if token.is_empty() {
 		return false;
 	}
-	if token == "." || token == ".." {
+	if matches!(token, "." | ".." | "~") || token.starts_with("~/") || token.starts_with("~\\") {
 		return true;
 	}
 	token.contains('/')
@@ -470,7 +470,7 @@ fn looks_like_known_file_extension(extension: &str) -> bool {
 }
 
 fn is_standalone_path_candidate(token: &str) -> bool {
-	if token == "." || token == ".." {
+	if matches!(token, "." | ".." | "~") {
 		return true;
 	}
 	!token.is_empty()
@@ -479,8 +479,9 @@ fn is_standalone_path_candidate(token: &str) -> bool {
 }
 
 fn is_concrete_path_candidate(token: &str) -> bool {
-	token == "."
-		|| token == ".."
+	matches!(token, "." | ".." | "~")
+		|| token.starts_with("~/")
+		|| token.starts_with("~\\")
 		|| token.contains('/')
 		|| token.contains('\\')
 		|| candidate_exists_in_current_workspace(token)
@@ -591,7 +592,7 @@ fn push_candidate_reply_fragment(
 }
 
 fn is_path_fragment_char(character: char) -> bool {
-	character.is_ascii_alphanumeric() || matches!(character, '.' | '/' | '\\' | '_' | '-')
+	character.is_ascii_alphanumeric() || matches!(character, '.' | '/' | '\\' | '_' | '-' | '~')
 }
 
 fn extract_fenced_python_code(goal: &str) -> Option<String> {
@@ -777,4 +778,15 @@ fn is_probable_shell_command(value: &str) -> bool {
 	first_token
 		.chars()
 		.all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-'))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::extract_explicit_path_candidates;
+
+	#[test]
+	fn extract_explicit_path_candidates_preserves_home_directory_paths() {
+		let paths = extract_explicit_path_candidates("帮我 ll ~/ 看看有啥");
+		assert_eq!(paths, vec!["~/".to_string()]);
+	}
 }

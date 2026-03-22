@@ -227,11 +227,11 @@ fn approval_markup(approval_id: &ApprovalId) -> TelegramReplyMarkup {
 	TelegramReplyMarkup {
 		inline_keyboard: vec![vec![
 			TelegramInlineKeyboardButton {
-				text: "Approve".to_string(),
+				text: "✅ Approve".to_string(),
 				callback_data: approval_callback_data(approval_id, true),
 			},
 			TelegramInlineKeyboardButton {
-				text: "Reject".to_string(),
+				text: "❌ Reject".to_string(),
 				callback_data: approval_callback_data(approval_id, false),
 			},
 		]],
@@ -378,6 +378,8 @@ mod tests {
 			.expect("pending approval should render inline keyboard");
 		assert_eq!(markup.inline_keyboard.len(), 1);
 		assert_eq!(markup.inline_keyboard[0].len(), 2);
+		assert_eq!(markup.inline_keyboard[0][0].text, "✅ Approve");
+		assert_eq!(markup.inline_keyboard[0][1].text, "❌ Reject");
 		assert_eq!(
 			markup.inline_keyboard[0][0].callback_data,
 			"ap:a:approval-42"

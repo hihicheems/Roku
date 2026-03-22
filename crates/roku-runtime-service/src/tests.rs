@@ -829,6 +829,11 @@ fn execution_approval_tickets_resume_frozen_command_and_preserve_digest() {
 	let frozen_payload = serde_json::json!({
 		"error_code": "approval_required",
 		"message": "approval required",
+		"tool_name": "command.run",
+		"tool_input": {
+			"command": "pwd",
+			"cwd": cwd_text
+		},
 		"policy_decision": sample_execution_policy_decision(),
 		"canonical_execution": canonical_execution,
 		"digest": "digest-from-ticket",
@@ -843,6 +848,11 @@ fn execution_approval_tickets_resume_frozen_command_and_preserve_digest() {
 		payload: serde_json::json!({
 			"error_code": "approval_required",
 			"message": "approval required",
+			"tool_name": "command.run",
+			"tool_input": {
+				"command": "pwd",
+				"cwd": cwd_text
+			},
 			"policy_decision": sample_execution_policy_decision(),
 			"canonical_execution": sample_frozen_command_execution(&cwd_text, "mutable-node-digest"),
 			"digest": "mutable-node-digest",
@@ -899,7 +909,9 @@ fn execution_approval_tickets_resume_frozen_command_and_preserve_digest() {
 	assert_eq!(pending_response.status, ResponseStatus::PendingApproval);
 	assert_eq!(
 		pending_response.message,
-		format!("approval required: Run command pwd from {cwd_text}")
+		format!(
+			"🛡️ Approval Request\n\nTool: command.run\nAction: Run command pwd from {cwd_text}\nRisk: medium\nReason: the command is outside the constrained built-in allowlist"
+		)
 	);
 
 	let response = service
@@ -1036,6 +1048,11 @@ fn execution_approval_tickets_reject_mismatched_frozen_digest() {
 		payload: serde_json::json!({
 			"error_code": "approval_required",
 			"message": "approval required",
+			"tool_name": "command.run",
+			"tool_input": {
+				"command": "pwd",
+				"cwd": cwd_text
+			},
 			"policy_decision": sample_execution_policy_decision(),
 			"canonical_execution": sample_frozen_command_execution(&cwd_text, "digest-from-ticket"),
 			"digest": "different-digest",
