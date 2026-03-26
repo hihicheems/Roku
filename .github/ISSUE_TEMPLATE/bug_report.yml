@@ -1,0 +1,72 @@
+name: Bug report
+description: Report a concrete bug or regression.
+title: "[Bug]: "
+labels:
+  - bug
+  - roku
+body:
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I can describe the current behavior and the expected behavior clearly.
+          required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What is broken, and why does it matter?
+      placeholder: A short description of the bug and its impact.
+    validations:
+      required: true
+  - type: textarea
+    id: current_behavior
+    attributes:
+      label: Current behavior
+      placeholder: What happens now?
+    validations:
+      required: true
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior
+      placeholder: What should happen instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide steps, commands, or a minimal scenario.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, toolchain, branch, or runtime details if they matter.
+      placeholder: macOS 15, stable Rust, commit SHA, local config notes...
+    validations:
+      required: false
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Logs, screenshots, traces, or code references.
+      placeholder: Paste logs or add links here.
+    validations:
+      required: false
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to submit a PR for this bug.
+          required: false
