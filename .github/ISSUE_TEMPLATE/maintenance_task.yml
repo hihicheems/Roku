@@ -1,0 +1,36 @@
+name: Maintenance task
+description: Track cleanup, chore, or project maintenance work.
+title: "[Task]: "
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What maintenance work is needed?
+      placeholder: Describe the task briefly.
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Why now?
+      description: Why is this worth doing?
+      placeholder: Maintenance cost, tooling drift, recurring pain, or cleanup need.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and non-goals
+      description: What is in scope, and what should stay out?
+      placeholder: Affected crates, scripts, docs, or workflows.
+    validations:
+      required: false
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: What would count as done?
+      placeholder: Concrete outcomes, checks, or reviewer expectations.
+    validations:
+      required: false

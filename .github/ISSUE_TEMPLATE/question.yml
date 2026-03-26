@@ -1,0 +1,34 @@
+name: Question
+description: Ask for usage, behavior, or workflow clarification.
+title: "[Question]: "
+body:
+  - type: textarea
+    id: trying_to_do
+    attributes:
+      label: What are you trying to do?
+      placeholder: Describe the task or workflow you are aiming for.
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: What is your question?
+      placeholder: Ask the concrete question here.
+    validations:
+      required: true
+  - type: textarea
+    id: checked
+    attributes:
+      label: What have you already checked?
+      description: Mention docs, files, commands, or previous attempts.
+      placeholder: README sections, commands, config files, prior experiments...
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include version, branch, or runtime context if helpful.
+      placeholder: OS, Rust toolchain, commit SHA, local setup notes...
+    validations:
+      required: false
