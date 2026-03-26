@@ -1,6 +1,10 @@
 name: Feature request
 description: Propose a concrete improvement or new capability.
 title: "[Feature]: "
+labels:
+  - enhancement
+  - kind/feature
+  - roku
 body:
   - type: checkboxes
     id: checks

@@ -1,6 +1,9 @@
 name: Bug report
 description: Report a concrete bug or regression.
 title: "[Bug]: "
+labels:
+  - bug
+  - roku
 body:
   - type: checkboxes
     id: checks

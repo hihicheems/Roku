@@ -1,6 +1,9 @@
 name: Question
 description: Ask for usage, behavior, or workflow clarification.
 title: "[Question]: "
+labels:
+  - question
+  - roku
 body:
   - type: textarea
     id: trying_to_do

@@ -1,6 +1,8 @@
 name: Maintenance task
 description: Track cleanup, chore, or project maintenance work.
 title: "[Task]: "
+labels:
+  - roku
 body:
   - type: textarea
     id: summary
