@@ -474,6 +474,41 @@ integration_row() {
 		"$detail"
 }
 
+provider_row() {
+	local name="$1"
+	local status="$2"
+	local detail="$3"
+	printf '  %-4s %-20s %-12s %s\n' \
+		"$(status_marker "$status")" \
+		"$name" \
+		"$status" \
+		"$detail"
+}
+
+openviking_provider_status() {
+	local detail
+	detail="$("$ROOT_DIR/scripts/dev-openviking.sh" status 2>/dev/null || true)"
+	if [[ -z "$detail" ]]; then
+		printf '%s\n' "Unconfigured|status probe failed"
+		return 0
+	fi
+
+	case "$detail" in
+	Running*)
+		printf '%s\n' "Running|$detail"
+		;;
+	Exited*)
+		printf '%s\n' "Exited|$detail"
+		;;
+	Stopped*)
+		printf '%s\n' "Stopped|$detail"
+		;;
+	*)
+		printf '%s\n' "Configured|$detail"
+		;;
+	esac
+}
+
 log_row() {
 	local component="$1"
 	local latest_log
@@ -562,6 +597,14 @@ doctor() {
 	fi
 	integration_row 'SQLite memory/control-plane adapter' 'Configured' "$(sqlite_memory_adapter_detail)"
 	integration_row 'API bind address' 'Configured' "$(api_gateway_bind_addr)"
+	echo
+	printf '%s\n' 'Providers'
+	printf '  %-4s %-20s %-12s %s\n' 'MARK' 'NAME' 'STATUS' 'DETAILS'
+	local openviking_probe openviking_status openviking_detail
+	openviking_probe="$(openviking_provider_status)"
+	openviking_status="${openviking_probe%%|*}"
+	openviking_detail="${openviking_probe#*|}"
+	provider_row 'OpenViking' "$openviking_status" "$openviking_detail"
 	echo
 	printf '%s\n' 'Observability Logs'
 	printf '  %-4s %-24s %-12s %s\n' 'MARK' 'COMPONENT' 'STATUS' 'LATEST LOG'
