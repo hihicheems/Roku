@@ -22,6 +22,7 @@ outputs/
 # Common
 **/*.DS_Store
 logs/
+.agents/
 .codex/
 .env
 .roku/
