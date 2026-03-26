@@ -1,0 +1,75 @@
+name: Ensure Native Build Toolchain
+description: >
+  Ensure a Linux runner has a working native C toolchain for Rust build scripts.
+  On self-hosted runners, preserve existing proxy environment variables when
+  escalating through sudo so package-manager traffic follows the runner's own
+  network configuration.
+
+inputs:
+  apt-packages:
+    description: Space-separated apt packages to install when cc is missing.
+    required: false
+    default: build-essential pkg-config
+  dnf-packages:
+    description: Space-separated dnf packages to install when cc is missing.
+    required: false
+    default: gcc gcc-c++ make pkgconf-pkg-config
+  yum-packages:
+    description: Space-separated yum packages to install when cc is missing.
+    required: false
+    default: gcc gcc-c++ make pkgconfig
+  apk-packages:
+    description: Space-separated apk packages to install when cc is missing.
+    required: false
+    default: build-base pkgconf
+
+runs:
+  using: composite
+  steps:
+    - name: Install native toolchain if missing
+      shell: bash
+      run: |
+        if command -v cc >/dev/null 2>&1; then
+          cc --version
+          exit 0
+        fi
+
+        # Self-hosted runners often rely on environment-provided outbound proxy
+        # settings. `sudo` can drop those variables, so forward the current
+        # proxy environment explicitly when package installation is required.
+        PROXY_EXPORTS=()
+        for var in http_proxy https_proxy all_proxy no_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY; do
+          if [[ -n "${!var:-}" ]]; then
+            PROXY_EXPORTS+=("${var}=${!var}")
+          fi
+        done
+
+        run_with_privilege() {
+          if command -v sudo >/dev/null 2>&1; then
+            sudo env "${PROXY_EXPORTS[@]}" "$@"
+          else
+            env "${PROXY_EXPORTS[@]}" "$@"
+          fi
+        }
+
+        if command -v apt-get >/dev/null 2>&1; then
+          # Use the runner's configured apt sources; only the proxy handling is
+          # runner-specific here.
+          read -r -a APT_PACKAGES <<<"${{ inputs.apt-packages }}"
+          run_with_privilege apt-get update
+          run_with_privilege apt-get install -y "${APT_PACKAGES[@]}"
+        elif command -v dnf >/dev/null 2>&1; then
+          read -r -a DNF_PACKAGES <<<"${{ inputs.dnf-packages }}"
+          run_with_privilege dnf install -y "${DNF_PACKAGES[@]}"
+        elif command -v yum >/dev/null 2>&1; then
+          read -r -a YUM_PACKAGES <<<"${{ inputs.yum-packages }}"
+          run_with_privilege yum install -y "${YUM_PACKAGES[@]}"
+        elif command -v apk >/dev/null 2>&1; then
+          read -r -a APK_PACKAGES <<<"${{ inputs.apk-packages }}"
+          run_with_privilege apk add --no-cache "${APK_PACKAGES[@]}"
+        else
+          echo "cc is missing and no supported package manager is available."
+          exit 1
+        fi
+
+        cc --version

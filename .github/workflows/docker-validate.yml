@@ -23,6 +23,9 @@ jobs:
     # Base-image pulls are stable there, so we can drop the old host cache warmup
     # step from the legacy runner. We still forward proxy build args because the
     # Dockerfile's RUN steps need outbound access inside the image build itself.
+    # Proxy values are not hard-coded here: the job simply forwards whatever
+    # proxy environment the current runner exposes, which keeps runner migration
+    # or proxy rotation localized to runner config instead of this workflow.
     runs-on: roku-arc
     steps:
       - uses: actions/checkout@v6
