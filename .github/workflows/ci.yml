@@ -13,6 +13,9 @@ env:
   # Disable incremental compilation for faster from-scratch builds
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_TEST_DEBUG: 0
+  RUST_TOOLCHAIN_VERSION: "1.92.0"
+  HAWKEYE_VERSION: "6.5.1"
+  CARGO_NEXTEST_VERSION: "0.9.132"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
@@ -20,17 +23,25 @@ concurrency:
 
 jobs:
   check:
-    # Current default Linux runner pool. Change this anchor if the repository
-    # moves back to GitHub-hosted Linux or to a different self-hosted label.
+    # ARC runner pods now use a custom image that already carries the native
+    # C toolchain, the pinned Rust toolchain, hawkeye, and cargo-nextest.
+    # Keep runtime steps focused on verification and compilation instead of
+    # reinstalling the same toolchain on every ephemeral runner. Avoid adding
+    # third-party cache actions here because ARC's proxy path to GitHub action
+    # tarballs has proven less reliable than the runner image itself.
     runs-on: &linux_runner roku-arc
     steps:
       - uses: actions/checkout@v6
-
-      # Self-hosted runner bootstrap lives in one local action so proxy-aware
-      # package installation and native toolchain assumptions are not duplicated
-      # across jobs or workflows.
-      - name: Ensure native build toolchain
-        uses: ./.github/actions/ensure-native-build-toolchain
+      - uses: ./.github/actions/ensure-native-build-toolchain
+        with:
+          required-tools: |
+            cc
+            pkg-config
+            rustc=${{ env.RUST_TOOLCHAIN_VERSION }}
+            cargo=${{ env.RUST_TOOLCHAIN_VERSION }}
+            rustfmt
+            cargo-clippy
+            hawkeye=${{ env.HAWKEYE_VERSION }}
 
       - name: Bash syntax check
         shell: bash
@@ -46,12 +57,8 @@ jobs:
             bash -n "$script"
           done
 
-      - uses: dtolnay/rust-toolchain@stable
-
       - name: Check License Header
-        uses: korandoru/hawkeye@v6
-        with:
-          config: licenserc.toml
+        run: hawkeye check
 
       - name: Fmt check
         run: cargo fmt --all -- --check
@@ -66,10 +73,13 @@ jobs:
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
     steps:
       - uses: actions/checkout@v6
-      - name: Ensure native build toolchain
-        uses: ./.github/actions/ensure-native-build-toolchain
-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/ensure-native-build-toolchain
+        with:
+          required-tools: |
+            cc
+            pkg-config
+            rustc=${{ env.RUST_TOOLCHAIN_VERSION }}
+            cargo=${{ env.RUST_TOOLCHAIN_VERSION }}
       - name: Build
         run: cargo build --release --locked
 
@@ -77,11 +87,14 @@ jobs:
     runs-on: *linux_runner
     steps:
       - uses: actions/checkout@v6
-      - name: Ensure native build toolchain
-        uses: ./.github/actions/ensure-native-build-toolchain
-
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@nextest
+      - uses: ./.github/actions/ensure-native-build-toolchain
+        with:
+          required-tools: |
+            cc
+            pkg-config
+            rustc=${{ env.RUST_TOOLCHAIN_VERSION }}
+            cargo=${{ env.RUST_TOOLCHAIN_VERSION }}
+            cargo-nextest=${{ env.CARGO_NEXTEST_VERSION }}
 
       - run: cargo check --locked
 

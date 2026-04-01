@@ -1,75 +1,109 @@
 name: Ensure Native Build Toolchain
-description: >
-  Ensure a Linux runner has a working native C toolchain for Rust build scripts.
-  On self-hosted runners, preserve existing proxy environment variables when
-  escalating through sudo so package-manager traffic follows the runner's own
-  network configuration.
+description: Verify that the ARC runner image already includes the required native and Rust toolchain binaries.
 
 inputs:
-  apt-packages:
-    description: Space-separated apt packages to install when cc is missing.
+  required-tools:
+    description: Newline-delimited list of binaries that must be available on PATH, optionally as tool=expected-version-substring.
     required: false
-    default: build-essential pkg-config
-  dnf-packages:
-    description: Space-separated dnf packages to install when cc is missing.
+    default: |
+      cc
+      pkg-config
+      rustc
+      cargo
+  probe-timeout-seconds:
+    description: Maximum number of seconds to wait for each tool --version probe before treating it as unusable.
     required: false
-    default: gcc gcc-c++ make pkgconf-pkg-config
-  yum-packages:
-    description: Space-separated yum packages to install when cc is missing.
-    required: false
-    default: gcc gcc-c++ make pkgconfig
-  apk-packages:
-    description: Space-separated apk packages to install when cc is missing.
-    required: false
-    default: build-base pkgconf
+    default: "15"
 
 runs:
   using: composite
   steps:
-    - name: Install native toolchain if missing
+    - name: Verify preinstalled toolchain
       shell: bash
       run: |
-        if command -v cc >/dev/null 2>&1; then
-          cc --version
+        set -euo pipefail
+
+        mapfile -t required_tools < <(printf '%s\n' '${{ inputs.required-tools }}' | sed '/^[[:space:]]*$/d')
+        probe_timeout_seconds='${{ inputs.probe-timeout-seconds }}'
+
+        if [[ ${#required_tools[@]} -eq 0 ]]; then
+          echo "No required tools configured."
           exit 0
         fi
 
-        # Self-hosted runners often rely on environment-provided outbound proxy
-        # settings. `sudo` can drop those variables, so forward the current
-        # proxy environment explicitly when package installation is required.
-        PROXY_EXPORTS=()
-        for var in http_proxy https_proxy all_proxy no_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY; do
-          if [[ -n "${!var:-}" ]]; then
-            PROXY_EXPORTS+=("${var}=${!var}")
+        missing=()
+        unusable=()
+        drifted=()
+
+        for requirement in "${required_tools[@]}"; do
+          tool="${requirement}"
+          expected_version=""
+          if [[ "${requirement}" == *"="* ]]; then
+            tool="${requirement%%=*}"
+            expected_version="${requirement#*=}"
+          fi
+
+          if ! command -v "${tool}" >/dev/null 2>&1; then
+            missing+=("${tool}")
+            continue
+          fi
+
+          probe_output=""
+          probe_status=0
+          set +e
+          if command -v timeout >/dev/null 2>&1; then
+            probe_output="$(timeout "${probe_timeout_seconds}" "${tool}" --version 2>&1)"
+            probe_status=$?
+          else
+            probe_output="$("${tool}" --version 2>&1)"
+            probe_status=$?
+          fi
+          set -e
+
+          version_line="$(printf '%s\n' "${probe_output}" | sed -n '/./{p;q;}')"
+
+          if [[ ${probe_status} -ne 0 ]]; then
+            unusable+=("${tool}")
+            if [[ ${probe_status} -eq 124 ]]; then
+              printf '%s: timed out after %ss while executing --version probe\n' "${tool}" "${probe_timeout_seconds}" >&2
+            else
+              printf '%s: failed to execute --version probe (exit %s)\n' "${tool}" "${probe_status}" >&2
+            fi
+            if [[ -n "${version_line}" ]]; then
+              printf '%s: %s\n' "${tool}" "${version_line}" >&2
+            fi
+            continue
+          fi
+
+          if [[ -n "${version_line}" ]]; then
+            echo "${tool}: ${version_line}"
+          else
+            echo "${tool}: found"
+          fi
+
+          if [[ -n "${expected_version}" && "${probe_output}" != *"${expected_version}"* ]]; then
+            if [[ -n "${version_line}" ]]; then
+              drifted+=("${tool} expected '${expected_version}' got '${version_line}'")
+            else
+              drifted+=("${tool} expected '${expected_version}' but emitted no version output")
+            fi
           fi
         done
 
-        run_with_privilege() {
-          if command -v sudo >/dev/null 2>&1; then
-            sudo env "${PROXY_EXPORTS[@]}" "$@"
-          else
-            env "${PROXY_EXPORTS[@]}" "$@"
-          fi
-        }
-
-        if command -v apt-get >/dev/null 2>&1; then
-          # Use the runner's configured apt sources; only the proxy handling is
-          # runner-specific here.
-          read -r -a APT_PACKAGES <<<"${{ inputs.apt-packages }}"
-          run_with_privilege apt-get update
-          run_with_privilege apt-get install -y "${APT_PACKAGES[@]}"
-        elif command -v dnf >/dev/null 2>&1; then
-          read -r -a DNF_PACKAGES <<<"${{ inputs.dnf-packages }}"
-          run_with_privilege dnf install -y "${DNF_PACKAGES[@]}"
-        elif command -v yum >/dev/null 2>&1; then
-          read -r -a YUM_PACKAGES <<<"${{ inputs.yum-packages }}"
-          run_with_privilege yum install -y "${YUM_PACKAGES[@]}"
-        elif command -v apk >/dev/null 2>&1; then
-          read -r -a APK_PACKAGES <<<"${{ inputs.apk-packages }}"
-          run_with_privilege apk add --no-cache "${APK_PACKAGES[@]}"
-        else
-          echo "cc is missing and no supported package manager is available."
-          exit 1
+        if [[ ${#missing[@]} -gt 0 ]]; then
+          printf 'Missing preinstalled tools in ARC runner image: %s\n' "${missing[*]}" >&2
         fi
 
-        cc --version
+        if [[ ${#unusable[@]} -gt 0 ]]; then
+          printf 'Unusable preinstalled tools in ARC runner image: %s\n' "${unusable[*]}" >&2
+        fi
+
+        if [[ ${#drifted[@]} -gt 0 ]]; then
+          printf 'Version drift detected in ARC runner image:\n' >&2
+          printf '  - %s\n' "${drifted[@]}" >&2
+        fi
+
+        if [[ ${#missing[@]} -gt 0 || ${#unusable[@]} -gt 0 || ${#drifted[@]} -gt 0 ]]; then
+          printf 'Rebuild and redeploy the custom ARC runner image instead of installing them at job runtime.\n' >&2
+          exit 1
+        fi
