@@ -77,6 +77,8 @@ RUN set -eux; \
     chown -R runner:runner /home/runner/.cargo /home/runner/.rustup; \
     rustc --version; \
     cargo --version; \
+    rustfmt --version; \
+    cargo-clippy --version; \
     cc --version; \
     pkg-config --version; \
     git-cliff --version; \

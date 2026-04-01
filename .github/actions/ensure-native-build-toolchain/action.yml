@@ -3,7 +3,7 @@ description: Verify that the ARC runner image already includes the required nati
 
 inputs:
   required-tools:
-    description: Newline-delimited list of binaries that must be available on PATH.
+    description: Newline-delimited list of binaries that must be available on PATH, optionally as tool=expected-version-substring.
     required: false
     default: |
       cc
@@ -27,22 +27,53 @@ runs:
         fi
 
         missing=()
-        for tool in "${required_tools[@]}"; do
+        unusable=()
+        drifted=()
+
+        for requirement in "${required_tools[@]}"; do
+          tool="${requirement}"
+          expected_version=""
+          if [[ "${requirement}" == *"="* ]]; then
+            tool="${requirement%%=*}"
+            expected_version="${requirement#*=}"
+          fi
+
           if ! command -v "${tool}" >/dev/null 2>&1; then
             missing+=("${tool}")
             continue
           fi
 
-          version_line="$("${tool}" --version 2>&1 | head -n 1 || true)"
+          version_line="$("${tool}" --version 2>&1 | head -n 1)" || {
+            unusable+=("${tool}")
+            printf '%s: failed to execute --version probe\n' "${tool}" >&2
+            continue
+          }
+
           if [[ -n "${version_line}" ]]; then
             echo "${tool}: ${version_line}"
           else
             echo "${tool}: found"
           fi
+
+          if [[ -n "${expected_version}" && "${version_line}" != *"${expected_version}"* ]]; then
+            drifted+=("${tool} expected '${expected_version}' got '${version_line}'")
+          fi
         done
 
         if [[ ${#missing[@]} -gt 0 ]]; then
           printf 'Missing preinstalled tools in ARC runner image: %s\n' "${missing[*]}" >&2
+        fi
+
+        if [[ ${#unusable[@]} -gt 0 ]]; then
+          printf 'Unusable preinstalled tools in ARC runner image: %s\n' "${unusable[*]}" >&2
+        fi
+
+        if [[ ${#drifted[@]} -gt 0 ]]; then
+          printf 'Version drift detected in ARC runner image:\n' >&2
+          printf '  - %s\n' "${drifted[@]}" >&2
+        fi
+
+        if [[ ${#missing[@]} -gt 0 || ${#unusable[@]} -gt 0 || ${#drifted[@]} -gt 0 ]]; then
           printf 'Rebuild and redeploy the custom ARC runner image instead of installing them at job runtime.\n' >&2
           exit 1
         fi

@@ -13,6 +13,9 @@ env:
   # Disable incremental compilation for faster from-scratch builds
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_TEST_DEBUG: 0
+  RUST_TOOLCHAIN_VERSION: "1.92.0"
+  HAWKEYE_VERSION: "6.5.1"
+  CARGO_NEXTEST_VERSION: "0.9.132"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
@@ -22,8 +25,10 @@ jobs:
   check:
     # ARC runner pods now use a custom image that already carries the native
     # C toolchain, the pinned Rust toolchain, hawkeye, and cargo-nextest.
-    # Keep runtime steps as fast verification + remote cache restore instead of
-    # reinstalling the same toolchain on every ephemeral runner.
+    # Keep runtime steps focused on verification and compilation instead of
+    # reinstalling the same toolchain on every ephemeral runner. Avoid adding
+    # third-party cache actions here because ARC's proxy path to GitHub action
+    # tarballs has proven less reliable than the runner image itself.
     runs-on: &linux_runner roku-arc
     steps:
       - uses: actions/checkout@v6
@@ -32,15 +37,11 @@ jobs:
           required-tools: |
             cc
             pkg-config
-            rustc
-            cargo
-            hawkeye
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # ARC runner images already preinstall CLI tooling, so avoid uploading
-          # ~/.cargo/bin and keep PR jobs restore-only to skip long cache saves.
-          cache-bin: false
-          save-if: false
+            rustc=${{ env.RUST_TOOLCHAIN_VERSION }}
+            cargo=${{ env.RUST_TOOLCHAIN_VERSION }}
+            rustfmt
+            cargo-clippy
+            hawkeye=${{ env.HAWKEYE_VERSION }}
 
       - name: Bash syntax check
         shell: bash
@@ -73,11 +74,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/ensure-native-build-toolchain
-      - uses: Swatinem/rust-cache@v2
         with:
-          cache-bin: false
-          # Only persist refreshed caches from the canonical branch pushes.
-          save-if: ${{ github.event_name == 'push' }}
+          required-tools: |
+            cc
+            pkg-config
+            rustc=${{ env.RUST_TOOLCHAIN_VERSION }}
+            cargo=${{ env.RUST_TOOLCHAIN_VERSION }}
       - name: Build
         run: cargo build --release --locked
 
@@ -90,13 +92,9 @@ jobs:
           required-tools: |
             cc
             pkg-config
-            rustc
-            cargo
-            cargo-nextest
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-          save-if: false
+            rustc=${{ env.RUST_TOOLCHAIN_VERSION }}
+            cargo=${{ env.RUST_TOOLCHAIN_VERSION }}
+            cargo-nextest=${{ env.CARGO_NEXTEST_VERSION }}
 
       - run: cargo check --locked
 

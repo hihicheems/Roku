@@ -11,6 +11,10 @@ on:
         required: true
         type: string
 
+env:
+  RUST_TOOLCHAIN_VERSION: "1.92.0"
+  GIT_CLIFF_VERSION: "2.12.0"
+
 jobs:
   generate-changelog:
     name: Generate Changelog
@@ -33,9 +37,9 @@ jobs:
           required-tools: |
             cc
             pkg-config
-            rustc
-            cargo
-            git-cliff
+            rustc=${{ env.RUST_TOOLCHAIN_VERSION }}
+            cargo=${{ env.RUST_TOOLCHAIN_VERSION }}
+            git-cliff=${{ env.GIT_CLIFF_VERSION }}
 
       - name: Generate changelog
         run: |
@@ -116,9 +120,9 @@ jobs:
           required-tools: |
             cc
             pkg-config
-            rustc
-            cargo
-            git-cliff
+            rustc=${{ env.RUST_TOOLCHAIN_VERSION }}
+            cargo=${{ env.RUST_TOOLCHAIN_VERSION }}
+            git-cliff=${{ env.GIT_CLIFF_VERSION }}
 
       - name: Ensure default branch
         run: |
