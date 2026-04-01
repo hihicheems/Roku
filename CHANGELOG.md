@@ -2,6 +2,63 @@
 
 # Changelog
 
+## [v0.0.7] - 2026-04-01
+
+### Features
+
+- **(roku-agent-runtime)** capture execution trace evidence (by @[itscheems](https://github.com/itscheems)) - ([b2fcf96](https://github.com/itscheems/Roku/commit/b2fcf9641ba31f1ffc79735622703867653ef956))
+- **(roku-agent-runtime)** reuse shared command execution seam (by @[itscheems](https://github.com/itscheems)) - ([48f1a58](https://github.com/itscheems/Roku/commit/48f1a5816bde495c94a7fc06a9047823b0ca1134))
+- **(roku-common-types)** add execution approval contracts (by @[itscheems](https://github.com/itscheems)) - ([6c816e4](https://github.com/itscheems/Roku/commit/6c816e43995ad9f3080070c012b7816398ccb179))
+- **(roku-memory)** add provider-neutral session management subsystem (by @[itscheems](https://github.com/itscheems)) - ([f7a6ad3](https://github.com/itscheems/Roku/commit/f7a6ad352b1d662adff1d3cd96451770a3fc07e1))
+- **(roku-plugin-host)** gate command invocations with policy decisions (by @[itscheems](https://github.com/itscheems)) - ([28b0ec0](https://github.com/itscheems/Roku/commit/28b0ec0822ca01195403084c2a9af65f41102798))
+- **(roku-plugin-telegram)** use runtime approval messages directly (by @[itscheems](https://github.com/itscheems)) - ([a2d972e](https://github.com/itscheems/Roku/commit/a2d972e767c50bff93b3de1009e4490262ac3180))
+- **(roku-plugin-telegram)** add multi-session control flow to telegram runtime (by @[itscheems](https://github.com/itscheems)) - ([743224e](https://github.com/itscheems/Roku/commit/743224e61777341c8d2f6bd1e61129d2984ca29f))
+- **(roku-runtime-service)** freeze and resume approved executions (by @[itscheems](https://github.com/itscheems)) - ([557f124](https://github.com/itscheems/Roku/commit/557f124ef5b8df793455db61fbe106f8854ffa3a))
+- **(scripts)** show OpenViking provider status in doctor (by @[itscheems](https://github.com/itscheems)) - ([8a8a8a2](https://github.com/itscheems/Roku/commit/8a8a8a29aca7f1f44b23daad4247edfbb48670ff))
+
+### Bug Fixes
+
+- **(cd)** replace release rust toolchain action (#28) (by @[itscheems](https://github.com/itscheems))  - (#28) - ([9fa82c1](https://github.com/itscheems/Roku/commit/9fa82c1d3cf849934ec4e8f078154c995431a16c))
+- **(ci)** install native build toolchain on runner (by @[itscheems](https://github.com/itscheems)) - ([a3e6dd3](https://github.com/itscheems/Roku/commit/a3e6dd38d6ca2de19ec44c0b7bd522dc0dea601e))
+- **(roku-agent-runtime)** preserve exact inputs for approved replays (by @[itscheems](https://github.com/itscheems)) - ([b5611b2](https://github.com/itscheems/Roku/commit/b5611b2ba753bf7c6e56baba95f4b6873991e7d2))
+- **(roku-agent-runtime)** preserve direct-route approval payloads (by @[itscheems](https://github.com/itscheems)) - ([3f90fde](https://github.com/itscheems/Roku/commit/3f90fde2ddfbbbabde58cb582ff969bdc94e9875))
+- **(roku-cmd)** restore request env overrides after execution (by @[itscheems](https://github.com/itscheems)) - ([7e9cf16](https://github.com/itscheems/Roku/commit/7e9cf160d92fe037ec052f6e3ea1c6855b2482d7))
+- **(roku-common-types)** add path approval reason code (by @[itscheems](https://github.com/itscheems)) - ([83152a0](https://github.com/itscheems/Roku/commit/83152a0f94d2e2b2220e9d0a53c2147b43ead76a))
+- **(roku-plugin-host)** support approved scope overrides (by @[itscheems](https://github.com/itscheems)) - ([0a5a787](https://github.com/itscheems/Roku/commit/0a5a787eab1e443ba8a68b4afcfddf4968e7abd0))
+- **(roku-plugin-memory-openviking)** harden runtime-state visibility and clears (by @[itscheems](https://github.com/itscheems)) - ([b4732d6](https://github.com/itscheems/Roku/commit/b4732d6bf482f6cd3d65ffb13dc5e7a27bee5e4e))
+- **(roku-plugin-memory-openviking)** repair runtime-state provider compatibility (by @[itscheems](https://github.com/itscheems)) - ([a7bdc3b](https://github.com/itscheems/Roku/commit/a7bdc3bc5311134ba5bd35dd2279d225993e86b7))
+- **(roku-plugin-telegram)** add approval button emoji (by @[itscheems](https://github.com/itscheems)) - ([a46653b](https://github.com/itscheems/Roku/commit/a46653b812b887c974a5e2b39e6607474622c6c0))
+- **(roku-plugin-telegram)** simplify sessions control output (by @[itscheems](https://github.com/itscheems)) - ([37ec34c](https://github.com/itscheems/Roku/commit/37ec34ccb6cbb0df9b47416101fd646713818c09))
+- **(roku-plugin-tools)** route out-of-scope paths through approval (by @[itscheems](https://github.com/itscheems)) - ([6cf05c1](https://github.com/itscheems/Roku/commit/6cf05c1d8f5be48553521ad06a904dd31666c68a))
+- **(roku-plugin-tools)** keep canonical execution for untrusted commands (by @[itscheems](https://github.com/itscheems)) - ([9909de7](https://github.com/itscheems/Roku/commit/9909de7113a143a7f60cd4dc6c66828f89aa16c0))
+- **(roku-runtime-service)** resume approved filesystem access (by @[itscheems](https://github.com/itscheems)) - ([9b6a0ed](https://github.com/itscheems/Roku/commit/9b6a0edd1edf5116190771416f3a6cae5d759705))
+- **(roku-runtime-service)** freeze direct-route command approvals (by @[itscheems](https://github.com/itscheems)) - ([0e8532a](https://github.com/itscheems/Roku/commit/0e8532a2fc215fb2a3c35a328445cedb4fae54be))
+- **(scripts)** manage dev openviking lifecycle in script (by @[itscheems](https://github.com/itscheems)) - ([d5ac35a](https://github.com/itscheems/Roku/commit/d5ac35a187b6d2f40e3c78f951506d59c5b6c974))
+- **(scripts)** enable openviking features for live services (by @[itscheems](https://github.com/itscheems)) - ([222a9d9](https://github.com/itscheems/Roku/commit/222a9d9bc1dc5876e6bfced66e932470bfaf383e))
+
+### Refactor
+
+- **(roku-cmd)** centralize telegram session ux defaults (by @[itscheems](https://github.com/itscheems)) - ([aa355e9](https://github.com/itscheems/Roku/commit/aa355e9dd43554d60d723bce6aee72a3f369740b))
+- **(roku-plugin-tools)** split command.run execution pipeline (by @[itscheems](https://github.com/itscheems)) - ([a1a7333](https://github.com/itscheems/Roku/commit/a1a73336f828bbaed62c70df4e270b05d8cfac45))
+
+### Documentation
+
+- **(workspace)** add default issue labels (by @[itscheems](https://github.com/itscheems)) - ([9116d1b](https://github.com/itscheems/Roku/commit/9116d1b7ffafe958913fe542ba05b784418634c9))
+- **(workspace)** add GitHub contribution templates (by @[itscheems](https://github.com/itscheems)) - ([e402ff3](https://github.com/itscheems/Roku/commit/e402ff3b5f35da54551d52706f660bd74dd119d2))
+
+### Miscellaneous Tasks
+
+- **(config)** harden tool version probes (by @[itscheems](https://github.com/itscheems)) - ([175260a](https://github.com/itscheems/Roku/commit/175260a05278e290a0ab698d7bde701df27e2271))
+- **(config)** harden arc workflow stability (by @[itscheems](https://github.com/itscheems)) - ([e010ea2](https://github.com/itscheems/Roku/commit/e010ea27f4ed161a5e475617ad0f3e0408a3f2ba))
+- **(config)** reduce rust cache upload time (by @[itscheems](https://github.com/itscheems)) - ([db008d4](https://github.com/itscheems/Roku/commit/db008d49bad5a26d71340169ae7d3634479d4bdb))
+- **(config)** keep arc values out of tree (by @[itscheems](https://github.com/itscheems)) - ([aa2e46e](https://github.com/itscheems/Roku/commit/aa2e46edeb2dea3e0b1a34d93389c15bc147557c))
+- **(config)** preinstall arc runner toolchain (by @[itscheems](https://github.com/itscheems)) - ([8c45f6a](https://github.com/itscheems/Roku/commit/8c45f6aca9a2ec9163d3235757098cc6767c802f))
+- **(config)** ignore local AGENTS metadata (by @[itscheems](https://github.com/itscheems)) - ([7a4e0d7](https://github.com/itscheems/Roku/commit/7a4e0d70f6ca19d99b455703a19fc724d37cf194))
+- **(workflows)** move jobs to self-hosted runners (by @[itscheems](https://github.com/itscheems)) - ([6f6e6e8](https://github.com/itscheems/Roku/commit/6f6e6e8183bfcba9626d67ad9f70ca4cfff7ffff))
+- **(workspace)** ignore .agents directory (by @[itscheems](https://github.com/itscheems)) - ([fc13dda](https://github.com/itscheems/Roku/commit/fc13dda7a688a5559448ef7fcc2344ec8d2c35be))
+- remove unused runner matrix (by @[itscheems](https://github.com/itscheems)) - ([d2294e8](https://github.com/itscheems/Roku/commit/d2294e84447e043fbaac748985177025c05650a4))
+- move workflows to arc runners (by @[itscheems](https://github.com/itscheems)) - ([fb126cf](https://github.com/itscheems/Roku/commit/fb126cf8052292b73fd8b1e7cd46a5a81c87e835))
+
 ## [v0.0.6] - 2026-03-18
 
 ### Features
