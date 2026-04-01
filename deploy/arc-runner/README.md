@@ -32,9 +32,30 @@ The repository now treats the runner image as the installation boundary:
 ## Files
 
 - `Dockerfile`: custom ARC runner image.
-- `controller.values.yaml`: controller chart values template.
-- `runner-scale-set.values.yaml`: runner scale set values template.
 
-These values files are templates. Fill in environment-specific proxy domains,
-cluster CIDRs, node IPs, and image references before applying them on a
-workspace.
+Repository-owned ARC assets stop at the runner image and general deployment
+guidance. Environment-specific Helm values are intentionally not tracked here.
+
+Workspace installs usually need private details such as:
+
+- corporate proxy endpoints
+- internal DNS overrides
+- cluster CIDRs
+- node IPs
+- private image references
+- namespace-local secrets
+
+Those values should stay in local deployment artifacts, ignored `outputs/`
+files, or a private operations repository instead of this public tree.
+
+## Deployment guidance
+
+When preparing ARC values for a workspace:
+
+- keep the controller and runner scale-set values outside this repository
+- keep mutable runner state isolated per pod
+- avoid shared writable Cargo, Rustup, and Docker layer directories
+- prefer prebuilt runner images plus remote cache reuse in workflows
+
+The live `act` rollout that motivated this layout uses those same rules, but
+its concrete values remain intentionally out of tree.
