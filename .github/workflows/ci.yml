@@ -36,6 +36,11 @@ jobs:
             cargo
             hawkeye
       - uses: Swatinem/rust-cache@v2
+        with:
+          # ARC runner images already preinstall CLI tooling, so avoid uploading
+          # ~/.cargo/bin and keep PR jobs restore-only to skip long cache saves.
+          cache-bin: false
+          save-if: false
 
       - name: Bash syntax check
         shell: bash
@@ -69,6 +74,10 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/ensure-native-build-toolchain
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          # Only persist refreshed caches from the canonical branch pushes.
+          save-if: ${{ github.event_name == 'push' }}
       - name: Build
         run: cargo build --release --locked
 
@@ -85,6 +94,9 @@ jobs:
             cargo
             cargo-nextest
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          save-if: false
 
       - run: cargo check --locked
 
