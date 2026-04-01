@@ -32,11 +32,13 @@ jobs:
       - name: Ensure native build toolchain
         uses: ./.github/actions/ensure-native-build-toolchain
 
+      # `actions-rs/toolchain@v1` uses an older Node networking stack that has
+      # proven flaky behind the ARC runner proxy on `act` (CONNECT retries end
+      # in HTTP 407). The rest of the repository already uses dtolnay's action,
+      # so keep release jobs on the same maintained path.
       - name: Install Rust & git-cliff
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
           profile: minimal
 
       - name: Install git-cliff
@@ -120,10 +122,8 @@ jobs:
         uses: ./.github/actions/ensure-native-build-toolchain
 
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
           profile: minimal
 
       - name: Install git-cliff
