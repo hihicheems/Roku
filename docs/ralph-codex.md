@@ -45,6 +45,10 @@ Optional environment knobs:
 - `RALPH_CODEX_SANDBOX`
 - `RALPH_CODEX_APPROVAL`
 - `RALPH_CODEX_ARGS`
+- `RALPH_CODEX_TIMEOUT_SECONDS`
+- `RALPH_CODEX_MAX_RETRIES`
+- `RALPH_CODEX_RETRY_WAIT_SECONDS`
+- `RALPH_CODEX_TERM_GRACE_SECONDS`
 - `RALPH_STATE_DIR`
 
 ## Quick Start
@@ -91,6 +95,30 @@ Why this shape:
 - stderr is captured separately because Codex may emit startup warnings there
 - each Ralph iteration is a fresh `codex exec` process, preserving the Ralph pattern
 
+## Runner Hardening
+
+The repo-local Codex runner now adds three stability controls:
+
+- hard timeout per Codex attempt
+- retry on timeout / likely transport failures
+- fail-fast after retries are exhausted
+
+Relevant environment variables:
+
+```bash
+RALPH_CODEX_TIMEOUT_SECONDS=1800
+RALPH_CODEX_MAX_RETRIES=2
+RALPH_CODEX_RETRY_WAIT_SECONDS=10
+RALPH_CODEX_TERM_GRACE_SECONDS=5
+```
+
+Retry behavior is intentionally conservative:
+
+- retryable: timeout, stream disconnects, TLS handshake EOF, request transport errors, common transient 5xx/network failures
+- non-retryable: ordinary task/code failures
+
+If the runner still fails after retries, Ralph exits immediately instead of silently continuing to the next iteration.
+
 ## How To View Progress
 
 Primary progress surfaces:
@@ -100,6 +128,9 @@ Primary progress surfaces:
 - `.ralph/.last-run`
 - `.ralph/runs/<timestamp>/iteration-*.events.jsonl`
 - `.ralph/runs/<timestamp>/iteration-*.stderr.log`
+- `.ralph/runs/<timestamp>/iteration-*.status.txt`
+- `.ralph/runs/<timestamp>/iteration-*.attempt-*.events.jsonl`
+- `.ralph/runs/<timestamp>/iteration-*.attempt-*.stderr.log`
 
 Useful commands:
 
@@ -107,6 +138,7 @@ Useful commands:
 cat .ralph/progress.txt
 jq '.userStories[] | {id, title, passes}' .ralph/prd.json
 cat .ralph/.last-run
+cat "$(cat .ralph/.last-run)/iteration-001.status.txt"
 tail -f "$(cat .ralph/.last-run)/iteration-001.stderr.log"
 sed -n '1,20p' "$(cat .ralph/.last-run)/iteration-001.events.jsonl"
 ```
@@ -122,6 +154,8 @@ Resume:
 - rerun `just ralph` or `./scripts/ralph/ralph.sh`
 - Ralph re-reads `.ralph/prd.json` and `.ralph/progress.txt`
 - the next fresh Codex iteration continues from repo state, git history, and Ralph state files
+- if the previous run died mid-iteration, the next run simply retries from the last persisted repo/PRD checkpoint
+- per-iteration `status.txt` and attempt logs tell you whether the last stop was timeout, retryable transport failure, or terminal runner failure
 
 This is intentionally not Codex session resume. Ralph’s model is fresh-instance-per-iteration.
 
@@ -133,6 +167,7 @@ This is intentionally not Codex session resume. Ralph’s model is fresh-instanc
 - `codex exec --output-last-message` reliably writes the final assistant message to a file.
 - `codex exec --json` produces JSONL events suitable for per-iteration logging.
 - In this environment, Codex may emit plugin warmup warnings to stderr; the wrapper captures them into per-iteration log files instead of relying on a perfectly clean terminal stream.
+- Transport failures can leave `codex exec` retrying long enough to stall the outer loop if the wrapper does not impose its own timeout/fail-fast policy.
 
 ## Local Adaptation Decisions
 
@@ -147,6 +182,9 @@ This is intentionally not Codex session resume. Ralph’s model is fresh-instanc
 - This does not generate PRDs for you; it expects `.ralph/prd.json` to exist.
 - Only the Codex runner path was validated locally here.
 - Fresh-iteration Ralph means no hidden cross-iteration in-memory state beyond git history and `.ralph/*`.
+- Crash recovery is checkpoint-based, not in-process continuation:
+  - completed work survives through git commits plus `.ralph/prd.json` / `progress.txt`
+  - an interrupted in-flight iteration is retried from the last persisted checkpoint on the next launch
 
 ## Suggested Next Extensions
 

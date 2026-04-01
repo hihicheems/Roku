@@ -20,6 +20,12 @@ Environment:
   RALPH_CODEX_SANDBOX   Sandbox mode for codex exec (default: workspace-write)
   RALPH_CODEX_APPROVAL  Approval mode for codex exec (default: never)
   RALPH_CODEX_ARGS      Extra shell-split Codex args, e.g. '--search'
+  RALPH_CODEX_TIMEOUT_SECONDS
+                         Hard timeout for one Codex attempt (default: 1800)
+  RALPH_CODEX_MAX_RETRIES
+                         Retry count after the initial failed attempt (default: 2)
+  RALPH_CODEX_RETRY_WAIT_SECONDS
+                         Base wait before retrying a retryable failure (default: 10)
 EOF
 }
 
@@ -275,7 +281,11 @@ main() {
 		fi
 
 		if [[ "$rc" -ne 0 ]]; then
-			echo "  Codex iteration exited with status $rc. See $(relative_to_root "$run_dir/$iteration_label.stderr.log")" >&2
+			echo "  Codex iteration exited with status $rc." >&2
+			echo "  Runner status: $(relative_to_root "$run_dir/$iteration_label.status.txt")" >&2
+			echo "  Stderr log: $(relative_to_root "$run_dir/$iteration_label.stderr.log")" >&2
+			echo "Ralph stopped after a runner failure so the next launch can resume from persisted repo/PRD state." >&2
+			exit "$rc"
 		fi
 
 		echo "Iteration $i complete. Continuing..."
