@@ -10,6 +10,10 @@ inputs:
       pkg-config
       rustc
       cargo
+  probe-timeout-seconds:
+    description: Maximum number of seconds to wait for each tool --version probe before treating it as unusable.
+    required: false
+    default: "15"
 
 runs:
   using: composite
@@ -20,6 +24,7 @@ runs:
         set -euo pipefail
 
         mapfile -t required_tools < <(printf '%s\n' '${{ inputs.required-tools }}' | sed '/^[[:space:]]*$/d')
+        probe_timeout_seconds='${{ inputs.probe-timeout-seconds }}'
 
         if [[ ${#required_tools[@]} -eq 0 ]]; then
           echo "No required tools configured."
@@ -43,11 +48,32 @@ runs:
             continue
           fi
 
-          version_line="$("${tool}" --version 2>&1 | head -n 1)" || {
+          probe_output=""
+          probe_status=0
+          set +e
+          if command -v timeout >/dev/null 2>&1; then
+            probe_output="$(timeout "${probe_timeout_seconds}" "${tool}" --version 2>&1)"
+            probe_status=$?
+          else
+            probe_output="$("${tool}" --version 2>&1)"
+            probe_status=$?
+          fi
+          set -e
+
+          version_line="$(printf '%s\n' "${probe_output}" | sed -n '/./{p;q;}')"
+
+          if [[ ${probe_status} -ne 0 ]]; then
             unusable+=("${tool}")
-            printf '%s: failed to execute --version probe\n' "${tool}" >&2
+            if [[ ${probe_status} -eq 124 ]]; then
+              printf '%s: timed out after %ss while executing --version probe\n' "${tool}" "${probe_timeout_seconds}" >&2
+            else
+              printf '%s: failed to execute --version probe (exit %s)\n' "${tool}" "${probe_status}" >&2
+            fi
+            if [[ -n "${version_line}" ]]; then
+              printf '%s: %s\n' "${tool}" "${version_line}" >&2
+            fi
             continue
-          }
+          fi
 
           if [[ -n "${version_line}" ]]; then
             echo "${tool}: ${version_line}"
@@ -55,8 +81,12 @@ runs:
             echo "${tool}: found"
           fi
 
-          if [[ -n "${expected_version}" && "${version_line}" != *"${expected_version}"* ]]; then
-            drifted+=("${tool} expected '${expected_version}' got '${version_line}'")
+          if [[ -n "${expected_version}" && "${probe_output}" != *"${expected_version}"* ]]; then
+            if [[ -n "${version_line}" ]]; then
+              drifted+=("${tool} expected '${expected_version}' got '${version_line}'")
+            else
+              drifted+=("${tool} expected '${expected_version}' but emitted no version output")
+            fi
           fi
         done
 
