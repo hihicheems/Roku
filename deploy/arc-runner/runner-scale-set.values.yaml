@@ -1,0 +1,176 @@
+githubConfigUrl: https://github.com/itscheems/Roku
+githubConfigSecret: github-auth-secret
+
+runnerScaleSetName: roku-arc
+minRunners: 0
+maxRunners: 10
+
+proxy:
+  http:
+    url: http://proxy.i.brainpp.cn:3128
+  https:
+    url: http://proxy.i.brainpp.cn:3128
+  noProxy:
+    - clear.ml
+    - kubebrain
+    - kubebrain.com
+    - svc
+    - .svc
+    - .cluster.local
+    - brainpp.cn
+    - brainpp.local
+    - brainpp.ml
+    - megvii-inc.com
+    - megvii-op.org
+    - 127.0.0.1
+    - localhost
+    - ::1
+    - kubernetes
+    - kubernetes.default
+    - kubernetes.default.svc
+    - kubernetes.default.svc.cluster.local
+    - 10.42.0.0/16
+    - 10.43.0.0/16
+    - 10.43.0.1
+
+controllerServiceAccount:
+  namespace: arc-systems
+  name: arc-controller-sa
+
+keyVault: {}
+resourceMeta: {}
+
+# Keep mutable state isolated per runner pod. Do not add shared writable
+# Cargo/Rustup or /var/lib/docker hostPath caches back into this template.
+template:
+  spec:
+    initContainers:
+      - name: init-runner-dirs
+        image: docker:dind
+        imagePullPolicy: IfNotPresent
+        command:
+          - sh
+          - -c
+          - mkdir -p "/mnt/work/${ARC_POD_NAME}" "/mnt/docker/${ARC_POD_NAME}" "/mnt/externals/${ARC_POD_NAME}" && chmod 0777 "/mnt/work/${ARC_POD_NAME}" "/mnt/docker/${ARC_POD_NAME}" "/mnt/externals/${ARC_POD_NAME}"
+        env:
+          - name: ARC_POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+        volumeMounts:
+          - name: work
+            mountPath: /mnt/work
+          - name: dind-storage
+            mountPath: /mnt/docker
+          - name: dind-externals-root
+            mountPath: /mnt/externals
+      - name: init-dind-externals
+        image: localhost/roku-arc-runner:2026-04-01
+        imagePullPolicy: IfNotPresent
+        command:
+          - cp
+        args:
+          - -r
+          - /home/runner/externals/.
+          - /home/runner/tmpDir/
+        env:
+          - name: ARC_POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+        volumeMounts:
+          - name: dind-externals-root
+            mountPath: /home/runner/tmpDir
+            subPathExpr: $(ARC_POD_NAME)
+    containers:
+      - name: runner
+        image: localhost/roku-arc-runner:2026-04-01
+        imagePullPolicy: IfNotPresent
+        command:
+          - /home/runner/run.sh
+        env:
+          - name: RUNNER_WORKDIR
+            value: /home/runner/_work
+          - name: DOCKER_HOST
+            value: unix:///var/run/docker.sock
+          - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
+            value: "120"
+          - name: ARC_POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: HTTP_PROXY
+            value: http://proxy.i.brainpp.cn:3128
+          - name: HTTPS_PROXY
+            value: http://proxy.i.brainpp.cn:3128
+          - name: ALL_PROXY
+            value: http://proxy.i.brainpp.cn:3128
+          - name: NO_PROXY
+            value: clear.ml,kubebrain,kubebrain.com,svc,.svc,.cluster.local,brainpp.cn,brainpp.local,brainpp.ml,megvii-inc.com,megvii-op.org,127.0.0.1,localhost,::1,kubernetes,kubernetes.default,kubernetes.default.svc,kubernetes.default.svc.cluster.local,10.42.0.0/16,10.43.0.0/16,10.43.0.1
+          - name: all_proxy
+            value: http://proxy.i.brainpp.cn:3128
+        volumeMounts:
+          - name: work
+            mountPath: /home/runner/_work
+            subPathExpr: $(ARC_POD_NAME)
+          - name: dind-sock
+            mountPath: /var/run
+      - name: dind
+        image: docker:dind
+        imagePullPolicy: IfNotPresent
+        args:
+          - dockerd
+          - --host=unix:///var/run/docker.sock
+          - --group=$(DOCKER_GROUP_GID)
+        env:
+          - name: DOCKER_GROUP_GID
+            value: "123"
+          - name: ARC_POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: http_proxy
+            value: http://proxy.i.brainpp.cn:3128
+          - name: https_proxy
+            value: http://proxy.i.brainpp.cn:3128
+          - name: all_proxy
+            value: http://proxy.i.brainpp.cn:3128
+          - name: no_proxy
+            value: clear.ml,kubebrain,kubebrain.com,svc,.svc,.cluster.local,brainpp.cn,brainpp.local,brainpp.ml,megvii-inc.com,megvii-op.org,127.0.0.1,localhost,::1,kubernetes,kubernetes.default,kubernetes.default.svc,kubernetes.default.svc.cluster.local,10.42.0.0/16,10.43.0.0/16,10.43.0.1
+          - name: HTTP_PROXY
+            value: http://proxy.i.brainpp.cn:3128
+          - name: HTTPS_PROXY
+            value: http://proxy.i.brainpp.cn:3128
+          - name: ALL_PROXY
+            value: http://proxy.i.brainpp.cn:3128
+          - name: NO_PROXY
+            value: clear.ml,kubebrain,kubebrain.com,svc,.svc,.cluster.local,brainpp.cn,brainpp.local,brainpp.ml,megvii-inc.com,megvii-op.org,127.0.0.1,localhost,::1,kubernetes,kubernetes.default,kubernetes.default.svc,kubernetes.default.svc.cluster.local,10.42.0.0/16,10.43.0.0/16,10.43.0.1
+        securityContext:
+          privileged: true
+        volumeMounts:
+          - name: work
+            mountPath: /home/runner/_work
+            subPathExpr: $(ARC_POD_NAME)
+          - name: dind-sock
+            mountPath: /var/run
+          - name: dind-externals-root
+            mountPath: /home/runner/externals
+            subPathExpr: $(ARC_POD_NAME)
+          - name: dind-storage
+            mountPath: /var/lib/docker
+            subPathExpr: $(ARC_POD_NAME)
+    volumes:
+      - name: work
+        hostPath:
+          path: /data/arc-runners/work
+          type: DirectoryOrCreate
+      - name: dind-storage
+        hostPath:
+          path: /data/arc-runners/docker
+          type: DirectoryOrCreate
+      - name: dind-sock
+        emptyDir: {}
+      - name: dind-externals-root
+        hostPath:
+          path: /data/arc-runners/externals
+          type: DirectoryOrCreate

@@ -14,8 +14,10 @@ on:
 jobs:
   generate-changelog:
     name: Generate Changelog
-    # Current default Linux runner pool. Change this anchor if the repository
-    # moves back to GitHub-hosted Linux or to a different self-hosted label.
+    # Release jobs run on the same ARC pool as CI, but the custom runner image
+    # already includes git-cliff and the native/Rust toolchain it needs. Keep
+    # a fast verifier here so image drift fails loudly instead of silently
+    # falling back to runtime installs over the company proxy.
     runs-on: &linux_runner roku-arc
     permissions:
       contents: write
@@ -26,23 +28,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      # `cargo install git-cliff` compiles a Rust binary. On GitHub-hosted
-      # runners `cc` is already present; on our self-hosted pool we bootstrap
-      # it through one shared local action that preserves the runner's proxy env.
-      - name: Ensure native build toolchain
-        uses: ./.github/actions/ensure-native-build-toolchain
-
-      # `actions-rs/toolchain@v1` uses an older Node networking stack that has
-      # proven flaky behind the ARC runner proxy on `act` (CONNECT retries end
-      # in HTTP 407). The rest of the repository already uses dtolnay's action,
-      # so keep release jobs on the same maintained path.
-      - name: Install Rust & git-cliff
-        uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/ensure-native-build-toolchain
         with:
-          profile: minimal
-
-      - name: Install git-cliff
-        run: cargo install git-cliff --force
+          required-tools: |
+            cc
+            pkg-config
+            rustc
+            cargo
+            git-cliff
 
       - name: Generate changelog
         run: |
@@ -118,16 +111,14 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Ensure native build toolchain
-        uses: ./.github/actions/ensure-native-build-toolchain
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/ensure-native-build-toolchain
         with:
-          profile: minimal
-
-      - name: Install git-cliff
-        run: cargo install git-cliff --force
+          required-tools: |
+            cc
+            pkg-config
+            rustc
+            cargo
+            git-cliff
 
       - name: Ensure default branch
         run: |
