@@ -20,6 +20,7 @@ mod execution;
 mod helpers;
 mod legacy_graph;
 mod memory_context;
+mod pending_loop_snapshot_store;
 mod runtime_loop_lifecycle;
 mod runtime_loop_recovery;
 #[cfg(test)]
@@ -29,8 +30,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use roku_agent_runtime::{
-	EscalationAction, EscalationReason, GenericAgentRuntime, IntentFamily, LoopState,
-	RouteDecision, RouteDecisionResult, RouteEscalationPlan, RouteRisk,
+	EscalationAction, EscalationReason, GenericAgentRuntime, IntentFamily, RouteDecision,
+	RouteDecisionResult, RouteEscalationPlan, RouteRisk,
 };
 use roku_artifact_store::ArtifactStore;
 use roku_capability_auth::CapabilityAuthority;
@@ -53,6 +54,9 @@ use roku_validation_plane::ValidationPipeline;
 
 use crate::helpers::{approval_artifact, failure_message, ticket_status_label};
 pub use crate::memory_context::ContextBundle;
+pub use crate::pending_loop_snapshot_store::{
+	InMemoryPendingLoopSnapshotStore, PendingLoopSnapshotStore,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RunMode {
@@ -165,7 +169,7 @@ pub struct RuntimeService {
 	memory_backend: Arc<dyn LongTermMemoryBackend>,
 	memory_policy: Arc<dyn MemoryLifecyclePolicy>,
 	state: Mutex<RuntimeState>,
-	pending_loops: Mutex<HashMap<String, LoopState>>,
+	pending_loop_snapshot_store: Arc<dyn PendingLoopSnapshotStore>,
 	memory_contexts: Mutex<HashMap<String, String>>,
 }
 
@@ -339,7 +343,7 @@ impl RuntimeService {
 				artifact_store,
 				experiment_registry,
 			}),
-			pending_loops: Mutex::new(HashMap::new()),
+			pending_loop_snapshot_store: Arc::new(InMemoryPendingLoopSnapshotStore::default()),
 			memory_contexts: Mutex::new(HashMap::new()),
 		}
 	}
@@ -352,6 +356,14 @@ impl RuntimeService {
 	/// runtime truth so logs and tests can verify which path is active.
 	pub fn with_runtime_mode_report(mut self, runtime_mode: RuntimeModeReport) -> Self {
 		self.runtime_mode = runtime_mode;
+		self
+	}
+
+	pub fn with_pending_loop_snapshot_store(
+		mut self,
+		pending_loop_snapshot_store: Arc<dyn PendingLoopSnapshotStore>,
+	) -> Self {
+		self.pending_loop_snapshot_store = pending_loop_snapshot_store;
 		self
 	}
 
