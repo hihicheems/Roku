@@ -2080,6 +2080,46 @@ mod tests {
 	}
 
 	#[test]
+	fn candidate_selection_ask_user_resume_contract_requires_grounded_choice() {
+		let runtime = GenericAgentRuntime::with_skill_registry(SkillRegistry::disabled());
+		let candidates = vec![
+			"/Users/jojo/cjj_project/Roku/Cargo.toml".to_string(),
+			"/Users/jojo/cjj_project/Roku/crates/roku-agent-runtime/Cargo.toml".to_string(),
+		];
+		let loop_state = awaiting_user_loop_state(
+			"看一下 Cargo.toml",
+			AskUserPayload::candidate_selection(
+				"我找到了多个候选路径。你想看哪一个？",
+				candidates.clone(),
+				None,
+			),
+		);
+
+		assert_eq!(
+			loop_state
+				.awaiting_user
+				.as_ref()
+				.expect("awaiting-user payload should exist")
+				.resume_contract,
+			AskUserResumeContract::CandidateSelection { candidates }
+		);
+
+		let assessment = runtime.assess_awaiting_user_resume(
+			&loop_state,
+			"/Users/jojo/cjj_project/Roku/crates/roku-agent-runtime/Cargo.toml",
+		);
+
+		assert_eq!(
+			assessment,
+			AwaitingUserResumeAssessment {
+				should_resume: true,
+				reason: "user reply selected one of the grounded candidates for the paused loop"
+					.to_string(),
+			}
+		);
+	}
+
+	#[test]
 	fn missing_required_input_resume_uses_router_gate() {
 		let (router, prompts) = router_with_json_responses(vec![serde_json::json!({
 			"resume_existing_loop": true,
