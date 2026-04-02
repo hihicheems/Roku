@@ -16,7 +16,8 @@ use std::sync::Arc;
 
 use roku_agent_runtime::RouteDecisionResult;
 use roku_common_types::{
-	ConversationTurn, RequestEnvelope, ResourceSelector, ResponseEnvelope, RuntimeError,
+	ConversationRole, ConversationTurn, RequestEnvelope, ResourceSelector, ResponseEnvelope,
+	RuntimeError,
 };
 use roku_memory::{
 	LongTermMemoryBackend, MemoryHit, MemoryLifecyclePolicy, MemoryRecallInput,
@@ -47,19 +48,45 @@ impl RuntimeMemoryLayers {
 	}
 
 	pub fn memory_context_text(&self) -> String {
-		if self.long_term_recall.is_empty() {
-			return String::new();
+		let mut sections = Vec::new();
+		if !self.short_term_continuity.is_empty() {
+			sections.push(format_named_memory_section(
+				"Short-term continuity",
+				self.short_term_continuity
+					.iter()
+					.map(|turn| {
+						format!("- {}: {}", conversation_role_label(turn.role), turn.content)
+					})
+					.collect(),
+			));
 		}
-		self.long_term_recall
-			.iter()
-			.map(|hit| {
-				format!(
-					"- {} | {:?} | {}",
-					hit.record.record_id, hit.record.kind, hit.record.summary
-				)
-			})
-			.collect::<Vec<_>>()
-			.join("\n")
+		if !self.long_term_recall.is_empty() {
+			sections.push(format_named_memory_section(
+				"Long-term recall",
+				self.long_term_recall
+					.iter()
+					.map(|hit| {
+						format!(
+							"- {} | {:?} | {}",
+							hit.record.record_id, hit.record.kind, hit.record.summary
+						)
+					})
+					.collect(),
+			));
+		}
+		sections.join("\n\n")
+	}
+}
+
+fn format_named_memory_section(title: &str, entries: Vec<String>) -> String {
+	format!("{title}:\n{}", entries.join("\n"))
+}
+
+fn conversation_role_label(role: ConversationRole) -> &'static str {
+	match role {
+		ConversationRole::User => "user",
+		ConversationRole::Assistant => "assistant",
+		ConversationRole::System => "system",
 	}
 }
 

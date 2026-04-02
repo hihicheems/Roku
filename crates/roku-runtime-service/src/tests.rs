@@ -542,7 +542,7 @@ fn context_bundle_separates_short_term_continuity_from_long_term_hits() {
 }
 
 #[test]
-fn context_bundle_renders_memory_context_independently() {
+fn context_bundle_renders_continuity_and_recall_as_named_memory_sections() {
 	let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
 	let mut seed = MemoryWriteRequest::new(
 		MemoryKind::UserPreference,
@@ -574,8 +574,10 @@ fn context_bundle_renders_memory_context_independently() {
 		.expect("context bundle should build");
 	let memory_context_text = bundle.memory_context_text();
 
-	assert!(memory_context_text.contains("Rust preference"));
-	assert!(!memory_context_text.contains("Please use concise answers."));
+	assert_eq!(
+		memory_context_text,
+		"Short-term continuity:\n- user: Please use concise answers.\n\nLong-term recall:\n- memory-record-1 | UserPreference | Rust preference"
+	);
 	assert!(!memory_context_text.is_empty());
 	assert_eq!(bundle.short_term_continuity.len(), 1);
 	assert_eq!(request.conversation_history.len(), 1);
@@ -639,8 +641,22 @@ fn runtime_memory_layers_keep_continuity_recall_and_working_memory_distinct() {
 	);
 
 	let memory_context_text = layers.memory_context_text();
-	assert!(memory_context_text.contains("Rust preference"));
-	assert!(!memory_context_text.contains("Please use concise answers."));
+	assert!(
+		memory_context_text.contains("Short-term continuity:"),
+		"continuity section should be named in assembled output"
+	);
+	assert!(
+		memory_context_text.contains("- user: Please use concise answers."),
+		"continuity content should remain distinguishable in assembled output"
+	);
+	assert!(
+		memory_context_text.contains("Long-term recall:"),
+		"recall section should be named in assembled output"
+	);
+	assert!(
+		memory_context_text.contains("- memory-record-1 | UserPreference | Rust preference"),
+		"recall content should remain distinguishable in assembled output"
+	);
 	assert!(!memory_context_text.contains("WORKING_MEMORY_ONLY::"));
 }
 
