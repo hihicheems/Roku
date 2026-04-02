@@ -636,9 +636,24 @@ fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
 		),
 		last_observation: None,
 	};
+	let freeform_pause = AskUserPayload::freeform("您想继续什么任务？");
+	let pause_message = freeform_pause.final_message.clone();
 	let mut loop_state = LoopState::new("loop-freeform-pending", &context);
 	loop_state.status = roku_agent_runtime::LoopStatus::AwaitingUser;
-	loop_state.awaiting_user = Some(AskUserPayload::freeform("您想继续什么任务？"));
+	loop_state.awaiting_user = Some(freeform_pause.clone());
+	assert_eq!(
+		freeform_pause.resume_contract,
+		AskUserResumeContract::NoAutomaticResume
+	);
+	let assessment = service
+		.runtime
+		.assess_awaiting_user_resume(&loop_state, "What skills and tools do you have right now?");
+	assert!(!assessment.should_resume);
+	assert!(
+		assessment.reason.contains("fresh intake"),
+		"expected stale freeform pause to be discarded as a fresh intake, got: {}",
+		assessment.reason
+	);
 	service
 		.restore_pending_loop(loop_state)
 		.expect("pending loop should restore");
@@ -648,7 +663,7 @@ fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
 		.expect("fresh intake should succeed");
 
 	assert_eq!(response.status, ResponseStatus::Succeeded);
-	assert_ne!(response.message, "您想继续什么任务？");
+	assert_ne!(response.message, pause_message);
 	assert_eq!(backend.recorded_queries().len(), 1);
 	assert!(
 		service

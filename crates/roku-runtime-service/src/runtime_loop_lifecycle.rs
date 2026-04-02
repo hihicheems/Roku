@@ -266,7 +266,8 @@ fn route_bound_resources(route: &RouteDecisionResult) -> Vec<roku_common_types::
 #[cfg(test)]
 mod tests {
 	use roku_agent_runtime::{
-		DirectRoutePlan, IntentFamily, RouteDecision, RouteRisk, StepAction, runtime_loop_trace,
+		AskUserPayload, DirectRoutePlan, IntentFamily, RouteDecision, RouteRisk, StepAction,
+		runtime_loop_trace,
 	};
 	use roku_common_types::{RequestEnvelope, RequestId, ResourceSelector, ResponseStatus};
 
@@ -336,6 +337,48 @@ mod tests {
 			trace.final_outcome.final_message.as_deref(),
 			Some(approval_message)
 		);
+	}
+
+	#[test]
+	fn direct_route_awaiting_user_trace_is_explicit() {
+		let service = RuntimeService::default();
+		let mut loop_state = direct_route_loop_state(
+			&service,
+			"Clarify which task to continue before resuming execution.",
+		);
+		let payload = AskUserPayload::freeform("您想继续什么任务？");
+		let pause_message = payload.final_message.clone();
+
+		service.record_runtime_loop_ask_user_payload_step(
+			&mut loop_state,
+			ResponseStatus::Succeeded,
+			payload.clone(),
+		);
+
+		let trace = runtime_loop_trace(&loop_state);
+		let step = &trace.steps[0];
+
+		assert_eq!(trace.status, "awaiting_user");
+		assert_eq!(trace.step_count, 1);
+		assert_eq!(step.decision.action, "ask_user");
+		assert_eq!(
+			step.decision.reason,
+			"runtime loop captured direct route completion"
+		);
+		assert_eq!(
+			step.decision.final_message.as_deref(),
+			Some(pause_message.as_str())
+		);
+		assert_eq!(trace.final_outcome.status, "awaiting_user");
+		assert_eq!(
+			trace.final_outcome.terminal_action.as_deref(),
+			Some("ask_user")
+		);
+		assert_eq!(
+			trace.final_outcome.final_message.as_deref(),
+			Some(pause_message.as_str())
+		);
+		assert_eq!(loop_state.awaiting_user.as_ref(), Some(&payload));
 	}
 
 	#[test]
