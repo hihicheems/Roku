@@ -2,7 +2,6 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-image_ref="${1:-localhost/roku-arc-runner:2026-04-01}"
 
 rust_toolchain_version="$(
   awk -F '"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' \
@@ -12,6 +11,19 @@ rust_toolchain_version="$(
 if [[ -z "${rust_toolchain_version}" ]]; then
   echo "failed to read Rust channel from rust-toolchain.toml" >&2
   exit 1
+fi
+
+if [[ $# -gt 0 ]]; then
+  image_ref="$1"
+else
+  image_repository="${IMAGE_REPOSITORY:-localhost/roku-arc-runner}"
+  if git -C "${repo_root}" rev-parse --short=12 HEAD >/dev/null 2>&1; then
+    git_short_sha="$(git -C "${repo_root}" rev-parse --short=12 HEAD)"
+  else
+    git_short_sha="$(date +%Y%m%d%H%M%S)"
+  fi
+  default_image_tag="rust-${rust_toolchain_version//./-}-${git_short_sha}"
+  image_ref="${image_repository}:${default_image_tag}"
 fi
 
 build_args=(
@@ -34,8 +46,15 @@ if ! docker info >/dev/null 2>&1; then
   fi
 fi
 
+echo "Building ARC runner image:"
+echo "  repo root: ${repo_root}"
+echo "  image ref: ${image_ref}"
+echo "  rust toolchain: ${rust_toolchain_version}"
+
 "${docker_cmd[@]}" build \
   "${build_args[@]}" \
   --tag "${image_ref}" \
   --file "${repo_root}/deploy/arc-runner/Dockerfile" \
   "${repo_root}"
+
+echo "Built ${image_ref}"
