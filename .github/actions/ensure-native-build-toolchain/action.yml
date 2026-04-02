@@ -34,6 +34,7 @@ runs:
         missing=()
         unusable=()
         drifted=()
+        proxy_backed=()
 
         for requirement in "${required_tools[@]}"; do
           tool="${requirement}"
@@ -47,6 +48,17 @@ runs:
             missing+=("${tool}")
             continue
           fi
+
+          resolved_tool="$(command -v "${tool}")"
+          cargo_proxy_dir="${CARGO_HOME:-${HOME}/.cargo}/bin"
+          case "${tool}" in
+            rustc|cargo|rustfmt|cargo-fmt|cargo-clippy|clippy-driver)
+              if [[ "${resolved_tool}" == "${cargo_proxy_dir}/"* ]]; then
+                proxy_backed+=("${tool} resolved to rustup proxy path ${resolved_tool}")
+                continue
+              fi
+              ;;
+          esac
 
           probe_output=""
           probe_status=0
@@ -76,9 +88,9 @@ runs:
           fi
 
           if [[ -n "${version_line}" ]]; then
-            echo "${tool}: ${version_line}"
+            echo "${tool}: ${version_line} [${resolved_tool}]"
           else
-            echo "${tool}: found"
+            echo "${tool}: found [${resolved_tool}]"
           fi
 
           if [[ -n "${expected_version}" && "${probe_output}" != *"${expected_version}"* ]]; then
@@ -103,7 +115,12 @@ runs:
           printf '  - %s\n' "${drifted[@]}" >&2
         fi
 
-        if [[ ${#missing[@]} -gt 0 || ${#unusable[@]} -gt 0 || ${#drifted[@]} -gt 0 ]]; then
+        if [[ ${#proxy_backed[@]} -gt 0 ]]; then
+          printf 'Rust toolchain commands still resolve to rustup proxy paths:\n' >&2
+          printf '  - %s\n' "${proxy_backed[@]}" >&2
+        fi
+
+        if [[ ${#missing[@]} -gt 0 || ${#unusable[@]} -gt 0 || ${#drifted[@]} -gt 0 || ${#proxy_backed[@]} -gt 0 ]]; then
           printf 'Rebuild and redeploy the custom ARC runner image instead of installing them at job runtime.\n' >&2
           exit 1
         fi
