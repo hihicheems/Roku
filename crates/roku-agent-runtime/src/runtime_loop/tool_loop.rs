@@ -1039,8 +1039,10 @@ mod tests {
 	}
 
 	#[test]
-	fn prompt_uses_context_projection_history_digest_instead_of_raw_step_log() {
+	fn prompt_projects_working_summary_separately_from_history_digest() {
 		let mut loop_state = sample_loop_state();
+		loop_state.working_summary =
+			"PROMPT_WORKING_SUMMARY_ONLY::pending repo blocker".to_string();
 		let observation = ToolObservation {
 			ok: true,
 			tool_name: "inventory.describe".to_string(),
@@ -1078,6 +1080,13 @@ mod tests {
 		let projection = build_context_projection(&loop_state);
 		let prompt = tool_loop_prompt(&projection, None);
 
+		assert_eq!(
+			prompt
+				.matches("PROMPT_WORKING_SUMMARY_ONLY::pending repo blocker")
+				.count(),
+			1
+		);
+		assert!(prompt.contains("\"working_summary\":"));
 		assert!(prompt.contains("\"history_digest\":"));
 		assert!(prompt.contains("step 1"));
 		assert!(prompt.contains("inventory.describe"));

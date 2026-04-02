@@ -37,11 +37,14 @@ use crate::runtime_loop::{LoopState, StepAction, StepObservation, ToolObservatio
 /// - `visible_tools`: Tool names currently visible to the next decision round.
 /// - `visible_tool_hints`: Compact semantic hints for the currently visible tools.
 /// - `last_observation`: The latest grounded tool observation, if any.
+/// - `working_summary`: Runtime-owned short-term working memory carried separately from history.
 /// - `history_digest`: A compact summary of recent steps and current open state.
 /// - `unresolved_blockers`: Open blockers that may require follow-up or user clarification.
 /// - `working_assumptions`: Explicitly marked tentative assumptions, not grounded facts.
 ///
 /// ## Invariants
+/// - `working_summary` is copied directly from `LoopState` and is not reconstructed from
+///   `history_digest`.
 /// - `history_digest` is derived from recent loop history and never stores raw `StepRecord`
 ///   payloads verbatim.
 /// - `working_assumptions` must be clearly tentative and may be overturned by future
@@ -66,6 +69,7 @@ pub struct ContextProjection {
 	pub visible_tools: Vec<String>,
 	pub visible_tool_hints: BTreeMap<String, VisibleToolHint>,
 	pub last_observation: Option<ToolObservation>,
+	pub working_summary: String,
 	pub history_digest: String,
 	pub unresolved_blockers: Vec<String>,
 	pub working_assumptions: Vec<String>,
@@ -108,6 +112,7 @@ pub(crate) fn build_context_projection(loop_state: &LoopState) -> ContextProject
 		visible_tools: loop_state.visible_tools.clone(),
 		visible_tool_hints: BTreeMap::new(),
 		last_observation: loop_state.last_observation.clone(),
+		working_summary: loop_state.working_summary.clone(),
 		history_digest: history_digest(loop_state, &unresolved_blockers, &working_assumptions),
 		unresolved_blockers,
 		working_assumptions,
@@ -387,5 +392,23 @@ mod tests {
 		assert!(projection.history_digest.contains("Working assumptions:"));
 		assert!(!projection.history_digest.contains("started_at"));
 		assert!(!projection.history_digest.contains("finished_at"));
+	}
+
+	#[test]
+	fn context_projection_keeps_working_summary_separate_from_history_digest() {
+		let mut loop_state = sample_loop_state();
+		loop_state.working_summary = "WORKING_SUMMARY_ONLY::grounded repo layout".to_string();
+
+		let projection = build_context_projection(&loop_state);
+
+		assert_eq!(
+			projection.working_summary,
+			"WORKING_SUMMARY_ONLY::grounded repo layout"
+		);
+		assert!(
+			!projection
+				.history_digest
+				.contains("WORKING_SUMMARY_ONLY::grounded repo layout")
+		);
 	}
 }
