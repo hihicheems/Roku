@@ -23,9 +23,12 @@ Environment:
   RALPH_CODEX_TIMEOUT_SECONDS
                          Hard timeout for one Codex attempt (default: 1800)
   RALPH_CODEX_MAX_RETRIES
-                         Retry count after the initial failed attempt (default: 2)
+                         Retry count after the initial failed attempt (default: 5)
   RALPH_CODEX_RETRY_WAIT_SECONDS
                          Base wait before retrying a retryable failure (default: 10)
+  Note:
+    max-iterations limits one Ralph launch only; `.ralph/prd.json` may contain more stories
+    than this number.
 EOF
 }
 
@@ -198,6 +201,10 @@ pending_story_count() {
 	jq '[.userStories[]? | select(.passes != true)] | length' "$PRD_FILE"
 }
 
+total_story_count() {
+	jq '[.userStories[]?] | length' "$PRD_FILE"
+}
+
 render_prompt() {
 	local prompt_path="$1"
 	cat >"$prompt_path" <<EOF
@@ -262,7 +269,9 @@ main() {
 	echo "  Tool: $TOOL"
 	echo "  Max iterations: $MAX_ITERATIONS"
 	echo "  State dir: $(relative_to_root "$STATE_DIR")"
+	echo "  Stories in PRD: $(total_story_count)"
 	echo "  Pending stories: $(pending_story_count)"
+	echo "  Run cap applies to this launch only; rerun Ralph if stories remain."
 	echo "  Run dir: $(relative_to_root "$run_dir")"
 
 	local i
@@ -326,7 +335,9 @@ main() {
 	done
 
 	echo
-	echo "Ralph reached max iterations ($MAX_ITERATIONS) without completing all tasks."
+	echo "Ralph reached max iterations ($MAX_ITERATIONS) with $(pending_story_count) pending stories still in $(relative_to_root "$PRD_FILE")."
+	echo "This run cap does not limit how many stories may exist in prd.json."
+	echo "Rerun `just ralph` to continue, or pass a larger iteration cap for this launch."
 	echo "Progress log: $(relative_to_root "$PROGRESS_FILE")"
 	echo "Run logs: $(relative_to_root "$run_dir")"
 	exit 1

@@ -17,7 +17,7 @@ Environment:
   RALPH_CODEX_TIMEOUT_SECONDS
                          Hard timeout for one Codex attempt (default: 1800)
   RALPH_CODEX_MAX_RETRIES
-                         Retry count after the initial failed attempt (default: 2)
+                         Retry count after the initial failed attempt (default: 5)
   RALPH_CODEX_RETRY_WAIT_SECONDS
                          Base wait before retrying a retryable failure (default: 10)
   RALPH_CODEX_TERM_GRACE_SECONDS
@@ -77,7 +77,7 @@ CODEX_BIN="${RALPH_CODEX_BIN:-codex}"
 CODEX_SANDBOX="${RALPH_CODEX_SANDBOX:-workspace-write}"
 CODEX_APPROVAL="${RALPH_CODEX_APPROVAL:-never}"
 CODEX_TIMEOUT_SECONDS="${RALPH_CODEX_TIMEOUT_SECONDS:-1800}"
-CODEX_MAX_RETRIES="${RALPH_CODEX_MAX_RETRIES:-2}"
+CODEX_MAX_RETRIES="${RALPH_CODEX_MAX_RETRIES:-5}"
 CODEX_RETRY_WAIT_SECONDS="${RALPH_CODEX_RETRY_WAIT_SECONDS:-10}"
 CODEX_TERM_GRACE_SECONDS="${RALPH_CODEX_TERM_GRACE_SECONDS:-5}"
 
