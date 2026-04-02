@@ -3505,6 +3505,8 @@ mod tests {
 		fs::create_dir_all(&duplicate_b_dir).expect("duplicate fixture dir B should exist");
 		let duplicate_a_path = duplicate_a_dir.join(&duplicate_name);
 		let duplicate_b_path = duplicate_b_dir.join(&duplicate_name);
+		let duplicate_a_display = duplicate_a_path.display().to_string();
+		let duplicate_b_display = duplicate_b_path.display().to_string();
 		fs::write(&duplicate_a_path, "duplicate a\n").expect("duplicate fixture A should write");
 		fs::write(&duplicate_b_path, "duplicate b\n").expect("duplicate fixture B should write");
 
@@ -3544,6 +3546,70 @@ mod tests {
 					expected: true,
 				}],
 			},
+		);
+		let ambiguous_tool_step = ambiguous_find_trace
+			.steps
+			.iter()
+			.find(|step| step.decision.action == "call_tool")
+			.expect("ambiguous fs.find trace should record a tool step");
+		let ambiguous_matches = ambiguous_tool_step
+			.observation
+			.as_ref()
+			.and_then(|observation| observation.get("data"))
+			.and_then(|data| data.get("matches"))
+			.and_then(Value::as_array)
+			.expect("ambiguous fs.find observation should include candidate matches");
+		assert_eq!(
+			ambiguous_tool_step.decision.tool_name.as_deref(),
+			Some("fs.find")
+		);
+		assert_eq!(
+			ambiguous_tool_step
+				.observation
+				.as_ref()
+				.and_then(|observation| observation.get("error_type"))
+				.and_then(Value::as_str),
+			Some("multiple_candidates")
+		);
+		assert_eq!(
+			ambiguous_tool_step
+				.interpreted_observation
+				.as_ref()
+				.and_then(|observation| observation.get("continue_allowed"))
+				.and_then(Value::as_bool),
+			Some(true)
+		);
+		assert_eq!(ambiguous_matches.len(), 2);
+		assert!(
+			ambiguous_matches
+				.iter()
+				.any(|value| { value.as_str() == Some(duplicate_a_display.as_str()) })
+		);
+		assert!(
+			ambiguous_matches
+				.iter()
+				.any(|value| { value.as_str() == Some(duplicate_b_display.as_str()) })
+		);
+		assert_eq!(
+			ambiguous_find_trace
+				.final_outcome
+				.terminal_action
+				.as_deref(),
+			Some("ask_user")
+		);
+		assert!(
+			ambiguous_find_trace
+				.final_outcome
+				.final_message
+				.as_deref()
+				.is_some_and(|message| message.contains(&duplicate_a_display))
+		);
+		assert!(
+			ambiguous_find_trace
+				.final_outcome
+				.final_message
+				.as_deref()
+				.is_some_and(|message| message.contains(&duplicate_b_display))
 		);
 
 		let missing_find_trace = runtime_loop_trace_for_goal(
@@ -3600,8 +3666,8 @@ mod tests {
 			},
 		);
 
-		cleanup_fixture(duplicate_a_path.to_string_lossy().as_ref());
-		cleanup_fixture(duplicate_b_path.to_string_lossy().as_ref());
+		cleanup_fixture(&duplicate_a_display);
+		cleanup_fixture(&duplicate_b_display);
 	}
 
 	#[test]
