@@ -262,3 +262,119 @@ fn route_bound_resources(route: &RouteDecisionResult) -> Vec<roku_common_types::
 		RouteDecisionResult::Escalate(_) => Vec::new(),
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use roku_agent_runtime::{
+		DirectRoutePlan, IntentFamily, RouteDecision, RouteRisk, StepAction, runtime_loop_trace,
+	};
+	use roku_common_types::{RequestEnvelope, RequestId, ResourceSelector, ResponseStatus};
+
+	use super::*;
+
+	fn direct_route_request(goal: &str) -> RequestEnvelope {
+		RequestEnvelope {
+			request_id: RequestId("req-direct-route-terminal-trace".to_string()),
+			session_id: "session-direct-route-terminal-trace".to_string(),
+			goal: goal.to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		}
+	}
+
+	fn direct_route() -> RouteDecisionResult {
+		RouteDecisionResult::Direct(DirectRoutePlan {
+			decision: RouteDecision::new(
+				IntentFamily::CodeExec,
+				0.95,
+				false,
+				RouteRisk::Low,
+				vec!["command.run".to_string()],
+				vec!["core-command".to_string()],
+				Vec::new(),
+				"direct route terminal trace test",
+			),
+			bound_resources: vec![ResourceSelector::tool("command.run".to_string())],
+		})
+	}
+
+	fn direct_route_loop_state(service: &RuntimeService, goal: &str) -> LoopState {
+		let request = direct_route_request(goal);
+		service.initialize_runtime_loop_for_route(&request, &direct_route())
+	}
+
+	#[test]
+	fn direct_route_pending_approval_terminal_trace_is_explicit() {
+		let service = RuntimeService::default();
+		let mut loop_state =
+			direct_route_loop_state(&service, "Run pwd after approval so I can inspect the cwd.");
+		let approval_message = "🛡️ Approval Request\n\nTool: command.run\nAction: Run command pwd from /workspace\nRisk: medium\nReason: the command is outside the constrained built-in allowlist";
+
+		service.record_runtime_loop_terminal_step_with_action(
+			&mut loop_state,
+			StepAction::Fail,
+			ResponseStatus::PendingApproval,
+			approval_message,
+		);
+
+		let trace = runtime_loop_trace(&loop_state);
+		let step = &trace.steps[0];
+
+		assert_eq!(trace.step_count, 1);
+		assert_eq!(step.decision.action, "fail");
+		assert_eq!(
+			step.decision.reason,
+			"runtime loop captured pending approval terminal state"
+		);
+		assert_eq!(
+			step.decision.final_message.as_deref(),
+			Some(approval_message)
+		);
+		assert_eq!(trace.final_outcome.status, "failed");
+		assert_eq!(trace.final_outcome.terminal_action.as_deref(), Some("fail"));
+		assert_eq!(
+			trace.final_outcome.final_message.as_deref(),
+			Some(approval_message)
+		);
+	}
+
+	#[test]
+	fn direct_route_completion_terminal_trace_is_explicit() {
+		let service = RuntimeService::default();
+		let mut loop_state = direct_route_loop_state(
+			&service,
+			"Run pwd and report the current working directory when the route succeeds.",
+		);
+		let completion_message = "The current working directory is /workspace.";
+
+		service.record_runtime_loop_terminal_step_with_action(
+			&mut loop_state,
+			StepAction::FinalAnswer,
+			ResponseStatus::Succeeded,
+			completion_message,
+		);
+
+		let trace = runtime_loop_trace(&loop_state);
+		let step = &trace.steps[0];
+
+		assert_eq!(trace.step_count, 1);
+		assert_eq!(step.decision.action, "final_answer");
+		assert_eq!(
+			step.decision.reason,
+			"runtime loop captured direct route completion"
+		);
+		assert_eq!(
+			step.decision.final_message.as_deref(),
+			Some(completion_message)
+		);
+		assert_eq!(trace.final_outcome.status, "succeeded");
+		assert_eq!(
+			trace.final_outcome.terminal_action.as_deref(),
+			Some("final_answer")
+		);
+		assert_eq!(
+			trace.final_outcome.final_message.as_deref(),
+			Some(completion_message)
+		);
+	}
+}
