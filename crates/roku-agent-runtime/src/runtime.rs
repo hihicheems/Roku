@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -53,7 +53,10 @@ use roku_plugin_core::PluginRegistrySnapshot;
 use roku_plugin_host::{ToolExecutionResult, ToolInvocation, ToolRuntime, ToolRuntimeError};
 use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier};
 use roku_plugin_skills::SkillRegistry;
-use roku_plugin_tools::canonical_execution_for_builtin_tool_input;
+use roku_plugin_tools::{
+	RuntimeVisibleToolAvailabilitySnapshot, build_runtime_visible_tool_availability_snapshot,
+	canonical_execution_for_builtin_tool_input,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -88,6 +91,7 @@ pub struct GenericAgentRuntime {
 	workers: Vec<WorkerRegistryEntry>,
 	tool_runtime: Arc<ToolRuntime>,
 	resource_catalog: ResourceCatalog,
+	runtime_visible_tool_availability_snapshot: RuntimeVisibleToolAvailabilitySnapshot,
 	tool_config: ToolCatalogConfig,
 	plugin_snapshot: PluginRegistrySnapshot,
 	route_router: Option<Arc<LlmRouter>>,
@@ -135,11 +139,17 @@ impl GenericAgentRuntime {
 			.entries()
 			.iter()
 			.any(|entry| entry.name == "skill.execute");
+		let runtime_visible_tool_availability_snapshot =
+			build_runtime_visible_tool_availability_snapshot(
+				&resource_catalog,
+				safe_baseline_tool_pool(),
+			);
 		let shared_tool_runtime = Arc::new(tool_runtime);
 		let mut runtime = Self {
 			workers: Vec::new(),
 			tool_runtime: Arc::clone(&shared_tool_runtime),
 			resource_catalog,
+			runtime_visible_tool_availability_snapshot,
 			tool_config: tool_config.clone(),
 			plugin_snapshot,
 			route_router: None,
@@ -400,6 +410,7 @@ impl GenericAgentRuntime {
 				tool_config: &self.tool_config,
 				agent_runtime_config: &self.agent_runtime_config,
 				plugin_snapshot: &self.plugin_snapshot,
+				availability_snapshot: &self.runtime_visible_tool_availability_snapshot,
 				route_router: self.route_router.as_deref(),
 				skill_execution_available: self.skill_execution_available,
 			},
@@ -560,23 +571,27 @@ impl GenericAgentRuntime {
 			StepAction::AskUser => StepObservation::AskUser {
 				final_message: message,
 			},
-			StepAction::FinalAnswer | StepAction::Fail | StepAction::CallTool => {
-				StepObservation::FinalMessage {
-					final_message: message,
-				}
-			}
+			StepAction::FinalAnswer
+			| StepAction::Fail
+			| StepAction::CallTool
+			| StepAction::Stop => StepObservation::FinalMessage {
+				final_message: message,
+			},
 		});
 		let reason = reason.into();
 		let step = StepRecord::terminal(
 			loop_state.step_index + 1,
+			action,
 			terminal_decision(action, &reason, observation.as_ref()),
 			loop_state.visible_tools.clone(),
+			loop_state.bound_resources.clone(),
 			observation,
 			match action {
 				StepAction::AskUser => loop_state.remaining_step_budget,
 				StepAction::FinalAnswer | StepAction::Fail | StepAction::CallTool => {
 					loop_state.remaining_step_budget.saturating_sub(1)
 				}
+				StepAction::Stop => loop_state.remaining_step_budget,
 			},
 			loop_state.remaining_recovery_budget,
 			loop_state.working_directory.clone(),
@@ -588,6 +603,7 @@ impl GenericAgentRuntime {
 			StepAction::Fail => crate::runtime_loop::LoopStatus::Failed,
 			StepAction::AskUser => crate::runtime_loop::LoopStatus::AwaitingUser,
 			StepAction::CallTool => crate::runtime_loop::LoopStatus::LoopRunning,
+			StepAction::Stop => crate::runtime_loop::LoopStatus::Stopped,
 		};
 		step
 	}
@@ -601,6 +617,7 @@ impl GenericAgentRuntime {
 		let reason = reason.into();
 		let step = StepRecord::terminal(
 			loop_state.step_index + 1,
+			StepAction::AskUser,
 			terminal_decision(
 				StepAction::AskUser,
 				&reason,
@@ -609,6 +626,7 @@ impl GenericAgentRuntime {
 				}),
 			),
 			loop_state.visible_tools.clone(),
+			loop_state.bound_resources.clone(),
 			Some(StepObservation::AskUser {
 				final_message: payload.final_message.clone(),
 			}),
@@ -692,6 +710,7 @@ impl GenericAgentRuntime {
 						loop_state.step_index + 1,
 						next_step.clone(),
 						loop_state.visible_tools.clone(),
+						loop_state.bound_resources.clone(),
 						raw_tool_output,
 						StepObservation::Tool(observation.clone()),
 						interpreted.clone(),
@@ -994,29 +1013,8 @@ impl GenericAgentRuntime {
 		route_decision: &crate::router::RouteDecision,
 		_loop_state: Option<&LoopState>,
 	) -> Vec<String> {
-		let enabled_tools = self
-			.resource_catalog
-			.descriptors_for_kind(ResourceKind::Tool)
-			.into_iter()
-			.map(|descriptor| descriptor.name)
-			.collect::<HashSet<_>>();
-		let mut visible_tools = Vec::new();
-		append_enabled_tool_names(
-			&mut visible_tools,
-			&enabled_tools,
-			route_decision.candidate_tools.iter().map(String::as_str),
-		);
-		append_enabled_tool_names(
-			&mut visible_tools,
-			&enabled_tools,
-			safe_baseline_tool_pool().iter().copied(),
-		);
-		if visible_tools.is_empty() {
-			let mut fallback_tools = enabled_tools.into_iter().collect::<Vec<_>>();
-			fallback_tools.sort();
-			return fallback_tools;
-		}
-		visible_tools
+		self.runtime_visible_tool_availability_snapshot
+			.compose_visible_tools(route_decision.candidate_tools.iter().map(String::as_str))
 	}
 
 	fn execute_tool_like_route(
@@ -1676,7 +1674,7 @@ fn terminal_decision(
 			StepAction::CallTool => crate::runtime_loop::NextStepAction::CallTool,
 			StepAction::AskUser => crate::runtime_loop::NextStepAction::AskUser,
 			StepAction::FinalAnswer => crate::runtime_loop::NextStepAction::FinalAnswer,
-			StepAction::Fail => crate::runtime_loop::NextStepAction::Fail,
+			StepAction::Fail | StepAction::Stop => crate::runtime_loop::NextStepAction::Fail,
 		},
 		tool_name: None,
 		arguments: None,
@@ -1818,20 +1816,6 @@ fn tool_loop_failure_message(
 	}
 
 	summarized_tool_loop_message(goal, &interpreted.raw_observation)
-}
-
-fn append_enabled_tool_names<'a>(
-	visible_tools: &mut Vec<String>,
-	enabled_tools: &HashSet<String>,
-	tool_names: impl IntoIterator<Item = &'a str>,
-) {
-	for tool_name in tool_names {
-		if enabled_tools.contains(tool_name)
-			&& !visible_tools.iter().any(|existing| existing == tool_name)
-		{
-			visible_tools.push(tool_name.to_string());
-		}
-	}
 }
 
 fn compact_selection_hint(selection_hint: &str, max_chars: usize) -> String {
@@ -2992,6 +2976,134 @@ mod tests {
 	}
 
 	#[test]
+	fn initialize_runtime_loop_seeds_visible_tools_from_shared_availability_snapshot() {
+		let runtime = GenericAgentRuntime {
+			runtime_visible_tool_availability_snapshot: RuntimeVisibleToolAvailabilitySnapshot {
+				enabled_tools: [
+					"inventory.describe".to_string(),
+					"table.preview".to_string(),
+				]
+				.into_iter()
+				.collect(),
+				baseline_visible_tools: vec!["inventory.describe".to_string()],
+			},
+			..GenericAgentRuntime::default()
+		};
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-loop-snapshot".to_string()),
+			session_id: "session-loop-snapshot".to_string(),
+			goal: "Preview the loaded table".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::TableRead,
+			0.88,
+			false,
+			crate::router::RouteRisk::Low,
+			vec!["fs.read_text".to_string(), "table.preview".to_string()],
+			vec!["core-table".to_string()],
+			Vec::new(),
+			"table preview request",
+		);
+
+		let loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+
+		assert_eq!(
+			loop_state.visible_tools,
+			vec![
+				"table.preview".to_string(),
+				"inventory.describe".to_string(),
+			]
+		);
+	}
+
+	#[test]
+	fn classify_route_and_loop_initialization_agree_on_snapshot_visibility() {
+		let runtime = GenericAgentRuntime {
+			runtime_visible_tool_availability_snapshot: RuntimeVisibleToolAvailabilitySnapshot {
+				enabled_tools: [
+					"inventory.describe".to_string(),
+					"table.preview".to_string(),
+				]
+				.into_iter()
+				.collect(),
+				baseline_visible_tools: vec!["inventory.describe".to_string()],
+			},
+			..GenericAgentRuntime::default()
+		};
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-table-snapshot-agreement".to_string()),
+			session_id: "session-table-snapshot-agreement".to_string(),
+			goal: "tmp/example.csv 这个文件帮我处理一下。".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+		let crate::router::RouteDecisionResult::Direct(plan) = route else {
+			panic!("expected direct tool-loop route for explicit table request");
+		};
+		let loop_state = runtime.initialize_runtime_loop(
+			&request,
+			&request.session_id,
+			&plan.decision,
+			Vec::new(),
+		);
+
+		assert_eq!(
+			plan.decision.candidate_tools,
+			vec!["table.preview".to_string()]
+		);
+		assert_eq!(
+			loop_state.visible_tools,
+			vec![
+				"table.preview".to_string(),
+				"inventory.describe".to_string(),
+			]
+		);
+		assert!(
+			plan.decision
+				.candidate_tools
+				.iter()
+				.any(|tool_name| tool_name == "table.preview")
+		);
+		assert!(
+			loop_state
+				.visible_tools
+				.iter()
+				.any(|tool_name| tool_name == "table.preview")
+		);
+		assert!(
+			!plan
+				.decision
+				.candidate_tools
+				.iter()
+				.any(|tool_name| tool_name == "table.inspect")
+		);
+		assert!(
+			!loop_state
+				.visible_tools
+				.iter()
+				.any(|tool_name| tool_name == "table.inspect")
+		);
+		assert!(
+			!plan
+				.decision
+				.candidate_tools
+				.iter()
+				.any(|tool_name| tool_name == "table.list_sheets")
+		);
+		assert!(
+			!loop_state
+				.visible_tools
+				.iter()
+				.any(|tool_name| tool_name == "table.list_sheets")
+		);
+	}
+
+	#[test]
 	fn classify_route_starts_fs_read_text_for_grounded_filesystem_reads() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
@@ -3220,6 +3332,74 @@ mod tests {
 				panic!("expected runnable shell command to shortlist command.run, got {other:?}")
 			}
 		}
+	}
+
+	#[test]
+	fn command_run_visibility_stays_separate_from_invocation_time_approval() {
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId(
+				"req-command-run-visibility-boundary".to_string(),
+			),
+			session_id: "session-command-run-visibility-boundary".to_string(),
+			goal: "Run this command: `touch phase3-visibility-boundary.tmp`".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		let route = runtime.classify_route(&request, &request.session_id);
+		let crate::router::RouteDecisionResult::Direct(plan) = route else {
+			panic!("expected direct route for explicit command.run approval boundary");
+		};
+		assert_eq!(plan.decision.intent_family, IntentFamily::CodeExec);
+		assert_eq!(
+			plan.decision.candidate_tools.first().map(String::as_str),
+			Some("command.run")
+		);
+
+		let mut loop_state = runtime.initialize_runtime_loop(
+			&request,
+			&request.session_id,
+			&plan.decision,
+			plan.bound_resources.clone(),
+		);
+		assert!(
+			loop_state
+				.visible_tools
+				.contains(&"command.run".to_string()),
+			"enabled command.run should stay visible before invocation-time policy runs"
+		);
+
+		let execution = runtime.execute_tool_loop(
+			&TaskId("task-command-run-visibility-boundary".to_string()),
+			&request,
+			&mut loop_state,
+			"",
+			None,
+		);
+		let payload = payload_value(&execution.result);
+
+		assert_eq!(execution.result.status, ResultStatus::Error);
+		assert_eq!(execution.terminal_step_action, Some(StepAction::Fail));
+		assert_eq!(
+			payload
+				.get("policy_decision")
+				.and_then(|value| value.get("outcome"))
+				.and_then(serde_json::Value::as_str),
+			Some("require_approval")
+		);
+		assert_eq!(loop_state.history.len(), 2);
+		assert_eq!(
+			loop_state.history[0].decision.tool_name.as_deref(),
+			Some("command.run")
+		);
+		assert!(
+			loop_state.history[0]
+				.visible_tools_before
+				.contains(&"command.run".to_string()),
+			"the step should fail because of approval policy, not because command.run disappeared from visibility"
+		);
+		assert_eq!(loop_state.history[1].action, StepAction::Fail);
 	}
 
 	#[test]
@@ -4056,6 +4236,7 @@ mod tests {
 				final_message: None,
 			},
 			loop_state.visible_tools.clone(),
+			loop_state.bound_resources.clone(),
 			serde_json::json!({
 				"ok": true,
 				"terminal": false,

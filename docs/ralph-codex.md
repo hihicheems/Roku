@@ -72,6 +72,8 @@ just ralph 20
 just ralph 10 .ralph-alt
 ```
 
+`10` is only the default iteration cap for one launch. It is not a limit on how many stories may exist in `.ralph/prd.json`.
+
 or:
 
 ```bash
@@ -109,7 +111,7 @@ Relevant environment variables:
 
 ```bash
 RALPH_CODEX_TIMEOUT_SECONDS=1800
-RALPH_CODEX_MAX_RETRIES=2
+RALPH_CODEX_MAX_RETRIES=5
 RALPH_CODEX_RETRY_WAIT_SECONDS=10
 RALPH_CODEX_TERM_GRACE_SECONDS=5
 ```
@@ -121,10 +123,13 @@ Retry behavior is intentionally conservative:
 
 If the runner still fails after retries, Ralph exits immediately instead of silently continuing to the next iteration.
 
+By default, one failed attempt gets up to five retries, for a total of six attempts on retryable failures.
+
 ## Commit And State Hygiene
 
 - Ralph should create Conventional Commit titles that follow `.codex/rules/git-commit.md`.
 - Commit titles should describe the actual code change only; do not include story IDs or PRD labels.
+- Ralph should stage the relevant repository files for one story and create an actual git commit before that story is marked `passes: true`.
 - `.ralph/*` is runtime state, not product code. Keep `prd.json` and `progress.txt` updated locally, but do not stage or commit them.
 - When a PRD is complete, Ralph archives the finished `prd.json` and `progress.txt` under `.ralph/archive/` before the next PRD replaces the active file.
 
@@ -166,7 +171,7 @@ Resume:
 - if the previous run died mid-iteration, the next run simply retries from the last persisted repo/PRD checkpoint
 - per-iteration `status.txt` and attempt logs tell you whether the last stop was timeout, retryable transport failure, or terminal runner failure
 - if the active PRD is already complete, rerunning Ralph archives the completed state and exits without launching Codex again
-
+- if a launch stops because it hit `MAX_ITERATIONS`, rerun Ralph to continue the remaining stories in the same `prd.json`
 This is intentionally not Codex session resume. Ralph’s model is fresh-instance-per-iteration.
 
 ## Verified Facts
@@ -191,6 +196,7 @@ This is intentionally not Codex session resume. Ralph’s model is fresh-instanc
 - The default console experience is concise; detailed progress lives in JSONL and stderr log files.
 - This does not generate PRDs for you; it expects `.ralph/prd.json` to exist.
 - Only the Codex runner path was validated locally here.
+- `MAX_ITERATIONS` limits one launch only; it does not cap how many stories may be present in `prd.json`.
 - Fresh-iteration Ralph means no hidden cross-iteration in-memory state beyond git history and `.ralph/*`.
 - Crash recovery is checkpoint-based, not in-process continuation:
   - completed work survives through git commits plus `.ralph/prd.json` / `progress.txt`

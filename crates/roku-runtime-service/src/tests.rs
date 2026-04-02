@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use roku_agent_runtime::{
 	AskUserPayload, AskUserResumeContract, AskUserResumeDirective, DirectRoutePlan, IntentFamily,
 	LoopContext, LoopState, RouteDecision, RouteDecisionResult, RouteRisk, StepObservation,
-	StepRecord, ToolObservation,
+	StepRecord, ToolObservation, runtime_loop_trace,
 };
 use roku_common_types::ResourceSelector;
 use roku_common_types::{
@@ -48,6 +48,7 @@ use tempfile::tempdir;
 struct RecordingPendingLoopSnapshotStore {
 	snapshots: Mutex<HashMap<String, LoopState>>,
 	events: Mutex<Vec<String>>,
+	deleted_snapshots: Mutex<Vec<LoopState>>,
 }
 
 impl RecordingPendingLoopSnapshotStore {
@@ -70,6 +71,13 @@ impl RecordingPendingLoopSnapshotStore {
 			.lock()
 			.expect("snapshot store lock should not be poisoned")
 			.is_empty()
+	}
+
+	fn deleted_snapshots(&self) -> Vec<LoopState> {
+		self.deleted_snapshots
+			.lock()
+			.expect("deleted snapshot log lock should not be poisoned")
+			.clone()
 	}
 }
 
@@ -104,10 +112,17 @@ impl PendingLoopSnapshotStore for RecordingPendingLoopSnapshotStore {
 			.lock()
 			.expect("event log lock should not be poisoned")
 			.push(format!("delete:{session_id}"));
-		self.snapshots
+		let removed = self
+			.snapshots
 			.lock()
 			.expect("snapshot store lock should not be poisoned")
 			.remove(session_id);
+		if let Some(snapshot) = removed {
+			self.deleted_snapshots
+				.lock()
+				.expect("deleted snapshot log lock should not be poisoned")
+				.push(snapshot);
+		}
 		Ok(())
 	}
 }
@@ -139,7 +154,6 @@ fn pending_filesystem_candidate_loop_state() -> LoopState {
 			"fs.read_text".to_string(),
 			"fs.find".to_string(),
 			"fs.inspect".to_string(),
-			"general.execute".to_string(),
 		],
 		bound_resources: vec![ResourceSelector::tool("fs.read_text".to_string())],
 		route_decision: RouteDecision::new(
@@ -178,6 +192,7 @@ fn pending_filesystem_candidate_loop_state() -> LoopState {
 			final_message: None,
 		},
 		loop_state.visible_tools.clone(),
+		loop_state.bound_resources.clone(),
 		serde_json::json!({
 			"ok": false,
 			"error_type": "multiple_candidates",
@@ -194,6 +209,7 @@ fn pending_filesystem_candidate_loop_state() -> LoopState {
 	));
 	loop_state.record_step(StepRecord::terminal(
 		2,
+		roku_agent_runtime::StepAction::AskUser,
 		roku_agent_runtime::NextStepDecision {
 			action: roku_agent_runtime::NextStepAction::AskUser,
 			tool_name: None,
@@ -203,6 +219,7 @@ fn pending_filesystem_candidate_loop_state() -> LoopState {
 			final_message: Some("你想看哪一个 Cargo.toml？".to_string()),
 		},
 		loop_state.visible_tools.clone(),
+		loop_state.bound_resources.clone(),
 		Some(StepObservation::AskUser {
 			final_message: "你想看哪一个 Cargo.toml？".to_string(),
 		}),
@@ -226,6 +243,98 @@ fn pending_filesystem_candidate_loop_state() -> LoopState {
 		}),
 	});
 	loop_state
+}
+
+fn pending_filesystem_resume_success_loop_state() -> (LoopState, String) {
+	let context = LoopContext {
+		request_id: "req-pending-inventory-loop-success".to_string(),
+		session_id: "session-1".to_string(),
+		goal: "告诉我你当前暴露的 tools 和 skills，并按我选择的主题继续".to_string(),
+		workspace_root: "/workspace".to_string(),
+		working_directory: "/workspace".to_string(),
+		visible_tools: vec!["inventory.describe".to_string()],
+		bound_resources: vec![ResourceSelector::tool("inventory.describe".to_string())],
+		route_decision: RouteDecision::new(
+			IntentFamily::Chat,
+			0.93,
+			false,
+			RouteRisk::Low,
+			vec!["inventory.describe".to_string()],
+			Vec::new(),
+			Vec::new(),
+			"inventory resume success request",
+		),
+		last_observation: None,
+	};
+	let mut loop_state = LoopState::new("loop-pending-inventory-loop-success", &context);
+	let observation = ToolObservation {
+		ok: false,
+		tool_name: "inventory.describe".to_string(),
+		error_type: Some("multiple_candidates".to_string()),
+		terminal: false,
+		data: serde_json::json!({
+			"matches": ["tools", "skills"],
+		}),
+		message: "I can continue with either `tools` or `skills`.".to_string(),
+	};
+	let interpreted =
+		roku_agent_runtime::interpret_observation(&loop_state, observation.clone(), None);
+	loop_state.record_step(StepRecord::tool_call(
+		1,
+		roku_agent_runtime::NextStepDecision {
+			action: roku_agent_runtime::NextStepAction::CallTool,
+			tool_name: Some("inventory.describe".to_string()),
+			arguments: Some(serde_json::json!({})),
+			reason: "Inspect the runtime inventory before answering.".to_string(),
+			final_message: None,
+		},
+		loop_state.visible_tools.clone(),
+		loop_state.bound_resources.clone(),
+		serde_json::json!({
+			"ok": false,
+			"error_type": "multiple_candidates",
+			"terminal": false,
+			"message": "I can continue with either `tools` or `skills`.",
+			"data": observation.data.clone(),
+		}),
+		StepObservation::Tool(observation),
+		interpreted.clone(),
+		Some(12),
+		interpreted.remaining_step_budget,
+		interpreted.remaining_recovery_budget,
+		"/workspace",
+	));
+	loop_state.record_step(StepRecord::terminal(
+		2,
+		roku_agent_runtime::StepAction::AskUser,
+		roku_agent_runtime::NextStepDecision {
+			action: roku_agent_runtime::NextStepAction::AskUser,
+			tool_name: None,
+			arguments: None,
+			reason: "Runtime paused for user clarification after the latest tool observation."
+				.to_string(),
+			final_message: Some("你想继续看 `tools` 还是 `skills`？".to_string()),
+		},
+		loop_state.visible_tools.clone(),
+		loop_state.bound_resources.clone(),
+		Some(StepObservation::AskUser {
+			final_message: "你想继续看 `tools` 还是 `skills`？".to_string(),
+		}),
+		3,
+		2,
+		"/workspace",
+	));
+	loop_state.awaiting_user = Some(AskUserPayload {
+		final_message: "你想继续看 `tools` 还是 `skills`？".to_string(),
+		resume_contract: AskUserResumeContract::CandidateSelection {
+			candidates: vec!["tools".to_string(), "skills".to_string()],
+		},
+		resume_directive: Some(AskUserResumeDirective::RepeatToolWithSelectedCandidate {
+			tool_name: "inventory.describe".to_string(),
+			argument_key: "topic".to_string(),
+		}),
+	});
+	(loop_state, "tools".to_string())
 }
 
 fn node(node_id: &str, kind: TaskNodeKind) -> TaskNode {
@@ -702,7 +811,7 @@ fn multistep_requests_enter_the_generic_loop_for_new_requests() {
 }
 
 #[test]
-fn pending_filesystem_tool_loops_resume_through_the_generic_loop_driver() {
+fn pending_filesystem_tool_loops_survive_resume_through_the_generic_loop_driver_when_work_fails() {
 	let service = RuntimeService::default();
 	let loop_state = pending_filesystem_candidate_loop_state();
 	service
@@ -736,7 +845,7 @@ fn pending_filesystem_tool_loops_resume_through_the_generic_loop_driver() {
 }
 
 #[test]
-fn configured_pending_loop_snapshot_store_drives_generic_loop_resume() {
+fn configured_pending_loop_snapshot_store_survives_generic_loop_resume_failures() {
 	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
 	store.seed(pending_filesystem_candidate_loop_state());
 	let service = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
@@ -758,7 +867,8 @@ fn configured_pending_loop_snapshot_store_drives_generic_loop_resume() {
 }
 
 #[test]
-fn reconstructed_service_instances_resume_generic_pending_loops_from_shared_snapshot_store() {
+fn reconstructed_service_instances_survive_generic_pending_loop_failures_from_shared_snapshot_store()
+ {
 	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
 	let writer = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
 	writer
@@ -806,7 +916,74 @@ fn reconstructed_service_instances_resume_generic_pending_loops_from_shared_snap
 }
 
 #[test]
+fn reconstructed_service_instances_resume_generic_pending_loops_to_success_from_shared_snapshot_store()
+ {
+	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
+	let (pending_loop, selected_manifest) = pending_filesystem_resume_success_loop_state();
+	let writer = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
+	writer
+		.restore_pending_loop(pending_loop)
+		.expect("pending loop should persist before service reconstruction");
+	drop(writer);
+
+	let service = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
+	let response = service
+		.execute(request(&selected_manifest))
+		.expect("reconstructed service should resume the stored pending loop to success");
+
+	assert_eq!(
+		response.status,
+		ResponseStatus::Succeeded,
+		"unexpected resume response: {response:?}"
+	);
+	let task_id = TaskId("task-req-1".to_string());
+	let task = service
+		.get_task(&task_id)
+		.expect("task lookup should succeed")
+		.expect("resumed task should be persisted");
+	assert_eq!(task.state, TaskState::Succeeded);
+	assert!(task.graph.is_none());
+	let last_result = task
+		.last_result
+		.as_ref()
+		.expect("successful resumed task should persist a terminal result");
+	let payload = serde_json::from_str::<serde_json::Value>(&last_result.payload)
+		.expect("terminal payload should decode");
+	let trace: roku_common_types::RuntimeLoopTrace =
+		serde_json::from_value(payload["probe_trace"].clone()).expect("probe trace should decode");
+	assert_eq!(trace.status, "succeeded");
+	assert_eq!(
+		trace.final_outcome.terminal_action.as_deref(),
+		Some("final_answer")
+	);
+	assert!(trace.steps.iter().all(|step| {
+		step.visible_resources_before.as_ref()
+			== Some(&vec![ResourceSelector::tool(
+				"inventory.describe".to_string(),
+			)])
+	}));
+
+	let experiment = service
+		.get_experiment_run(&task_id)
+		.expect("experiment lookup should succeed")
+		.expect("resumed task should record an experiment run");
+	assert_eq!(experiment.strategy, "runtime_loop_resume");
+
+	assert_eq!(
+		store.events(),
+		vec![
+			"store:session-1".to_string(),
+			"load:session-1".to_string(),
+			"delete:session-1".to_string(),
+			"delete:session-1".to_string(),
+		]
+	);
+	assert!(store.is_empty());
+}
+
+#[test]
 fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
+	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
 	let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
 	let mut memory = MemoryWriteRequest::new(
 		MemoryKind::UserPreference,
@@ -819,7 +996,9 @@ fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
 	backend
 		.write(&memory)
 		.expect("seed long-term memory write should succeed");
-	let service = RuntimeService::default().with_long_term_memory_backend(backend.clone());
+	let service = RuntimeService::default()
+		.with_long_term_memory_backend(backend.clone())
+		.with_pending_loop_snapshot_store(store.clone());
 	let cwd = env::current_dir().expect("cwd should resolve");
 	let context = LoopContext {
 		request_id: "req-freeform-pending".to_string(),
@@ -886,6 +1065,29 @@ fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
 		.expect("task should be persisted");
 	assert_eq!(task.state, TaskState::Succeeded);
 	assert!(task.last_result.is_some());
+	let discarded = store.deleted_snapshots();
+	let stopped_snapshot = discarded
+		.iter()
+		.find(|snapshot| snapshot.status == roku_agent_runtime::LoopStatus::Stopped)
+		.expect("stale discard should persist one stopped snapshot before deletion");
+	let trace = runtime_loop_trace(stopped_snapshot);
+	assert_eq!(trace.status, "stopped");
+	assert_eq!(trace.final_outcome.terminal_action.as_deref(), Some("stop"));
+	assert!(
+		trace
+			.final_outcome
+			.final_message
+			.as_deref()
+			.expect("stop trace should include a terminal message")
+			.contains("fresh intake")
+	);
+	assert_eq!(
+		trace
+			.steps
+			.last()
+			.and_then(|step| step.visible_resources_before.clone()),
+		Some(vec![ResourceSelector::tool("general.execute".to_string())])
+	);
 }
 
 #[test]

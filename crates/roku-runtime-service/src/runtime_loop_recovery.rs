@@ -60,9 +60,9 @@ impl RuntimeService {
 		let assessment = self
 			.runtime
 			.assess_awaiting_user_resume(&existing, &request.goal);
-		self.pending_loop_snapshot_store
-			.delete(&request.session_id)?;
 		if assessment.should_resume {
+			self.pending_loop_snapshot_store
+				.delete(&request.session_id)?;
 			log_runtime(
 				LogLevel::Info,
 				"resuming awaiting runtime loop",
@@ -75,6 +75,15 @@ impl RuntimeService {
 			);
 			return Ok(Some(existing));
 		}
+		let mut existing = existing;
+		let stop_message = format!(
+			"Discarded stale pending loop before new intake: {}",
+			assessment.reason
+		);
+		self.record_runtime_loop_stop_step(&mut existing, &stop_message);
+		self.pending_loop_snapshot_store.store(&existing)?;
+		self.pending_loop_snapshot_store
+			.delete(&request.session_id)?;
 		log_runtime(
 			LogLevel::Info,
 			"discarded stale awaiting runtime loop before new intake",

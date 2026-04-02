@@ -168,6 +168,7 @@ fn render_step_digest_line(step: &crate::runtime_loop::StepRecord) -> String {
 		StepAction::AskUser => "ask_user",
 		StepAction::FinalAnswer => "final_answer",
 		StepAction::Fail => "fail",
+		StepAction::Stop => "stop",
 	};
 	let tool_name = step.tool_name.as_deref().unwrap_or("none");
 	let observation = step
@@ -360,6 +361,7 @@ mod tests {
 				final_message: None,
 			},
 			state.visible_tools.clone(),
+			state.bound_resources.clone(),
 			serde_json::json!({
 				"ok": true,
 				"terminal": false,

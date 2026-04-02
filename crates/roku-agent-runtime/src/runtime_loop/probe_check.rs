@@ -171,6 +171,7 @@ mod tests {
 				final_message: None,
 			},
 			state.visible_tools.clone(),
+			state.bound_resources.clone(),
 			json!({"ok": true}),
 			StepObservation::Tool(observation),
 			interpreted,
@@ -181,6 +182,7 @@ mod tests {
 		));
 		state.record_step(StepRecord::terminal(
 			2,
+			crate::runtime_loop::StepAction::FinalAnswer,
 			NextStepDecision {
 				action: NextStepAction::FinalAnswer,
 				tool_name: None,
@@ -189,6 +191,7 @@ mod tests {
 				final_message: Some("/workspace".to_string()),
 			},
 			state.visible_tools.clone(),
+			state.bound_resources.clone(),
 			Some(StepObservation::FinalMessage {
 				final_message: "/workspace".to_string(),
 			}),
