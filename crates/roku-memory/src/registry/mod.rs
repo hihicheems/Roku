@@ -216,14 +216,16 @@ impl<'a> MemoryEntryRegistry<'a> {
 mod tests {
 	use std::sync::Arc;
 
-	use crate::NoopLongTermMemoryBackend;
 	use crate::pending_loop::NoopPendingLoopSnapshotBackend;
 	use crate::session::{NoopSessionManagementBackend, NoopSessionStateBackend};
 	use crate::short_term::NoopShortTermContinuityBackend;
+	use crate::{MemoryLifecyclePolicy, MemoryWritePolicyInput, NoopLongTermMemoryBackend};
+	use roku_common_types::ResponseStatus;
 
 	use super::{
-		LongTermBackendSelection, MemoryAdapterAvailability, MemoryBackendId, MemoryEntryRegistry,
-		MemorySubsystemRegistration, ResolvedMemorySubsystem, resolve_long_term_backend_selection,
+		DisabledMemoryLifecyclePolicy, LongTermBackendSelection, MemoryAdapterAvailability,
+		MemoryBackendId, MemoryEntryRegistry, MemorySubsystemRegistration, ResolvedMemorySubsystem,
+		resolve_long_term_backend_selection,
 	};
 
 	#[test]
@@ -263,6 +265,26 @@ mod tests {
 			selection,
 			LongTermBackendSelection::Backend(MemoryBackendId::OpenViking)
 		);
+	}
+
+	#[test]
+	fn disabled_lifecycle_policy_skips_write_back_requests() {
+		let policy = DisabledMemoryLifecyclePolicy;
+		let input = MemoryWritePolicyInput {
+			request_id: "req-1".to_string(),
+			session_id: "session-1".to_string(),
+			goal: "Remember my preferred coding language".to_string(),
+			response_status: ResponseStatus::Succeeded,
+			response_message: "Done".to_string(),
+			pending_loop_active: false,
+			short_term_continuity: Vec::new(),
+			recalled_hits: Vec::new(),
+			user_id: None,
+			project_id: None,
+			workspace_id: None,
+		};
+
+		assert!(policy.build_write_request(&input).is_none());
 	}
 
 	struct StubRegistration {

@@ -32,10 +32,10 @@ use roku_common_types::{
 	TaskNode, TaskNodeKind, TaskState,
 };
 use roku_memory::{
-	InMemoryLongTermMemoryBackend, LongTermMemoryBackend, MemoryBackendHealth, MemoryBackendStatus,
-	MemoryDeleteSelector, MemoryError, MemoryKind, MemoryLifecyclePolicy, MemoryQuery,
-	MemoryRecallInput, MemoryScope, MemoryWriteAck, MemoryWritePolicyInput, MemoryWriteReason,
-	MemoryWriteRequest,
+	DisabledMemoryLifecyclePolicy, InMemoryLongTermMemoryBackend, LongTermMemoryBackend,
+	MemoryBackendHealth, MemoryBackendStatus, MemoryDeleteSelector, MemoryError, MemoryKind,
+	MemoryLifecyclePolicy, MemoryQuery, MemoryRecallInput, MemoryScope, MemoryWriteAck,
+	MemoryWritePolicyInput, MemoryWriteReason, MemoryWriteRequest,
 };
 
 use crate::{
@@ -726,7 +726,7 @@ fn recall_failures_do_not_block_direct_execution() {
 }
 
 #[test]
-fn successful_requests_trigger_memory_write_back_hook() {
+fn successful_requests_write_back_when_policy_effectively_enables_it() {
 	let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
 	let service = RuntimeService::default()
 		.with_long_term_memory_backend(backend.clone())
@@ -739,6 +739,22 @@ fn successful_requests_trigger_memory_write_back_hook() {
 	assert_eq!(response.status, ResponseStatus::Succeeded);
 	assert_eq!(backend.recorded_writes().len(), 1);
 	assert_eq!(backend.stored_records().len(), 1);
+}
+
+#[test]
+fn successful_requests_skip_write_back_when_policy_effectively_disables_it() {
+	let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
+	let service = RuntimeService::default()
+		.with_long_term_memory_backend(backend.clone())
+		.with_memory_lifecycle_policy(Arc::new(DisabledMemoryLifecyclePolicy));
+
+	let response = service
+		.execute(request("What skills and tools do you have right now?"))
+		.expect("direct request should succeed");
+
+	assert_eq!(response.status, ResponseStatus::Succeeded);
+	assert!(backend.recorded_writes().is_empty());
+	assert!(backend.stored_records().is_empty());
 }
 
 #[test]
