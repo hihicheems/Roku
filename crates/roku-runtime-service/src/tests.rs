@@ -653,6 +653,29 @@ fn planning_mode_hint_returns_compatibility_fallback_without_graph() {
 }
 
 #[test]
+fn planning_mode_hints_clear_pending_loop_snapshots_without_resuming() {
+	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
+	store.seed(pending_filesystem_candidate_loop_state());
+	let service = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
+	let mut request = request("Read the first part of Cargo.toml.");
+	request.planning_mode_hint = Some(PlanningModeHint::TreeSearch);
+
+	let response = service
+		.execute(request)
+		.expect("compatibility fallback should bypass pending-loop resume");
+
+	assert_eq!(response.status, ResponseStatus::Succeeded);
+	assert_eq!(
+		store.events(),
+		vec![
+			"delete:session-1".to_string(),
+			"delete:session-1".to_string(),
+		]
+	);
+	assert!(store.is_empty());
+}
+
+#[test]
 fn multistep_requests_enter_the_generic_loop_for_new_requests() {
 	let service = RuntimeService::default();
 	let response = service
