@@ -1286,6 +1286,7 @@ fn render_directory_message(path: &Path, entries: &[Value], truncated: bool) -> 
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use roku_common_types::ToolOutputEnvelope;
 	use serde_json::json;
 	use tempfile::tempdir;
 
@@ -1339,5 +1340,42 @@ mod tests {
 			decision.reason_code,
 			PolicyReasonCode::ApprovalRequiredByOutOfScopePath
 		);
+	}
+
+	#[test]
+	fn fs_exists_emits_tool_output_envelope() {
+		let directory = tempdir().expect("tempdir should succeed");
+		fs::write(directory.path().join("note.txt"), "hello").expect("fixture should write");
+		let tool = FsExistsTool {
+			config: FsToolRuntimeConfig::default(),
+		};
+
+		let output = tool
+			.invoke(ToolInvocationRequest {
+				invocation_key: "fs.exists:test".to_string(),
+				attempt: 1,
+				input: json!({ "path": "note.txt" }),
+				sandbox_profile: SandboxProfile::ReadOnlyFs,
+				attachments: Vec::new(),
+				allowed_read_roots: vec![directory.path().to_path_buf()],
+				allowed_write_roots: Vec::new(),
+			})
+			.expect("fs.exists invocation should succeed");
+
+		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
+			.expect("fs.exists output should deserialize as ToolOutputEnvelope");
+		assert!(envelope.ok);
+		assert!(!envelope.terminal);
+		assert_eq!(envelope.error_type, None);
+		let observed_path = envelope.data["path"]
+			.as_str()
+			.expect("fs.exists data.path should be a string");
+		assert!(observed_path.ends_with("/note.txt"));
+		assert_eq!(
+			envelope.message,
+			format!("`{observed_path}` exists as file.")
+		);
+		assert_eq!(envelope.data["exists"], true);
+		assert_eq!(envelope.data["kind"], "file");
 	}
 }
