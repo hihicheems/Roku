@@ -735,6 +735,54 @@ fn configured_pending_loop_snapshot_store_drives_generic_loop_resume() {
 }
 
 #[test]
+fn reconstructed_service_instances_resume_generic_pending_loops_from_shared_snapshot_store() {
+	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
+	let writer = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
+	writer
+		.restore_pending_loop(pending_filesystem_candidate_loop_state())
+		.expect("pending loop should persist before service reconstruction");
+	drop(writer);
+
+	let service = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
+	let response = service
+		.execute(request("Cargo.toml"))
+		.expect("reconstructed service should resume the stored pending loop");
+
+	assert_eq!(response.status, ResponseStatus::Failed);
+	assert!(
+		response
+			.message
+			.contains("general execution did not use a live runtime")
+	);
+	assert!(!response.artifacts.is_empty());
+
+	let task_id = TaskId("task-req-1".to_string());
+	let task = service
+		.get_task(&task_id)
+		.expect("task lookup should succeed")
+		.expect("resumed task should be persisted");
+	assert_eq!(task.state, TaskState::Failed);
+	assert!(task.graph.is_none());
+
+	let experiment = service
+		.get_experiment_run(&task_id)
+		.expect("experiment lookup should succeed")
+		.expect("resumed task should record an experiment run");
+	assert_eq!(experiment.strategy, "runtime_loop_resume");
+
+	assert_eq!(
+		store.events(),
+		vec![
+			"store:session-1".to_string(),
+			"load:session-1".to_string(),
+			"delete:session-1".to_string(),
+			"delete:session-1".to_string(),
+		]
+	);
+	assert!(store.is_empty());
+}
+
+#[test]
 fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
 	let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
 	let mut memory = MemoryWriteRequest::new(
