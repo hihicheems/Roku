@@ -14,6 +14,7 @@
 
 //! Builtin tool catalog and runtime builders for Roku plugins.
 
+mod availability;
 mod builders;
 mod builtin;
 mod config;
@@ -23,6 +24,9 @@ mod runtime_config;
 use roku_common_types::CanonicalExecution;
 use serde_json::Value;
 
+pub use availability::{
+	RuntimeVisibleToolAvailabilitySnapshot, build_runtime_visible_tool_availability_snapshot,
+};
 pub use builders::{
 	build_builtin_tool_runtime, build_builtin_tool_runtime_with_plugin_snapshot,
 	build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities,

@@ -95,6 +95,7 @@ use roku_common_types::{RequestEnvelope, ResourceSelector};
 use roku_plugin_catalog::{CatalogDescriptor, CatalogMatch, ResourceCatalog, ResourceKind};
 use roku_plugin_core::PluginRegistrySnapshot;
 use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier, StructuredGenerationError};
+use roku_plugin_tools::RuntimeVisibleToolAvailabilitySnapshot;
 use serde_json::json;
 
 use crate::AgentRuntimeConfig;
@@ -125,6 +126,7 @@ pub(crate) struct RouteClassifierContext<'a> {
 	pub(crate) tool_config: &'a ToolCatalogConfig,
 	pub(crate) agent_runtime_config: &'a AgentRuntimeConfig,
 	pub(crate) plugin_snapshot: &'a PluginRegistrySnapshot,
+	pub(crate) availability_snapshot: &'a RuntimeVisibleToolAvailabilitySnapshot,
 	pub(crate) route_router: Option<&'a LlmRouter>,
 	pub(crate) skill_execution_available: bool,
 }
@@ -1238,8 +1240,9 @@ fn build_tool_loop_route(
 	bound_resources: Vec<ResourceSelector>,
 ) -> RouteDecisionResult {
 	let seeded_tools = decision.candidate_tools.clone();
-	decision.candidate_tools =
-		filter_enabled_candidate_tools(context.catalog, preferred_tool, &seeded_tools);
+	decision.candidate_tools = context
+		.availability_snapshot
+		.filter_candidate_tools(preferred_tool, &seeded_tools);
 	if decision.candidate_plugins.is_empty() {
 		decision.candidate_plugins = decision
 			.candidate_tools
@@ -1258,27 +1261,6 @@ fn build_loop_hint_route(
 	decision: RouteDecision,
 ) -> RouteDecisionResult {
 	build_tool_loop_route(context, decision, None, Vec::new())
-}
-
-fn filter_enabled_candidate_tools(
-	catalog: &ResourceCatalog,
-	preferred_tool: Option<&str>,
-	seed_tools: &[String],
-) -> Vec<String> {
-	let mut tools = Vec::new();
-	if let Some(preferred_tool) = preferred_tool
-		&& tool_selector(catalog, preferred_tool).is_some()
-	{
-		tools.push(preferred_tool.to_string());
-	}
-	for tool_name in seed_tools {
-		if tool_selector(catalog, tool_name).is_some()
-			&& !tools.iter().any(|existing| existing == tool_name)
-		{
-			tools.push(tool_name.clone());
-		}
-	}
-	tools
 }
 
 fn build_skill_route_result(
@@ -1709,7 +1691,10 @@ fn resource_risk(descriptor: &CatalogDescriptor) -> RouteRisk {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::collections::BTreeSet;
+
 	use roku_plugin_catalog::{ResourceCost, ResourceRisk};
+	use roku_plugin_tools::RuntimeVisibleToolAvailabilitySnapshot;
 
 	fn tool_descriptor(name: &str) -> CatalogDescriptor {
 		CatalogDescriptor {
@@ -1782,5 +1767,52 @@ mod tests {
 		};
 
 		assert!(!skill_descriptor_is_executable(&descriptor));
+	}
+
+	#[test]
+	fn build_tool_loop_route_filters_shortlist_from_availability_snapshot() {
+		let catalog = ResourceCatalog::new(vec![
+			tool_descriptor("general.execute"),
+			tool_descriptor("web.search"),
+		]);
+		let tool_config = ToolCatalogConfig::default();
+		let agent_runtime_config = AgentRuntimeConfig::default();
+		let plugin_snapshot = PluginRegistrySnapshot::permissive();
+		let availability_snapshot = RuntimeVisibleToolAvailabilitySnapshot {
+			enabled_tools: ["general.execute".to_string()]
+				.into_iter()
+				.collect::<BTreeSet<_>>(),
+			baseline_visible_tools: Vec::new(),
+		};
+		let context = RouteClassifierContext {
+			catalog: &catalog,
+			tool_config: &tool_config,
+			agent_runtime_config: &agent_runtime_config,
+			plugin_snapshot: &plugin_snapshot,
+			availability_snapshot: &availability_snapshot,
+			route_router: None,
+			skill_execution_available: false,
+		};
+		let decision = RouteDecision::new(
+			IntentFamily::WebLookup,
+			0.91,
+			false,
+			RouteRisk::Low,
+			vec!["general.execute".to_string(), "web.search".to_string()],
+			Vec::new(),
+			Vec::new(),
+			"snapshot-owned shortlist filtering",
+		);
+
+		let RouteDecisionResult::Direct(plan) =
+			build_tool_loop_route(&context, decision, Some("web.search"), Vec::new())
+		else {
+			panic!("expected direct tool-loop route");
+		};
+
+		assert_eq!(
+			plan.decision.candidate_tools,
+			vec!["general.execute".to_string()]
+		);
 	}
 }
