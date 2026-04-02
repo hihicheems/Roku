@@ -2050,17 +2050,33 @@ mod tests {
 	}
 
 	#[test]
-	fn freeform_awaiting_user_pauses_do_not_auto_resume() {
+	fn freeform_ask_user_resume_contract_requires_fresh_intake() {
 		let runtime = GenericAgentRuntime::with_skill_registry(SkillRegistry::disabled());
 		let loop_state = awaiting_user_loop_state(
 			"继续之前的任务",
 			AskUserPayload::freeform("您想继续什么任务？"),
 		);
 
+		assert_eq!(
+			loop_state
+				.awaiting_user
+				.as_ref()
+				.expect("awaiting-user payload should exist")
+				.resume_contract,
+			AskUserResumeContract::NoAutomaticResume
+		);
+
 		let assessment = runtime.assess_awaiting_user_resume(&loop_state, "项目里有几行代码？");
 
-		assert!(!assessment.should_resume);
-		assert!(assessment.reason.contains("fresh intake"));
+		assert_eq!(
+			assessment,
+			AwaitingUserResumeAssessment {
+				should_resume: false,
+				reason:
+					"freeform clarification pauses do not auto-resume; treat the next message as a fresh intake"
+						.to_string(),
+			}
+		);
 	}
 
 	#[test]
