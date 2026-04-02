@@ -20,8 +20,11 @@ You are the bottom execution agent inside a Ralph outer loop.
 
 1. Implement exactly one pending story.
 2. Run the relevant validation commands for that story.
-3. If the validation passes, commit the changes with:
-   `feat: [Story ID] - [Story Title]`
+3. If the validation passes, create one Conventional Commit title that follows `.codex/rules/git-commit.md`.
+   Use the primary owning crate or real repo area as the scope, and write only the actual code change in the title.
+   Do not include story IDs, PRD labels, or bracketed template text in the commit title.
+   When the change introduces a new helper/module, reshapes ownership, or touches multiple files in a non-obvious way, add a short body with concise `-` bullets that explain the key change points.
+   Do not stage or commit `.ralph/*` runtime files; update them locally only.
 4. Update the PRD so that the completed story has `passes: true`.
 5. Append a short progress entry to the progress log.
 
