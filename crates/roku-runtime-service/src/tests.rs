@@ -16,8 +16,9 @@ use std::env;
 use std::sync::Arc;
 
 use roku_agent_runtime::{
-	AskUserPayload, AskUserResumeContract, AskUserResumeDirective, IntentFamily, LoopContext,
-	LoopState, RouteDecision, RouteRisk, StepObservation, StepRecord, ToolObservation,
+	AskUserPayload, AskUserResumeContract, AskUserResumeDirective, DirectRoutePlan, IntentFamily,
+	LoopContext, LoopState, RouteDecision, RouteDecisionResult, RouteRisk, StepObservation,
+	StepRecord, ToolObservation,
 };
 use roku_common_types::ResourceSelector;
 use roku_common_types::{
@@ -329,6 +330,44 @@ fn resumed_pending_loops_project_bound_resources_into_context_bundle() {
 		vec![ResourceSelector::tool("fs.read_text".to_string())]
 	);
 	assert!(bundle.pending_loop_active);
+}
+
+#[test]
+fn direct_routes_project_bound_resources_into_context_bundle() {
+	let service = RuntimeService::default();
+	let mut bundle = service
+		.build_context_bundle(
+			&request("Read Cargo.toml and explain the workspace layout."),
+			false,
+		)
+		.expect("context bundle should build");
+	let route = RouteDecisionResult::Direct(DirectRoutePlan {
+		decision: RouteDecision::new(
+			IntentFamily::FilesystemRead,
+			0.96,
+			false,
+			RouteRisk::Low,
+			vec!["fs.read_text".to_string(), "fs.find".to_string()],
+			Vec::new(),
+			Vec::new(),
+			"direct resource projection request",
+		),
+		bound_resources: vec![
+			ResourceSelector::tool("fs.read_text".to_string()),
+			ResourceSelector::tool("fs.find".to_string()),
+		],
+	});
+
+	service.attach_visible_resources(&mut bundle, &route);
+
+	assert_eq!(
+		bundle.visible_resources,
+		vec![
+			ResourceSelector::tool("fs.read_text".to_string()),
+			ResourceSelector::tool("fs.find".to_string()),
+		]
+	);
+	assert!(!bundle.pending_loop_active);
 }
 
 #[test]
