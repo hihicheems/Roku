@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::runtime_loop::execution_trace::project_execution_traces;
-use crate::runtime_loop::{LoopState, LoopStatus, NextStepAction, StepAction, StepObservation};
+use crate::runtime_loop::{LoopState, LoopStatus, StepAction, StepObservation};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeLoopTraceCheckReport {
@@ -30,6 +30,7 @@ pub struct RuntimeLoopTraceCheckReport {
 	pub step_count_matches: bool,
 	pub decisions_captured: bool,
 	pub visible_tools_captured: bool,
+	pub visible_resources_captured: bool,
 	pub tool_steps_capture_raw_output: bool,
 	pub tool_steps_capture_normalized_observation: bool,
 	pub tool_steps_capture_interpreted_observation: bool,
@@ -56,13 +57,14 @@ pub fn runtime_loop_trace(loop_state: &LoopState) -> RuntimeLoopTrace {
 			.map(|(step, execution_trace)| RuntimeLoopTraceStep {
 				step_index: step.step_index,
 				decision: RuntimeLoopTraceDecision {
-					action: next_step_action_label(step.decision.action).to_string(),
+					action: step_action_label(step.action).to_string(),
 					tool_name: step.decision.tool_name.clone(),
 					arguments: step.decision.arguments.clone(),
 					reason: step.decision.reason.clone(),
 					final_message: step.decision.final_message.clone(),
 				},
 				visible_tools_before: step.visible_tools_before.clone(),
+				visible_resources_before: Some(step.visible_resources_before.clone()),
 				started_at: step.started_at.clone(),
 				finished_at: step.finished_at.clone(),
 				tool_latency_ms: step.tool_latency_ms,
@@ -86,7 +88,9 @@ pub fn runtime_loop_trace(loop_state: &LoopState) -> RuntimeLoopTrace {
 			terminal_action: loop_state.history.last().and_then(|step| {
 				matches!(
 					step.action,
-					StepAction::AskUser | StepAction::FinalAnswer | StepAction::Fail
+					StepAction::AskUser
+						| StepAction::FinalAnswer
+						| StepAction::Fail | StepAction::Stop
 				)
 				.then(|| step_action_label(step.action).to_string())
 			}),
@@ -100,7 +104,7 @@ pub fn check_runtime_loop_trace(trace: &RuntimeLoopTrace) -> RuntimeLoopTraceChe
 	let decisions_captured = trace.steps.iter().all(|step| {
 		let action_known = matches!(
 			step.decision.action.as_str(),
-			"call_tool" | "ask_user" | "final_answer" | "fail"
+			"call_tool" | "ask_user" | "final_answer" | "fail" | "stop"
 		);
 		let reason_present = !step.decision.reason.trim().is_empty();
 		let call_tool_has_name =
@@ -111,6 +115,10 @@ pub fn check_runtime_loop_trace(trace: &RuntimeLoopTrace) -> RuntimeLoopTraceChe
 		.steps
 		.iter()
 		.all(|step| !step.visible_tools_before.is_empty());
+	let visible_resources_captured = trace
+		.steps
+		.iter()
+		.all(|step| step.visible_resources_before.is_some());
 	let tool_steps = trace
 		.steps
 		.iter()
@@ -163,6 +171,11 @@ pub fn check_runtime_loop_trace(trace: &RuntimeLoopTrace) -> RuntimeLoopTraceChe
 	if !visible_tools_captured {
 		issues.push("trace steps did not capture visible tools for the decision round".to_string());
 	}
+	if !visible_resources_captured {
+		issues.push(
+			"trace steps did not capture visible resources for the decision round".to_string(),
+		);
+	}
 	if !tool_steps_capture_raw_output {
 		issues.push("at least one tool step is missing raw tool output".to_string());
 	}
@@ -198,6 +211,7 @@ pub fn check_runtime_loop_trace(trace: &RuntimeLoopTrace) -> RuntimeLoopTraceChe
 		step_count_matches,
 		decisions_captured,
 		visible_tools_captured,
+		visible_resources_captured,
 		tool_steps_capture_raw_output,
 		tool_steps_capture_normalized_observation,
 		tool_steps_capture_interpreted_observation,
@@ -342,15 +356,7 @@ fn step_action_label(action: StepAction) -> &'static str {
 		StepAction::AskUser => "ask_user",
 		StepAction::FinalAnswer => "final_answer",
 		StepAction::Fail => "fail",
-	}
-}
-
-fn next_step_action_label(action: NextStepAction) -> &'static str {
-	match action {
-		NextStepAction::CallTool => "call_tool",
-		NextStepAction::AskUser => "ask_user",
-		NextStepAction::FinalAnswer => "final_answer",
-		NextStepAction::Fail => "fail",
+		StepAction::Stop => "stop",
 	}
 }
 
@@ -429,6 +435,7 @@ mod tests {
 				final_message: None,
 			},
 			vec!["command.run".to_string(), "general.execute".to_string()],
+			state.bound_resources.clone(),
 			json!({"ok": true}),
 			StepObservation::Tool(observation),
 			interpreted,
@@ -439,6 +446,7 @@ mod tests {
 		));
 		state.record_step(StepRecord::terminal(
 			2,
+			crate::runtime_loop::StepAction::FinalAnswer,
 			NextStepDecision {
 				action: NextStepAction::FinalAnswer,
 				tool_name: None,
@@ -447,6 +455,7 @@ mod tests {
 				final_message: Some("/workspace".to_string()),
 			},
 			vec!["command.run".to_string(), "general.execute".to_string()],
+			state.bound_resources.clone(),
 			Some(StepObservation::FinalMessage {
 				final_message: "/workspace".to_string(),
 			}),
@@ -463,8 +472,13 @@ mod tests {
 			trace.steps[0].visible_tools_before,
 			vec!["command.run".to_string(), "general.execute".to_string()]
 		);
+		assert_eq!(
+			trace.steps[0].visible_resources_before,
+			Some(vec![ResourceSelector::tool("command.run".to_string())])
+		);
 		assert!(trace.steps[0].execution_trace.is_some());
 		assert!(report.command_execution_traces_captured);
+		assert!(report.visible_resources_captured);
 		assert!(report.execution_trace_stage_order_valid);
 		assert!(report.execution_trace_digests_aligned);
 		assert!(
@@ -536,6 +550,7 @@ mod tests {
 				final_message: None,
 			},
 			state.visible_tools.clone(),
+			state.bound_resources.clone(),
 			approval_payload,
 			StepObservation::Tool(approval_observation),
 			approval_interpreted,
@@ -598,6 +613,7 @@ mod tests {
 				final_message: None,
 			},
 			state.visible_tools.clone(),
+			state.bound_resources.clone(),
 			resumed_output,
 			StepObservation::Tool(resumed_observation),
 			resumed_interpreted,
@@ -608,6 +624,7 @@ mod tests {
 		));
 		state.record_step(StepRecord::terminal(
 			3,
+			crate::runtime_loop::StepAction::FinalAnswer,
 			NextStepDecision {
 				action: NextStepAction::FinalAnswer,
 				tool_name: None,
@@ -616,6 +633,7 @@ mod tests {
 				final_message: Some("/workspace".to_string()),
 			},
 			state.visible_tools.clone(),
+			state.bound_resources.clone(),
 			Some(StepObservation::FinalMessage {
 				final_message: "/workspace".to_string(),
 			}),
@@ -713,6 +731,7 @@ mod tests {
 				final_message: None,
 			},
 			vec!["command.run".to_string(), "general.execute".to_string()],
+			state.bound_resources.clone(),
 			json!({
 				"ok": true,
 				"data": {
@@ -728,6 +747,7 @@ mod tests {
 		));
 		state.record_step(StepRecord::terminal(
 			2,
+			crate::runtime_loop::StepAction::FinalAnswer,
 			NextStepDecision {
 				action: NextStepAction::FinalAnswer,
 				tool_name: None,
@@ -736,6 +756,7 @@ mod tests {
 				final_message: Some("/workspace".to_string()),
 			},
 			vec!["command.run".to_string(), "general.execute".to_string()],
+			state.bound_resources.clone(),
 			Some(StepObservation::FinalMessage {
 				final_message: "/workspace".to_string(),
 			}),

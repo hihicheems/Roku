@@ -571,23 +571,27 @@ impl GenericAgentRuntime {
 			StepAction::AskUser => StepObservation::AskUser {
 				final_message: message,
 			},
-			StepAction::FinalAnswer | StepAction::Fail | StepAction::CallTool => {
-				StepObservation::FinalMessage {
-					final_message: message,
-				}
-			}
+			StepAction::FinalAnswer
+			| StepAction::Fail
+			| StepAction::CallTool
+			| StepAction::Stop => StepObservation::FinalMessage {
+				final_message: message,
+			},
 		});
 		let reason = reason.into();
 		let step = StepRecord::terminal(
 			loop_state.step_index + 1,
+			action,
 			terminal_decision(action, &reason, observation.as_ref()),
 			loop_state.visible_tools.clone(),
+			loop_state.bound_resources.clone(),
 			observation,
 			match action {
 				StepAction::AskUser => loop_state.remaining_step_budget,
 				StepAction::FinalAnswer | StepAction::Fail | StepAction::CallTool => {
 					loop_state.remaining_step_budget.saturating_sub(1)
 				}
+				StepAction::Stop => loop_state.remaining_step_budget,
 			},
 			loop_state.remaining_recovery_budget,
 			loop_state.working_directory.clone(),
@@ -599,6 +603,7 @@ impl GenericAgentRuntime {
 			StepAction::Fail => crate::runtime_loop::LoopStatus::Failed,
 			StepAction::AskUser => crate::runtime_loop::LoopStatus::AwaitingUser,
 			StepAction::CallTool => crate::runtime_loop::LoopStatus::LoopRunning,
+			StepAction::Stop => crate::runtime_loop::LoopStatus::Stopped,
 		};
 		step
 	}
@@ -612,6 +617,7 @@ impl GenericAgentRuntime {
 		let reason = reason.into();
 		let step = StepRecord::terminal(
 			loop_state.step_index + 1,
+			StepAction::AskUser,
 			terminal_decision(
 				StepAction::AskUser,
 				&reason,
@@ -620,6 +626,7 @@ impl GenericAgentRuntime {
 				}),
 			),
 			loop_state.visible_tools.clone(),
+			loop_state.bound_resources.clone(),
 			Some(StepObservation::AskUser {
 				final_message: payload.final_message.clone(),
 			}),
@@ -703,6 +710,7 @@ impl GenericAgentRuntime {
 						loop_state.step_index + 1,
 						next_step.clone(),
 						loop_state.visible_tools.clone(),
+						loop_state.bound_resources.clone(),
 						raw_tool_output,
 						StepObservation::Tool(observation.clone()),
 						interpreted.clone(),
@@ -1666,7 +1674,7 @@ fn terminal_decision(
 			StepAction::CallTool => crate::runtime_loop::NextStepAction::CallTool,
 			StepAction::AskUser => crate::runtime_loop::NextStepAction::AskUser,
 			StepAction::FinalAnswer => crate::runtime_loop::NextStepAction::FinalAnswer,
-			StepAction::Fail => crate::runtime_loop::NextStepAction::Fail,
+			StepAction::Fail | StepAction::Stop => crate::runtime_loop::NextStepAction::Fail,
 		},
 		tool_name: None,
 		arguments: None,
@@ -4228,6 +4236,7 @@ mod tests {
 				final_message: None,
 			},
 			loop_state.visible_tools.clone(),
+			loop_state.bound_resources.clone(),
 			serde_json::json!({
 				"ok": true,
 				"terminal": false,

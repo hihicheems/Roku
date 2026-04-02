@@ -1061,6 +1061,7 @@ mod tests {
 				final_message: None,
 			},
 			loop_state.visible_tools.clone(),
+			loop_state.bound_resources.clone(),
 			json!({
 				"ok": true,
 				"terminal": false,

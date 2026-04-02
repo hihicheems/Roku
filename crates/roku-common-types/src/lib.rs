@@ -877,6 +877,8 @@ pub struct RuntimeLoopTraceStep {
 	pub decision: RuntimeLoopTraceDecision,
 	#[serde(default)]
 	pub visible_tools_before: Vec<String>,
+	#[serde(default)]
+	pub visible_resources_before: Option<Vec<ResourceSelector>>,
 	pub started_at: String,
 	pub finished_at: String,
 	#[serde(default)]

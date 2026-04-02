@@ -166,6 +166,7 @@ impl LoopState {
 			crate::runtime_loop::StepAction::AskUser => LoopStatus::AwaitingUser,
 			crate::runtime_loop::StepAction::FinalAnswer => LoopStatus::Succeeded,
 			crate::runtime_loop::StepAction::Fail => LoopStatus::Failed,
+			crate::runtime_loop::StepAction::Stop => LoopStatus::Stopped,
 		};
 		self.history.push(step);
 	}

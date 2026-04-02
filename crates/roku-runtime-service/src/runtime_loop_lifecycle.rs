@@ -142,6 +142,22 @@ impl RuntimeService {
 		self.record_runtime_loop_step_with_action(loop_state, action, response_status, message)
 	}
 
+	pub(super) fn record_runtime_loop_stop_step(
+		&self,
+		loop_state: &mut LoopState,
+		message: &str,
+	) -> StepRecord {
+		let step = self.runtime.record_terminal_step(
+			loop_state,
+			StepAction::Stop,
+			"runtime loop discarded a stale pending pause before accepting a fresh intake",
+			Some(message.to_string()),
+		);
+		self.record_runtime_loop_history(loop_state, loop_state.history.len().saturating_sub(1));
+		self.log_runtime_loop_terminated(loop_state);
+		step
+	}
+
 	pub(super) fn record_runtime_loop_escalation_step(
 		&self,
 		loop_state: &mut LoopState,
@@ -226,6 +242,7 @@ impl RuntimeService {
 				loop_state.status == roku_agent_runtime::LoopStatus::Succeeded
 			}
 			StepAction::Fail => loop_state.status == roku_agent_runtime::LoopStatus::Failed,
+			StepAction::Stop => loop_state.status == roku_agent_runtime::LoopStatus::Stopped,
 			StepAction::CallTool => {
 				loop_state.status == roku_agent_runtime::LoopStatus::LoopRunning
 			}
@@ -324,6 +341,10 @@ mod tests {
 		assert_eq!(trace.step_count, 1);
 		assert_eq!(step.decision.action, "fail");
 		assert_eq!(
+			step.visible_resources_before,
+			Some(vec![ResourceSelector::tool("command.run".to_string())])
+		);
+		assert_eq!(
 			step.decision.reason,
 			"runtime loop captured pending approval terminal state"
 		);
@@ -361,6 +382,10 @@ mod tests {
 		assert_eq!(trace.status, "awaiting_user");
 		assert_eq!(trace.step_count, 1);
 		assert_eq!(step.decision.action, "ask_user");
+		assert_eq!(
+			step.visible_resources_before,
+			Some(vec![ResourceSelector::tool("command.run".to_string())])
+		);
 		assert_eq!(
 			step.decision.reason,
 			"runtime loop captured direct route completion"
@@ -402,6 +427,10 @@ mod tests {
 
 		assert_eq!(trace.step_count, 1);
 		assert_eq!(step.decision.action, "final_answer");
+		assert_eq!(
+			step.visible_resources_before,
+			Some(vec![ResourceSelector::tool("command.run".to_string())])
+		);
 		assert_eq!(
 			step.decision.reason,
 			"runtime loop captured direct route completion"

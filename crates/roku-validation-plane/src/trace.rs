@@ -39,6 +39,12 @@ pub(crate) fn run_trace_checks(trace: &RuntimeLoopTrace, failures: &mut Vec<Stri
 				step.step_index
 			));
 		}
+		if step.visible_resources_before.is_none() {
+			failures.push(format!(
+				"runtime loop trace step {} is missing visible_resources_before",
+				step.step_index
+			));
+		}
 		if step.decision.reason.trim().is_empty() {
 			failures.push(format!(
 				"runtime loop trace step {} is missing decision.reason",
@@ -115,6 +121,7 @@ mod tests {
 						"command.run".to_string(),
 						"general.execute".to_string(),
 					],
+					visible_resources_before: Some(vec![]),
 					started_at: "2026-01-01T00:00:00Z".to_string(),
 					finished_at: "2026-01-01T00:00:00Z".to_string(),
 					tool_latency_ms: Some(10),
@@ -139,6 +146,7 @@ mod tests {
 						"command.run".to_string(),
 						"general.execute".to_string(),
 					],
+					visible_resources_before: Some(vec![]),
 					started_at: "2026-01-01T00:00:01Z".to_string(),
 					finished_at: "2026-01-01T00:00:01Z".to_string(),
 					tool_latency_ms: None,

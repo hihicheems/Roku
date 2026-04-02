@@ -17,9 +17,9 @@ use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::runtime_loop::{
-	InterpretedObservation, NextStepAction, NextStepDecision, StepObservation,
-};
+use roku_common_types::ResourceSelector;
+
+use crate::runtime_loop::{InterpretedObservation, NextStepDecision, StepObservation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +28,7 @@ pub enum StepAction {
 	AskUser,
 	FinalAnswer,
 	Fail,
+	Stop,
 }
 
 /// Immutable fact record for one loop step.
@@ -43,6 +44,7 @@ pub enum StepAction {
 /// - `decision_reason`: Runtime or model reason attached to the chosen action.
 /// - `decision`: Full decision contract recorded for this round.
 /// - `visible_tools_before`: Visible tool set presented to the decision for this round.
+/// - `visible_resources_before`: Resources bound into the loop before this step executed.
 /// - `started_at` / `finished_at`: RFC3339 timestamps for replay and audit.
 /// - `tool_latency_ms`: Tool latency when a tool call occurred.
 /// - `raw_tool_output`: Raw tool or adapter payload captured before normalization.
@@ -68,6 +70,8 @@ pub struct StepRecord {
 	pub decision_reason: String,
 	pub decision: NextStepDecision,
 	pub visible_tools_before: Vec<String>,
+	#[serde(default)]
+	pub visible_resources_before: Vec<ResourceSelector>,
 	pub started_at: String,
 	pub finished_at: String,
 	pub tool_latency_ms: Option<u64>,
@@ -80,10 +84,12 @@ pub struct StepRecord {
 }
 
 impl StepRecord {
+	#[allow(clippy::too_many_arguments)]
 	pub fn tool_call(
 		step_index: u32,
 		decision: NextStepDecision,
 		visible_tools_before: Vec<String>,
+		visible_resources_before: Vec<ResourceSelector>,
 		raw_tool_output: Value,
 		observation: StepObservation,
 		interpreted_observation: InterpretedObservation,
@@ -102,6 +108,7 @@ impl StepRecord {
 			decision_reason,
 			decision,
 			visible_tools_before,
+			visible_resources_before,
 			started_at: timestamp.clone(),
 			finished_at: timestamp,
 			tool_latency_ms,
@@ -116,15 +123,16 @@ impl StepRecord {
 
 	pub fn terminal(
 		step_index: u32,
+		action: StepAction,
 		decision: NextStepDecision,
 		visible_tools_before: Vec<String>,
+		visible_resources_before: Vec<ResourceSelector>,
 		observation: Option<StepObservation>,
 		remaining_step_budget_after: u32,
 		remaining_recovery_budget_after: u32,
 		working_directory_after: impl Into<String>,
 	) -> Self {
 		let timestamp = now_rfc3339();
-		let action = step_action_from_decision(&decision);
 		let tool_name = decision.tool_name.clone();
 		let decision_reason = decision.reason.clone();
 		Self {
@@ -134,6 +142,7 @@ impl StepRecord {
 			decision_reason,
 			decision,
 			visible_tools_before,
+			visible_resources_before,
 			started_at: timestamp.clone(),
 			finished_at: timestamp,
 			tool_latency_ms: None,
@@ -144,15 +153,6 @@ impl StepRecord {
 			remaining_recovery_budget_after,
 			working_directory_after: working_directory_after.into(),
 		}
-	}
-}
-
-fn step_action_from_decision(decision: &NextStepDecision) -> StepAction {
-	match decision.action {
-		NextStepAction::CallTool => StepAction::CallTool,
-		NextStepAction::AskUser => StepAction::AskUser,
-		NextStepAction::FinalAnswer => StepAction::FinalAnswer,
-		NextStepAction::Fail => StepAction::Fail,
 	}
 }
 
