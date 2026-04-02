@@ -20,13 +20,13 @@ You are the bottom execution agent inside a Ralph outer loop.
 
 1. Implement exactly one pending story.
 2. Run the relevant validation commands for that story.
-3. If the validation passes, create one Conventional Commit title that follows `.codex/rules/git-commit.md`.
+3. If the validation passes, stage the repository changes for that story, excluding `.ralph/*`, and create exactly one Conventional Commit that follows `.codex/rules/git-commit.md`.
    Use the primary owning crate or real repo area as the scope, and write only the actual code change in the title.
    Do not include story IDs, PRD labels, or bracketed template text in the commit title.
    When the change introduces a new helper/module, reshapes ownership, or touches multiple files in a non-obvious way, add a short body with concise `-` bullets that explain the key change points.
    Do not stage or commit `.ralph/*` runtime files; update them locally only.
-4. Update the PRD so that the completed story has `passes: true`.
-5. Append a short progress entry to the progress log.
+4. Only after the `git commit` succeeds, update the PRD so that the completed story has `passes: true`.
+5. Append a short progress entry to the progress log after the successful commit.
 
 ## Progress Log Format
 
@@ -50,6 +50,7 @@ If you discover durable, reusable knowledge that future agents should know, upda
 ## Quality Bar
 
 - Do not mark a story complete if the relevant checks fail.
+- Do not mark a story complete if the repository changes are not committed yet.
 - Do not make speculative wide-scope refactors.
 - Keep CI-friendly behavior and preserve existing repo conventions.
 

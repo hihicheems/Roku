@@ -125,6 +125,7 @@ If the runner still fails after retries, Ralph exits immediately instead of sile
 
 - Ralph should create Conventional Commit titles that follow `.codex/rules/git-commit.md`.
 - Commit titles should describe the actual code change only; do not include story IDs or PRD labels.
+- Ralph should stage the relevant repository files for one story and create an actual git commit before that story is marked `passes: true`.
 - `.ralph/*` is runtime state, not product code. Keep `prd.json` and `progress.txt` updated locally, but do not stage or commit them.
 - When a PRD is complete, Ralph archives the finished `prd.json` and `progress.txt` under `.ralph/archive/` before the next PRD replaces the active file.
 
@@ -166,7 +167,6 @@ Resume:
 - if the previous run died mid-iteration, the next run simply retries from the last persisted repo/PRD checkpoint
 - per-iteration `status.txt` and attempt logs tell you whether the last stop was timeout, retryable transport failure, or terminal runner failure
 - if the active PRD is already complete, rerunning Ralph archives the completed state and exits without launching Codex again
-
 This is intentionally not Codex session resume. Ralph’s model is fresh-instance-per-iteration.
 
 ## Verified Facts
