@@ -74,6 +74,12 @@ impl RuntimeMemoryLayers {
 					.collect(),
 			));
 		}
+		if !self.working_memory.is_empty() {
+			sections.push(format_named_memory_section(
+				"Working memory",
+				vec![self.working_memory.clone()],
+			));
+		}
 		sections.join("\n\n")
 	}
 }

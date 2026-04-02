@@ -639,6 +639,10 @@ fn runtime_memory_layers_keep_continuity_recall_and_working_memory_distinct() {
 		),
 		"fresh request assembly should default to an empty working-memory layer"
 	);
+	assert!(
+		!bundle.memory_context_text().contains("Working memory:"),
+		"fresh request assembly should not render an empty working-memory section"
+	);
 
 	let memory_context_text = layers.memory_context_text();
 	assert!(
@@ -657,7 +661,14 @@ fn runtime_memory_layers_keep_continuity_recall_and_working_memory_distinct() {
 		memory_context_text.contains("- memory-record-1 | UserPreference | Rust preference"),
 		"recall content should remain distinguishable in assembled output"
 	);
-	assert!(!memory_context_text.contains("WORKING_MEMORY_ONLY::"));
+	assert!(
+		memory_context_text.contains("Working memory:"),
+		"working-memory section should be named in assembled output"
+	);
+	assert!(
+		memory_context_text.contains("WORKING_MEMORY_ONLY::follow the runtime seam"),
+		"working-memory content should remain distinguishable in assembled output"
+	);
 }
 
 #[test]
