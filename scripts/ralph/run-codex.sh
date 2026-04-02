@@ -5,23 +5,38 @@ set -euo pipefail
 usage() {
 	cat <<'EOF'
 Usage:
-  ./scripts/ralph/run-codex.sh --repo-root <path> --prompt-file <path> --run-dir <path> --iteration <label>
+  ./scripts/ralph/run-codex.sh --purpose <execute|eval> --repo-root <path> --prompt-file <path> --run-dir <path> --iteration <label>
 
 Environment:
-  RALPH_CODEX_BIN        Codex executable to run (default: codex)
-  RALPH_CODEX_MODEL      Optional model override
-  RALPH_CODEX_PROFILE    Optional Codex profile name
-  RALPH_CODEX_SANDBOX    Codex sandbox mode (default: workspace-write)
-  RALPH_CODEX_APPROVAL   Codex approval policy (default: never)
-  RALPH_CODEX_ARGS       Extra shell-split args appended before the prompt
-  RALPH_CODEX_TIMEOUT_SECONDS
-                         Hard timeout for one Codex attempt (default: 1800)
-  RALPH_CODEX_MAX_RETRIES
-                         Retry count after the initial failed attempt (default: 5)
-  RALPH_CODEX_RETRY_WAIT_SECONDS
-                         Base wait before retrying a retryable failure (default: 10)
-  RALPH_CODEX_TERM_GRACE_SECONDS
-                         Grace period between TERM and KILL on timeout (default: 5)
+  Shared:
+    RALPH_CODEX_BIN              Codex executable to run (default: codex)
+
+  Execution:
+    RALPH_CODEX_MODEL            Optional model override
+    RALPH_CODEX_PROFILE          Optional Codex profile name
+    RALPH_CODEX_SANDBOX          Codex sandbox mode (default: workspace-write)
+    RALPH_CODEX_APPROVAL         Codex approval policy (default: never)
+    RALPH_CODEX_ARGS             Extra shell-split args appended before the prompt
+    RALPH_CODEX_TIMEOUT_SECONDS  Hard timeout for one Codex attempt (default: 1800)
+    RALPH_CODEX_MAX_RETRIES      Retry count after the initial failed attempt (default: 5)
+    RALPH_CODEX_RETRY_WAIT_SECONDS
+                                 Base wait before retrying a retryable failure (default: 10)
+    RALPH_CODEX_TERM_GRACE_SECONDS
+                                 Grace period between TERM and KILL on timeout (default: 5)
+
+  Eval:
+    RALPH_EVAL_MODEL             Optional evaluator model override
+    RALPH_EVAL_PROFILE           Optional evaluator Codex profile name
+    RALPH_EVAL_SANDBOX           Evaluator sandbox mode (default: read-only)
+    RALPH_EVAL_APPROVAL          Evaluator approval policy (default: never)
+    RALPH_EVAL_ARGS              Extra shell-split evaluator args
+    RALPH_EVAL_TIMEOUT_SECONDS   Hard timeout for one evaluator attempt (default: 900)
+    RALPH_EVAL_RETRY_WAIT_SECONDS
+                                 Base wait before retrying a retryable evaluator failure (default: 10)
+    RALPH_EVAL_TERM_GRACE_SECONDS
+                                 Grace period between TERM and KILL on evaluator timeout (default: 5)
+    RALPH_EVAL_RUNNER_MAX_RETRIES
+                                 Runner retry count for evaluator transport failures (default: 0)
 
 Behavior:
   - Writes per-attempt JSONL and stderr logs under <run-dir>
@@ -36,9 +51,18 @@ REPO_ROOT=""
 PROMPT_FILE=""
 RUN_DIR=""
 ITERATION=""
+PURPOSE=""
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--purpose)
+		PURPOSE="$2"
+		shift 2
+		;;
+	--purpose=*)
+		PURPOSE="${1#*=}"
+		shift
+		;;
 	--repo-root)
 		REPO_ROOT="$2"
 		shift 2
@@ -67,19 +91,40 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-if [[ -z "$REPO_ROOT" || -z "$PROMPT_FILE" || -z "$RUN_DIR" || -z "$ITERATION" ]]; then
+if [[ -z "$PURPOSE" || -z "$REPO_ROOT" || -z "$PROMPT_FILE" || -z "$RUN_DIR" || -z "$ITERATION" ]]; then
 	echo "missing required arguments" >&2
 	usage >&2
 	exit 1
 fi
 
+if [[ "$PURPOSE" != "execute" && "$PURPOSE" != "eval" ]]; then
+	echo "unsupported purpose: $PURPOSE" >&2
+	exit 1
+fi
+
 CODEX_BIN="${RALPH_CODEX_BIN:-codex}"
-CODEX_SANDBOX="${RALPH_CODEX_SANDBOX:-workspace-write}"
-CODEX_APPROVAL="${RALPH_CODEX_APPROVAL:-never}"
-CODEX_TIMEOUT_SECONDS="${RALPH_CODEX_TIMEOUT_SECONDS:-1800}"
-CODEX_MAX_RETRIES="${RALPH_CODEX_MAX_RETRIES:-5}"
-CODEX_RETRY_WAIT_SECONDS="${RALPH_CODEX_RETRY_WAIT_SECONDS:-10}"
-CODEX_TERM_GRACE_SECONDS="${RALPH_CODEX_TERM_GRACE_SECONDS:-5}"
+
+if [[ "$PURPOSE" == "execute" ]]; then
+	CODEX_MODEL="${RALPH_CODEX_MODEL:-}"
+	CODEX_PROFILE="${RALPH_CODEX_PROFILE:-}"
+	CODEX_SANDBOX="${RALPH_CODEX_SANDBOX:-workspace-write}"
+	CODEX_APPROVAL="${RALPH_CODEX_APPROVAL:-never}"
+	CODEX_ARGS="${RALPH_CODEX_ARGS:-}"
+	CODEX_TIMEOUT_SECONDS="${RALPH_CODEX_TIMEOUT_SECONDS:-1800}"
+	CODEX_MAX_RETRIES="${RALPH_CODEX_MAX_RETRIES:-5}"
+	CODEX_RETRY_WAIT_SECONDS="${RALPH_CODEX_RETRY_WAIT_SECONDS:-10}"
+	CODEX_TERM_GRACE_SECONDS="${RALPH_CODEX_TERM_GRACE_SECONDS:-5}"
+else
+	CODEX_MODEL="${RALPH_EVAL_MODEL:-${RALPH_CODEX_MODEL:-}}"
+	CODEX_PROFILE="${RALPH_EVAL_PROFILE:-${RALPH_CODEX_PROFILE:-}}"
+	CODEX_SANDBOX="${RALPH_EVAL_SANDBOX:-read-only}"
+	CODEX_APPROVAL="${RALPH_EVAL_APPROVAL:-never}"
+	CODEX_ARGS="${RALPH_EVAL_ARGS:-}"
+	CODEX_TIMEOUT_SECONDS="${RALPH_EVAL_TIMEOUT_SECONDS:-900}"
+	CODEX_MAX_RETRIES="${RALPH_EVAL_RUNNER_MAX_RETRIES:-0}"
+	CODEX_RETRY_WAIT_SECONDS="${RALPH_EVAL_RETRY_WAIT_SECONDS:-10}"
+	CODEX_TERM_GRACE_SECONDS="${RALPH_EVAL_TERM_GRACE_SECONDS:-5}"
+fi
 
 if ! command -v "$CODEX_BIN" >/dev/null 2>&1; then
 	echo "missing Codex CLI: $CODEX_BIN" >&2
@@ -95,10 +140,10 @@ ensure_uint() {
 	fi
 }
 
-ensure_uint "RALPH_CODEX_TIMEOUT_SECONDS" "$CODEX_TIMEOUT_SECONDS"
-ensure_uint "RALPH_CODEX_MAX_RETRIES" "$CODEX_MAX_RETRIES"
-ensure_uint "RALPH_CODEX_RETRY_WAIT_SECONDS" "$CODEX_RETRY_WAIT_SECONDS"
-ensure_uint "RALPH_CODEX_TERM_GRACE_SECONDS" "$CODEX_TERM_GRACE_SECONDS"
+ensure_uint "CODEX_TIMEOUT_SECONDS" "$CODEX_TIMEOUT_SECONDS"
+ensure_uint "CODEX_MAX_RETRIES" "$CODEX_MAX_RETRIES"
+ensure_uint "CODEX_RETRY_WAIT_SECONDS" "$CODEX_RETRY_WAIT_SECONDS"
+ensure_uint "CODEX_TERM_GRACE_SECONDS" "$CODEX_TERM_GRACE_SECONDS"
 
 mkdir -p "$RUN_DIR"
 
@@ -112,18 +157,16 @@ rm -f "$EVENT_LOG" "$STDERR_LOG" "$LAST_MESSAGE_FILE" "$STATUS_FILE"
 
 cmd=("$CODEX_BIN" -a "$CODEX_APPROVAL" exec -C "$REPO_ROOT" --sandbox "$CODEX_SANDBOX" --skip-git-repo-check --color never --json -o "$LAST_MESSAGE_FILE")
 
-if [[ -n "${RALPH_CODEX_MODEL:-}" ]]; then
-	cmd+=(-m "$RALPH_CODEX_MODEL")
+if [[ -n "$CODEX_MODEL" ]]; then
+	cmd+=(-m "$CODEX_MODEL")
 fi
 
-if [[ -n "${RALPH_CODEX_PROFILE:-}" ]]; then
-	cmd+=(-p "$RALPH_CODEX_PROFILE")
+if [[ -n "$CODEX_PROFILE" ]]; then
+	cmd+=(-p "$CODEX_PROFILE")
 fi
 
-if [[ -n "${RALPH_CODEX_ARGS:-}" ]]; then
-	# Intentionally shell-split to make repo-local env overrides easy to use.
-	# Example: RALPH_CODEX_ARGS='--search --enable foo'
-	read -r -a extra_args <<<"$RALPH_CODEX_ARGS"
+if [[ -n "$CODEX_ARGS" ]]; then
+	read -r -a extra_args <<<"$CODEX_ARGS"
 	cmd+=("${extra_args[@]}")
 fi
 
@@ -141,6 +184,7 @@ write_status() {
 	local detail="$5"
 
 	cat >"$STATUS_FILE" <<EOF
+purpose=$PURPOSE
 iteration=$ITERATION
 state=$state
 attempt=$attempt
@@ -256,6 +300,7 @@ sync_last_attempt_artifacts() {
 }
 
 echo "  Codex runner: $CODEX_BIN" >&2
+echo "  Purpose: $PURPOSE" >&2
 echo "  Codex event log: $EVENT_LOG" >&2
 echo "  Codex stderr log: $STDERR_LOG" >&2
 echo "  Codex last message: $LAST_MESSAGE_FILE" >&2

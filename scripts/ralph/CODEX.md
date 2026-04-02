@@ -1,62 +1,89 @@
-# Ralph Codex Instructions
+# Ralph Codex Execution Instructions
 
 You are the bottom execution agent inside a Ralph outer loop.
 
 ## Core Mode
 
-- Treat the PRD file as the task queue and source of truth.
-- Work on at most one pending story per iteration.
+- Work on exactly one selected story.
 - Keep changes focused and reviewable.
 - Use the smallest relevant validation loop that matches the actual change.
 - Reuse repo-provided commands such as `just`, targeted `cargo` checks, or existing scripts when available.
 
-## Story Selection
+## Story Ownership
 
-1. Read the PRD.
-2. Find the highest-priority user story whose `passes` field is not `true`.
-3. If there is no such story, reply exactly with `<promise>COMPLETE</promise>` and do nothing else.
+- The Ralph outer loop has already selected the story for this round.
+- Do not choose another story.
+- Do not widen scope beyond this story.
 
 ## Execution Rules
 
-1. Implement exactly one pending story.
-2. Run the relevant validation commands for that story.
-3. If the validation passes, stage the repository changes for that story, excluding `.ralph/*`, and create exactly one Conventional Commit that follows `.codex/rules/git-commit.md`.
-   Use the primary owning crate or real repo area as the scope, and write only the actual code change in the title.
-   Do not include story IDs, PRD labels, or bracketed template text in the commit title.
-   When the change introduces a new helper/module, reshapes ownership, or touches multiple files in a non-obvious way, add a short body with concise `-` bullets that explain the key change points.
-   Do not stage or commit `.ralph/*` runtime files; update them locally only.
-4. Only after the `git commit` succeeds, update the PRD so that the completed story has `passes: true`.
-5. Append a short progress entry to the progress log after the successful commit.
+1. Implement exactly the selected story.
+2. Run the relevant mechanical checks for that story.
+3. Write exactly one execution artifact JSON to the path provided in the run context.
+4. Do not create a git commit.
+5. Do not update `.ralph/prd.json`.
+6. Do not update `.ralph/progress.txt`.
+7. Do not stage or commit `.ralph/*` runtime files.
 
-## Progress Log Format
+## Execution Artifact Contract
 
-Append to the progress log; never replace it.
+Write a single JSON object with these fields:
 
-```md
-## [UTC timestamp] - [Story ID]
-- What was implemented
-- Validation that was run
-- Files changed
-- Learnings for future iterations
----
-```
+- `status`
+  - `ok`
+  - `mechanical_failed`
+  - `infra_fail`
+- `summary`
+- `filesChanged`
+- `mechanicalChecks`
+- `acceptanceCriteriaClaims`
+- `proposedCommit`
+- `learnings`
 
-If you discover reusable repo knowledge, add a concise note under the `## Codebase Patterns` section near the top of the progress log.
+### `mechanicalChecks`
 
-## AGENTS.md Updates
+Each entry must contain:
 
-If you discover durable, reusable knowledge that future agents should know, update the nearest relevant `AGENTS.md` file. Only add stable patterns or gotchas, not story-specific notes.
+- `command`
+- `status`
+  - `passed`
+  - `failed`
+  - `skipped`
+- optional `outputPath`
+
+### `acceptanceCriteriaClaims`
+
+Each entry must contain:
+
+- `criterionId`
+- `criterionText`
+- `claimedStatus`
+  - `met`
+  - `not_met`
+  - `unclear`
+- `evidence`
+
+### `proposedCommit`
+
+- `title`
+- `bodyBullets`
+
+The title must follow `.codex/rules/git-commit.md`.
+
+## Failure Semantics
+
+- If the story implementation is complete and the mechanical checks passed, write `status: "ok"`.
+- If the code changed but one or more mechanical checks failed, write `status: "mechanical_failed"`.
+- If tooling or environment problems prevent a trustworthy result artifact, write `status: "infra_fail"` if possible.
 
 ## Quality Bar
 
-- Do not mark a story complete if the relevant checks fail.
-- Do not mark a story complete if the repository changes are not committed yet.
+- Do not silently skip required checks.
+- Do not claim a criterion is met unless you can point to concrete evidence.
+- Do not emit placeholder commit text.
 - Do not make speculative wide-scope refactors.
-- Keep CI-friendly behavior and preserve existing repo conventions.
 
-## Completion Signal
+## Final Message
 
-After finishing a story, check the PRD again.
-
-- If all stories are now complete, reply exactly with `<promise>COMPLETE</promise>`.
-- Otherwise, finish normally; Ralph will start another fresh Codex iteration later.
+- Keep the final assistant message short.
+- The JSON artifact is the authority; the final message is only for human-readable logs.
