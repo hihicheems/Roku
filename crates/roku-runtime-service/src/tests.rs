@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::env;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use roku_agent_runtime::{
-	AskUserPayload, AskUserResumeContract, AskUserResumeDirective, IntentFamily, LoopContext,
-	LoopState, RouteDecision, RouteRisk, StepObservation, StepRecord, ToolObservation,
+	AskUserPayload, AskUserResumeContract, AskUserResumeDirective, DirectRoutePlan, IntentFamily,
+	LoopContext, LoopState, RouteDecision, RouteDecisionResult, RouteRisk, StepObservation,
+	StepRecord, ToolObservation,
 };
 use roku_common_types::ResourceSelector;
 use roku_common_types::{
@@ -26,8 +28,8 @@ use roku_common_types::{
 	ExecutionActionClass, ExecutionEnvPolicy, ExecutionEnvPolicyMode, ExecutionResourceScope,
 	InvocationMode, JoinPolicy, NodeId, PendingExecutionApproval, PlanningModeHint, PolicyDecision,
 	PolicyOutcome, PolicyReasonCode, RecoveryEligibility, RequestEnvelope, RequestId,
-	ResponseStatus, ResultEnvelope, ResultStatus, Task, TaskEdge, TaskGraph, TaskId, TaskNode,
-	TaskNodeKind, TaskState,
+	ResponseStatus, ResultEnvelope, ResultStatus, RuntimeError, Task, TaskEdge, TaskGraph, TaskId,
+	TaskNode, TaskNodeKind, TaskState,
 };
 use roku_memory::{
 	InMemoryLongTermMemoryBackend, LongTermMemoryBackend, MemoryBackendHealth, MemoryBackendStatus,
@@ -36,8 +38,79 @@ use roku_memory::{
 	MemoryWriteRequest,
 };
 
-use crate::{RuntimeExecutionMode, RuntimeModeReport, RuntimeService, compact_approval_id};
+use crate::{
+	PendingLoopSnapshotStore, RuntimeExecutionMode, RuntimeModeReport, RuntimeService,
+	compact_approval_id,
+};
 use tempfile::tempdir;
+
+#[derive(Default)]
+struct RecordingPendingLoopSnapshotStore {
+	snapshots: Mutex<HashMap<String, LoopState>>,
+	events: Mutex<Vec<String>>,
+}
+
+impl RecordingPendingLoopSnapshotStore {
+	fn seed(&self, loop_state: LoopState) {
+		self.snapshots
+			.lock()
+			.expect("snapshot seed lock should not be poisoned")
+			.insert(loop_state.session_id.clone(), loop_state);
+	}
+
+	fn events(&self) -> Vec<String> {
+		self.events
+			.lock()
+			.expect("event log lock should not be poisoned")
+			.clone()
+	}
+
+	fn is_empty(&self) -> bool {
+		self.snapshots
+			.lock()
+			.expect("snapshot store lock should not be poisoned")
+			.is_empty()
+	}
+}
+
+impl PendingLoopSnapshotStore for RecordingPendingLoopSnapshotStore {
+	fn load(&self, session_id: &str) -> Result<Option<LoopState>, RuntimeError> {
+		self.events
+			.lock()
+			.expect("event log lock should not be poisoned")
+			.push(format!("load:{session_id}"));
+		Ok(self
+			.snapshots
+			.lock()
+			.expect("snapshot store lock should not be poisoned")
+			.get(session_id)
+			.cloned())
+	}
+
+	fn store(&self, loop_state: &LoopState) -> Result<(), RuntimeError> {
+		self.events
+			.lock()
+			.expect("event log lock should not be poisoned")
+			.push(format!("store:{}", loop_state.session_id));
+		self.snapshots
+			.lock()
+			.expect("snapshot store lock should not be poisoned")
+			.insert(loop_state.session_id.clone(), loop_state.clone());
+		Ok(())
+	}
+
+	fn delete(&self, session_id: &str) -> Result<(), RuntimeError> {
+		self.events
+			.lock()
+			.expect("event log lock should not be poisoned")
+			.push(format!("delete:{session_id}"));
+		self.snapshots
+			.lock()
+			.expect("snapshot store lock should not be poisoned")
+			.remove(session_id);
+		Ok(())
+	}
+}
 
 fn request(goal: &str) -> RequestEnvelope {
 	RequestEnvelope {
@@ -47,6 +120,112 @@ fn request(goal: &str) -> RequestEnvelope {
 		planning_mode_hint: None,
 		conversation_history: Vec::new(),
 	}
+}
+
+fn pending_filesystem_candidate_loop_state() -> LoopState {
+	let cwd = env::current_dir().expect("cwd should resolve");
+	let root_manifest = cwd.join("Cargo.toml").display().to_string();
+	let nested_manifest = cwd
+		.join("crates/roku-agent-runtime/Cargo.toml")
+		.display()
+		.to_string();
+	let context = LoopContext {
+		request_id: "req-pending-tool-loop".to_string(),
+		session_id: "session-1".to_string(),
+		goal: "帮我定位 Cargo.toml，然后告诉我这个 workspace 的 crate 组织".to_string(),
+		workspace_root: cwd.display().to_string(),
+		working_directory: cwd.display().to_string(),
+		visible_tools: vec![
+			"fs.read_text".to_string(),
+			"fs.find".to_string(),
+			"fs.inspect".to_string(),
+			"general.execute".to_string(),
+		],
+		bound_resources: vec![ResourceSelector::tool("fs.read_text".to_string())],
+		route_decision: RouteDecision::new(
+			IntentFamily::FilesystemRead,
+			0.94,
+			false,
+			RouteRisk::Low,
+			vec!["fs.read_text".to_string(), "fs.find".to_string()],
+			Vec::new(),
+			Vec::new(),
+			"filesystem request",
+		),
+		last_observation: None,
+	};
+	let mut loop_state = LoopState::new("loop-pending-tool-loop", &context);
+	let observation = ToolObservation {
+		ok: false,
+		tool_name: "fs.read_text".to_string(),
+		error_type: Some("multiple_candidates".to_string()),
+		terminal: false,
+		data: serde_json::json!({
+			"path": "Cargo.toml",
+			"matches": [root_manifest, nested_manifest],
+		}),
+		message: "Found 2 matching candidates for `Cargo.toml`.".to_string(),
+	};
+	let interpreted =
+		roku_agent_runtime::interpret_observation(&loop_state, observation.clone(), None);
+	loop_state.record_step(StepRecord::tool_call(
+		1,
+		roku_agent_runtime::NextStepDecision {
+			action: roku_agent_runtime::NextStepAction::CallTool,
+			tool_name: Some("fs.read_text".to_string()),
+			arguments: Some(serde_json::json!({ "path": "Cargo.toml" })),
+			reason: "Read the grounded workspace manifest first.".to_string(),
+			final_message: None,
+		},
+		loop_state.visible_tools.clone(),
+		serde_json::json!({
+			"ok": false,
+			"error_type": "multiple_candidates",
+			"terminal": false,
+			"message": "Found 2 matching candidates for `Cargo.toml`.",
+			"data": observation.data.clone(),
+		}),
+		StepObservation::Tool(observation),
+		interpreted.clone(),
+		Some(12),
+		interpreted.remaining_step_budget,
+		interpreted.remaining_recovery_budget,
+		cwd.display().to_string(),
+	));
+	loop_state.record_step(StepRecord::terminal(
+		2,
+		roku_agent_runtime::NextStepDecision {
+			action: roku_agent_runtime::NextStepAction::AskUser,
+			tool_name: None,
+			arguments: None,
+			reason: "Runtime paused for user clarification after the latest tool observation."
+				.to_string(),
+			final_message: Some("你想看哪一个 Cargo.toml？".to_string()),
+		},
+		loop_state.visible_tools.clone(),
+		Some(StepObservation::AskUser {
+			final_message: "你想看哪一个 Cargo.toml？".to_string(),
+		}),
+		3,
+		2,
+		cwd.display().to_string(),
+	));
+	loop_state.awaiting_user = Some(AskUserPayload {
+		final_message: "你想看哪一个 Cargo.toml？".to_string(),
+		resume_contract: AskUserResumeContract::CandidateSelection {
+			candidates: vec![
+				cwd.join("Cargo.toml").display().to_string(),
+				cwd.join("crates/roku-agent-runtime/Cargo.toml")
+					.display()
+					.to_string(),
+			],
+		},
+		resume_directive: Some(AskUserResumeDirective::RepeatToolWithSelectedCandidate {
+			tool_name: "fs.read_text".to_string(),
+			argument_key: "path".to_string(),
+		}),
+	});
+	loop_state
 }
 
 fn node(node_id: &str, kind: TaskNodeKind) -> TaskNode {
@@ -332,6 +511,44 @@ fn resumed_pending_loops_project_bound_resources_into_context_bundle() {
 }
 
 #[test]
+fn direct_routes_project_bound_resources_into_context_bundle() {
+	let service = RuntimeService::default();
+	let mut bundle = service
+		.build_context_bundle(
+			&request("Read Cargo.toml and explain the workspace layout."),
+			false,
+		)
+		.expect("context bundle should build");
+	let route = RouteDecisionResult::Direct(DirectRoutePlan {
+		decision: RouteDecision::new(
+			IntentFamily::FilesystemRead,
+			0.96,
+			false,
+			RouteRisk::Low,
+			vec!["fs.read_text".to_string(), "fs.find".to_string()],
+			Vec::new(),
+			Vec::new(),
+			"direct resource projection request",
+		),
+		bound_resources: vec![
+			ResourceSelector::tool("fs.read_text".to_string()),
+			ResourceSelector::tool("fs.find".to_string()),
+		],
+	});
+
+	service.attach_visible_resources(&mut bundle, &route);
+
+	assert_eq!(
+		bundle.visible_resources,
+		vec![
+			ResourceSelector::tool("fs.read_text".to_string()),
+			ResourceSelector::tool("fs.find".to_string()),
+		]
+	);
+	assert!(!bundle.pending_loop_active);
+}
+
+#[test]
 fn compact_approval_id_stays_short_for_telegram_callbacks() {
 	let approval_id = compact_approval_id("task-tg-919471825", "request-approval");
 
@@ -436,6 +653,29 @@ fn planning_mode_hint_returns_compatibility_fallback_without_graph() {
 }
 
 #[test]
+fn planning_mode_hints_clear_pending_loop_snapshots_without_resuming() {
+	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
+	store.seed(pending_filesystem_candidate_loop_state());
+	let service = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
+	let mut request = request("Read the first part of Cargo.toml.");
+	request.planning_mode_hint = Some(PlanningModeHint::TreeSearch);
+
+	let response = service
+		.execute(request)
+		.expect("compatibility fallback should bypass pending-loop resume");
+
+	assert_eq!(response.status, ResponseStatus::Succeeded);
+	assert_eq!(
+		store.events(),
+		vec![
+			"delete:session-1".to_string(),
+			"delete:session-1".to_string(),
+		]
+	);
+	assert!(store.is_empty());
+}
+
+#[test]
 fn multistep_requests_enter_the_generic_loop_for_new_requests() {
 	let service = RuntimeService::default();
 	let response = service
@@ -464,108 +704,7 @@ fn multistep_requests_enter_the_generic_loop_for_new_requests() {
 #[test]
 fn pending_filesystem_tool_loops_resume_through_the_generic_loop_driver() {
 	let service = RuntimeService::default();
-	let cwd = env::current_dir().expect("cwd should resolve");
-	let root_manifest = cwd.join("Cargo.toml").display().to_string();
-	let nested_manifest = cwd
-		.join("crates/roku-agent-runtime/Cargo.toml")
-		.display()
-		.to_string();
-	let context = LoopContext {
-		request_id: "req-pending-tool-loop".to_string(),
-		session_id: "session-1".to_string(),
-		goal: "帮我定位 Cargo.toml，然后告诉我这个 workspace 的 crate 组织".to_string(),
-		workspace_root: cwd.display().to_string(),
-		working_directory: cwd.display().to_string(),
-		visible_tools: vec![
-			"fs.read_text".to_string(),
-			"fs.find".to_string(),
-			"fs.inspect".to_string(),
-			"general.execute".to_string(),
-		],
-		bound_resources: vec![ResourceSelector::tool("fs.read_text".to_string())],
-		route_decision: RouteDecision::new(
-			IntentFamily::FilesystemRead,
-			0.94,
-			false,
-			RouteRisk::Low,
-			vec!["fs.read_text".to_string(), "fs.find".to_string()],
-			Vec::new(),
-			Vec::new(),
-			"filesystem request",
-		),
-		last_observation: None,
-	};
-	let mut loop_state = LoopState::new("loop-pending-tool-loop", &context);
-	let observation = ToolObservation {
-		ok: false,
-		tool_name: "fs.read_text".to_string(),
-		error_type: Some("multiple_candidates".to_string()),
-		terminal: false,
-		data: serde_json::json!({
-			"path": "Cargo.toml",
-			"matches": [root_manifest, nested_manifest],
-		}),
-		message: "Found 2 matching candidates for `Cargo.toml`.".to_string(),
-	};
-	let interpreted =
-		roku_agent_runtime::interpret_observation(&loop_state, observation.clone(), None);
-	loop_state.record_step(StepRecord::tool_call(
-		1,
-		roku_agent_runtime::NextStepDecision {
-			action: roku_agent_runtime::NextStepAction::CallTool,
-			tool_name: Some("fs.read_text".to_string()),
-			arguments: Some(serde_json::json!({ "path": "Cargo.toml" })),
-			reason: "Read the grounded workspace manifest first.".to_string(),
-			final_message: None,
-		},
-		loop_state.visible_tools.clone(),
-		serde_json::json!({
-			"ok": false,
-			"error_type": "multiple_candidates",
-			"terminal": false,
-			"message": "Found 2 matching candidates for `Cargo.toml`.",
-			"data": observation.data.clone(),
-		}),
-		StepObservation::Tool(observation),
-		interpreted.clone(),
-		Some(12),
-		interpreted.remaining_step_budget,
-		interpreted.remaining_recovery_budget,
-		cwd.display().to_string(),
-	));
-	loop_state.record_step(StepRecord::terminal(
-		2,
-		roku_agent_runtime::NextStepDecision {
-			action: roku_agent_runtime::NextStepAction::AskUser,
-			tool_name: None,
-			arguments: None,
-			reason: "Runtime paused for user clarification after the latest tool observation."
-				.to_string(),
-			final_message: Some("你想看哪一个 Cargo.toml？".to_string()),
-		},
-		loop_state.visible_tools.clone(),
-		Some(StepObservation::AskUser {
-			final_message: "你想看哪一个 Cargo.toml？".to_string(),
-		}),
-		3,
-		2,
-		cwd.display().to_string(),
-	));
-	loop_state.awaiting_user = Some(AskUserPayload {
-		final_message: "你想看哪一个 Cargo.toml？".to_string(),
-		resume_contract: AskUserResumeContract::CandidateSelection {
-			candidates: vec![
-				cwd.join("Cargo.toml").display().to_string(),
-				cwd.join("crates/roku-agent-runtime/Cargo.toml")
-					.display()
-					.to_string(),
-			],
-		},
-		resume_directive: Some(AskUserResumeDirective::RepeatToolWithSelectedCandidate {
-			tool_name: "fs.read_text".to_string(),
-			argument_key: "path".to_string(),
-		}),
-	});
+	let loop_state = pending_filesystem_candidate_loop_state();
 	service
 		.restore_pending_loop(loop_state)
 		.expect("pending loop should restore");
@@ -594,6 +733,76 @@ fn pending_filesystem_tool_loops_resume_through_the_generic_loop_driver() {
 	assert_eq!(task.state, TaskState::Failed);
 	assert!(task.last_result.is_none());
 	assert!(!response.artifacts.is_empty());
+}
+
+#[test]
+fn configured_pending_loop_snapshot_store_drives_generic_loop_resume() {
+	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
+	store.seed(pending_filesystem_candidate_loop_state());
+	let service = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
+
+	let response = service
+		.execute(request("Cargo.toml"))
+		.expect("pending loop should resume from the configured snapshot store");
+
+	assert_eq!(response.status, ResponseStatus::Failed);
+	assert!(
+		response
+			.message
+			.contains("general execution did not use a live runtime")
+	);
+	let events = store.events();
+	assert_eq!(events.first().map(String::as_str), Some("load:session-1"));
+	assert!(events.iter().any(|event| event == "delete:session-1"));
+	assert!(store.is_empty());
+}
+
+#[test]
+fn reconstructed_service_instances_resume_generic_pending_loops_from_shared_snapshot_store() {
+	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
+	let writer = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
+	writer
+		.restore_pending_loop(pending_filesystem_candidate_loop_state())
+		.expect("pending loop should persist before service reconstruction");
+	drop(writer);
+
+	let service = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
+	let response = service
+		.execute(request("Cargo.toml"))
+		.expect("reconstructed service should resume the stored pending loop");
+
+	assert_eq!(response.status, ResponseStatus::Failed);
+	assert!(
+		response
+			.message
+			.contains("general execution did not use a live runtime")
+	);
+	assert!(!response.artifacts.is_empty());
+
+	let task_id = TaskId("task-req-1".to_string());
+	let task = service
+		.get_task(&task_id)
+		.expect("task lookup should succeed")
+		.expect("resumed task should be persisted");
+	assert_eq!(task.state, TaskState::Failed);
+	assert!(task.graph.is_none());
+
+	let experiment = service
+		.get_experiment_run(&task_id)
+		.expect("experiment lookup should succeed")
+		.expect("resumed task should record an experiment run");
+	assert_eq!(experiment.strategy, "runtime_loop_resume");
+
+	assert_eq!(
+		store.events(),
+		vec![
+			"store:session-1".to_string(),
+			"load:session-1".to_string(),
+			"delete:session-1".to_string(),
+			"delete:session-1".to_string(),
+		]
+	);
+	assert!(store.is_empty());
 }
 
 #[test]
@@ -636,9 +845,24 @@ fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
 		),
 		last_observation: None,
 	};
+	let freeform_pause = AskUserPayload::freeform("您想继续什么任务？");
+	let pause_message = freeform_pause.final_message.clone();
 	let mut loop_state = LoopState::new("loop-freeform-pending", &context);
 	loop_state.status = roku_agent_runtime::LoopStatus::AwaitingUser;
-	loop_state.awaiting_user = Some(AskUserPayload::freeform("您想继续什么任务？"));
+	loop_state.awaiting_user = Some(freeform_pause.clone());
+	assert_eq!(
+		freeform_pause.resume_contract,
+		AskUserResumeContract::NoAutomaticResume
+	);
+	let assessment = service
+		.runtime
+		.assess_awaiting_user_resume(&loop_state, "What skills and tools do you have right now?");
+	assert!(!assessment.should_resume);
+	assert!(
+		assessment.reason.contains("fresh intake"),
+		"expected stale freeform pause to be discarded as a fresh intake, got: {}",
+		assessment.reason
+	);
 	service
 		.restore_pending_loop(loop_state)
 		.expect("pending loop should restore");
@@ -648,7 +872,7 @@ fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
 		.expect("fresh intake should succeed");
 
 	assert_eq!(response.status, ResponseStatus::Succeeded);
-	assert_ne!(response.message, "您想继续什么任务？");
+	assert_ne!(response.message, pause_message);
 	assert_eq!(backend.recorded_queries().len(), 1);
 	assert!(
 		service

@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-use std::sync::MutexGuard;
-
 use roku_agent_runtime::LoopState;
 use roku_common_types::{RequestEnvelope, ResponseEnvelope, RuntimeError, Task, TaskId};
 use roku_observability::LogLevel;
@@ -24,30 +21,25 @@ use crate::{log_runtime, truncate_for_log};
 
 impl RuntimeService {
 	pub fn pending_loop(&self, session_id: &str) -> Result<Option<LoopState>, RuntimeError> {
-		let pending = self.lock_pending_loops()?;
-		Ok(pending.get(session_id).cloned())
+		self.pending_loop_snapshot_store.load(session_id)
 	}
 
 	pub fn restore_pending_loop(&self, loop_state: LoopState) -> Result<(), RuntimeError> {
-		let mut pending = self.lock_pending_loops()?;
-		pending.insert(loop_state.session_id.clone(), loop_state);
-		Ok(())
+		self.pending_loop_snapshot_store.store(&loop_state)
 	}
 
 	pub fn clear_pending_loop(&self, session_id: &str) -> Result<(), RuntimeError> {
-		let mut pending = self.lock_pending_loops()?;
-		pending.remove(session_id);
-		Ok(())
+		self.pending_loop_snapshot_store.delete(session_id)
 	}
 
 	pub(super) fn sync_pending_loop(&self, loop_state: &LoopState) -> Result<(), RuntimeError> {
-		let mut pending = self.lock_pending_loops()?;
 		match loop_state.status {
 			roku_agent_runtime::LoopStatus::AwaitingUser => {
-				pending.insert(loop_state.session_id.clone(), loop_state.clone());
+				self.pending_loop_snapshot_store.store(loop_state)?;
 			}
 			_ => {
-				pending.remove(&loop_state.session_id);
+				self.pending_loop_snapshot_store
+					.delete(&loop_state.session_id)?;
 			}
 		}
 		Ok(())
@@ -57,19 +49,20 @@ impl RuntimeService {
 		&self,
 		request: &RequestEnvelope,
 	) -> Result<Option<LoopState>, RuntimeError> {
-		let mut pending = self.lock_pending_loops()?;
-		let Some(existing) = pending.get(&request.session_id).cloned() else {
+		let Some(existing) = self.pending_loop_snapshot_store.load(&request.session_id)? else {
 			return Ok(None);
 		};
 		if request.planning_mode_hint.is_some() {
-			pending.remove(&request.session_id);
+			self.pending_loop_snapshot_store
+				.delete(&request.session_id)?;
 			return Ok(None);
 		}
 		let assessment = self
 			.runtime
 			.assess_awaiting_user_resume(&existing, &request.goal);
+		self.pending_loop_snapshot_store
+			.delete(&request.session_id)?;
 		if assessment.should_resume {
-			pending.remove(&request.session_id);
 			log_runtime(
 				LogLevel::Info,
 				"resuming awaiting runtime loop",
@@ -82,7 +75,6 @@ impl RuntimeService {
 			);
 			return Ok(Some(existing));
 		}
-		pending.remove(&request.session_id);
 		log_runtime(
 			LogLevel::Info,
 			"discarded stale awaiting runtime loop before new intake",
@@ -130,14 +122,6 @@ impl RuntimeService {
 		self.apply_memory_write_back(request, &response, context_bundle);
 		self.clear_memory_context(&task.task_id);
 		Ok(response)
-	}
-
-	fn lock_pending_loops(
-		&self,
-	) -> Result<MutexGuard<'_, HashMap<String, LoopState>>, RuntimeError> {
-		self.pending_loops
-			.lock()
-			.map_err(|error| RuntimeError::new(format!("pending loop state poisoned: {error}")))
 	}
 
 	pub(crate) fn cache_memory_context(&self, task_id: &TaskId, context: &str) {

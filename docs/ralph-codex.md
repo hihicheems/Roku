@@ -25,7 +25,9 @@ Runtime state lives under `.ralph/` and is gitignored:
 
 - `.ralph/prd.json`
 - `.ralph/progress.txt`
-- `.ralph/archive/`
+- `.ralph/archive/<timestamp>-<branch>-<prd-hash>.prd.json`
+- `.ralph/archive/<timestamp>-<branch>-<prd-hash>.progress.txt`
+- `.ralph/archive/<timestamp>-<branch>-<prd-hash>.meta.txt`
 - `.ralph/runs/<timestamp>/`
 - `.ralph/.last-branch`
 - `.ralph/.last-run`
@@ -119,6 +121,13 @@ Retry behavior is intentionally conservative:
 
 If the runner still fails after retries, Ralph exits immediately instead of silently continuing to the next iteration.
 
+## Commit And State Hygiene
+
+- Ralph should create Conventional Commit titles that follow `.codex/rules/git-commit.md`.
+- Commit titles should describe the actual code change only; do not include story IDs or PRD labels.
+- `.ralph/*` is runtime state, not product code. Keep `prd.json` and `progress.txt` updated locally, but do not stage or commit them.
+- When a PRD is complete, Ralph archives the finished `prd.json` and `progress.txt` under `.ralph/archive/` before the next PRD replaces the active file.
+
 ## How To View Progress
 
 Primary progress surfaces:
@@ -156,6 +165,7 @@ Resume:
 - the next fresh Codex iteration continues from repo state, git history, and Ralph state files
 - if the previous run died mid-iteration, the next run simply retries from the last persisted repo/PRD checkpoint
 - per-iteration `status.txt` and attempt logs tell you whether the last stop was timeout, retryable transport failure, or terminal runner failure
+- if the active PRD is already complete, rerunning Ralph archives the completed state and exits without launching Codex again
 
 This is intentionally not Codex session resume. Ralph’s model is fresh-instance-per-iteration.
 

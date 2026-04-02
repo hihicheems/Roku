@@ -2050,21 +2050,77 @@ mod tests {
 	}
 
 	#[test]
-	fn freeform_awaiting_user_pauses_do_not_auto_resume() {
+	fn freeform_ask_user_resume_contract_requires_fresh_intake() {
 		let runtime = GenericAgentRuntime::with_skill_registry(SkillRegistry::disabled());
 		let loop_state = awaiting_user_loop_state(
 			"继续之前的任务",
 			AskUserPayload::freeform("您想继续什么任务？"),
 		);
 
+		assert_eq!(
+			loop_state
+				.awaiting_user
+				.as_ref()
+				.expect("awaiting-user payload should exist")
+				.resume_contract,
+			AskUserResumeContract::NoAutomaticResume
+		);
+
 		let assessment = runtime.assess_awaiting_user_resume(&loop_state, "项目里有几行代码？");
 
-		assert!(!assessment.should_resume);
-		assert!(assessment.reason.contains("fresh intake"));
+		assert_eq!(
+			assessment,
+			AwaitingUserResumeAssessment {
+				should_resume: false,
+				reason:
+					"freeform clarification pauses do not auto-resume; treat the next message as a fresh intake"
+						.to_string(),
+			}
+		);
 	}
 
 	#[test]
-	fn missing_required_input_resume_uses_router_gate() {
+	fn candidate_selection_ask_user_resume_contract_requires_grounded_choice() {
+		let runtime = GenericAgentRuntime::with_skill_registry(SkillRegistry::disabled());
+		let candidates = vec![
+			"/Users/jojo/cjj_project/Roku/Cargo.toml".to_string(),
+			"/Users/jojo/cjj_project/Roku/crates/roku-agent-runtime/Cargo.toml".to_string(),
+		];
+		let loop_state = awaiting_user_loop_state(
+			"看一下 Cargo.toml",
+			AskUserPayload::candidate_selection(
+				"我找到了多个候选路径。你想看哪一个？",
+				candidates.clone(),
+				None,
+			),
+		);
+
+		assert_eq!(
+			loop_state
+				.awaiting_user
+				.as_ref()
+				.expect("awaiting-user payload should exist")
+				.resume_contract,
+			AskUserResumeContract::CandidateSelection { candidates }
+		);
+
+		let assessment = runtime.assess_awaiting_user_resume(
+			&loop_state,
+			"/Users/jojo/cjj_project/Roku/crates/roku-agent-runtime/Cargo.toml",
+		);
+
+		assert_eq!(
+			assessment,
+			AwaitingUserResumeAssessment {
+				should_resume: true,
+				reason: "user reply selected one of the grounded candidates for the paused loop"
+					.to_string(),
+			}
+		);
+	}
+
+	#[test]
+	fn missing_required_input_ask_user_resume_contract_uses_router_decision() {
 		let (router, prompts) = router_with_json_responses(vec![serde_json::json!({
 			"resume_existing_loop": true,
 			"reason": "The reply supplies the missing project_path for the paused request."
@@ -2078,11 +2134,28 @@ mod tests {
 			),
 		);
 
+		assert_eq!(
+			loop_state
+				.awaiting_user
+				.as_ref()
+				.expect("awaiting-user payload should exist")
+				.resume_contract,
+			AskUserResumeContract::MissingRequiredInput {
+				fields: vec!["project_path".to_string()]
+			}
+		);
+
 		let assessment =
 			runtime.assess_awaiting_user_resume(&loop_state, "/Users/jojo/cjj_project/Roku");
 
-		assert!(assessment.should_resume);
-		assert!(assessment.reason.contains("project_path"));
+		assert_eq!(
+			assessment,
+			AwaitingUserResumeAssessment {
+				should_resume: true,
+				reason: "The reply supplies the missing project_path for the paused request."
+					.to_string(),
+			}
+		);
 		let prompts = prompts.lock().expect("prompt lock should succeed");
 		assert_eq!(prompts.len(), 1);
 		assert!(prompts[0].contains("project_path"));
@@ -3505,6 +3578,8 @@ mod tests {
 		fs::create_dir_all(&duplicate_b_dir).expect("duplicate fixture dir B should exist");
 		let duplicate_a_path = duplicate_a_dir.join(&duplicate_name);
 		let duplicate_b_path = duplicate_b_dir.join(&duplicate_name);
+		let duplicate_a_display = duplicate_a_path.display().to_string();
+		let duplicate_b_display = duplicate_b_path.display().to_string();
 		fs::write(&duplicate_a_path, "duplicate a\n").expect("duplicate fixture A should write");
 		fs::write(&duplicate_b_path, "duplicate b\n").expect("duplicate fixture B should write");
 
@@ -3544,6 +3619,70 @@ mod tests {
 					expected: true,
 				}],
 			},
+		);
+		let ambiguous_tool_step = ambiguous_find_trace
+			.steps
+			.iter()
+			.find(|step| step.decision.action == "call_tool")
+			.expect("ambiguous fs.find trace should record a tool step");
+		let ambiguous_matches = ambiguous_tool_step
+			.observation
+			.as_ref()
+			.and_then(|observation| observation.get("data"))
+			.and_then(|data| data.get("matches"))
+			.and_then(Value::as_array)
+			.expect("ambiguous fs.find observation should include candidate matches");
+		assert_eq!(
+			ambiguous_tool_step.decision.tool_name.as_deref(),
+			Some("fs.find")
+		);
+		assert_eq!(
+			ambiguous_tool_step
+				.observation
+				.as_ref()
+				.and_then(|observation| observation.get("error_type"))
+				.and_then(Value::as_str),
+			Some("multiple_candidates")
+		);
+		assert_eq!(
+			ambiguous_tool_step
+				.interpreted_observation
+				.as_ref()
+				.and_then(|observation| observation.get("continue_allowed"))
+				.and_then(Value::as_bool),
+			Some(true)
+		);
+		assert_eq!(ambiguous_matches.len(), 2);
+		assert!(
+			ambiguous_matches
+				.iter()
+				.any(|value| { value.as_str() == Some(duplicate_a_display.as_str()) })
+		);
+		assert!(
+			ambiguous_matches
+				.iter()
+				.any(|value| { value.as_str() == Some(duplicate_b_display.as_str()) })
+		);
+		assert_eq!(
+			ambiguous_find_trace
+				.final_outcome
+				.terminal_action
+				.as_deref(),
+			Some("ask_user")
+		);
+		assert!(
+			ambiguous_find_trace
+				.final_outcome
+				.final_message
+				.as_deref()
+				.is_some_and(|message| message.contains(&duplicate_a_display))
+		);
+		assert!(
+			ambiguous_find_trace
+				.final_outcome
+				.final_message
+				.as_deref()
+				.is_some_and(|message| message.contains(&duplicate_b_display))
 		);
 
 		let missing_find_trace = runtime_loop_trace_for_goal(
@@ -3600,8 +3739,8 @@ mod tests {
 			},
 		);
 
-		cleanup_fixture(duplicate_a_path.to_string_lossy().as_ref());
-		cleanup_fixture(duplicate_b_path.to_string_lossy().as_ref());
+		cleanup_fixture(&duplicate_a_display);
+		cleanup_fixture(&duplicate_b_display);
 	}
 
 	#[test]

@@ -82,6 +82,7 @@ ARCHIVE_DIR="$STATE_DIR/archive"
 RUNS_DIR="$STATE_DIR/runs"
 LAST_BRANCH_FILE="$STATE_DIR/.last-branch"
 LAST_RUN_FILE="$STATE_DIR/.last-run"
+LAST_ARCHIVE_KEY_FILE="$STATE_DIR/.last-archive-key"
 
 require_command() {
 	local command_name="$1"
@@ -94,6 +95,7 @@ require_command() {
 ensure_prereqs() {
 	require_command git
 	require_command jq
+	require_command shasum
 	require_command "${RALPH_CODEX_BIN:-codex}"
 }
 
@@ -123,49 +125,73 @@ relative_to_root() {
 	fi
 }
 
-archive_previous_run_if_branch_changed() {
-	if [[ ! -f "$PRD_FILE" || ! -f "$LAST_BRANCH_FILE" ]]; then
+current_branch_name() {
+	local git_branch prd_branch
+	git_branch="$(git -C "$ROOT_DIR" branch --show-current 2>/dev/null || true)"
+	if [[ -n "$git_branch" && "$git_branch" != "HEAD" ]]; then
+		printf '%s\n' "$git_branch"
 		return 0
 	fi
 
-	local current_branch last_branch date folder_name archive_folder
-	current_branch="$(jq -r '.branchName // empty' "$PRD_FILE" 2>/dev/null || true)"
-	last_branch="$(cat "$LAST_BRANCH_FILE" 2>/dev/null || true)"
-
-	if [[ -z "$current_branch" || -z "$last_branch" || "$current_branch" == "$last_branch" ]]; then
+	prd_branch="$(jq -r '.branchName // empty' "$PRD_FILE" 2>/dev/null || true)"
+	if [[ -n "$prd_branch" ]]; then
+		printf '%s\n' "$prd_branch"
 		return 0
 	fi
 
-	date="$(date -u +%Y-%m-%d)"
-	folder_name="$(printf '%s' "$last_branch" | sed 's|^ralph/||')"
-	archive_folder="$ARCHIVE_DIR/$date-$folder_name"
-
-	echo "Archiving previous Ralph run for branch: $last_branch"
-	mkdir -p "$archive_folder"
-	[[ -f "$PRD_FILE" ]] && cp "$PRD_FILE" "$archive_folder/"
-	[[ -f "$PROGRESS_FILE" ]] && cp "$PROGRESS_FILE" "$archive_folder/"
-	echo "  Archive saved to: $(relative_to_root "$archive_folder")"
-
-	{
-		echo "# Ralph Progress Log"
-		echo "Started: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-		echo
-		echo "## Codebase Patterns"
-		echo
-		echo "---"
-	} >"$PROGRESS_FILE"
+	printf 'unlabeled\n'
 }
 
-track_current_branch() {
+sanitize_archive_label() {
+	printf '%s' "$1" | sed 's|[^A-Za-z0-9._-]|-|g; s|-\\{2,\\}|-|g; s|^-||; s|-$||'
+}
+
+archive_current_state() {
+	local reason="$1"
 	if [[ ! -f "$PRD_FILE" ]]; then
 		return 0
 	fi
 
-	local current_branch
-	current_branch="$(jq -r '.branchName // empty' "$PRD_FILE" 2>/dev/null || true)"
-	if [[ -n "$current_branch" ]]; then
-		printf '%s\n' "$current_branch" >"$LAST_BRANCH_FILE"
+	local raw_branch branch_label prd_hash archive_key timestamp archive_base
+	raw_branch="$(current_branch_name)"
+	branch_label="$(sanitize_archive_label "$raw_branch")"
+	if [[ -z "$branch_label" ]]; then
+		branch_label="unlabeled"
 	fi
+
+	prd_hash="$(shasum -a 256 "$PRD_FILE" | awk '{print substr($1, 1, 12)}')"
+	archive_key="${branch_label}-${prd_hash}"
+
+	if [[ -f "$LAST_ARCHIVE_KEY_FILE" ]] && [[ "$(cat "$LAST_ARCHIVE_KEY_FILE")" == "$archive_key" ]]; then
+		return 0
+	fi
+
+	if compgen -G "$ARCHIVE_DIR/*-${archive_key}.prd.json" >/dev/null; then
+		printf '%s\n' "$archive_key" >"$LAST_ARCHIVE_KEY_FILE"
+		return 0
+	fi
+
+	timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+	archive_base="$ARCHIVE_DIR/${timestamp}-${archive_key}"
+
+	cp "$PRD_FILE" "${archive_base}.prd.json"
+	if [[ -f "$PROGRESS_FILE" ]]; then
+		cp "$PROGRESS_FILE" "${archive_base}.progress.txt"
+	fi
+
+	cat >"${archive_base}.meta.txt" <<EOF
+archived_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+reason=$reason
+source_branch=$raw_branch
+prd_hash=$prd_hash
+EOF
+
+	printf '%s\n' "$archive_key" >"$LAST_ARCHIVE_KEY_FILE"
+	echo "Archived Ralph state: $(relative_to_root "${archive_base}.prd.json")"
+}
+
+track_current_branch() {
+	printf '%s\n' "$(current_branch_name)" >"$LAST_BRANCH_FILE"
 }
 
 pending_story_count() {
@@ -217,8 +243,14 @@ main() {
 		exit 1
 	fi
 
-	archive_previous_run_if_branch_changed
 	track_current_branch
+
+	if [[ "$(pending_story_count)" -eq 0 ]]; then
+		echo "Ralph state already complete."
+		archive_current_state "already_completed"
+		echo "Progress log: $(relative_to_root "$PROGRESS_FILE")"
+		exit 0
+	fi
 
 	local run_id run_dir
 	run_id="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -273,6 +305,7 @@ main() {
 
 		if [[ "$output" == *"<promise>COMPLETE</promise>"* ]]; then
 			echo
+			archive_current_state "completed"
 			echo "Ralph completed all tasks."
 			echo "Completed at iteration $i of $MAX_ITERATIONS"
 			echo "Progress log: $(relative_to_root "$PROGRESS_FILE")"

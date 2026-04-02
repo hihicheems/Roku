@@ -20,7 +20,9 @@ mod execution;
 mod helpers;
 mod legacy_graph;
 mod memory_context;
+mod pending_loop_snapshot_store;
 mod runtime_loop_lifecycle;
+mod runtime_loop_owner;
 mod runtime_loop_recovery;
 #[cfg(test)]
 mod tests;
@@ -29,8 +31,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use roku_agent_runtime::{
-	EscalationAction, EscalationReason, GenericAgentRuntime, IntentFamily, LoopState,
-	RouteDecision, RouteDecisionResult, RouteEscalationPlan, RouteRisk,
+	EscalationAction, EscalationReason, GenericAgentRuntime, IntentFamily, RouteDecision,
+	RouteDecisionResult, RouteEscalationPlan, RouteRisk,
 };
 use roku_artifact_store::ArtifactStore;
 use roku_capability_auth::CapabilityAuthority;
@@ -53,6 +55,10 @@ use roku_validation_plane::ValidationPipeline;
 
 use crate::helpers::{approval_artifact, failure_message, ticket_status_label};
 pub use crate::memory_context::ContextBundle;
+pub use crate::pending_loop_snapshot_store::{
+	InMemoryPendingLoopSnapshotStore, PendingLoopSnapshotStore,
+};
+use crate::runtime_loop_owner::RuntimeLoopOwner;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RunMode {
@@ -165,7 +171,7 @@ pub struct RuntimeService {
 	memory_backend: Arc<dyn LongTermMemoryBackend>,
 	memory_policy: Arc<dyn MemoryLifecyclePolicy>,
 	state: Mutex<RuntimeState>,
-	pending_loops: Mutex<HashMap<String, LoopState>>,
+	pending_loop_snapshot_store: Arc<dyn PendingLoopSnapshotStore>,
 	memory_contexts: Mutex<HashMap<String, String>>,
 }
 
@@ -339,7 +345,7 @@ impl RuntimeService {
 				artifact_store,
 				experiment_registry,
 			}),
-			pending_loops: Mutex::new(HashMap::new()),
+			pending_loop_snapshot_store: Arc::new(InMemoryPendingLoopSnapshotStore::default()),
 			memory_contexts: Mutex::new(HashMap::new()),
 		}
 	}
@@ -352,6 +358,14 @@ impl RuntimeService {
 	/// runtime truth so logs and tests can verify which path is active.
 	pub fn with_runtime_mode_report(mut self, runtime_mode: RuntimeModeReport) -> Self {
 		self.runtime_mode = runtime_mode;
+		self
+	}
+
+	pub fn with_pending_loop_snapshot_store(
+		mut self,
+		pending_loop_snapshot_store: Arc<dyn PendingLoopSnapshotStore>,
+	) -> Self {
+		self.pending_loop_snapshot_store = pending_loop_snapshot_store;
 		self
 	}
 
@@ -445,135 +459,7 @@ impl RuntimeService {
 
 		self.record_transition(&mut task, TaskState::Planning, "classify direct route")?;
 
-		if let Some(planning_mode_hint) = normalized_request.planning_mode_hint {
-			let context_bundle = self.build_context_bundle(&normalized_request, false)?;
-			let memory_context_text = context_bundle.memory_context_text();
-			self.cache_memory_context(&task.task_id, &memory_context_text);
-			self.clear_pending_loop(&normalized_request.session_id)?;
-			self.metrics.inc_route_escalations();
-			self.metrics.inc_route_limited_planning();
-			log_runtime(
-				LogLevel::Info,
-				"planning mode hint resolved as compatibility fallback",
-				[
-					("request_id", normalized_request.request_id.0.clone()),
-					("planning_mode_hint", format!("{planning_mode_hint:?}")),
-				],
-			);
-			self.start_experiment_run(&task, &normalized_request.goal, "compatibility_fallback")?;
-			let compatibility_plan = compatibility_fallback_plan(
-				"planning mode hints are deprecated compatibility signals; planning-heavy workflow is not enabled in this runtime",
-			);
-			let mut loop_state = self.initialize_runtime_loop_for_route(
-				&normalized_request,
-				&RouteDecisionResult::Escalate(compatibility_plan.clone()),
-			);
-			return self.process_direct_escalation(
-				&mut task,
-				&normalized_request,
-				&compatibility_plan,
-				&mut loop_state,
-				&context_bundle,
-				&memory_context_text,
-			);
-		}
-
-		let mut resumable_loop = self.take_resumable_pending_loop(&normalized_request)?;
-		let mut context_bundle =
-			self.build_context_bundle(&normalized_request, resumable_loop.is_some())?;
-		let memory_context_text = context_bundle.memory_context_text();
-		self.cache_memory_context(&task.task_id, &memory_context_text);
-
-		if let Some(mut loop_state) = resumable_loop.take() {
-			self.attach_resumed_loop_resources(&mut context_bundle, &loop_state);
-			self.start_experiment_run(&task, &normalized_request.goal, "runtime_loop_resume")?;
-			return self.resume_pending_loop(
-				&mut task,
-				&normalized_request,
-				&mut loop_state,
-				&context_bundle,
-				&memory_context_text,
-			);
-		}
-
-		let route = self
-			.runtime
-			.classify_route(&normalized_request, &normalized_request.session_id);
-		self.attach_visible_resources(&mut context_bundle, &route);
-		log_route_decision(&normalized_request, &route);
-		let mut loop_state = self.initialize_runtime_loop_for_route(&normalized_request, &route);
-		match &route {
-			RouteDecisionResult::Direct(plan) => {
-				self.metrics.inc_direct_route_hits();
-				self.start_experiment_run(&task, &normalized_request.goal, "direct_route")?;
-				self.process_direct_route(
-					&mut task,
-					&normalized_request,
-					plan,
-					&mut loop_state,
-					&context_bundle,
-					&memory_context_text,
-				)
-			}
-			RouteDecisionResult::Escalate(plan) => {
-				self.metrics.inc_route_escalations();
-				match plan.reason {
-					EscalationReason::RouteClassifierFailure => {
-						self.metrics.inc_route_classifier_failures();
-					}
-					EscalationReason::RouteParseGuardFailure => {
-						self.metrics.inc_route_parse_guard_failures();
-					}
-					EscalationReason::MissingArguments
-					| EscalationReason::RequiresMultiStep
-					| EscalationReason::NoEnabledRouteTarget
-					| EscalationReason::RouteModelUnavailable
-					| EscalationReason::LowConfidence => {}
-				}
-				match plan.action {
-					EscalationAction::AskForMoreInfo => {
-						self.start_experiment_run(&task, &normalized_request.goal, "direct_route")?;
-						self.process_direct_escalation(
-							&mut task,
-							&normalized_request,
-							plan,
-							&mut loop_state,
-							&context_bundle,
-							&memory_context_text,
-						)
-					}
-					EscalationAction::FallbackAnswer => {
-						self.metrics.inc_direct_route_fallbacks();
-						self.start_experiment_run(&task, &normalized_request.goal, "direct_route")?;
-						self.process_direct_escalation(
-							&mut task,
-							&normalized_request,
-							plan,
-							&mut loop_state,
-							&context_bundle,
-							&memory_context_text,
-						)
-					}
-					EscalationAction::EnterLimitedPlanning => {
-						self.metrics.inc_route_limited_planning();
-						self.metrics.inc_direct_route_fallbacks();
-						self.start_experiment_run(
-							&task,
-							&normalized_request.goal,
-							"compatibility_fallback",
-						)?;
-						self.process_direct_escalation(
-							&mut task,
-							&normalized_request,
-							plan,
-							&mut loop_state,
-							&context_bundle,
-							&memory_context_text,
-						)
-					}
-				}
-			}
-		}
+		RuntimeLoopOwner::new(self).execute_request(&mut task, &normalized_request)
 	}
 
 	pub fn get_approval(
