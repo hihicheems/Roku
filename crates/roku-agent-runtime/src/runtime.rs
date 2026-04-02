@@ -2120,7 +2120,7 @@ mod tests {
 	}
 
 	#[test]
-	fn missing_required_input_resume_uses_router_gate() {
+	fn missing_required_input_ask_user_resume_contract_uses_router_decision() {
 		let (router, prompts) = router_with_json_responses(vec![serde_json::json!({
 			"resume_existing_loop": true,
 			"reason": "The reply supplies the missing project_path for the paused request."
@@ -2134,11 +2134,28 @@ mod tests {
 			),
 		);
 
+		assert_eq!(
+			loop_state
+				.awaiting_user
+				.as_ref()
+				.expect("awaiting-user payload should exist")
+				.resume_contract,
+			AskUserResumeContract::MissingRequiredInput {
+				fields: vec!["project_path".to_string()]
+			}
+		);
+
 		let assessment =
 			runtime.assess_awaiting_user_resume(&loop_state, "/Users/jojo/cjj_project/Roku");
 
-		assert!(assessment.should_resume);
-		assert!(assessment.reason.contains("project_path"));
+		assert_eq!(
+			assessment,
+			AwaitingUserResumeAssessment {
+				should_resume: true,
+				reason: "The reply supplies the missing project_path for the paused request."
+					.to_string(),
+			}
+		);
 		let prompts = prompts.lock().expect("prompt lock should succeed");
 		assert_eq!(prompts.len(), 1);
 		assert!(prompts[0].contains("project_path"));
