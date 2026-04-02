@@ -39,8 +39,8 @@ use roku_memory::{
 };
 
 use crate::{
-	PendingLoopSnapshotStore, RuntimeExecutionMode, RuntimeModeReport, RuntimeService,
-	compact_approval_id,
+	PendingLoopSnapshotStore, RuntimeExecutionMode, RuntimeMemoryLayers, RuntimeModeReport,
+	RuntimeService, compact_approval_id,
 };
 use tempfile::tempdir;
 
@@ -579,6 +579,69 @@ fn context_bundle_renders_memory_context_independently() {
 	assert!(!memory_context_text.is_empty());
 	assert_eq!(bundle.short_term_continuity.len(), 1);
 	assert_eq!(request.conversation_history.len(), 1);
+}
+
+#[test]
+fn runtime_memory_layers_keep_continuity_recall_and_working_memory_distinct() {
+	let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
+	let mut seed = MemoryWriteRequest::new(
+		MemoryKind::UserPreference,
+		MemoryScope::Session,
+		"User prefers Rust snippets.",
+		"Rust preference".to_string(),
+		MemoryWriteReason::OperatorRequested,
+	);
+	seed.session_id = Some("session-1".to_string());
+	backend
+		.write(&seed)
+		.expect("seed long-term memory write should succeed");
+
+	let service = RuntimeService::default().with_long_term_memory_backend(backend);
+	let request = RequestEnvelope {
+		request_id: RequestId("req-memory-layers".to_string()),
+		session_id: "session-1".to_string(),
+		goal: "Rust preference".to_string(),
+		planning_mode_hint: None,
+		conversation_history: vec![roku_common_types::ConversationTurn {
+			role: roku_common_types::ConversationRole::User,
+			content: "Please use concise answers.".to_string(),
+			created_at_unix_ms: 0,
+		}],
+	};
+
+	let bundle = service
+		.build_context_bundle(&request, false)
+		.expect("context bundle should build");
+	let layers = bundle
+		.runtime_memory_layers_with_working_memory("WORKING_MEMORY_ONLY::follow the runtime seam");
+
+	assert_eq!(
+		layers.short_term_continuity, request.conversation_history,
+		"continuity should stay in its own layer"
+	);
+	assert_eq!(layers.long_term_recall.len(), 1);
+	assert_eq!(
+		layers.long_term_recall[0].record.summary, "Rust preference",
+		"recall should stay in its own layer"
+	);
+	assert_eq!(
+		layers.working_memory, "WORKING_MEMORY_ONLY::follow the runtime seam",
+		"working memory should stay in its own layer"
+	);
+	assert_eq!(
+		bundle.runtime_memory_layers(),
+		RuntimeMemoryLayers::new(
+			request.conversation_history.clone(),
+			layers.long_term_recall.clone(),
+			""
+		),
+		"fresh request assembly should default to an empty working-memory layer"
+	);
+
+	let memory_context_text = layers.memory_context_text();
+	assert!(memory_context_text.contains("Rust preference"));
+	assert!(!memory_context_text.contains("Please use concise answers."));
+	assert!(!memory_context_text.contains("WORKING_MEMORY_ONLY::"));
 }
 
 #[test]

@@ -295,7 +295,9 @@ impl RuntimeService {
 		node: &TaskNode,
 		mode: RunMode,
 	) -> Result<Option<ResponseEnvelope>, RuntimeError> {
-		let memory_context = self.task_memory_context(&task.task_id);
+		let memory_context = self
+			.task_runtime_memory_layers(&task.task_id)
+			.memory_context_text();
 		let mut spec = build_agent_instance_for_node_with_history(task, node, &memory_context);
 		let capability_allowed = {
 			let mut state = self.lock_state()?;
@@ -639,7 +641,7 @@ impl RuntimeService {
 			.map(|artifact| artifact.uri)
 			.collect();
 		self.save_task(task.clone())?;
-		self.clear_memory_context(&task.task_id);
+		self.clear_runtime_memory_layers(&task.task_id);
 
 		Ok(ResponseEnvelope {
 			request_id,

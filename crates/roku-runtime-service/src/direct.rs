@@ -55,7 +55,7 @@ impl RuntimeService {
 		}
 		self.sync_pending_loop(loop_state)?;
 		self.apply_memory_write_back(request, &response, context_bundle);
-		self.clear_memory_context(&task.task_id);
+		self.clear_runtime_memory_layers(&task.task_id);
 		Ok(response)
 	}
 
@@ -96,7 +96,7 @@ impl RuntimeService {
 		}
 		self.sync_pending_loop(loop_state)?;
 		self.apply_memory_write_back(request, &response, context_bundle);
-		self.clear_memory_context(&task.task_id);
+		self.clear_runtime_memory_layers(&task.task_id);
 		Ok(response)
 	}
 

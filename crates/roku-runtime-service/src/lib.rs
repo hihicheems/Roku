@@ -54,7 +54,7 @@ use roku_orchestrator::Orchestrator;
 use roku_validation_plane::ValidationPipeline;
 
 use crate::helpers::{approval_artifact, failure_message, ticket_status_label};
-pub use crate::memory_context::ContextBundle;
+pub use crate::memory_context::{ContextBundle, RuntimeMemoryLayers};
 pub use crate::pending_loop_snapshot_store::{
 	InMemoryPendingLoopSnapshotStore, PendingLoopSnapshotStore,
 };
@@ -172,7 +172,7 @@ pub struct RuntimeService {
 	memory_policy: Arc<dyn MemoryLifecyclePolicy>,
 	state: Mutex<RuntimeState>,
 	pending_loop_snapshot_store: Arc<dyn PendingLoopSnapshotStore>,
-	memory_contexts: Mutex<HashMap<String, String>>,
+	runtime_memory_layers: Mutex<HashMap<String, RuntimeMemoryLayers>>,
 }
 
 impl RuntimeService {
@@ -346,7 +346,7 @@ impl RuntimeService {
 				experiment_registry,
 			}),
 			pending_loop_snapshot_store: Arc::new(InMemoryPendingLoopSnapshotStore::default()),
-			memory_contexts: Mutex::new(HashMap::new()),
+			runtime_memory_layers: Mutex::new(HashMap::new()),
 		}
 	}
 

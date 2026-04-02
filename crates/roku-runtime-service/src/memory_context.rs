@@ -27,6 +27,43 @@ use roku_observability::LogLevel;
 use crate::{RuntimeService, log_runtime};
 
 #[derive(Debug, Clone, Default, PartialEq)]
+pub struct RuntimeMemoryLayers {
+	pub short_term_continuity: Vec<ConversationTurn>,
+	pub long_term_recall: Vec<MemoryHit>,
+	pub working_memory: String,
+}
+
+impl RuntimeMemoryLayers {
+	pub fn new(
+		short_term_continuity: Vec<ConversationTurn>,
+		long_term_recall: Vec<MemoryHit>,
+		working_memory: impl Into<String>,
+	) -> Self {
+		Self {
+			short_term_continuity,
+			long_term_recall,
+			working_memory: working_memory.into(),
+		}
+	}
+
+	pub fn memory_context_text(&self) -> String {
+		if self.long_term_recall.is_empty() {
+			return String::new();
+		}
+		self.long_term_recall
+			.iter()
+			.map(|hit| {
+				format!(
+					"- {} | {:?} | {}",
+					hit.record.record_id, hit.record.kind, hit.record.summary
+				)
+			})
+			.collect::<Vec<_>>()
+			.join("\n")
+	}
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ContextBundle {
 	pub short_term_continuity: Vec<ConversationTurn>,
 	pub long_term_memory_hits: Vec<MemoryHit>,
@@ -37,20 +74,23 @@ pub struct ContextBundle {
 }
 
 impl ContextBundle {
+	pub fn runtime_memory_layers(&self) -> RuntimeMemoryLayers {
+		self.runtime_memory_layers_with_working_memory(String::new())
+	}
+
+	pub fn runtime_memory_layers_with_working_memory(
+		&self,
+		working_memory: impl Into<String>,
+	) -> RuntimeMemoryLayers {
+		RuntimeMemoryLayers::new(
+			self.short_term_continuity.clone(),
+			self.long_term_memory_hits.clone(),
+			working_memory,
+		)
+	}
+
 	pub fn memory_context_text(&self) -> String {
-		if self.long_term_memory_hits.is_empty() {
-			return String::new();
-		}
-		self.long_term_memory_hits
-			.iter()
-			.map(|hit| {
-				format!(
-					"- {} | {:?} | {}",
-					hit.record.record_id, hit.record.kind, hit.record.summary
-				)
-			})
-			.collect::<Vec<_>>()
-			.join("\n")
+		self.runtime_memory_layers().memory_context_text()
 	}
 }
 
