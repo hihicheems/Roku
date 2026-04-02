@@ -14,6 +14,9 @@
 
 //! Builtin tool catalog and runtime builders for Roku plugins.
 
+use std::collections::BTreeSet;
+use std::sync::LazyLock;
+
 mod availability;
 mod builders;
 mod builtin;
@@ -47,6 +50,42 @@ pub use runtime_config::{
 	ToolWorkerRuntimeConfigPatch, ToolsRuntimeConfig, ToolsRuntimeConfigError,
 	ToolsRuntimeConfigPatch, WebToolRuntimeConfig, WebToolRuntimeConfigPatch,
 };
+
+static BUILTIN_TOOL_NAMES: LazyLock<BTreeSet<String>> = LazyLock::new(|| {
+	let mut names = ToolCatalogConfig::default()
+		.tools
+		.into_iter()
+		.map(|tool| tool.name)
+		.collect::<BTreeSet<_>>();
+	names.extend(
+		[
+			"command.run",
+			"fs.exists",
+			"fs.find",
+			"fs.glob",
+			"fs.inspect",
+			"fs.list_dir",
+			"fs.read_text",
+			"python.run",
+			"table.inspect",
+			"table.list_sheets",
+			"table.preview",
+			"table.schema",
+			"web.search",
+		]
+		.into_iter()
+		.map(str::to_string),
+	);
+	names
+});
+
+pub fn builtin_tool_names() -> &'static BTreeSet<String> {
+	&BUILTIN_TOOL_NAMES
+}
+
+pub fn is_builtin_tool_name(tool_name: &str) -> bool {
+	builtin_tool_names().contains(tool_name)
+}
 
 pub fn canonical_execution_for_builtin_tool_input(
 	tool_name: &str,

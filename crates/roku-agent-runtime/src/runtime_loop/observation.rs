@@ -14,6 +14,7 @@
 
 use roku_common_types::ToolOutputEnvelope;
 use roku_plugin_host::{ToolExecutionResult, ToolRuntimeError};
+use roku_plugin_tools::is_builtin_tool_name;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -181,9 +182,7 @@ impl ToolObservation {
 }
 
 fn allows_migration_legacy_output_fallback(tool_name: &str) -> bool {
-	// `fs.exists` and `skill.execute` now have explicit envelope coverage at both the emitter and
-	// observation boundary, so their runtime paths no longer need the migration-only raw fallback.
-	!matches!(tool_name, "fs.exists" | "skill.execute")
+	!is_builtin_tool_name(tool_name)
 }
 
 fn tool_error_code(error: &ToolRuntimeError) -> &'static str {
@@ -237,7 +236,6 @@ fn classify_tool_error(tool_name: &str, error_code: &str, message: &str) -> (Str
 
 #[cfg(test)]
 mod tests {
-	use std::collections::BTreeMap;
 	use std::env;
 	use std::ffi::OsString;
 	use std::fs;
@@ -254,7 +252,8 @@ mod tests {
 	use roku_plugin_skills::{SkillRegistry, SkillRegistryError};
 	use roku_plugin_tools::{
 		ToolCatalogConfig, build_builtin_tool_runtime, build_llm_tool_runtime,
-		build_resource_catalog,
+		build_resource_catalog, build_runtime_visible_tool_availability_snapshot,
+		builtin_tool_names,
 	};
 	use serde_json::{Value, json};
 	use zip::CompressionMethod;
@@ -327,27 +326,6 @@ mod tests {
 		"generic_raw"
 	}
 
-	fn push_remaining_fallback_case(
-		inventory: &mut BTreeMap<&'static str, Vec<String>>,
-		emitter_type: &'static str,
-		tool_name: &str,
-		output: &Value,
-	) {
-		let observation = ToolObservation::from_output_value(tool_name, output);
-		assert_eq!(observation.tool_name, tool_name);
-		if let Some(message) = output.get("message").and_then(Value::as_str) {
-			assert_eq!(observation.message, message);
-		}
-
-		let contract_kind = output_contract_kind(output);
-		if contract_kind != "envelope" {
-			inventory
-				.entry(emitter_type)
-				.or_default()
-				.push(format!("{tool_name}:{contract_kind}"));
-		}
-	}
-
 	fn invoke_tool(
 		runtime: &ToolRuntime,
 		tool_name: &str,
@@ -413,125 +391,32 @@ mod tests {
 	}
 
 	#[test]
-	fn inventories_remaining_raw_output_fallback_cases_by_emitter_type() {
-		let mut remaining = BTreeMap::<&'static str, Vec<String>>::new();
+	fn builtin_tool_authority_disables_legacy_output_fallback_for_all_builtin_names() {
+		let tool_config = ToolCatalogConfig::default();
+		let catalog = build_resource_catalog(&SkillRegistry::disabled(), &tool_config);
+		let snapshot =
+			build_runtime_visible_tool_availability_snapshot(&catalog, &["inventory.describe"]);
 
-		let builtin_runtime =
-			build_builtin_tool_runtime(SkillRegistry::disabled(), &ToolCatalogConfig::default());
-		let inventory_output = invoke_tool(
-			&builtin_runtime,
-			"inventory.describe",
-			json!({
-				"task_id": "task-1",
-				"node_id": "node-1",
-				"goal": "List the current runtime inventory.",
-				"summary": "Return the local inventory state.",
-				"conversation_history": "",
-				"memory_context": "",
-				"budget_tokens": 2048_u64,
-				"time_budget_ms": 45_000_u64
-			}),
-			vec!["inventory.read".to_string()],
-			None,
-		)
-		.output;
-		push_remaining_fallback_case(
-			&mut remaining,
-			"builtin_backed",
-			"inventory.describe",
-			&inventory_output,
-		);
-
-		let fs_root = tempfile::tempdir().expect("fs root should exist");
-		fs::write(fs_root.path().join("note.txt"), "hello").expect("fs fixture should write");
-		let fs_output = invoke_tool(
-			&builtin_runtime,
-			"fs.exists",
-			json!({
-				"task_id": "task-1",
-				"node_id": "node-1",
-				"goal": "Check whether note.txt exists.",
-				"summary": "Resolve the grounded file path and report whether it exists.",
-				"conversation_history": "",
-				"budget_tokens": 2048_u64,
-				"time_budget_ms": 45_000_u64,
-				"path": "note.txt"
-			}),
-			vec!["fs.exists".to_string()],
-			Some(ExecutionResourceScope {
-				working_directory: fs_root.path().display().to_string(),
-				resolved_targets: vec![fs_root.path().join("note.txt").display().to_string()],
-				effective_read_roots: vec![fs_root.path().display().to_string()],
-				effective_write_roots: Vec::new(),
-			}),
-		)
-		.output;
-		push_remaining_fallback_case(&mut remaining, "builtin_backed", "fs.exists", &fs_output);
-
-		let _skill_root_lock = SKILL_ROOT_ENV_LOCK
-			.lock()
-			.expect("skill root lock should succeed");
-		let (skill_runtime, skill_root) = skill_execution_runtime();
-		let _skill_root = ScopedSkillRoot::set(skill_root.path().join("generated").as_path());
-		let skill_output = invoke_tool(
-			&skill_runtime,
-			"skill.execute",
-			json!({
-				"task_id": "task-2",
-				"node_id": "node-2",
-				"goal": "Run the demo skill now.",
-				"summary": "Execute the installed demo skill script.",
-				"conversation_history": "",
-				"memory_context": "",
-				"granted_capabilities": ["skill.execute"],
-				"resource_selectors": ["skill:demo-skill"],
-				"budget_tokens": 4096_u64,
-				"time_budget_ms": 120_000_u64
-			}),
-			vec!["skill.execute".to_string()],
-			None,
-		)
-		.output;
-		push_remaining_fallback_case(
-			&mut remaining,
-			"skill_backed",
-			"skill.execute",
-			&skill_output,
-		);
-
-		let legacy_other_output = json!({
-			"ok": false,
-			"error_type": "custom_error",
-			"data": { "emitter": "custom.legacy" }
-		});
-		push_remaining_fallback_case(
-			&mut remaining,
-			"other",
-			"custom.legacy",
-			&legacy_other_output,
-		);
-
-		let generic_other_output = json!({
-			"status": "ok",
-			"message": "custom raw emitter bypasses the shared envelope"
-		});
-		push_remaining_fallback_case(&mut remaining, "other", "custom.raw", &generic_other_output);
-
-		assert_eq!(
-			remaining.get("builtin_backed").cloned().unwrap_or_default(),
-			Vec::<String>::new()
-		);
-		assert_eq!(
-			remaining.get("skill_backed").cloned().unwrap_or_default(),
-			Vec::<String>::new()
-		);
-		assert_eq!(
-			remaining.get("other").cloned().unwrap_or_default(),
-			vec![
-				"custom.legacy:legacy_raw".to_string(),
-				"custom.raw:generic_raw".to_string(),
-			]
-		);
+		for tool_name in builtin_tool_names() {
+			assert!(
+				!super::allows_migration_legacy_output_fallback(tool_name),
+				"builtin tool `{tool_name}` should not use migration raw fallback"
+			);
+		}
+		for tool_name in &snapshot.enabled_tools {
+			assert!(
+				builtin_tool_names().contains(tool_name),
+				"runtime-visible tool `{tool_name}` should be part of the builtin authority set"
+			);
+			assert!(
+				!super::allows_migration_legacy_output_fallback(tool_name),
+				"runtime-visible builtin `{tool_name}` should not use migration raw fallback"
+			);
+		}
+		assert!(super::allows_migration_legacy_output_fallback(
+			"custom.legacy"
+		));
+		assert!(super::allows_migration_legacy_output_fallback("custom.raw"));
 	}
 
 	#[test]
