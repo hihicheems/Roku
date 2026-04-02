@@ -87,3 +87,7 @@ alias t := test
 # Restart the background OpenViking provider with the same health-gated flow.
 @openviking-restart:
     ./scripts/dev-openviking.sh restart
+
+# Run the repo-local Ralph outer loop using Codex CLI.
+@ralph iterations="10" state_dir=".ralph":
+    ./scripts/ralph/ralph.sh --state-dir {{state_dir}} {{iterations}}

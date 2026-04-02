@@ -26,6 +26,7 @@ logs/
 .codex/
 .env
 .roku/
+.ralph/
 run/
 tmp/
 prompts/
