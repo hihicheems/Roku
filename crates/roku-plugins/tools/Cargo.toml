@@ -20,7 +20,7 @@ roku-plugin-llm = { path = "../llm" }
 roku-plugin-skills = { path = "../skills" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 shlex = "1"
 toml = "1.1"
 thiserror = "2"
