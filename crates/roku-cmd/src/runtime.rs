@@ -252,9 +252,22 @@ pub(crate) fn prepare_memory_artifacts_from_env() -> Result<String, CommandError
 	layout.ensure_dirs().map_err(CommandError::Io)?;
 	let configs = load_runtime_configs(&layout)?;
 	let generated = prepare_runtime_generated_artifacts(&configs)?;
+	let lifecycle = default_memory_lifecycle_report(&configs.memory);
 	serde_json::to_string_pretty(&json!({
 		"enabled": configs.memory.enabled,
 		"backend": configs.memory.backend.as_str(),
+		"lifecycle": {
+			"recall": {
+				"requested": lifecycle.recall.requested,
+				"effective": lifecycle.recall.effective,
+				"blocked_reason": lifecycle.recall.blocked_reason,
+			},
+			"write_back": {
+				"requested": lifecycle.write_back.requested,
+				"effective": lifecycle.write_back.effective,
+				"blocked_reason": lifecycle.write_back.blocked_reason,
+			},
+		},
 		"backends": {
 			"openviking": configs.memory.backends.openviking.summary_json(),
 			"sqlite": configs.memory.backends.sqlite.summary_json(),
@@ -264,6 +277,66 @@ pub(crate) fn prepare_memory_artifacts_from_env() -> Result<String, CommandError
 			.map(|path| path.display().to_string()),
 	}))
 	.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemoryLifecycleToggleReport {
+	requested: bool,
+	effective: bool,
+	blocked_reason: Option<&'static str>,
+}
+
+impl MemoryLifecycleToggleReport {
+	const fn disabled() -> Self {
+		Self {
+			requested: false,
+			effective: false,
+			blocked_reason: None,
+		}
+	}
+
+	const fn enabled() -> Self {
+		Self {
+			requested: true,
+			effective: true,
+			blocked_reason: None,
+		}
+	}
+
+	const fn blocked(reason: &'static str) -> Self {
+		Self {
+			requested: true,
+			effective: false,
+			blocked_reason: Some(reason),
+		}
+	}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemoryLifecycleReport {
+	recall: MemoryLifecycleToggleReport,
+	write_back: MemoryLifecycleToggleReport,
+}
+
+fn default_memory_lifecycle_report(memory_config: &MemoryRuntimeConfig) -> MemoryLifecycleReport {
+	let recall = if memory_config.enabled && memory_config.recall.enabled {
+		MemoryLifecycleToggleReport::enabled()
+	} else {
+		MemoryLifecycleToggleReport::disabled()
+	};
+	let write_back = if !memory_config.enabled || !memory_config.write.enabled {
+		MemoryLifecycleToggleReport::disabled()
+	} else if !memory_config.recall.enabled {
+		MemoryLifecycleToggleReport::blocked(
+			"runtime.memory.recall.enabled is false, so the default lifecycle policy disables write-back",
+		)
+	} else {
+		MemoryLifecycleToggleReport::blocked(
+			"default lifecycle policy keeps automatic write-back disabled",
+		)
+	};
+
+	MemoryLifecycleReport { recall, write_back }
 }
 
 pub(crate) fn show_memory_health_from_env() -> Result<String, CommandError> {
@@ -571,14 +644,14 @@ fn wire_default_long_term_memory(
 	subsystem: roku_memory::ResolvedMemorySubsystem,
 	memory_config: &MemoryRuntimeConfig,
 ) -> Result<RuntimeService, CommandError> {
-	let policy: Arc<dyn MemoryLifecyclePolicy> =
-		if memory_config.enabled && memory_config.recall.enabled {
-			Arc::new(ConservativeMemoryLifecyclePolicy {
-				recall_limit: memory_config.recall.top_k.max(1),
-			})
-		} else {
-			Arc::new(DisabledMemoryLifecyclePolicy)
-		};
+	let lifecycle = default_memory_lifecycle_report(memory_config);
+	let policy: Arc<dyn MemoryLifecyclePolicy> = if lifecycle.recall.effective {
+		Arc::new(ConservativeMemoryLifecyclePolicy {
+			recall_limit: memory_config.recall.top_k.max(1),
+		})
+	} else {
+		Arc::new(DisabledMemoryLifecyclePolicy)
+	};
 	Ok(service
 		.with_long_term_memory_backend(subsystem.long_term)
 		.with_memory_lifecycle_policy(policy))
@@ -850,8 +923,9 @@ pub(crate) fn apply_request_env_overrides(
 
 #[cfg(test)]
 mod tests {
+	use std::fs;
 	use std::io::{Cursor, Write};
-	use std::sync::Arc;
+	use std::sync::{Arc, LazyLock, Mutex};
 
 	use roku_common_types::{RequestId, ResponseEnvelope, ResponseStatus};
 	use roku_plugin_skills::{
@@ -860,6 +934,8 @@ mod tests {
 	use serde_json::Value;
 
 	use super::*;
+
+	static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 	#[derive(Clone)]
 	struct StaticArchiveFetcher {
@@ -949,6 +1025,7 @@ mod tests {
 
 	#[test]
 	fn request_env_overrides_restore_skill_roots_after_drop() {
+		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
 		let original_skill_root = std::env::var_os("ROKU_SKILL_ROOT");
 		let original_generated_root = std::env::var_os("ROKU_GENERATED_SKILL_ROOT");
 		let tempdir = tempfile::tempdir().expect("temp skill root should exist");
@@ -975,6 +1052,50 @@ mod tests {
 		assert_eq!(
 			std::env::var_os("ROKU_GENERATED_SKILL_ROOT"),
 			original_generated_root
+		);
+	}
+
+	#[test]
+	fn prepare_memory_artifacts_reports_write_back_as_effectively_disabled() {
+		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
+		let tempdir = tempfile::tempdir().expect("temp root should exist");
+		let config_dir = tempdir.path().join("config");
+		fs::create_dir_all(&config_dir).expect("config dir should exist");
+		let runtime_toml = config_dir.join("runtime.toml");
+		fs::write(
+			&runtime_toml,
+			r#"
+[runtime.memory]
+enabled = true
+
+[runtime.memory.recall]
+enabled = true
+
+[runtime.memory.write]
+enabled = true
+"#,
+		)
+		.expect("runtime config should be written");
+
+		let _home_guard = EnvOverrideGuard::set_path("ROKU_HOME", tempdir.path());
+		let _config_guard = EnvOverrideGuard::set_path("ROKU_RUNTIME_CONFIG_PATH", &runtime_toml);
+
+		let output = prepare_memory_artifacts_from_env()
+			.expect("prepare-config output should render effective lifecycle state");
+		let output_json: Value =
+			serde_json::from_str(&output).expect("prepare-config output should be valid json");
+
+		assert_eq!(output_json["lifecycle"]["recall"]["requested"], true);
+		assert_eq!(output_json["lifecycle"]["recall"]["effective"], true);
+		assert_eq!(
+			output_json["lifecycle"]["recall"]["blocked_reason"],
+			Value::Null
+		);
+		assert_eq!(output_json["lifecycle"]["write_back"]["requested"], true);
+		assert_eq!(output_json["lifecycle"]["write_back"]["effective"], false);
+		assert_eq!(
+			output_json["lifecycle"]["write_back"]["blocked_reason"],
+			"default lifecycle policy keeps automatic write-back disabled"
 		);
 	}
 
