@@ -580,6 +580,76 @@ final_infra_retry:final-eval)
 		}' >"$LAST_MESSAGE_FILE"
 	fi
 	;;
+final_pass_dirty:execute)
+	echo "story done" >"$REPO_ROOT/story.txt"
+	write_execution_artifact \
+		"$EXEC_ARTIFACT" \
+		"ok" \
+		"implemented final-pass-dirty scenario story" \
+		'["story.txt"]' \
+		'[{"command":"echo final-pass-dirty","status":"passed"}]' \
+		'[{"criterionId":"AC-1","criterionText":"Typecheck passes","claimedStatus":"met","evidence":"echo final-pass-dirty"}]' \
+		'fix(scripts): final pass dirty scenario story' \
+		'["write story.txt"]' \
+		'["allow finalization-only corrective round when needed"]'
+	printf 'execution done\n' >"$LAST_MESSAGE_FILE"
+	;;
+final_pass_dirty:eval)
+	write_eval_message \
+		"pass" \
+		"story itself is acceptable" \
+		'[{"criterionId":"AC-1","criterionText":"Typecheck passes","judgment":"met","evidence":"echo final-pass-dirty"}]' \
+		'[]' \
+		'[]' \
+		"pass" \
+		"story passes" \
+		0
+	;;
+final_pass_dirty:final-eval)
+	if [[ ! -f "$REPO_ROOT/.mock-state/final-pass-dirty-created" ]]; then
+		printf 'final dirty\n' >"$REPO_ROOT/final-pass-dirty.txt"
+		touch "$REPO_ROOT/.mock-state/final-pass-dirty-created"
+	fi
+	jq -n '{
+		status: "pass",
+		summary: "whole PRD still holds even though the worktree still needs a final corrective commit",
+		prdReview: {
+			goals: [{ id: "G-1", text: "Finish the requested workflow", judgment: "met", evidence: ["story.txt exists", "final-pass-dirty.txt exists"] }],
+			userStories: [{ id: "US-001", text: "final pass dirty story", judgment: "met", evidence: ["story commit exists"] }],
+			functionalRequirements: [{ id: "FR-1", text: "Typecheck passes", judgment: "met", evidence: ["echo final-pass-dirty"] }],
+			nonGoals: [{ id: "NG-1", text: "Do not widen scope", judgment: "met", evidence: ["bounded finalization only"] }]
+		},
+		scopeDrift: {
+			underfit: { present: false, summary: "", evidence: [] },
+			overreach: { present: false, summary: "", evidence: [] },
+			cross_story_conflict: { present: false, summary: "", evidence: [] },
+			shared_constraint_loss: { present: false, summary: "", evidence: [] }
+		},
+		findings: [],
+		requiredFixes: [],
+		verdictSummary: {
+			decision: "pass",
+			primaryReason: "aggregate review passed",
+			requiredFixesCount: 0,
+			overallDriftLevel: "low"
+		}
+	}' >"$LAST_MESSAGE_FILE"
+	;;
+final_pass_dirty:final-fix)
+	jq -n '{
+		status: "ok",
+		summary: "prepared a bounded final corrective commit for the already-reviewed dirty worktree",
+		filesChanged: ["final-pass-dirty.txt"],
+		mechanicalChecks: [{"command":"echo finalization-only","status":"skipped"}],
+		addressedFindings: [],
+		proposedCommit: {
+			title: "fix(scripts): finalize bounded run-level corrective changes",
+			bodyBullets: ["record the dirty worktree that already passed final aggregate review"]
+		},
+		learnings: ["final eval pass may still require a final corrective commit when the reviewed worktree is dirty"]
+	}' >"$FINAL_FIX_ARTIFACT"
+	printf 'final fix done\n' >"$LAST_MESSAGE_FILE"
+	;;
 adopt:execute)
 	if [[ ! -f "$REPO_ROOT/dirty.txt" ]]; then
 		printf 'dirty\n' >"$REPO_ROOT/dirty.txt"
@@ -882,6 +952,33 @@ run_case_final_infra_retry() {
 	assert_eq "pass" "$(jq -r '.status' "$tmp_dir/.ralph/runs/$(basename "$(cat "$tmp_dir/.ralph/.last-run")")/final.eval.semantic-eval.json")" "final infra retry should eventually pass"
 }
 
+run_case_final_pass_dirty() {
+	local tmp_dir="$1/final-pass-dirty"
+	setup_temp_repo "$tmp_dir"
+	write_prd "$tmp_dir" "final pass dirty story"
+	set +e
+	(
+		cd "$tmp_dir"
+		RALPH_CODEX_BIN="$tmp_dir/mock-codex.sh" \
+		RALPH_TEST_SCENARIO="final_pass_dirty" \
+		./scripts/ralph/ralph.sh --state-dir .ralph 1
+	)
+	local rc=$?
+	set -e
+	assert_eq "1" "$rc" "final-pass-dirty scenario should stop before implicit finalization"
+	assert_eq "true" "$(jq -r '.userStories[0].passes' "$tmp_dir/.ralph/prd.json")" "final-pass-dirty scenario should preserve completed story state"
+	assert_eq "final" "$(jq -r '.scope' "$tmp_dir/.ralph/active-story.json")" "final-pass-dirty scenario should preserve a final checkpoint"
+	(
+		cd "$tmp_dir"
+		RALPH_CODEX_BIN="$tmp_dir/mock-codex.sh" \
+		RALPH_TEST_SCENARIO="final_pass_dirty" \
+		./scripts/ralph/ralph.sh --state-dir .ralph --adopt-dirty-worktree FINAL --yes 1
+	)
+	assert_file "$tmp_dir/.ralph/runs/$(basename "$(cat "$tmp_dir/.ralph/.last-run")")/final.fix-01.exec.fix-result.json"
+	assert_eq "3" "$(git -C "$tmp_dir" rev-list --count HEAD)" "final-pass-dirty scenario should create a final corrective commit"
+	assert_eq "pass" "$(jq -r '.status' "$tmp_dir/.ralph/runs/$(basename "$(cat "$tmp_dir/.ralph/.last-run")")/final.eval.semantic-eval.json")" "final-pass-dirty scenario should end with final pass"
+}
+
 run_case_missing_prd_source() {
 	local tmp_dir="$1/missing-prd-source"
 	setup_temp_repo "$tmp_dir"
@@ -912,6 +1009,7 @@ main() {
 	run_case_final_fix "$tmp_root"
 	run_case_final_hard_fail "$tmp_root"
 	run_case_final_infra_retry "$tmp_root"
+	run_case_final_pass_dirty "$tmp_root"
 	run_case_missing_prd_source "$tmp_root"
 
 	echo "Ralph semantic eval harness tests passed."

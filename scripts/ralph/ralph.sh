@@ -71,6 +71,8 @@ EOF
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
+RUN_STARTED_EPOCH="$(date +%s)"
+RUN_DURATION_PRINTED=0
 
 TOOL="codex"
 MAX_ITERATIONS=10
@@ -252,6 +254,34 @@ ensure_prd_source_exists() {
 
 timestamp_utc() {
 	date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+format_elapsed_human() {
+	local total_seconds="$1"
+	local hours minutes seconds
+	hours=$((total_seconds / 3600))
+	minutes=$(((total_seconds % 3600) / 60))
+	seconds=$((total_seconds % 60))
+
+	if [[ "$hours" -gt 0 ]]; then
+		printf '%dh %02dm %02ds\n' "$hours" "$minutes" "$seconds"
+	elif [[ "$minutes" -gt 0 ]]; then
+		printf '%dm %02ds\n' "$minutes" "$seconds"
+	else
+		printf '%ds\n' "$seconds"
+	fi
+}
+
+print_run_elapsed_time() {
+	if [[ "$RUN_DURATION_PRINTED" -eq 1 ]]; then
+		return
+	fi
+
+	local ended_epoch elapsed_seconds
+	ended_epoch="$(date +%s)"
+	elapsed_seconds=$((ended_epoch - RUN_STARTED_EPOCH))
+	RUN_DURATION_PRINTED=1
+	echo "Elapsed time: $(format_elapsed_human "$elapsed_seconds")"
 }
 
 relative_to_root() {
@@ -521,6 +551,53 @@ maybe_adopt_dirty_worktree() {
 		return 1
 	fi
 
+	if [[ "$ADOPT_DIRTY_STORY_ID" == "FINAL" ]]; then
+		if [[ "$(dirty_worktree_count)" -eq 0 ]]; then
+			echo "Nothing to adopt: the worktree is clean." >&2
+			exit 1
+		fi
+
+		local run_dir eval_artifact_path next_fix_round
+		run_dir=""
+		eval_artifact_path=""
+		next_fix_round=1
+
+		if [[ -f "$ACTIVE_STORY_FILE" ]]; then
+			if [[ "$(jq -r '.scope // "story"' "$ACTIVE_STORY_FILE")" != "final" ]]; then
+				echo "Cannot adopt dirty worktree into FINAL while a story checkpoint is active." >&2
+				exit 1
+			fi
+			run_dir="$(jq -r '.runDir // ""' "$ACTIVE_STORY_FILE")"
+			eval_artifact_path="$(jq -r '.evalArtifactPath // ""' "$ACTIVE_STORY_FILE")"
+			if [[ "$(jq -r '.phase // ""' "$ACTIVE_STORY_FILE")" == "final_fix" ]]; then
+				next_fix_round="$(jq -r '(.fixRound // 0) + 1' "$ACTIVE_STORY_FILE")"
+			fi
+		else
+			run_dir="$(latest_run_dir || true)"
+			eval_artifact_path="$(latest_final_eval_artifact || true)"
+		fi
+
+		if [[ -z "$run_dir" || -z "$eval_artifact_path" || ! -f "$eval_artifact_path" ]]; then
+			echo "Cannot adopt dirty worktree into FINAL without an existing final eval artifact." >&2
+			exit 1
+		fi
+
+		if [[ "$(jq -r '.status // empty' "$eval_artifact_path")" != "pass" ]]; then
+			echo "Cannot adopt dirty worktree into FINAL unless the current final eval already passed." >&2
+			exit 1
+		fi
+
+		echo "Preparing dirty worktree adoption into FINAL."
+		show_dirty_worktree_summary
+		if ! adopt_dirty_worktree_confirmed; then
+			exit 1
+		fi
+
+		write_active_story_checkpoint "FINAL" 0 "final_fix" "$next_fix_round" "$run_dir" "" "$eval_artifact_path" "final"
+		echo "Adopted dirty worktree into FINAL finalization round."
+		return 0
+	fi
+
 	if [[ -f "$ACTIVE_STORY_FILE" ]]; then
 		echo "Cannot adopt a dirty worktree while an active story checkpoint already exists." >&2
 		exit 1
@@ -554,6 +631,8 @@ stop_for_dirty_worktree() {
 	show_dirty_worktree_summary >&2 || true
 	echo "Either clean the worktree first or adopt it explicitly:" >&2
 	echo "  ./scripts/ralph/ralph.sh --adopt-dirty-worktree <story-id> --yes" >&2
+	echo "If all stories are already complete and a passed final eval exists, you may instead adopt the current diff into FINAL:" >&2
+	echo "  ./scripts/ralph/ralph.sh --adopt-dirty-worktree FINAL --yes" >&2
 	exit 1
 }
 
@@ -564,11 +643,11 @@ ensure_story_context() {
 	fi
 
 	if [[ "$(dirty_worktree_count)" -gt 0 ]]; then
-		if [[ -f "$ACTIVE_STORY_FILE" ]]; then
-			return 0
-		fi
 		if [[ -n "$ADOPT_DIRTY_STORY_ID" ]]; then
 			maybe_adopt_dirty_worktree
+			return 0
+		fi
+		if [[ -f "$ACTIVE_STORY_FILE" ]]; then
 			return 0
 		fi
 		stop_for_dirty_worktree
@@ -671,6 +750,7 @@ render_final_fix_prompt() {
 	local final_eval_artifact="$2"
 	local fix_artifact_path="$3"
 	local fix_round="$4"
+	local fix_mode="$5"
 
 	cat >"$prompt_path" <<EOF
 # Ralph Final Fix Context
@@ -678,6 +758,7 @@ render_final_fix_prompt() {
 Repository root: $ROOT_DIR
 Ralph state directory: $STATE_DIR
 Current final fix round: $fix_round of $RALPH_FINAL_FIX_MAX_ROUNDS
+Final fix mode: $fix_mode
 
 Canonical source of truth for this run:
 - PRD source snapshot: $PRD_SOURCE_FILE
@@ -694,8 +775,23 @@ Do not modify:
 - $PROGRESS_FILE
 - $COMPLETED_STORIES_FILE
 
+Current dirty worktree summary:
+$(show_dirty_worktree_summary)
+
 EOF
 	cat "$SCRIPT_DIR/FINAL_FIX.md" >>"$prompt_path"
+}
+
+final_fix_mode_for_eval_artifact() {
+	local final_eval_artifact="$1"
+	if [[ -f "$final_eval_artifact" ]] && jq -e '
+		.status == "pass"
+		and ((.requiredFixes | length) == 0)
+	' "$final_eval_artifact" >/dev/null 2>&1; then
+		printf '%s\n' "finalize-dirty-worktree"
+	else
+		printf '%s\n' "bounded-corrective-change"
+	fi
 }
 
 show_missing_prd_help() {
@@ -1504,17 +1600,18 @@ process_final_phase() {
 
 	while true; do
 		if [[ "$phase" == "final_fix" ]]; then
-			local fix_label fix_prefix fix_prompt fix_raw fix_rc fix_status
+			local fix_label fix_prefix fix_prompt fix_raw fix_rc fix_status fix_mode
 			fix_label="$(printf 'final.fix-%02d.exec' "$fix_round")"
 			fix_prefix="$run_dir/$fix_label"
 			fix_prompt="$fix_prefix.prompt.md"
 			fix_raw="$fix_prefix.fix-result.raw.json"
 			final_fix_artifact_path="$fix_prefix.fix-result.json"
+			fix_mode="$(final_fix_mode_for_eval_artifact "$final_eval_artifact_path")"
 
-			render_final_fix_prompt "$fix_prompt" "$final_eval_artifact_path" "$fix_raw" "$fix_round"
+			render_final_fix_prompt "$fix_prompt" "$final_eval_artifact_path" "$fix_raw" "$fix_round" "$fix_mode"
 			write_active_story_checkpoint "FINAL" 0 "final_fix" "$fix_round" "$run_dir" "$final_fix_artifact_path" "$final_eval_artifact_path" "final"
 
-			echo "  Running final fix round $fix_round"
+			echo "  Running final fix round $fix_round ($fix_mode)"
 			if run_codex_purpose "execute" "$fix_prompt" "$run_dir" "$fix_label"; then
 				fix_rc=0
 			else
@@ -1608,7 +1705,12 @@ process_final_phase() {
 				final_commit_sha=""
 				if [[ "$(dirty_worktree_count)" -gt 0 ]]; then
 					if [[ "$fix_round" -eq 0 ]]; then
-						echo "  Final eval passed with unexpected dirty worktree and no final fix round. Preserving state." >&2
+						echo "  Final eval passed, but the worktree became dirty outside a final corrective round." >&2
+						show_dirty_worktree_summary >&2 || true
+						echo "  Clean or stash those files and rerun Ralph." >&2
+						echo "  If this exact diff is intentionally part of the reviewed final state, adopt it explicitly:" >&2
+						echo "    ./scripts/ralph/ralph.sh --state-dir $(relative_to_root "$STATE_DIR") --adopt-dirty-worktree FINAL --yes" >&2
+						write_active_story_checkpoint "FINAL" 0 "final_eval" "$fix_round" "$run_dir" "$final_fix_artifact_path" "$final_eval_artifact_path" "final"
 						return 1
 					fi
 					commit_source="$(extract_commit_json_path "$final_eval_artifact_path" "$final_fix_artifact_path")"
@@ -1695,6 +1797,7 @@ main() {
 			archive_current_state "already_completed"
 			echo "<promise>COMPLETE</promise>"
 			echo "Progress log: $(relative_to_root "$PROGRESS_FILE")"
+			print_run_elapsed_time
 			exit 0
 		fi
 	fi
@@ -1738,6 +1841,7 @@ main() {
 				echo "Completed after final evaluation."
 				echo "Progress log: $(relative_to_root "$PROGRESS_FILE")"
 				echo "Run logs: $(relative_to_root "$run_dir")"
+				print_run_elapsed_time
 				exit 0
 			fi
 			story_id="$(jq -r '.storyId' "$ACTIVE_STORY_FILE")"
@@ -1769,6 +1873,7 @@ main() {
 				echo "Completed after final evaluation."
 				echo "Progress log: $(relative_to_root "$PROGRESS_FILE")"
 				echo "Run logs: $(relative_to_root "$run_dir")"
+				print_run_elapsed_time
 				exit 0
 			fi
 			story_phase="execute"
@@ -1811,6 +1916,7 @@ main() {
 			echo "Completed after final evaluation at story iteration $i of $MAX_ITERATIONS"
 			echo "Progress log: $(relative_to_root "$PROGRESS_FILE")"
 			echo "Run logs: $(relative_to_root "$run_dir")"
+			print_run_elapsed_time
 			exit 0
 		fi
 
@@ -1825,6 +1931,7 @@ main() {
 	echo "Rerun \`just ralph\` to continue, or pass a larger iteration cap for this launch."
 	echo "Progress log: $(relative_to_root "$PROGRESS_FILE")"
 	echo "Run logs: $(relative_to_root "$run_dir")"
+	print_run_elapsed_time
 	exit 1
 }
 
