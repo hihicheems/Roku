@@ -1348,7 +1348,10 @@ mod tests {
 		AskUserPayload, GenericAgentRuntime, IntentFamily, LoopContext, LoopState, LoopStatus,
 		RouteDecision, RouteRisk,
 	};
-	use roku_common_types::{RequestEnvelope, RequestId, ResourceSelector, ResponseStatus};
+	use roku_common_types::{
+		RequestEnvelope, RequestId, ResourceSelector, ResponseStatus, RuntimeLoopTrace, TaskId,
+		TaskState,
+	};
 	use roku_memory::{
 		NoopLongTermMemoryBackend, NoopPendingLoopSnapshotBackend, PendingLoopSnapshot,
 		PendingLoopSnapshotBackend, PendingLoopSnapshotError,
@@ -1650,6 +1653,39 @@ mod tests {
 			.expect("telegram request should resume through the shared substrate");
 
 		assert_eq!(response.response.status, ResponseStatus::Succeeded);
+		let task_id = TaskId(format!("task-{}", response.response.request_id.0));
+		let task = handler
+			.service
+			.get_task(&task_id)
+			.expect("task lookup should succeed")
+			.expect("resumed telegram task should be persisted");
+		assert_eq!(task.state, TaskState::Succeeded);
+		assert!(task.graph.is_none());
+		let last_result = task
+			.last_result
+			.as_ref()
+			.expect("successful resumed telegram task should persist a terminal result");
+		let payload = serde_json::from_str::<Value>(&last_result.payload)
+			.expect("terminal payload should decode");
+		let trace: RuntimeLoopTrace = serde_json::from_value(payload["probe_trace"].clone())
+			.expect("probe trace should decode");
+		assert_eq!(trace.status, "succeeded");
+		assert_eq!(
+			trace.final_outcome.terminal_action.as_deref(),
+			Some("final_answer")
+		);
+		assert!(trace.steps.iter().all(|step| {
+			step.visible_resources_before.as_ref()
+				== Some(&vec![ResourceSelector::tool(
+					"inventory.describe".to_string(),
+				)])
+		}));
+		let experiment = handler
+			.service
+			.get_experiment_run(&task_id)
+			.expect("experiment lookup should succeed")
+			.expect("resumed telegram task should record an experiment run");
+		assert_eq!(experiment.strategy, "runtime_loop_resume");
 		assert!(
 			backend.snapshot(&session.session_id).is_none(),
 			"Telegram request flow should consume the shared pending loop snapshot"
@@ -1663,6 +1699,13 @@ mod tests {
 				.is_none(),
 			"Telegram request flow should not persist a Telegram-only pending-loop mirror"
 		);
+		let turns = handler
+			.transport_state
+			.load_short_term_continuity(&session.session_id, 8)
+			.expect("turns should load");
+		assert_eq!(turns.len(), 2);
+		assert_eq!(turns[0].content, selected_topic);
+		assert_eq!(turns[1].content, response.response.message);
 
 		let events = backend.events();
 		assert!(
