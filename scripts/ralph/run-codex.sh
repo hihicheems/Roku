@@ -5,7 +5,7 @@ set -euo pipefail
 usage() {
 	cat <<'EOF'
 Usage:
-  ./scripts/ralph/run-codex.sh --purpose <execute|eval> --repo-root <path> --prompt-file <path> --run-dir <path> --iteration <label>
+  ./scripts/ralph/run-codex.sh --purpose <execute|eval|final-eval> --repo-root <path> --prompt-file <path> --run-dir <path> --iteration <label>
 
 Environment:
   Shared:
@@ -37,6 +37,20 @@ Environment:
                                  Grace period between TERM and KILL on evaluator timeout (default: 5)
     RALPH_EVAL_RUNNER_MAX_RETRIES
                                  Runner retry count for evaluator transport failures (default: 0)
+
+  Final eval:
+    RALPH_FINAL_EVAL_MODEL             Optional final evaluator model override
+    RALPH_FINAL_EVAL_PROFILE           Optional final evaluator Codex profile name
+    RALPH_FINAL_EVAL_SANDBOX           Final evaluator sandbox mode (default: read-only)
+    RALPH_FINAL_EVAL_APPROVAL          Final evaluator approval mode (default: never)
+    RALPH_FINAL_EVAL_ARGS              Extra shell-split final evaluator args
+    RALPH_FINAL_EVAL_TIMEOUT_SECONDS   Hard timeout for one final evaluator attempt (default: 1200)
+    RALPH_FINAL_EVAL_RETRY_WAIT_SECONDS
+                                       Base wait before retrying a retryable final evaluator failure (default: 10)
+    RALPH_FINAL_EVAL_TERM_GRACE_SECONDS
+                                       Grace period between TERM and KILL on final evaluator timeout (default: 5)
+    RALPH_FINAL_EVAL_RUNNER_MAX_RETRIES
+                                       Runner retry count for final evaluator transport failures (default: 0)
 
 Behavior:
   - Writes per-attempt JSONL and stderr logs under <run-dir>
@@ -97,7 +111,7 @@ if [[ -z "$PURPOSE" || -z "$REPO_ROOT" || -z "$PROMPT_FILE" || -z "$RUN_DIR" || 
 	exit 1
 fi
 
-if [[ "$PURPOSE" != "execute" && "$PURPOSE" != "eval" ]]; then
+if [[ "$PURPOSE" != "execute" && "$PURPOSE" != "eval" && "$PURPOSE" != "final-eval" ]]; then
 	echo "unsupported purpose: $PURPOSE" >&2
 	exit 1
 fi
@@ -114,7 +128,7 @@ if [[ "$PURPOSE" == "execute" ]]; then
 	CODEX_MAX_RETRIES="${RALPH_CODEX_MAX_RETRIES:-5}"
 	CODEX_RETRY_WAIT_SECONDS="${RALPH_CODEX_RETRY_WAIT_SECONDS:-10}"
 	CODEX_TERM_GRACE_SECONDS="${RALPH_CODEX_TERM_GRACE_SECONDS:-5}"
-else
+elif [[ "$PURPOSE" == "eval" ]]; then
 	CODEX_MODEL="${RALPH_EVAL_MODEL:-${RALPH_CODEX_MODEL:-}}"
 	CODEX_PROFILE="${RALPH_EVAL_PROFILE:-${RALPH_CODEX_PROFILE:-}}"
 	CODEX_SANDBOX="${RALPH_EVAL_SANDBOX:-read-only}"
@@ -124,6 +138,16 @@ else
 	CODEX_MAX_RETRIES="${RALPH_EVAL_RUNNER_MAX_RETRIES:-0}"
 	CODEX_RETRY_WAIT_SECONDS="${RALPH_EVAL_RETRY_WAIT_SECONDS:-10}"
 	CODEX_TERM_GRACE_SECONDS="${RALPH_EVAL_TERM_GRACE_SECONDS:-5}"
+else
+	CODEX_MODEL="${RALPH_FINAL_EVAL_MODEL:-${RALPH_EVAL_MODEL:-${RALPH_CODEX_MODEL:-}}}"
+	CODEX_PROFILE="${RALPH_FINAL_EVAL_PROFILE:-${RALPH_EVAL_PROFILE:-${RALPH_CODEX_PROFILE:-}}}"
+	CODEX_SANDBOX="${RALPH_FINAL_EVAL_SANDBOX:-read-only}"
+	CODEX_APPROVAL="${RALPH_FINAL_EVAL_APPROVAL:-never}"
+	CODEX_ARGS="${RALPH_FINAL_EVAL_ARGS:-${RALPH_EVAL_ARGS:-}}"
+	CODEX_TIMEOUT_SECONDS="${RALPH_FINAL_EVAL_TIMEOUT_SECONDS:-1200}"
+	CODEX_MAX_RETRIES="${RALPH_FINAL_EVAL_RUNNER_MAX_RETRIES:-0}"
+	CODEX_RETRY_WAIT_SECONDS="${RALPH_FINAL_EVAL_RETRY_WAIT_SECONDS:-10}"
+	CODEX_TERM_GRACE_SECONDS="${RALPH_FINAL_EVAL_TERM_GRACE_SECONDS:-5}"
 fi
 
 if ! command -v "$CODEX_BIN" >/dev/null 2>&1; then

@@ -11,12 +11,16 @@ It is a developer workflow for working on Roku. It is not part of Roku product r
   - owns story selection, semantic gating, commits, `passes=true`, and progress updates
 - `scripts/ralph/run-codex.sh`
   - thin wrapper around `codex exec`
-  - supports `--purpose execute|eval`
+  - supports `--purpose execute|eval|final-eval`
   - writes per-round JSONL events, stderr logs, and final-message files
 - `scripts/ralph/CODEX.md`
   - execution-only prompt contract
 - `scripts/ralph/EVAL.md`
   - semantic-eval prompt contract
+- `scripts/ralph/FINAL_EVAL.md`
+  - run-level final eval prompt contract
+- `scripts/ralph/FINAL_FIX.md`
+  - bounded final-fix prompt contract
 - `scripts/ralph/prd.json.example`
   - example PRD shape for `.ralph/prd.json`
 - `scripts/ralph/test-semantic-eval.sh`
@@ -29,7 +33,9 @@ It is a developer workflow for working on Roku. It is not part of Roku product r
 Runtime state lives under `.ralph/` and is gitignored:
 
 - `.ralph/prd.json`
+- `.ralph/prd-source.md`
 - `.ralph/progress.txt`
+- `.ralph/completed-stories.json`
 - `.ralph/active-story.json`
 - `.ralph/archive/<timestamp>-<branch>-<prd-hash>.prd.json`
 - `.ralph/archive/<timestamp>-<branch>-<prd-hash>.progress.txt`
@@ -46,6 +52,10 @@ Story completion now flows through:
 
 `execute -> mechanical gate -> semantic eval -> optional fix/re-eval -> commit -> passes=true -> progress`
 
+Run completion now flows through:
+
+`all stories passed -> final eval -> optional final fix/re-eval -> archive -> COMPLETE`
+
 Important ownership rules:
 
 - the execution agent does **not** commit
@@ -57,6 +67,7 @@ Important ownership rules:
   - append progress
 
 Every story defaults to mandatory semantic eval before completion.
+Every completed run also defaults to mandatory final eval before Ralph may declare the PRD complete.
 
 ## Prerequisites
 
@@ -92,6 +103,18 @@ Optional environment knobs:
   - `RALPH_EVAL_RUNNER_MAX_RETRIES`
 - semantic loop:
   - `RALPH_SEMANTIC_MAX_FIX_ROUNDS`
+- final eval:
+  - `RALPH_FINAL_EVAL_MODEL`
+  - `RALPH_FINAL_EVAL_PROFILE`
+  - `RALPH_FINAL_EVAL_ARGS`
+  - `RALPH_FINAL_EVAL_SANDBOX`
+  - `RALPH_FINAL_EVAL_APPROVAL`
+  - `RALPH_FINAL_EVAL_TIMEOUT_SECONDS`
+  - `RALPH_FINAL_EVAL_MAX_RETRIES`
+  - `RALPH_FINAL_EVAL_RETRY_WAIT_SECONDS`
+  - `RALPH_FINAL_EVAL_TERM_GRACE_SECONDS`
+  - `RALPH_FINAL_EVAL_RUNNER_MAX_RETRIES`
+  - `RALPH_FINAL_FIX_MAX_ROUNDS`
 
 ## Quick Start
 
@@ -100,6 +123,7 @@ Optional environment knobs:
 ```bash
 mkdir -p .ralph
 cp scripts/ralph/prd.json.example .ralph/prd.json
+cp /path/to/source-prd.md .ralph/prd-source.md
 ```
 
 2. Edit `.ralph/prd.json` for your feature.
@@ -167,6 +191,15 @@ Top-level eval status:
 
 Eval output is consumed as JSON and then persisted by Ralph. This keeps evaluator runs compatible with the default read-only sandbox.
 
+Each final eval round must yield a canonical artifact:
+
+- `.ralph/runs/<run>/final.eval.semantic-eval.json`
+
+If final eval enters corrective rounds, Ralph also writes:
+
+- `.ralph/runs/<run>/final.fix-XX.exec.fix-result.json`
+- `.ralph/runs/<run>/final.fix-XX.eval.semantic-eval.json`
+
 ## Semantic Gating Rules
 
 - `execution.status=ok` is required before semantic eval runs
@@ -176,6 +209,10 @@ Eval output is consumed as JSON and then persisted by Ralph. This keeps evaluato
 - `semantic-eval.status=soft_fail` enters a fix round
 - `semantic-eval.status=hard_fail` stops the run for human intervention
 - `semantic-eval.status=infra_fail` retries the evaluator first, then stops without blaming the story
+- `final-eval.status=pass` is required before Ralph may archive and announce completion
+- `final-eval.status=soft_fail` enters a bounded final-fix round
+- `final-eval.status=hard_fail` stops the run for human intervention
+- `final-eval.status=infra_fail` retries the final evaluator first, then stops without blaming the implementation
 
 `MAX_ITERATIONS` counts handled stories only. Eval retries and fix subrounds do not consume the story-iteration budget.
 
@@ -204,7 +241,17 @@ RALPH_EVAL_MAX_RETRIES=2
 RALPH_EVAL_RETRY_WAIT_SECONDS=10
 RALPH_EVAL_TERM_GRACE_SECONDS=5
 RALPH_EVAL_RUNNER_MAX_RETRIES=0
-RALPH_SEMANTIC_MAX_FIX_ROUNDS=2
+RALPH_SEMANTIC_MAX_FIX_ROUNDS=3
+```
+
+Final eval defaults:
+
+```bash
+RALPH_FINAL_EVAL_TIMEOUT_SECONDS=1200
+RALPH_FINAL_EVAL_MAX_RETRIES=2
+RALPH_FINAL_EVAL_RETRY_WAIT_SECONDS=10
+RALPH_FINAL_EVAL_RUNNER_MAX_RETRIES=0
+RALPH_FINAL_FIX_MAX_ROUNDS=3
 ```
 
 Retry behavior remains conservative:
@@ -245,12 +292,16 @@ Primary progress surfaces:
 - `.ralph/progress.txt`
 - `.ralph/prd.json`
 - `.ralph/active-story.json`
+- `.ralph/prd-source.md`
+- `.ralph/completed-stories.json`
 - `.ralph/.last-run`
 - `.ralph/runs/<timestamp>/iteration-*.events.jsonl`
 - `.ralph/runs/<timestamp>/iteration-*.stderr.log`
 - `.ralph/runs/<timestamp>/iteration-*.status.txt`
 - `.ralph/runs/<timestamp>/iteration-*.story-result.json`
 - `.ralph/runs/<timestamp>/iteration-*.semantic-eval.json`
+- `.ralph/runs/<timestamp>/final.eval.semantic-eval.json`
+- `.ralph/runs/<timestamp>/final.fix-*.fix-result.json`
 
 Useful commands:
 
@@ -258,6 +309,8 @@ Useful commands:
 cat .ralph/progress.txt
 jq '.userStories[] | {id, title, passes}' .ralph/prd.json
 cat .ralph/active-story.json
+cat .ralph/prd-source.md
+cat .ralph/completed-stories.json
 cat .ralph/.last-run
 cat "$(cat .ralph/.last-run)/iteration-001.exec.status.txt"
 tail -f "$(cat .ralph/.last-run)/iteration-001.exec.stderr.log"
