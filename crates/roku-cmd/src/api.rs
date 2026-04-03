@@ -98,7 +98,86 @@ pub(crate) fn run_api_gateway_from_env() -> Result<(), CommandError> {
 
 #[cfg(test)]
 mod tests {
+	use std::collections::HashMap;
+	use std::sync::{Arc, Mutex};
+
+	use actix_web::test as actix_test;
+	use actix_web::{App, web};
+	use roku_api_gateway::{
+		ExperimentResponse, GatewayAppState, RuntimeServiceExecutor, SubmitRequest, SubmitResponse,
+		configure_routes,
+	};
+	use roku_memory::{PendingLoopSnapshot, PendingLoopSnapshotBackend, PendingLoopSnapshotError};
+	use roku_runtime_service::RuntimeService;
+
 	use super::ApiGatewayServerConfig;
+	use crate::pending_loop_substrate::MemoryPendingLoopSnapshotStore;
+	use crate::test_support::pending_inventory_resume_success_loop_state;
+
+	#[derive(Clone, Default)]
+	struct RecordingPendingLoopSnapshotBackend {
+		snapshots: Arc<Mutex<HashMap<String, PendingLoopSnapshot>>>,
+		events: Arc<Mutex<Vec<String>>>,
+	}
+
+	impl RecordingPendingLoopSnapshotBackend {
+		fn seed(&self, session_id: &str, snapshot: PendingLoopSnapshot) {
+			self.snapshots
+				.lock()
+				.expect("snapshot seed lock should not be poisoned")
+				.insert(session_id.to_string(), snapshot);
+		}
+
+		fn snapshot(&self, session_id: &str) -> Option<PendingLoopSnapshot> {
+			self.snapshots
+				.lock()
+				.expect("snapshot load lock should not be poisoned")
+				.get(session_id)
+				.cloned()
+		}
+
+		fn events(&self) -> Vec<String> {
+			self.events
+				.lock()
+				.expect("event log lock should not be poisoned")
+				.clone()
+		}
+	}
+
+	impl PendingLoopSnapshotBackend for RecordingPendingLoopSnapshotBackend {
+		fn load_pending_loop_snapshot(
+			&self,
+			session_id: &str,
+		) -> Result<Option<PendingLoopSnapshot>, PendingLoopSnapshotError> {
+			self.events
+				.lock()
+				.expect("event log lock should not be poisoned")
+				.push(format!("load:{session_id}"));
+			Ok(self.snapshot(session_id))
+		}
+
+		fn save_pending_loop_snapshot(
+			&self,
+			session_id: &str,
+			snapshot: Option<PendingLoopSnapshot>,
+		) -> Result<(), PendingLoopSnapshotError> {
+			let event = if snapshot.is_some() { "save" } else { "clear" };
+			self.events
+				.lock()
+				.expect("event log lock should not be poisoned")
+				.push(format!("{event}:{session_id}"));
+			let mut snapshots = self
+				.snapshots
+				.lock()
+				.expect("snapshot save lock should not be poisoned");
+			if let Some(snapshot) = snapshot {
+				snapshots.insert(session_id.to_string(), snapshot);
+			} else {
+				snapshots.remove(session_id);
+			}
+			Ok(())
+		}
+	}
 
 	#[test]
 	fn api_gateway_server_config_defaults_are_stable() {
@@ -109,5 +188,69 @@ mod tests {
 
 		assert_eq!(config.bind_addr, "127.0.0.1:8787");
 		assert_eq!(config.json_limit_bytes, 8 * 1024);
+	}
+
+	#[actix_web::test]
+	async fn submit_route_resumes_pending_loop_snapshots_from_shared_memory_substrate() {
+		let backend = RecordingPendingLoopSnapshotBackend::default();
+		let (pending_loop, selected_topic) = pending_inventory_resume_success_loop_state();
+		let session_id = pending_loop.session_id.clone();
+		backend.seed(
+			&session_id,
+			PendingLoopSnapshot {
+				run_id: pending_loop.run_id.clone(),
+				loop_state_json: serde_json::to_string(&pending_loop)
+					.expect("pending loop should encode"),
+			},
+		);
+		let service = RuntimeService::default().with_pending_loop_snapshot_store(Arc::new(
+			MemoryPendingLoopSnapshotStore::new(Box::new(backend.clone())),
+		));
+		let state = web::Data::new(GatewayAppState::new(Arc::new(RuntimeServiceExecutor::new(
+			Arc::new(service),
+		))));
+		let app = actix_test::init_service(
+			App::new()
+				.app_data(state)
+				.app_data(web::JsonConfig::default().limit(8 * 1024))
+				.configure(configure_routes),
+		)
+		.await;
+
+		let submit_request = actix_test::TestRequest::post()
+			.uri("/v1/requests")
+			.set_json(&SubmitRequest {
+				session_id: session_id.clone(),
+				goal: selected_topic,
+			})
+			.to_request();
+		let submit_response: SubmitResponse =
+			actix_test::call_and_read_body_json(&app, submit_request).await;
+
+		assert_eq!(submit_response.request_id, "req-1");
+		assert_eq!(submit_response.status, "succeeded");
+
+		let experiment_request = actix_test::TestRequest::get()
+			.uri("/v1/tasks/task-req-1/experiment")
+			.to_request();
+		let experiment_response: ExperimentResponse =
+			actix_test::call_and_read_body_json(&app, experiment_request).await;
+
+		assert_eq!(experiment_response.strategy, "runtime_loop_resume");
+		assert_eq!(experiment_response.status, "succeeded");
+		assert!(
+			backend.snapshot(&session_id).is_none(),
+			"API submit should consume the shared pending loop snapshot"
+		);
+
+		let events = backend.events();
+		assert!(
+			events.contains(&format!("load:{session_id}")),
+			"shared pending loop substrate should be read through the memory adapter"
+		);
+		assert!(
+			events.contains(&format!("clear:{session_id}")),
+			"shared pending loop substrate should clear the consumed snapshot"
+		);
 	}
 }
