@@ -37,7 +37,7 @@ Environment:
     RALPH_EVAL_ARGS               Extra shell-split evaluator args
     RALPH_EVAL_SANDBOX            Evaluator sandbox mode (default: read-only)
     RALPH_EVAL_APPROVAL           Evaluator approval mode (default: never)
-    RALPH_EVAL_TIMEOUT_SECONDS    Hard timeout for one evaluator attempt (default: 900)
+    RALPH_EVAL_TIMEOUT_SECONDS    Hard timeout for one evaluator attempt (default: 1800)
     RALPH_EVAL_MAX_RETRIES        Outer-loop evaluator infra retries (default: 2)
     RALPH_EVAL_RETRY_WAIT_SECONDS Base wait before retrying evaluator infra failures (default: 10)
     RALPH_EVAL_TERM_GRACE_SECONDS Grace period between TERM and KILL on evaluator timeout (default: 5)
@@ -53,7 +53,7 @@ Environment:
     RALPH_FINAL_EVAL_SANDBOX      Final evaluator sandbox mode (default: read-only)
     RALPH_FINAL_EVAL_APPROVAL     Final evaluator approval mode (default: never)
     RALPH_FINAL_EVAL_TIMEOUT_SECONDS
-                                  Hard timeout for one final evaluator attempt (default: 1200)
+                                  Hard timeout for one final evaluator attempt (default: 1800)
     RALPH_FINAL_EVAL_MAX_RETRIES  Outer-loop final evaluator infra retries (default: 2)
     RALPH_FINAL_EVAL_RETRY_WAIT_SECONDS
                                   Base wait before retrying final evaluator infra failures (default: 10)

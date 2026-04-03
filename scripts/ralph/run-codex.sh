@@ -30,7 +30,7 @@ Environment:
     RALPH_EVAL_SANDBOX           Evaluator sandbox mode (default: read-only)
     RALPH_EVAL_APPROVAL          Evaluator approval policy (default: never)
     RALPH_EVAL_ARGS              Extra shell-split evaluator args
-    RALPH_EVAL_TIMEOUT_SECONDS   Hard timeout for one evaluator attempt (default: 900)
+    RALPH_EVAL_TIMEOUT_SECONDS   Hard timeout for one evaluator attempt (default: 1800)
     RALPH_EVAL_RETRY_WAIT_SECONDS
                                  Base wait before retrying a retryable evaluator failure (default: 10)
     RALPH_EVAL_TERM_GRACE_SECONDS
@@ -44,7 +44,7 @@ Environment:
     RALPH_FINAL_EVAL_SANDBOX           Final evaluator sandbox mode (default: read-only)
     RALPH_FINAL_EVAL_APPROVAL          Final evaluator approval mode (default: never)
     RALPH_FINAL_EVAL_ARGS              Extra shell-split final evaluator args
-    RALPH_FINAL_EVAL_TIMEOUT_SECONDS   Hard timeout for one final evaluator attempt (default: 1200)
+    RALPH_FINAL_EVAL_TIMEOUT_SECONDS   Hard timeout for one final evaluator attempt (default: 1800)
     RALPH_FINAL_EVAL_RETRY_WAIT_SECONDS
                                        Base wait before retrying a retryable final evaluator failure (default: 10)
     RALPH_FINAL_EVAL_TERM_GRACE_SECONDS
@@ -134,7 +134,7 @@ elif [[ "$PURPOSE" == "eval" ]]; then
 	CODEX_SANDBOX="${RALPH_EVAL_SANDBOX:-read-only}"
 	CODEX_APPROVAL="${RALPH_EVAL_APPROVAL:-never}"
 	CODEX_ARGS="${RALPH_EVAL_ARGS:-}"
-	CODEX_TIMEOUT_SECONDS="${RALPH_EVAL_TIMEOUT_SECONDS:-900}"
+	CODEX_TIMEOUT_SECONDS="${RALPH_EVAL_TIMEOUT_SECONDS:-1800}"
 	CODEX_MAX_RETRIES="${RALPH_EVAL_RUNNER_MAX_RETRIES:-0}"
 	CODEX_RETRY_WAIT_SECONDS="${RALPH_EVAL_RETRY_WAIT_SECONDS:-10}"
 	CODEX_TERM_GRACE_SECONDS="${RALPH_EVAL_TERM_GRACE_SECONDS:-5}"
@@ -144,7 +144,7 @@ else
 	CODEX_SANDBOX="${RALPH_FINAL_EVAL_SANDBOX:-read-only}"
 	CODEX_APPROVAL="${RALPH_FINAL_EVAL_APPROVAL:-never}"
 	CODEX_ARGS="${RALPH_FINAL_EVAL_ARGS:-${RALPH_EVAL_ARGS:-}}"
-	CODEX_TIMEOUT_SECONDS="${RALPH_FINAL_EVAL_TIMEOUT_SECONDS:-1200}"
+	CODEX_TIMEOUT_SECONDS="${RALPH_FINAL_EVAL_TIMEOUT_SECONDS:-1800}"
 	CODEX_MAX_RETRIES="${RALPH_FINAL_EVAL_RUNNER_MAX_RETRIES:-0}"
 	CODEX_RETRY_WAIT_SECONDS="${RALPH_FINAL_EVAL_RETRY_WAIT_SECONDS:-10}"
 	CODEX_TERM_GRACE_SECONDS="${RALPH_FINAL_EVAL_TERM_GRACE_SECONDS:-5}"
