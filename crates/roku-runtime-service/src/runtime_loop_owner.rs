@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use roku_agent_runtime::{EscalationAction, EscalationReason, RouteDecisionResult};
-use roku_common_types::{RequestEnvelope, ResponseEnvelope, RuntimeError, Task};
+use roku_common_types::{
+	RequestEnvelope, ResponseEnvelope, RuntimeError, RuntimeMemorySections, Task,
+};
 use roku_observability::LogLevel;
 
 use crate::{
@@ -31,8 +33,8 @@ struct PreparedRuntimeLoopRequest {
 }
 
 impl PreparedRuntimeLoopRequest {
-	fn memory_context_text(&self) -> String {
-		self.runtime_memory_layers.memory_context_text()
+	fn runtime_memory_sections(&self) -> RuntimeMemorySections {
+		self.runtime_memory_layers.structured_sections()
 	}
 }
 
@@ -65,13 +67,13 @@ impl<'a> RuntimeLoopOwner<'a> {
 				.attach_resumed_loop_resources(&mut prepared.context_bundle, &loop_state);
 			self.service
 				.start_experiment_run(task, &request.goal, "runtime_loop_resume")?;
-			let memory_context_text = prepared.memory_context_text();
+			let runtime_memory_sections = prepared.runtime_memory_sections();
 			return self.service.resume_pending_loop(
 				task,
 				request,
 				&mut loop_state,
 				&prepared.context_bundle,
-				&memory_context_text,
+				&runtime_memory_sections,
 			);
 		}
 
@@ -118,14 +120,14 @@ impl<'a> RuntimeLoopOwner<'a> {
 			request,
 			&RouteDecisionResult::Escalate(compatibility_plan.clone()),
 		);
-		let memory_context_text = prepared.memory_context_text();
+		let runtime_memory_sections = prepared.runtime_memory_sections();
 		let response = self.service.process_direct_escalation(
 			task,
 			request,
 			&compatibility_plan,
 			&mut loop_state,
 			&prepared.context_bundle,
-			&memory_context_text,
+			&runtime_memory_sections,
 		)?;
 		Ok(Some(response))
 	}
@@ -158,7 +160,7 @@ impl<'a> RuntimeLoopOwner<'a> {
 		loop_state: &mut roku_agent_runtime::LoopState,
 		prepared: &PreparedRuntimeLoopRequest,
 	) -> Result<ResponseEnvelope, RuntimeError> {
-		let memory_context_text = prepared.memory_context_text();
+		let runtime_memory_sections = prepared.runtime_memory_sections();
 		match route {
 			RouteDecisionResult::Direct(plan) => {
 				self.service.metrics.inc_direct_route_hits();
@@ -170,7 +172,7 @@ impl<'a> RuntimeLoopOwner<'a> {
 					plan,
 					loop_state,
 					&prepared.context_bundle,
-					&memory_context_text,
+					&runtime_memory_sections,
 				)
 			}
 			RouteDecisionResult::Escalate(plan) => {
@@ -198,7 +200,7 @@ impl<'a> RuntimeLoopOwner<'a> {
 							plan,
 							loop_state,
 							&prepared.context_bundle,
-							&memory_context_text,
+							&runtime_memory_sections,
 						)
 					}
 					EscalationAction::FallbackAnswer => {
@@ -211,7 +213,7 @@ impl<'a> RuntimeLoopOwner<'a> {
 							plan,
 							loop_state,
 							&prepared.context_bundle,
-							&memory_context_text,
+							&runtime_memory_sections,
 						)
 					}
 					EscalationAction::EnterLimitedPlanning => {
@@ -228,7 +230,7 @@ impl<'a> RuntimeLoopOwner<'a> {
 							plan,
 							loop_state,
 							&prepared.context_bundle,
-							&memory_context_text,
+							&runtime_memory_sections,
 						)
 					}
 				}

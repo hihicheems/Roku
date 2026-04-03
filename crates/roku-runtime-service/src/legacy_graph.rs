@@ -17,8 +17,8 @@ use std::fmt;
 
 use roku_common_types::{
 	AgentContext, AgentInstanceSpec, NodeId, PolicyBindings, RecoveryEligibility, RerunPolicy,
-	ResultEnvelope, ResultStatus, ResumeCandidate, RuntimeError, Task, TaskEdgeCondition,
-	TaskGraph, TaskNode, TaskNodeDispatchPolicy, TaskNodeKind,
+	ResultEnvelope, ResultStatus, ResumeCandidate, RuntimeError, RuntimeMemorySections, Task,
+	TaskEdgeCondition, TaskGraph, TaskNode, TaskNodeDispatchPolicy, TaskNodeKind,
 };
 
 const PROFILE_RESEARCH: &str = "research";
@@ -288,7 +288,7 @@ impl LegacyTaskGraphScheduler {
 pub fn build_agent_instance_for_node_with_history(
 	task: &Task,
 	node: &TaskNode,
-	memory_context: &str,
+	runtime_memory_sections: &RuntimeMemorySections,
 ) -> AgentInstanceSpec {
 	let profile = select_profile_for_node(node);
 	let policy_bindings = derive_policy_bindings(node, profile);
@@ -301,7 +301,8 @@ pub fn build_agent_instance_for_node_with_history(
 			summary: node.description.clone(),
 			resources: node.resources.clone(),
 			conversation_history: task.conversation_history.clone(),
-			memory_context: memory_context.to_string(),
+			memory_context: runtime_memory_sections.named_sections_text(),
+			runtime_memory_sections: runtime_memory_sections.clone(),
 		},
 		capabilities: node.capabilities.clone(),
 		capability_tokens: Vec::new(),

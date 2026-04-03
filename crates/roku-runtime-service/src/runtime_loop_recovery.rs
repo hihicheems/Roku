@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use roku_agent_runtime::LoopState;
-use roku_common_types::{RequestEnvelope, ResponseEnvelope, RuntimeError, Task, TaskId};
+use roku_common_types::{
+	RequestEnvelope, ResponseEnvelope, RuntimeError, RuntimeMemorySections, Task, TaskId,
+};
 use roku_observability::LogLevel;
 
 use crate::{ContextBundle, RuntimeMemoryLayers, RuntimeService};
@@ -104,14 +106,14 @@ impl RuntimeService {
 		request: &RequestEnvelope,
 		loop_state: &mut LoopState,
 		context_bundle: &ContextBundle,
-		memory_context: &str,
+		runtime_memory_sections: &RuntimeMemorySections,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let initial_history_len = loop_state.history.len();
 		let execution = self.runtime.execute_tool_loop(
 			&task.task_id,
 			request,
 			loop_state,
-			memory_context,
+			runtime_memory_sections,
 			Some(&request.goal),
 		);
 		self.record_runtime_loop_history(loop_state, initial_history_len);

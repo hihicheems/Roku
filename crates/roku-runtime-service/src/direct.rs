@@ -15,7 +15,7 @@
 use roku_agent_runtime::{DirectRoutePlan, LoopState, RouteEscalationPlan};
 use roku_common_types::{
 	ErrorClass, EvidenceItem, RequestEnvelope, ResponseEnvelope, ResponseStatus, ResultEnvelope,
-	ResultStatus, RuntimeError, Task, TaskEventKind, TaskNode, TaskState,
+	ResultStatus, RuntimeError, RuntimeMemorySections, Task, TaskEventKind, TaskNode, TaskState,
 };
 
 use crate::execution::pending_execution_approval_fact;
@@ -30,14 +30,14 @@ impl RuntimeService {
 		_plan: &DirectRoutePlan,
 		loop_state: &mut LoopState,
 		context_bundle: &ContextBundle,
-		memory_context: &str,
+		runtime_memory_sections: &RuntimeMemorySections,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let initial_history_len = loop_state.history.len();
 		let execution = self.runtime.execute_tool_loop(
 			&task.task_id,
 			request,
 			loop_state,
-			memory_context,
+			runtime_memory_sections,
 			None,
 		);
 		self.record_runtime_loop_history(loop_state, initial_history_len);
@@ -66,11 +66,14 @@ impl RuntimeService {
 		plan: &RouteEscalationPlan,
 		loop_state: &mut LoopState,
 		context_bundle: &ContextBundle,
-		memory_context: &str,
+		runtime_memory_sections: &RuntimeMemorySections,
 	) -> Result<ResponseEnvelope, RuntimeError> {
-		let execution =
-			self.runtime
-				.execute_escalation_action(&task.task_id, request, plan, memory_context);
+		let execution = self.runtime.execute_escalation_action(
+			&task.task_id,
+			request,
+			plan,
+			runtime_memory_sections,
+		);
 		let response =
 			self.finalize_direct_path(task, execution.node, execution.result, execution.message)?;
 		if matches!(

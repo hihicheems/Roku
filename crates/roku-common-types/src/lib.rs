@@ -483,6 +483,46 @@ pub struct AgentContext {
 	#[serde(default)]
 	/// Provider-neutral runtime memory context (rendered from ContextBundle hits).
 	pub memory_context: String,
+	#[serde(default)]
+	/// Structured runtime-owned memory sections kept alongside the legacy rendered text.
+	pub runtime_memory_sections: RuntimeMemorySections,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeMemorySections {
+	#[serde(default)]
+	pub short_term_continuity: String,
+	#[serde(default)]
+	pub long_term_recall: String,
+	#[serde(default)]
+	pub working_memory: String,
+}
+
+impl RuntimeMemorySections {
+	pub fn is_empty(&self) -> bool {
+		self.short_term_continuity.trim().is_empty()
+			&& self.long_term_recall.trim().is_empty()
+			&& self.working_memory.trim().is_empty()
+	}
+
+	pub fn named_sections_text(&self) -> String {
+		let mut sections = Vec::new();
+		push_named_section(
+			&mut sections,
+			"Short-term continuity",
+			&self.short_term_continuity,
+		);
+		push_named_section(&mut sections, "Long-term recall", &self.long_term_recall);
+		push_named_section(&mut sections, "Working memory", &self.working_memory);
+		sections.join("\n\n")
+	}
+}
+
+fn push_named_section(sections: &mut Vec<String>, title: &str, content: &str) {
+	let trimmed = content.trim();
+	if !trimmed.is_empty() {
+		sections.push(format!("{title}:\n{trimmed}"));
+	}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

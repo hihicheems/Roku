@@ -26,8 +26,8 @@ use crate::config::{BuiltinToolRole, ConfiguredTool, ToolCatalogConfig};
 use crate::runtime_config::{ToolWorkerRuntimeConfig, ToolsRuntimeConfig};
 use roku_common_types::{
 	GeneralCompletionKind, GeneralEvidenceStatus, GeneralExecuteCompletion, ResourceSelector,
-	SkillExecutionMode, SkillExecutionPlan, SkillExecutionRequest, SkillExecutionResult,
-	ToolOutputEnvelope,
+	RuntimeMemorySections, SkillExecutionMode, SkillExecutionPlan, SkillExecutionRequest,
+	SkillExecutionResult, ToolOutputEnvelope,
 };
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_catalog::{CatalogDescriptor, ResourceCatalog, ResourceKind};
@@ -823,14 +823,7 @@ fn user_visible_prompt(
 			input.conversation_history
 		)
 	};
-	let memory_section = if input.memory_context.trim().is_empty() {
-		String::new()
-	} else {
-		format!(
-			"\n\nRelevant long-term memory (Roku-owned):\n{}",
-			input.memory_context
-		)
-	};
+	let memory_section = runtime_memory_section(input);
 	let runtime_context = runtime_context_block();
 	let skill_section = skill_context
 		.filter(|value| !value.trim().is_empty())
@@ -862,6 +855,44 @@ fn user_visible_prompt(
 		invocation_key = invocation_key,
 		time_budget_ms = input.time_budget_ms,
 	)
+}
+
+fn runtime_memory_section(input: &ToolInput<'_>) -> String {
+	if !input.runtime_memory_sections.is_empty() {
+		let mut sections = Vec::new();
+		append_runtime_memory_section(
+			&mut sections,
+			"Short-term continuity (Roku-owned)",
+			&input.runtime_memory_sections.short_term_continuity,
+		);
+		append_runtime_memory_section(
+			&mut sections,
+			"Long-term recall (Roku-owned)",
+			&input.runtime_memory_sections.long_term_recall,
+		);
+		append_runtime_memory_section(
+			&mut sections,
+			"Working memory (Roku-owned)",
+			&input.runtime_memory_sections.working_memory,
+		);
+		return sections.join("");
+	}
+
+	if input.memory_context.trim().is_empty() {
+		String::new()
+	} else {
+		format!(
+			"\n\nRelevant long-term memory (Roku-owned):\n{}",
+			input.memory_context
+		)
+	}
+}
+
+fn append_runtime_memory_section(sections: &mut Vec<String>, title: &str, content: &str) {
+	let trimmed = content.trim();
+	if !trimmed.is_empty() {
+		sections.push(format!("\n\n{title}:\n{trimmed}"));
+	}
 }
 
 fn output_rules_for_worker(worker_id: &str) -> &'static str {
@@ -1829,6 +1860,7 @@ struct ToolInput<'a> {
 	summary: &'a str,
 	conversation_history: &'a str,
 	memory_context: &'a str,
+	runtime_memory_sections: RuntimeMemorySections,
 	granted_capabilities: Vec<String>,
 	resource_selectors: Vec<String>,
 	budget_tokens: u64,
@@ -1864,6 +1896,17 @@ fn request_input(request: &ToolInvocationRequest) -> Result<ToolInput<'_>, ToolF
 		memory_context: input
 			.get("memory_context")
 			.and_then(Value::as_str)
+			.unwrap_or_default(),
+		runtime_memory_sections: input
+			.get("runtime_memory_sections")
+			.cloned()
+			.map(serde_json::from_value)
+			.transpose()
+			.map_err(|error| {
+				ToolFailure::terminal(format!(
+					"runtime_memory_sections must be a valid object: {error}"
+				))
+			})?
 			.unwrap_or_default(),
 		granted_capabilities: input
 			.get("granted_capabilities")
@@ -2170,6 +2213,7 @@ mod tests {
 	};
 	use crate::config::{BuiltinToolRole, ToolCatalogConfig};
 	use crate::runtime_config::ToolWorkerRuntimeConfig;
+	use roku_common_types::RuntimeMemorySections;
 	use roku_plugin_host::{SandboxProfile, Tool, ToolInvocationRequest};
 	use roku_plugin_llm::{
 		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderCallError,
@@ -2226,6 +2270,42 @@ mod tests {
 		assert!(prompt.contains("Authoritative local inventory JSON"));
 		assert!(prompt.contains("Execution authority"));
 		assert!(prompt.contains("side_effects_allowed"));
+	}
+
+	#[test]
+	fn user_visible_prompt_renders_structured_runtime_memory_sections() {
+		let request = ToolInvocationRequest {
+			invocation_key: "invoke-2".to_string(),
+			input: json!({
+				"task_id": "task-1",
+				"node_id": "node-1",
+				"goal": "继续当前 memory 调研",
+				"summary": "Execute primary action",
+				"conversation_history": "user: 继续",
+				"memory_context": "legacy fallback blob",
+				"runtime_memory_sections": {
+					"short_term_continuity": "- user: 继续",
+					"long_term_recall": "- memory-record-1 | UserPreference | Rust preference",
+					"working_memory": "Pending follow-up: keep runtime ownership explicit."
+				},
+				"granted_capabilities": ["inventory.read"],
+				"budget_tokens": 2048_u64,
+				"time_budget_ms": 45_000_u64
+			}),
+			attempt: 1,
+			sandbox_profile: SandboxProfile::NoIsolation,
+			attachments: Vec::new(),
+			allowed_read_roots: Vec::new(),
+			allowed_write_roots: Vec::new(),
+		};
+
+		let input = request_input(&request).expect("tool input should parse");
+		let prompt = user_visible_prompt(&input, "generic-worker", "invoke-2", None, None);
+
+		assert!(prompt.contains("Short-term continuity (Roku-owned):"));
+		assert!(prompt.contains("Long-term recall (Roku-owned):"));
+		assert!(prompt.contains("Working memory (Roku-owned):"));
+		assert!(!prompt.contains("Relevant long-term memory (Roku-owned):\nlegacy fallback blob"));
 	}
 
 	#[test]
@@ -2739,6 +2819,7 @@ print("ok")
 			summary: "Execute installed skill `skill-creator` using its local scripts",
 			conversation_history: "",
 			memory_context: "",
+			runtime_memory_sections: RuntimeMemorySections::default(),
 			granted_capabilities: vec!["skill.execute".to_string()],
 			resource_selectors: vec![
 				"tool:skill.execute".to_string(),

@@ -297,7 +297,7 @@ impl RuntimeService {
 	) -> Result<Option<ResponseEnvelope>, RuntimeError> {
 		let memory_context = self
 			.task_runtime_memory_layers(&task.task_id)
-			.memory_context_text();
+			.structured_sections();
 		let mut spec = build_agent_instance_for_node_with_history(task, node, &memory_context);
 		let capability_allowed = {
 			let mut state = self.lock_state()?;

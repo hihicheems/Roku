@@ -17,7 +17,7 @@ use std::sync::Arc;
 use roku_agent_runtime::RouteDecisionResult;
 use roku_common_types::{
 	ConversationRole, ConversationTurn, RequestEnvelope, ResourceSelector, ResponseEnvelope,
-	RuntimeError,
+	RuntimeError, RuntimeMemorySections,
 };
 use roku_memory::{
 	LongTermMemoryBackend, MemoryHit, MemoryLifecyclePolicy, MemoryRecallInput,
@@ -47,45 +47,32 @@ impl RuntimeMemoryLayers {
 		}
 	}
 
-	pub fn memory_context_text(&self) -> String {
-		let mut sections = Vec::new();
-		if !self.short_term_continuity.is_empty() {
-			sections.push(format_named_memory_section(
-				"Short-term continuity",
-				self.short_term_continuity
-					.iter()
-					.map(|turn| {
-						format!("- {}: {}", conversation_role_label(turn.role), turn.content)
-					})
-					.collect(),
-			));
+	pub fn structured_sections(&self) -> RuntimeMemorySections {
+		RuntimeMemorySections {
+			short_term_continuity: self
+				.short_term_continuity
+				.iter()
+				.map(|turn| format!("- {}: {}", conversation_role_label(turn.role), turn.content))
+				.collect::<Vec<_>>()
+				.join("\n"),
+			long_term_recall: self
+				.long_term_recall
+				.iter()
+				.map(|hit| {
+					format!(
+						"- {} | {:?} | {}",
+						hit.record.record_id, hit.record.kind, hit.record.summary
+					)
+				})
+				.collect::<Vec<_>>()
+				.join("\n"),
+			working_memory: self.working_memory.trim().to_string(),
 		}
-		if !self.long_term_recall.is_empty() {
-			sections.push(format_named_memory_section(
-				"Long-term recall",
-				self.long_term_recall
-					.iter()
-					.map(|hit| {
-						format!(
-							"- {} | {:?} | {}",
-							hit.record.record_id, hit.record.kind, hit.record.summary
-						)
-					})
-					.collect(),
-			));
-		}
-		if !self.working_memory.is_empty() {
-			sections.push(format_named_memory_section(
-				"Working memory",
-				vec![self.working_memory.clone()],
-			));
-		}
-		sections.join("\n\n")
 	}
-}
 
-fn format_named_memory_section(title: &str, entries: Vec<String>) -> String {
-	format!("{title}:\n{}", entries.join("\n"))
+	pub fn memory_context_text(&self) -> String {
+		self.structured_sections().named_sections_text()
+	}
 }
 
 fn conversation_role_label(role: ConversationRole) -> &'static str {

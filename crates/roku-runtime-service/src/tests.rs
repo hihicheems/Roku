@@ -644,6 +644,20 @@ fn runtime_memory_layers_keep_continuity_recall_and_working_memory_distinct() {
 		"fresh request assembly should not render an empty working-memory section"
 	);
 
+	let sections = layers.structured_sections();
+	assert_eq!(
+		sections.short_term_continuity, "- user: Please use concise answers.",
+		"continuity should stay distinguishable before any legacy string rendering"
+	);
+	assert_eq!(
+		sections.long_term_recall, "- memory-record-1 | UserPreference | Rust preference",
+		"recall should stay distinguishable before any legacy string rendering"
+	);
+	assert_eq!(
+		sections.working_memory, "WORKING_MEMORY_ONLY::follow the runtime seam",
+		"working memory should stay distinguishable before any legacy string rendering"
+	);
+
 	let memory_context_text = layers.memory_context_text();
 	assert!(
 		memory_context_text.contains("Short-term continuity:"),

@@ -67,6 +67,7 @@ impl ToolBackedWorker {
 				.collect::<Vec<_>>(),
 			"conversation_history": render_conversation_history(&spec.context.conversation_history),
 			"memory_context": spec.context.memory_context.clone(),
+			"runtime_memory_sections": spec.context.runtime_memory_sections.clone(),
 			"budget_tokens": spec.policy_bindings.budget_tokens,
 			"time_budget_ms": spec.policy_bindings.time_budget_ms,
 			"worker_id": self.worker_id,
@@ -290,7 +291,8 @@ mod test_workers {
 	use std::sync::Arc;
 
 	use roku_common_types::{
-		AgentContext, AgentInstanceSpec, NodeId, PolicyBindings, TaskId, TaskNode,
+		AgentContext, AgentInstanceSpec, NodeId, PolicyBindings, RuntimeMemorySections, TaskId,
+		TaskNode,
 	};
 	use roku_plugin_host::ToolRuntime;
 
@@ -307,6 +309,11 @@ mod test_workers {
 				resources: Vec::new(),
 				conversation_history: Vec::new(),
 				memory_context: "long-term context".to_string(),
+				runtime_memory_sections: RuntimeMemorySections {
+					short_term_continuity: "user: hi".to_string(),
+					long_term_recall: "memory-record-1 | UserPreference | Rust".to_string(),
+					working_memory: "remember runtime seam".to_string(),
+				},
 			},
 			capabilities: Vec::new(),
 			capability_tokens: Vec::new(),
@@ -323,6 +330,10 @@ mod test_workers {
 				.get("memory_context")
 				.and_then(|value| value.as_str()),
 			Some("long-term context")
+		);
+		assert_eq!(
+			invocation.input["runtime_memory_sections"]["working_memory"].as_str(),
+			Some("remember runtime seam")
 		);
 	}
 }
