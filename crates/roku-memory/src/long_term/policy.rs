@@ -22,7 +22,10 @@
 use roku_common_types::{ConversationTurn, ResponseStatus};
 use serde::{Deserialize, Serialize};
 
-use super::types::{MemoryHit, MemoryQuery, MemoryRecallReason, MemoryScope, MemoryWriteRequest};
+use super::types::{
+	MemoryHit, MemoryKind, MemoryQuery, MemoryRecallReason, MemoryScope, MemoryWriteReason,
+	MemoryWriteRequest,
+};
 
 /// Decides when runtime should recall or persist long-term memory.
 pub trait MemoryLifecyclePolicy: Send + Sync {
@@ -102,11 +105,16 @@ pub struct MemoryWritePolicyInput {
 pub struct ConservativeMemoryLifecyclePolicy {
 	/// Maximum number of hits to request when recall is enabled.
 	pub recall_limit: usize,
+	/// Whether automatic write-back is enabled for this runtime wiring.
+	pub automatic_write_back: bool,
 }
 
 impl Default for ConservativeMemoryLifecyclePolicy {
 	fn default() -> Self {
-		Self { recall_limit: 3 }
+		Self {
+			recall_limit: 3,
+			automatic_write_back: false,
+		}
 	}
 }
 
@@ -131,8 +139,31 @@ impl MemoryLifecyclePolicy for ConservativeMemoryLifecyclePolicy {
 		Some(query)
 	}
 
-	fn build_write_request(&self, _input: &MemoryWritePolicyInput) -> Option<MemoryWriteRequest> {
-		None
+	fn build_write_request(&self, input: &MemoryWritePolicyInput) -> Option<MemoryWriteRequest> {
+		if !self.automatic_write_back
+			|| input.response_status != ResponseStatus::Succeeded
+			|| input.pending_loop_active
+		{
+			return None;
+		}
+
+		let scope = if input.workspace_id.is_some() {
+			MemoryScope::Workspace
+		} else {
+			MemoryScope::Session
+		};
+		let mut request = MemoryWriteRequest::new(
+			MemoryKind::HistoricalCase,
+			scope,
+			format!("goal={} response={}", input.goal, input.response_message),
+			"Successful runtime response".to_string(),
+			MemoryWriteReason::TaskSucceeded,
+		);
+		request.session_id = Some(input.session_id.clone());
+		request.user_id = input.user_id.clone();
+		request.project_id = input.project_id.clone();
+		request.workspace_id = input.workspace_id.clone();
+		Some(request)
 	}
 }
 
@@ -140,7 +171,7 @@ impl MemoryLifecyclePolicy for ConservativeMemoryLifecyclePolicy {
 mod tests {
 	use crate::{
 		ConservativeMemoryLifecyclePolicy, MemoryLifecyclePolicy, MemoryRecallInput, MemoryScope,
-		MemoryWritePolicyInput,
+		MemoryWritePolicyInput, MemoryWriteReason,
 	};
 	use roku_common_types::{ConversationRole, ConversationTurn, ResponseStatus};
 
@@ -189,5 +220,34 @@ mod tests {
 		};
 
 		assert!(policy.build_write_request(&input).is_none());
+	}
+
+	#[test]
+	fn conservative_policy_can_enable_write_back_from_runtime_wiring() {
+		let policy = ConservativeMemoryLifecyclePolicy {
+			recall_limit: 4,
+			automatic_write_back: true,
+		};
+		let input = MemoryWritePolicyInput {
+			request_id: "req-1".to_string(),
+			session_id: "session-1".to_string(),
+			goal: "Summarize the repo".to_string(),
+			response_status: ResponseStatus::Succeeded,
+			response_message: "Done".to_string(),
+			pending_loop_active: false,
+			short_term_continuity: Vec::new(),
+			recalled_hits: Vec::new(),
+			user_id: None,
+			project_id: None,
+			workspace_id: None,
+		};
+
+		let request = policy
+			.build_write_request(&input)
+			.expect("write-back should be enabled");
+
+		assert_eq!(request.scope, MemoryScope::Session);
+		assert_eq!(request.write_reason, MemoryWriteReason::TaskSucceeded);
+		assert_eq!(request.session_id.as_deref(), Some("session-1"));
 	}
 }

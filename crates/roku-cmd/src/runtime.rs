@@ -331,9 +331,7 @@ fn default_memory_lifecycle_report(memory_config: &MemoryRuntimeConfig) -> Memor
 			"runtime.memory.recall.enabled is false, so the default lifecycle policy disables write-back",
 		)
 	} else {
-		MemoryLifecycleToggleReport::blocked(
-			"default lifecycle policy keeps automatic write-back disabled",
-		)
+		MemoryLifecycleToggleReport::enabled()
 	};
 
 	MemoryLifecycleReport { recall, write_back }
@@ -648,6 +646,7 @@ fn wire_default_long_term_memory(
 	let policy: Arc<dyn MemoryLifecyclePolicy> = if lifecycle.recall.effective {
 		Arc::new(ConservativeMemoryLifecyclePolicy {
 			recall_limit: memory_config.recall.top_k.max(1),
+			automatic_write_back: lifecycle.write_back.effective,
 		})
 	} else {
 		Arc::new(DisabledMemoryLifecyclePolicy)
@@ -927,7 +926,12 @@ mod tests {
 	use std::io::{Cursor, Write};
 	use std::sync::{Arc, LazyLock, Mutex};
 
-	use roku_common_types::{RequestId, ResponseEnvelope, ResponseStatus};
+	use roku_common_types::{RequestEnvelope, RequestId, ResponseEnvelope, ResponseStatus};
+	use roku_memory::{
+		InMemoryLongTermMemoryBackend, MemoryRecallConfig, MemoryWriteConfig,
+		NoopPendingLoopSnapshotBackend, NoopSessionManagementBackend, NoopSessionStateBackend,
+		NoopShortTermContinuityBackend, ResolvedMemorySubsystem,
+	};
 	use roku_plugin_skills::{
 		DownloadedArchive, SkillArchiveFetcher, SkillRegistryError, SkillSource,
 	};
@@ -1056,7 +1060,7 @@ mod tests {
 	}
 
 	#[test]
-	fn prepare_memory_artifacts_reports_write_back_as_effectively_disabled() {
+	fn prepare_memory_artifacts_reports_write_back_as_effectively_enabled() {
 		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
 		let tempdir = tempfile::tempdir().expect("temp root should exist");
 		let config_dir = tempdir.path().join("config");
@@ -1092,11 +1096,100 @@ enabled = true
 			Value::Null
 		);
 		assert_eq!(output_json["lifecycle"]["write_back"]["requested"], true);
-		assert_eq!(output_json["lifecycle"]["write_back"]["effective"], false);
+		assert_eq!(output_json["lifecycle"]["write_back"]["effective"], true);
 		assert_eq!(
 			output_json["lifecycle"]["write_back"]["blocked_reason"],
-			"default lifecycle policy keeps automatic write-back disabled"
+			Value::Null
 		);
+	}
+
+	#[test]
+	fn config_enabled_recall_and_write_enable_effective_write_back_behavior() {
+		let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
+		let service = service_with_memory_config(
+			MemoryRuntimeConfig {
+				core: roku_memory::MemoryRuntimeConfig {
+					enabled: true,
+					recall: MemoryRecallConfig {
+						enabled: true,
+						top_k: 5,
+					},
+					write: MemoryWriteConfig {
+						enabled: true,
+						max_batch_size: 4,
+					},
+					..roku_memory::MemoryRuntimeConfig::default()
+				},
+				..MemoryRuntimeConfig::default()
+			},
+			backend.clone(),
+		);
+
+		let response = service
+			.execute(memory_write_request(
+				"What skills and tools do you have right now?",
+			))
+			.expect("configured runtime request should succeed");
+
+		assert_eq!(response.status, ResponseStatus::Succeeded);
+		assert_eq!(backend.recorded_writes().len(), 1);
+	}
+
+	#[test]
+	fn config_disabled_recall_keeps_write_back_effectively_off() {
+		let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
+		let service = service_with_memory_config(
+			MemoryRuntimeConfig {
+				core: roku_memory::MemoryRuntimeConfig {
+					enabled: true,
+					recall: MemoryRecallConfig {
+						enabled: false,
+						top_k: 5,
+					},
+					write: MemoryWriteConfig {
+						enabled: true,
+						max_batch_size: 4,
+					},
+					..roku_memory::MemoryRuntimeConfig::default()
+				},
+				..MemoryRuntimeConfig::default()
+			},
+			backend.clone(),
+		);
+
+		let response = service
+			.execute(memory_write_request(
+				"What skills and tools do you have right now?",
+			))
+			.expect("configured runtime request should succeed");
+
+		assert_eq!(response.status, ResponseStatus::Succeeded);
+		assert!(backend.recorded_writes().is_empty());
+	}
+
+	fn service_with_memory_config(
+		memory_config: MemoryRuntimeConfig,
+		backend: Arc<InMemoryLongTermMemoryBackend>,
+	) -> RuntimeService {
+		let subsystem = ResolvedMemorySubsystem::with_parts(
+			backend,
+			Box::new(NoopShortTermContinuityBackend),
+			Box::new(NoopSessionStateBackend),
+			Box::new(NoopPendingLoopSnapshotBackend),
+			Box::new(NoopSessionManagementBackend),
+		);
+		wire_default_long_term_memory(RuntimeService::default(), subsystem, &memory_config)
+			.expect("memory config should wire into runtime service")
+	}
+
+	fn memory_write_request(goal: &str) -> RequestEnvelope {
+		RequestEnvelope {
+			request_id: RequestId("req-memory-write".to_string()),
+			session_id: "session-1".to_string(),
+			goal: goal.to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		}
 	}
 
 	fn test_registry() -> SkillRegistry {
