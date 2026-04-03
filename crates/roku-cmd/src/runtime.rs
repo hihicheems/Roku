@@ -55,6 +55,7 @@ use serde_json::json;
 use crate::CommandError;
 use crate::entry_registry::{resolve_entry_runtime_bundle, resolve_memory_subsystem};
 use crate::memory_runtime_config::MemoryRuntimeConfig;
+use crate::pending_loop_substrate::MemoryPendingLoopSnapshotStore;
 use crate::runtime_config::{
 	RuntimeConfigs, load_runtime_configs, prepare_runtime_generated_artifacts,
 };
@@ -460,7 +461,7 @@ fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandEr
 		);
 	let bundle = resolve_entry_runtime_bundle(&bootstrap.runtime_configs.memory, &layout)?;
 
-	wire_default_long_term_memory(
+	wire_memory_subsystem(
 		RuntimeService::new_with_bundles_and_runtime_and_metrics(
 			bundle.control_plane,
 			bundle.artifact_store,
@@ -599,7 +600,7 @@ fn build_deterministic_runtime_service_from_env() -> Result<RuntimeService, Comm
 		);
 	log_runtime_bootstrap_mode(&RuntimeModeReport::deterministic());
 	let bundle = resolve_entry_runtime_bundle(&bootstrap.runtime_configs.memory, &layout)?;
-	wire_default_long_term_memory(
+	wire_memory_subsystem(
 		RuntimeService::new_with_bundles_and_runtime_and_metrics(
 			bundle.control_plane,
 			bundle.artifact_store,
@@ -622,7 +623,7 @@ pub(crate) fn build_live_runtime_service_from_layout_and_bootstrap(
 	let (runtime, runtime_mode) = build_live_runtime(bootstrap.clone(), metrics.clone())?;
 	let bundle = resolve_entry_runtime_bundle(&bootstrap.runtime_configs.memory, layout)?;
 
-	wire_default_long_term_memory(
+	wire_memory_subsystem(
 		RuntimeService::new_with_bundles_and_runtime_and_metrics(
 			bundle.control_plane,
 			bundle.artifact_store,
@@ -637,11 +638,16 @@ pub(crate) fn build_live_runtime_service_from_layout_and_bootstrap(
 	)
 }
 
-fn wire_default_long_term_memory(
+fn wire_memory_subsystem(
 	service: RuntimeService,
 	subsystem: roku_memory::ResolvedMemorySubsystem,
 	memory_config: &MemoryRuntimeConfig,
 ) -> Result<RuntimeService, CommandError> {
+	let roku_memory::ResolvedMemorySubsystem {
+		long_term,
+		pending_loop,
+		..
+	} = subsystem;
 	let lifecycle = default_memory_lifecycle_report(memory_config);
 	let policy: Arc<dyn MemoryLifecyclePolicy> = if lifecycle.recall.effective {
 		Arc::new(ConservativeMemoryLifecyclePolicy {
@@ -652,7 +658,10 @@ fn wire_default_long_term_memory(
 		Arc::new(DisabledMemoryLifecyclePolicy)
 	};
 	Ok(service
-		.with_long_term_memory_backend(subsystem.long_term)
+		.with_pending_loop_snapshot_store(Arc::new(MemoryPendingLoopSnapshotStore::new(
+			pending_loop,
+		)))
+		.with_long_term_memory_backend(long_term)
 		.with_memory_lifecycle_policy(policy))
 }
 
@@ -924,13 +933,19 @@ pub(crate) fn apply_request_env_overrides(
 mod tests {
 	use std::fs;
 	use std::io::{Cursor, Write};
-	use std::sync::{Arc, LazyLock, Mutex};
+	use std::sync::Arc;
 
-	use roku_common_types::{RequestEnvelope, RequestId, ResponseEnvelope, ResponseStatus};
+	use roku_agent_runtime::{
+		AskUserPayload, AskUserResumeContract, AskUserResumeDirective, IntentFamily, LoopContext,
+		LoopState, RouteDecision, RouteRisk, StepObservation, StepRecord, ToolObservation,
+	};
+	use roku_common_types::{
+		RequestEnvelope, RequestId, ResourceSelector, ResponseEnvelope, ResponseStatus,
+	};
 	use roku_memory::{
 		InMemoryLongTermMemoryBackend, MemoryRecallConfig, MemoryWriteConfig,
 		NoopPendingLoopSnapshotBackend, NoopSessionManagementBackend, NoopSessionStateBackend,
-		NoopShortTermContinuityBackend, ResolvedMemorySubsystem,
+		NoopShortTermContinuityBackend, PendingLoopSnapshot, ResolvedMemorySubsystem,
 	};
 	use roku_plugin_skills::{
 		DownloadedArchive, SkillArchiveFetcher, SkillRegistryError, SkillSource,
@@ -938,8 +953,7 @@ mod tests {
 	use serde_json::Value;
 
 	use super::*;
-
-	static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+	use crate::test_support::ENV_MUTEX;
 
 	#[derive(Clone)]
 	struct StaticArchiveFetcher {
@@ -1167,6 +1181,95 @@ enabled = true
 		assert!(backend.recorded_writes().is_empty());
 	}
 
+	#[test]
+	fn once_flow_resumes_pending_loop_snapshots_from_shared_memory_substrate() {
+		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
+		let tempdir = tempfile::tempdir().expect("temp root should exist");
+		let config_dir = tempdir.path().join("config");
+		fs::create_dir_all(&config_dir).expect("config dir should exist");
+		let runtime_toml = config_dir.join("runtime.toml");
+		let sqlite_path = tempdir.path().join("state").join("pending-loop.db");
+		fs::write(
+			&runtime_toml,
+			format!(
+				r#"
+[runtime.memory]
+enabled = true
+backend = "sqlite"
+
+[runtime.memory.recall]
+enabled = true
+
+[runtime.memory.write]
+enabled = false
+
+[runtime.memory.backends.sqlite]
+path = "{}"
+"#,
+				sqlite_path.display()
+			),
+		)
+		.expect("runtime config should be written");
+
+		let _home_guard = EnvOverrideGuard::set_path("ROKU_HOME", tempdir.path());
+		let _config_guard = EnvOverrideGuard::set_path("ROKU_RUNTIME_CONFIG_PATH", &runtime_toml);
+		let layout = LocalStorageLayout::from_env();
+		layout.ensure_dirs().expect("layout dirs should exist");
+		let configs = load_runtime_configs(&layout).expect("runtime configs should load");
+		let (pending_loop, selected_topic) = pending_inventory_resume_success_loop_state();
+		let session_id = pending_loop.session_id.clone();
+		let subsystem =
+			resolve_memory_subsystem(&configs.memory).expect("memory subsystem should resolve");
+		subsystem
+			.pending_loop
+			.save_pending_loop_snapshot(
+				&session_id,
+				Some(PendingLoopSnapshot {
+					run_id: pending_loop.run_id.clone(),
+					loop_state_json: serde_json::to_string(&pending_loop)
+						.expect("pending loop should encode"),
+				}),
+			)
+			.expect("pending loop snapshot should persist");
+		assert!(
+			subsystem
+				.pending_loop
+				.load_pending_loop_snapshot(&session_id)
+				.expect("pending loop snapshot should reload")
+				.is_some()
+		);
+		drop(subsystem);
+
+		let response = run_with_mode_and_options(
+			ExecutionRequestOptions {
+				session_id: session_id.clone(),
+				goal: selected_topic,
+				planning_mode_hint: None,
+				generated_skill_root: None,
+			},
+			RunMode::Normal,
+		)
+		.expect("once flow should resume the shared pending loop snapshot");
+
+		assert_eq!(response.status, ResponseStatus::Succeeded);
+		assert!(
+			response
+				.message
+				.contains("[runtime requested=deterministic effective=deterministic]")
+		);
+
+		let reloaded =
+			resolve_memory_subsystem(&configs.memory).expect("memory subsystem should reload");
+		assert!(
+			reloaded
+				.pending_loop
+				.load_pending_loop_snapshot(&session_id)
+				.expect("pending loop snapshot should be readable")
+				.is_none(),
+			"once flow should consume the persisted pending loop snapshot"
+		);
+	}
+
 	fn service_with_memory_config(
 		memory_config: MemoryRuntimeConfig,
 		backend: Arc<InMemoryLongTermMemoryBackend>,
@@ -1178,8 +1281,100 @@ enabled = true
 			Box::new(NoopPendingLoopSnapshotBackend),
 			Box::new(NoopSessionManagementBackend),
 		);
-		wire_default_long_term_memory(RuntimeService::default(), subsystem, &memory_config)
+		wire_memory_subsystem(RuntimeService::default(), subsystem, &memory_config)
 			.expect("memory config should wire into runtime service")
+	}
+
+	fn pending_inventory_resume_success_loop_state() -> (LoopState, String) {
+		let context = LoopContext {
+			request_id: "req-pending-inventory-loop-success".to_string(),
+			session_id: "session-1".to_string(),
+			goal: "告诉我你当前暴露的 tools 和 skills，并按我选择的主题继续".to_string(),
+			workspace_root: "/workspace".to_string(),
+			working_directory: "/workspace".to_string(),
+			visible_tools: vec!["inventory.describe".to_string()],
+			bound_resources: vec![ResourceSelector::tool("inventory.describe".to_string())],
+			route_decision: RouteDecision::new(
+				IntentFamily::Chat,
+				0.93,
+				false,
+				RouteRisk::Low,
+				vec!["inventory.describe".to_string()],
+				Vec::new(),
+				Vec::new(),
+				"inventory resume success request",
+			),
+			last_observation: None,
+		};
+		let mut loop_state = LoopState::new("loop-pending-inventory-loop-success", &context);
+		let observation = ToolObservation {
+			ok: false,
+			tool_name: "inventory.describe".to_string(),
+			error_type: Some("multiple_candidates".to_string()),
+			terminal: false,
+			data: serde_json::json!({
+				"matches": ["tools", "skills"],
+			}),
+			message: "I can continue with either `tools` or `skills`.".to_string(),
+		};
+		let interpreted =
+			roku_agent_runtime::interpret_observation(&loop_state, observation.clone(), None);
+		loop_state.record_step(StepRecord::tool_call(
+			1,
+			roku_agent_runtime::NextStepDecision {
+				action: roku_agent_runtime::NextStepAction::CallTool,
+				tool_name: Some("inventory.describe".to_string()),
+				arguments: Some(serde_json::json!({})),
+				reason: "Inspect the runtime inventory before answering.".to_string(),
+				final_message: None,
+			},
+			loop_state.visible_tools.clone(),
+			loop_state.bound_resources.clone(),
+			serde_json::json!({
+				"ok": false,
+				"error_type": "multiple_candidates",
+				"terminal": false,
+				"message": "I can continue with either `tools` or `skills`.",
+				"data": observation.data.clone(),
+			}),
+			StepObservation::Tool(observation),
+			interpreted.clone(),
+			Some(12),
+			interpreted.remaining_step_budget,
+			interpreted.remaining_recovery_budget,
+			"/workspace",
+		));
+		loop_state.record_step(StepRecord::terminal(
+			2,
+			roku_agent_runtime::StepAction::AskUser,
+			roku_agent_runtime::NextStepDecision {
+				action: roku_agent_runtime::NextStepAction::AskUser,
+				tool_name: None,
+				arguments: None,
+				reason: "Runtime paused for user clarification after the latest tool observation."
+					.to_string(),
+				final_message: Some("你想继续看 `tools` 还是 `skills`？".to_string()),
+			},
+			loop_state.visible_tools.clone(),
+			loop_state.bound_resources.clone(),
+			Some(StepObservation::AskUser {
+				final_message: "你想继续看 `tools` 还是 `skills`？".to_string(),
+			}),
+			3,
+			2,
+			"/workspace",
+		));
+		loop_state.awaiting_user = Some(AskUserPayload {
+			final_message: "你想继续看 `tools` 还是 `skills`？".to_string(),
+			resume_contract: AskUserResumeContract::CandidateSelection {
+				candidates: vec!["tools".to_string(), "skills".to_string()],
+			},
+			resume_directive: Some(AskUserResumeDirective::RepeatToolWithSelectedCandidate {
+				tool_name: "inventory.describe".to_string(),
+				argument_key: "topic".to_string(),
+			}),
+		});
+		(loop_state, "tools".to_string())
 	}
 
 	fn memory_write_request(goal: &str) -> RequestEnvelope {

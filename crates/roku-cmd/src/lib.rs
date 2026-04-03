@@ -28,11 +28,19 @@ mod api;
 mod bot;
 mod entry_registry;
 mod memory_runtime_config;
+mod pending_loop_substrate;
 mod runtime;
 mod runtime_config;
 mod storage;
 mod telegram_loop_bridge;
 mod telegram_session_ux_config;
+
+#[cfg(test)]
+pub(crate) mod test_support {
+	use std::sync::{LazyLock, Mutex};
+
+	pub(crate) static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+}
 
 use std::env;
 use std::path::PathBuf;

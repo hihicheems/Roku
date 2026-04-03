@@ -199,7 +199,6 @@ pub(crate) fn prepare_runtime_generated_artifacts(
 mod tests {
 	use std::fs;
 	use std::path::PathBuf;
-	use std::sync::{LazyLock, Mutex};
 
 	use roku_memory::{HARD_MAX_MEMORY_RECALL_TOP_K, HARD_MAX_MEMORY_WRITE_BATCH_SIZE};
 
@@ -208,6 +207,7 @@ mod tests {
 		HARD_MAX_MEMORY_REQUEST_TIMEOUT_MS, HARD_MAX_OPENVIKING_EMBED_MAX_CONCURRENT,
 		HARD_MAX_OPENVIKING_VLM_MAX_CONCURRENT,
 	};
+	use crate::test_support::ENV_MUTEX;
 
 	const HARD_MAX_READ_BYTES: usize = 256 * 1024;
 	const HARD_MAX_DIR_ENTRIES: usize = 2_000;
@@ -215,8 +215,6 @@ mod tests {
 	const HARD_MAX_DESCENDANT_SCAN_ENTRIES: usize = 50_000;
 	const HARD_MAX_WEB_TOP_K: usize = 20;
 	const HARD_MAX_LLM_TOOL_TIMEOUT_MS: u64 = 180_000;
-
-	static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 	struct EnvGuard {
 		key: &'static str,

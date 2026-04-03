@@ -206,9 +206,11 @@ fn home_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::test_support::ENV_MUTEX;
 
 	#[test]
 	fn defaults_to_hidden_roku_home() {
+		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
 		let layout = LocalStorageLayout::from_env();
 		assert!(layout.home_dir.ends_with(".roku"));
 		assert!(
