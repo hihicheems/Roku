@@ -54,6 +54,10 @@ PROMPT="$(cat)"
 PURPOSE="execute"
 if grep -q "Ralph Semantic Eval Context" <<<"$PROMPT"; then
 	PURPOSE="eval"
+elif grep -q "Ralph Final Eval Context" <<<"$PROMPT"; then
+	PURPOSE="final-eval"
+elif grep -q "Ralph Final Fix Context" <<<"$PROMPT"; then
+	PURPOSE="final-fix"
 fi
 
 mkdir -p "$REPO_ROOT/.mock-state"
@@ -66,7 +70,7 @@ extract_bullet_after() {
 }
 
 extract_story_id() {
-	printf '%s\n' "$PROMPT" | grep -o '"id":"[^"]*"' | head -n1 | cut -d'"' -f4
+	printf '%s\n' "$PROMPT" | grep -o '"id":"[^"]*"' | head -n1 | cut -d'"' -f4 || true
 }
 
 write_execution_artifact() {
@@ -136,6 +140,7 @@ write_eval_message() {
 
 STORY_ID="$(extract_story_id)"
 EXEC_ARTIFACT="$(extract_bullet_after "Write the execution artifact JSON to:")"
+FINAL_FIX_ARTIFACT="$(extract_bullet_after "Write the final-fix artifact JSON to:")"
 SCENARIO="${RALPH_TEST_SCENARIO:-pass}"
 
 printf '{"event":"mock","purpose":"%s","scenario":"%s"}\n' "$PURPOSE" "$SCENARIO"
@@ -165,6 +170,32 @@ pass:eval)
 		"pass" \
 		"criteria met" \
 		0
+	;;
+pass:final-eval)
+	jq -n '{
+		status: "pass",
+		summary: "whole PRD still holds",
+		prdReview: {
+			goals: [{ id: "G-1", text: "Finish the requested workflow", judgment: "met", evidence: ["story.txt created"] }],
+			userStories: [{ id: "US-001", text: "pass story", judgment: "met", evidence: ["story commit exists"] }],
+			functionalRequirements: [{ id: "FR-1", text: "Typecheck passes", judgment: "met", evidence: ["echo pass"] }],
+			nonGoals: [{ id: "NG-1", text: "Do not widen scope", judgment: "met", evidence: ["single file changed"] }]
+		},
+		scopeDrift: {
+			underfit: { present: false, summary: "", evidence: [] },
+			overreach: { present: false, summary: "", evidence: [] },
+			cross_story_conflict: { present: false, summary: "", evidence: [] },
+			shared_constraint_loss: { present: false, summary: "", evidence: [] }
+		},
+		findings: [],
+		requiredFixes: [],
+		verdictSummary: {
+			decision: "pass",
+			primaryReason: "final aggregate review passed",
+			requiredFixesCount: 0,
+			overallDriftLevel: "low"
+		}
+	}' >"$LAST_MESSAGE_FILE"
 	;;
 soft_fix:execute)
 	if [[ -f "$REPO_ROOT/.mock-state/soft-fix-ready" ]]; then
@@ -208,6 +239,32 @@ soft_fix:eval)
 			0
 	fi
 	;;
+soft_fix:final-eval)
+	jq -n '{
+		status: "pass",
+		summary: "story-level fix still satisfies the whole PRD",
+		prdReview: {
+			goals: [{ id: "G-1", text: "Finish the requested workflow", judgment: "met", evidence: ["story.txt says good"] }],
+			userStories: [{ id: "US-001", text: "soft fix story", judgment: "met", evidence: ["story commit exists"] }],
+			functionalRequirements: [{ id: "FR-1", text: "Typecheck passes", judgment: "met", evidence: ["echo soft-fix"] }],
+			nonGoals: [{ id: "NG-1", text: "Do not widen scope", judgment: "met", evidence: ["single file changed"] }]
+		},
+		scopeDrift: {
+			underfit: { present: false, summary: "", evidence: [] },
+			overreach: { present: false, summary: "", evidence: [] },
+			cross_story_conflict: { present: false, summary: "", evidence: [] },
+			shared_constraint_loss: { present: false, summary: "", evidence: [] }
+		},
+		findings: [],
+		requiredFixes: [],
+		verdictSummary: {
+			decision: "pass",
+			primaryReason: "aggregate drift resolved",
+			requiredFixesCount: 0,
+			overallDriftLevel: "low"
+		}
+	}' >"$LAST_MESSAGE_FILE"
+	;;
 eval_infra_retry:execute)
 	echo "stable" >"$REPO_ROOT/story.txt"
 	write_execution_artifact \
@@ -244,6 +301,285 @@ eval_infra_retry:eval)
 			0
 	fi
 	;;
+eval_infra_retry:final-eval)
+	jq -n '{
+		status: "pass",
+		summary: "whole PRD still holds after story-level infra retry",
+		prdReview: {
+			goals: [{ id: "G-1", text: "Finish the requested workflow", judgment: "met", evidence: ["story.txt says stable"] }],
+			userStories: [{ id: "US-001", text: "eval infra retry story", judgment: "met", evidence: ["story commit exists"] }],
+			functionalRequirements: [{ id: "FR-1", text: "Typecheck passes", judgment: "met", evidence: ["echo stable"] }],
+			nonGoals: [{ id: "NG-1", text: "Do not widen scope", judgment: "met", evidence: ["single file changed"] }]
+		},
+		scopeDrift: {
+			underfit: { present: false, summary: "", evidence: [] },
+			overreach: { present: false, summary: "", evidence: [] },
+			cross_story_conflict: { present: false, summary: "", evidence: [] },
+			shared_constraint_loss: { present: false, summary: "", evidence: [] }
+		},
+		findings: [],
+		requiredFixes: [],
+		verdictSummary: {
+			decision: "pass",
+			primaryReason: "aggregate review passed",
+			requiredFixesCount: 0,
+			overallDriftLevel: "low"
+		}
+	}' >"$LAST_MESSAGE_FILE"
+	;;
+final_fix:execute)
+	echo "story done" >"$REPO_ROOT/story.txt"
+	write_execution_artifact \
+		"$EXEC_ARTIFACT" \
+		"ok" \
+		"implemented final-fix scenario story" \
+		'["story.txt"]' \
+		'[{"command":"echo final-fix","status":"passed"}]' \
+		'[{"criterionId":"AC-1","criterionText":"Typecheck passes","claimedStatus":"met","evidence":"echo final-fix"}]' \
+		'fix(scripts): final fix scenario story' \
+		'["write story.txt"]' \
+		'["leave final drift for the final evaluator"]'
+	printf 'execution done\n' >"$LAST_MESSAGE_FILE"
+	;;
+final_fix:eval)
+	write_eval_message \
+		"pass" \
+		"story itself is acceptable" \
+		'[{"criterionId":"AC-1","criterionText":"Typecheck passes","judgment":"met","evidence":"echo final-fix"}]' \
+		'[]' \
+		'[]' \
+		"pass" \
+		"story passes" \
+		0
+	;;
+final_fix:final-eval)
+	if [[ -f "$REPO_ROOT/.mock-state/final-fixed" ]]; then
+		jq -n '{
+			status: "pass",
+			summary: "final drift corrected",
+			prdReview: {
+				goals: [{ id: "G-1", text: "Finish the requested workflow", judgment: "met", evidence: ["final.txt says fixed"] }],
+				userStories: [{ id: "US-001", text: "final fix story", judgment: "met", evidence: ["story commit exists"] }],
+				functionalRequirements: [{ id: "FR-1", text: "Typecheck passes", judgment: "met", evidence: ["echo final-fix"] }],
+				nonGoals: [{ id: "NG-1", text: "Do not widen scope", judgment: "met", evidence: ["bounded final fix only"] }]
+			},
+			scopeDrift: {
+				underfit: { present: false, summary: "", evidence: [] },
+				overreach: { present: false, summary: "", evidence: [] },
+				cross_story_conflict: { present: false, summary: "", evidence: [] },
+				shared_constraint_loss: { present: false, summary: "", evidence: [] }
+			},
+			findings: [],
+			requiredFixes: [],
+			verdictSummary: {
+				decision: "pass",
+				primaryReason: "bounded final fix resolved aggregate drift",
+				requiredFixesCount: 0,
+				overallDriftLevel: "low"
+			},
+			approvedCommit: {
+				title: "fix(scripts): resolve final aggregate drift",
+				bodyBullets: ["apply bounded final corrective change"]
+			}
+		}' >"$LAST_MESSAGE_FILE"
+	else
+		jq -n '{
+			status: "soft_fail",
+			summary: "aggregate drift still exists",
+			prdReview: {
+				goals: [{ id: "G-1", text: "Finish the requested workflow", judgment: "unmet", evidence: ["final.txt missing"] }],
+				userStories: [{ id: "US-001", text: "final fix story", judgment: "met", evidence: ["story commit exists"] }],
+				functionalRequirements: [{ id: "FR-1", text: "Typecheck passes", judgment: "met", evidence: ["echo final-fix"] }],
+				nonGoals: [{ id: "NG-1", text: "Do not widen scope", judgment: "met", evidence: ["still bounded"] }]
+			},
+			scopeDrift: {
+				underfit: { present: true, summary: "missing final marker", evidence: ["final.txt missing"] },
+				overreach: { present: false, summary: "", evidence: [] },
+				cross_story_conflict: { present: false, summary: "", evidence: [] },
+				shared_constraint_loss: { present: false, summary: "", evidence: [] }
+			},
+			findings: [
+				{
+					id: "F-1",
+					kind: "implementation_fix",
+					summary: "Add the final aggregate marker file",
+					evidence: ["final.txt missing"]
+				}
+			],
+			requiredFixes: [
+				{
+					id: "RF-1",
+					kind: "implementation_fix",
+					summary: "Create final.txt with corrected content",
+					targets: ["final.txt"],
+					evidence: ["final.txt missing"]
+				}
+			],
+			verdictSummary: {
+				decision: "soft_fail",
+				primaryReason: "bounded final corrective change required",
+				requiredFixesCount: 1,
+				overallDriftLevel: "medium"
+			}
+		}' >"$LAST_MESSAGE_FILE"
+	fi
+	;;
+final_fix:final-fix)
+	printf 'fixed\n' >"$REPO_ROOT/final.txt"
+	touch "$REPO_ROOT/.mock-state/final-fixed"
+	jq -n '{
+		status: "ok",
+		summary: "applied bounded final fix",
+		filesChanged: ["final.txt"],
+		mechanicalChecks: [{"command":"test -f final.txt","status":"passed"}],
+		addressedFindings: [
+			{
+				findingId: "F-1",
+				kind: "implementation_fix",
+				status: "addressed",
+				evidence: "final.txt created"
+			}
+		],
+		proposedCommit: {
+			title: "fix(scripts): apply bounded final corrective change",
+			bodyBullets: ["create final.txt for aggregate conformance"]
+		},
+		learnings: ["final eval should stay bounded"]
+	}' >"$FINAL_FIX_ARTIFACT"
+	printf 'final fix done\n' >"$LAST_MESSAGE_FILE"
+	;;
+final_hard_fail:execute)
+	echo "story done" >"$REPO_ROOT/story.txt"
+	write_execution_artifact \
+		"$EXEC_ARTIFACT" \
+		"ok" \
+		"implemented final-hard-fail scenario story" \
+		'["story.txt"]' \
+		'[{"command":"echo final-hard-fail","status":"passed"}]' \
+		'[{"criterionId":"AC-1","criterionText":"Typecheck passes","claimedStatus":"met","evidence":"echo final-hard-fail"}]' \
+		'fix(scripts): final hard fail scenario story' \
+		'["write story.txt"]' \
+		'["leave slicing problem for the final evaluator"]'
+	printf 'execution done\n' >"$LAST_MESSAGE_FILE"
+	;;
+final_hard_fail:eval)
+	write_eval_message \
+		"pass" \
+		"story itself is acceptable" \
+		'[{"criterionId":"AC-1","criterionText":"Typecheck passes","judgment":"met","evidence":"echo final-hard-fail"}]' \
+		'[]' \
+		'[]' \
+		"pass" \
+		"story passes" \
+		0
+	;;
+final_hard_fail:final-eval)
+	jq -n '{
+		status: "hard_fail",
+		summary: "story slicing issue detected at final review",
+		prdReview: {
+			goals: [{ id: "G-1", text: "Finish the requested workflow", judgment: "unmet", evidence: ["shared constraint missing"] }],
+			userStories: [{ id: "US-001", text: "final hard fail story", judgment: "met", evidence: ["story commit exists"] }],
+			functionalRequirements: [{ id: "FR-1", text: "Typecheck passes", judgment: "met", evidence: ["echo final-hard-fail"] }],
+			nonGoals: [{ id: "NG-1", text: "Do not widen scope", judgment: "unclear", evidence: ["story slicing issue remains"] }]
+		},
+		scopeDrift: {
+			underfit: { present: false, summary: "", evidence: [] },
+			overreach: { present: false, summary: "", evidence: [] },
+			cross_story_conflict: { present: true, summary: "story slicing lost a shared requirement", evidence: ["shared constraint missing"] },
+			shared_constraint_loss: { present: true, summary: "shared constraint was dropped", evidence: ["shared constraint missing"] }
+		},
+		findings: [
+			{
+				id: "F-1",
+				kind: "story_slicing_issue",
+				summary: "Current slicing cannot satisfy the whole PRD",
+				evidence: ["shared constraint missing"]
+			}
+		],
+		requiredFixes: [
+			{
+				id: "RF-1",
+				kind: "story_slicing_issue",
+				summary: "Re-slice the PRD before continuing",
+				targets: ["story slicing"],
+				evidence: ["shared constraint missing"]
+			}
+		],
+		verdictSummary: {
+			decision: "hard_fail",
+			primaryReason: "requires story re-slicing, not bounded final fix",
+			requiredFixesCount: 1,
+			overallDriftLevel: "high"
+		},
+		humanGuidance: {
+			recommendedLayer: "story_slicing_issue",
+			nextAction: "Return to PRD to re-slice stories."
+		}
+	}' >"$LAST_MESSAGE_FILE"
+	;;
+final_infra_retry:execute)
+	echo "story done" >"$REPO_ROOT/story.txt"
+	write_execution_artifact \
+		"$EXEC_ARTIFACT" \
+		"ok" \
+		"implemented final-infra-retry scenario story" \
+		'["story.txt"]' \
+		'[{"command":"echo final-infra","status":"passed"}]' \
+		'[{"criterionId":"AC-1","criterionText":"Typecheck passes","claimedStatus":"met","evidence":"echo final-infra"}]' \
+		'fix(scripts): final infra retry scenario story' \
+		'["write story.txt"]' \
+		'["retry final evaluator on infra failure"]'
+	printf 'execution done\n' >"$LAST_MESSAGE_FILE"
+	;;
+final_infra_retry:eval)
+	write_eval_message \
+		"pass" \
+		"story itself is acceptable" \
+		'[{"criterionId":"AC-1","criterionText":"Typecheck passes","judgment":"met","evidence":"echo final-infra"}]' \
+		'[]' \
+		'[]' \
+		"pass" \
+		"story passes" \
+		0
+	;;
+final_infra_retry:final-eval)
+	COUNT_FILE="$REPO_ROOT/.mock-state/final-infra-count"
+	COUNT=0
+	if [[ -f "$COUNT_FILE" ]]; then
+		COUNT="$(cat "$COUNT_FILE")"
+	fi
+	COUNT=$((COUNT + 1))
+	printf '%s\n' "$COUNT" >"$COUNT_FILE"
+	if [[ "$COUNT" -eq 1 ]]; then
+		printf 'not-json\n' >"$LAST_MESSAGE_FILE"
+	else
+		jq -n '{
+			status: "pass",
+			summary: "final evaluator recovered after infra failure",
+			prdReview: {
+				goals: [{ id: "G-1", text: "Finish the requested workflow", judgment: "met", evidence: ["story.txt exists"] }],
+				userStories: [{ id: "US-001", text: "final infra retry story", judgment: "met", evidence: ["story commit exists"] }],
+				functionalRequirements: [{ id: "FR-1", text: "Typecheck passes", judgment: "met", evidence: ["echo final-infra"] }],
+				nonGoals: [{ id: "NG-1", text: "Do not widen scope", judgment: "met", evidence: ["single file changed"] }]
+			},
+			scopeDrift: {
+				underfit: { present: false, summary: "", evidence: [] },
+				overreach: { present: false, summary: "", evidence: [] },
+				cross_story_conflict: { present: false, summary: "", evidence: [] },
+				shared_constraint_loss: { present: false, summary: "", evidence: [] }
+			},
+			findings: [],
+			requiredFixes: [],
+			verdictSummary: {
+				decision: "pass",
+				primaryReason: "final retry succeeded",
+				requiredFixesCount: 0,
+				overallDriftLevel: "low"
+			}
+		}' >"$LAST_MESSAGE_FILE"
+	fi
+	;;
 adopt:execute)
 	if [[ ! -f "$REPO_ROOT/dirty.txt" ]]; then
 		printf 'dirty\n' >"$REPO_ROOT/dirty.txt"
@@ -270,6 +606,32 @@ adopt:eval)
 		"pass" \
 		"dirty worktree was adopted intentionally" \
 		0
+	;;
+adopt:final-eval)
+	jq -n '{
+		status: "pass",
+		summary: "adopted worktree still satisfies the whole PRD",
+		prdReview: {
+			goals: [{ id: "G-1", text: "Finish the requested workflow", judgment: "met", evidence: ["dirty.txt exists"] }],
+			userStories: [{ id: "US-001", text: "adopt dirty worktree story", judgment: "met", evidence: ["story commit exists"] }],
+			functionalRequirements: [{ id: "FR-1", text: "Typecheck passes", judgment: "met", evidence: ["echo adopt"] }],
+			nonGoals: [{ id: "NG-1", text: "Do not widen scope", judgment: "met", evidence: ["single file changed"] }]
+		},
+		scopeDrift: {
+			underfit: { present: false, summary: "", evidence: [] },
+			overreach: { present: false, summary: "", evidence: [] },
+			cross_story_conflict: { present: false, summary: "", evidence: [] },
+			shared_constraint_loss: { present: false, summary: "", evidence: [] }
+		},
+		findings: [],
+		requiredFixes: [],
+		verdictSummary: {
+			decision: "pass",
+			primaryReason: "adopted change stayed within the PRD",
+			requiredFixesCount: 0,
+			overallDriftLevel: "low"
+		}
+	}' >"$LAST_MESSAGE_FILE"
 	;;
 mechanical_failed:execute)
 	printf 'broken\n' >"$REPO_ROOT/story.txt"
@@ -312,7 +674,9 @@ setup_temp_repo() {
 	cp "$SCRIPT_SOURCE_DIR/run-codex.sh" "$repo_dir/scripts/ralph/run-codex.sh"
 	cp "$SCRIPT_SOURCE_DIR/CODEX.md" "$repo_dir/scripts/ralph/CODEX.md"
 	cp "$SCRIPT_SOURCE_DIR/EVAL.md" "$repo_dir/scripts/ralph/EVAL.md"
-	printf '.ralph/\n' >"$repo_dir/.gitignore"
+	cp "$SCRIPT_SOURCE_DIR/FINAL_EVAL.md" "$repo_dir/scripts/ralph/FINAL_EVAL.md"
+	cp "$SCRIPT_SOURCE_DIR/FINAL_FIX.md" "$repo_dir/scripts/ralph/FINAL_FIX.md"
+	printf '.ralph/\n.mock-state/\n' >"$repo_dir/.gitignore"
 	printf '# temp repo\n' >"$repo_dir/README.md"
 	make_mock_codex "$repo_dir/mock-codex.sh"
 	(
@@ -349,6 +713,27 @@ write_prd() {
   ]
 }
 EOF
+	cat >"$repo_dir/.ralph/prd-source.md" <<EOF
+# PRD: $story_title
+
+## Goals
+
+- Finish the requested workflow
+
+## User Stories
+
+### US-001
+
+- Typecheck passes
+
+## Functional Requirements
+
+- FR-1: The workflow completes without widening scope.
+
+## Non-Goals
+
+- Do not widen scope.
+EOF
 }
 
 run_case_pass() {
@@ -365,6 +750,19 @@ run_case_pass() {
 	assert_eq "2" "$(git -C "$tmp_dir" rev-list --count HEAD)" "pass scenario should create one story commit"
 	assert_file "$tmp_dir/.ralph/runs/$(basename "$(cat "$tmp_dir/.ralph/.last-run")")/iteration-001.exec.story-result.json"
 	assert_file "$tmp_dir/.ralph/runs/$(basename "$(cat "$tmp_dir/.ralph/.last-run")")/iteration-001.eval.semantic-eval.json"
+	assert_file "$tmp_dir/.ralph/runs/$(basename "$(cat "$tmp_dir/.ralph/.last-run")")/final.eval.semantic-eval.json"
+	assert_eq "pass" "$(jq -r '.status' "$tmp_dir/.ralph/runs/$(basename "$(cat "$tmp_dir/.ralph/.last-run")")/final.eval.semantic-eval.json")" "pass scenario should finish with final pass"
+	assert_file "$tmp_dir/.ralph/completed-stories.json"
+	assert_eq "1" "$(jq 'length' "$tmp_dir/.ralph/completed-stories.json")" "pass scenario should track one completed story"
+	if ! compgen -G "$tmp_dir/.ralph/archive/*.prd-source.md" >/dev/null; then
+		fail "pass scenario should archive prd-source snapshot"
+	fi
+	if ! compgen -G "$tmp_dir/.ralph/archive/*.completed-stories.json" >/dev/null; then
+		fail "pass scenario should archive completed stories summary"
+	fi
+	if ! compgen -G "$tmp_dir/.ralph/archive/*.final.eval.json" >/dev/null; then
+		fail "pass scenario should archive final eval artifact"
+	fi
 }
 
 run_case_soft_fix() {
@@ -380,6 +778,7 @@ run_case_soft_fix() {
 	assert_eq "true" "$(jq -r '.userStories[0].passes' "$tmp_dir/.ralph/prd.json")" "soft-fix scenario should mark story complete"
 	assert_file "$tmp_dir/.ralph/runs/$(basename "$(cat "$tmp_dir/.ralph/.last-run")")/iteration-001.fix-01.exec.story-result.json"
 	assert_eq "good" "$(cat "$tmp_dir/story.txt")" "soft-fix scenario should apply evaluator guidance"
+	assert_eq "pass" "$(jq -r '.status' "$tmp_dir/.ralph/runs/$(basename "$(cat "$tmp_dir/.ralph/.last-run")")/final.eval.semantic-eval.json")" "soft-fix scenario should finish with final pass"
 }
 
 run_case_eval_infra_retry() {
@@ -395,6 +794,7 @@ run_case_eval_infra_retry() {
 	)
 	assert_eq "2" "$(cat "$tmp_dir/.mock-state/eval-infra-count")" "eval infra retry should rerun evaluator"
 	assert_eq "true" "$(jq -r '.userStories[0].passes' "$tmp_dir/.ralph/prd.json")" "eval infra retry should eventually pass"
+	assert_eq "pass" "$(jq -r '.status' "$tmp_dir/.ralph/runs/$(basename "$(cat "$tmp_dir/.ralph/.last-run")")/final.eval.semantic-eval.json")" "eval infra retry scenario should still reach final pass"
 }
 
 run_case_adopt() {
@@ -410,6 +810,7 @@ run_case_adopt() {
 	)
 	assert_eq "true" "$(jq -r '.userStories[0].passes' "$tmp_dir/.ralph/prd.json")" "adopt scenario should mark story complete"
 	assert_file "$tmp_dir/dirty.txt"
+	assert_eq "pass" "$(jq -r '.status' "$tmp_dir/.ralph/runs/$(basename "$(cat "$tmp_dir/.ralph/.last-run")")/final.eval.semantic-eval.json")" "adopt scenario should reach final pass"
 }
 
 run_case_mechanical_failed() {
@@ -430,6 +831,74 @@ run_case_mechanical_failed() {
 	assert_eq "1" "$(git -C "$tmp_dir" rev-list --count HEAD)" "mechanical_failed scenario should not commit"
 }
 
+run_case_final_fix() {
+	local tmp_dir="$1/final-fix"
+	setup_temp_repo "$tmp_dir"
+	write_prd "$tmp_dir" "final fix story"
+	(
+		cd "$tmp_dir"
+		RALPH_CODEX_BIN="$tmp_dir/mock-codex.sh" \
+		RALPH_TEST_SCENARIO="final_fix" \
+		./scripts/ralph/ralph.sh --state-dir .ralph 1
+	)
+	assert_eq "true" "$(jq -r '.userStories[0].passes' "$tmp_dir/.ralph/prd.json")" "final-fix scenario should preserve completed story state"
+	assert_file "$tmp_dir/.ralph/runs/$(basename "$(cat "$tmp_dir/.ralph/.last-run")")/final.fix-01.exec.fix-result.json"
+	assert_eq "fixed" "$(cat "$tmp_dir/final.txt")" "final-fix scenario should apply bounded corrective change"
+	assert_eq "3" "$(git -C "$tmp_dir" rev-list --count HEAD)" "final-fix scenario should create story and final corrective commits"
+	assert_eq "pass" "$(jq -r '.status' "$tmp_dir/.ralph/runs/$(basename "$(cat "$tmp_dir/.ralph/.last-run")")/final.eval.semantic-eval.json")" "final-fix scenario should end with final pass"
+}
+
+run_case_final_hard_fail() {
+	local tmp_dir="$1/final-hard-fail"
+	setup_temp_repo "$tmp_dir"
+	write_prd "$tmp_dir" "final hard fail story"
+	set +e
+	(
+		cd "$tmp_dir"
+		RALPH_CODEX_BIN="$tmp_dir/mock-codex.sh" \
+		RALPH_TEST_SCENARIO="final_hard_fail" \
+		./scripts/ralph/ralph.sh --state-dir .ralph 1
+	)
+	local rc=$?
+	set -e
+	assert_eq "1" "$rc" "final-hard-fail scenario should stop"
+	assert_eq "true" "$(jq -r '.userStories[0].passes' "$tmp_dir/.ralph/prd.json")" "final-hard-fail should keep the story completed"
+	assert_eq "2" "$(git -C "$tmp_dir" rev-list --count HEAD)" "final-hard-fail should stop before a final corrective commit"
+	assert_eq "final" "$(jq -r '.scope' "$tmp_dir/.ralph/active-story.json")" "final-hard-fail should preserve a final-phase checkpoint"
+}
+
+run_case_final_infra_retry() {
+	local tmp_dir="$1/final-infra-retry"
+	setup_temp_repo "$tmp_dir"
+	write_prd "$tmp_dir" "final infra retry story"
+	(
+		cd "$tmp_dir"
+		RALPH_CODEX_BIN="$tmp_dir/mock-codex.sh" \
+		RALPH_TEST_SCENARIO="final_infra_retry" \
+		RALPH_FINAL_EVAL_MAX_RETRIES=2 \
+		./scripts/ralph/ralph.sh --state-dir .ralph 1
+	)
+	assert_eq "2" "$(cat "$tmp_dir/.mock-state/final-infra-count")" "final infra retry should rerun the final evaluator"
+	assert_eq "pass" "$(jq -r '.status' "$tmp_dir/.ralph/runs/$(basename "$(cat "$tmp_dir/.ralph/.last-run")")/final.eval.semantic-eval.json")" "final infra retry should eventually pass"
+}
+
+run_case_missing_prd_source() {
+	local tmp_dir="$1/missing-prd-source"
+	setup_temp_repo "$tmp_dir"
+	write_prd "$tmp_dir" "missing prd source story"
+	rm -f "$tmp_dir/.ralph/prd-source.md"
+	set +e
+	(
+		cd "$tmp_dir"
+		RALPH_CODEX_BIN="$tmp_dir/mock-codex.sh" \
+		./scripts/ralph/ralph.sh --state-dir .ralph 1
+	)
+	local rc=$?
+	set -e
+	assert_eq "1" "$rc" "missing prd source should stop early"
+	assert_eq "false" "$(jq -r '.userStories[0].passes' "$tmp_dir/.ralph/prd.json")" "missing prd source should not advance the story"
+}
+
 main() {
 	local tmp_root
 	tmp_root="$(mktemp -d)"
@@ -440,6 +909,10 @@ main() {
 	run_case_eval_infra_retry "$tmp_root"
 	run_case_adopt "$tmp_root"
 	run_case_mechanical_failed "$tmp_root"
+	run_case_final_fix "$tmp_root"
+	run_case_final_hard_fail "$tmp_root"
+	run_case_final_infra_retry "$tmp_root"
+	run_case_missing_prd_source "$tmp_root"
 
 	echo "Ralph semantic eval harness tests passed."
 }

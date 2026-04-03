@@ -44,11 +44,28 @@ Environment:
     RALPH_EVAL_RUNNER_MAX_RETRIES Runner retry count for evaluator transport failures (default: 0)
 
   Semantic loop:
-    RALPH_SEMANTIC_MAX_FIX_ROUNDS Fix rounds after evaluator soft-fail (default: 2)
+    RALPH_SEMANTIC_MAX_FIX_ROUNDS Fix rounds after evaluator soft-fail (default: 3)
+
+  Final eval:
+    RALPH_FINAL_EVAL_MODEL        Optional final evaluator model override
+    RALPH_FINAL_EVAL_PROFILE      Optional final evaluator Codex profile
+    RALPH_FINAL_EVAL_ARGS         Extra shell-split final evaluator args
+    RALPH_FINAL_EVAL_SANDBOX      Final evaluator sandbox mode (default: read-only)
+    RALPH_FINAL_EVAL_APPROVAL     Final evaluator approval mode (default: never)
+    RALPH_FINAL_EVAL_TIMEOUT_SECONDS
+                                  Hard timeout for one final evaluator attempt (default: 1200)
+    RALPH_FINAL_EVAL_MAX_RETRIES  Outer-loop final evaluator infra retries (default: 2)
+    RALPH_FINAL_EVAL_RETRY_WAIT_SECONDS
+                                  Base wait before retrying final evaluator infra failures (default: 10)
+    RALPH_FINAL_EVAL_TERM_GRACE_SECONDS
+                                  Grace period between TERM and KILL on final evaluator timeout (default: 5)
+    RALPH_FINAL_EVAL_RUNNER_MAX_RETRIES
+                                  Runner retry count for final evaluator transport failures (default: 0)
+    RALPH_FINAL_FIX_MAX_ROUNDS    Final corrective rounds after final soft-fail (default: 3)
 
   Note:
     max-iterations limits one Ralph launch only; `.ralph/prd.json` may contain more stories
-    than this number. Eval and fix subrounds do not consume the story iteration budget.
+    than this number. Story eval/fix and final eval/fix subrounds do not consume the story iteration budget.
 EOF
 }
 
@@ -62,7 +79,10 @@ ADOPT_DIRTY_STORY_ID=""
 ASSUME_YES=0
 RALPH_EVAL_MAX_RETRIES="${RALPH_EVAL_MAX_RETRIES:-2}"
 RALPH_EVAL_RETRY_WAIT_SECONDS="${RALPH_EVAL_RETRY_WAIT_SECONDS:-10}"
-RALPH_SEMANTIC_MAX_FIX_ROUNDS="${RALPH_SEMANTIC_MAX_FIX_ROUNDS:-2}"
+RALPH_SEMANTIC_MAX_FIX_ROUNDS="${RALPH_SEMANTIC_MAX_FIX_ROUNDS:-3}"
+RALPH_FINAL_EVAL_MAX_RETRIES="${RALPH_FINAL_EVAL_MAX_RETRIES:-2}"
+RALPH_FINAL_EVAL_RETRY_WAIT_SECONDS="${RALPH_FINAL_EVAL_RETRY_WAIT_SECONDS:-10}"
+RALPH_FINAL_FIX_MAX_ROUNDS="${RALPH_FINAL_FIX_MAX_ROUNDS:-3}"
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -117,7 +137,9 @@ if [[ "$TOOL" != "codex" ]]; then
 fi
 
 PRD_FILE="$STATE_DIR/prd.json"
+PRD_SOURCE_FILE="$STATE_DIR/prd-source.md"
 PROGRESS_FILE="$STATE_DIR/progress.txt"
+COMPLETED_STORIES_FILE="$STATE_DIR/completed-stories.json"
 ARCHIVE_DIR="$STATE_DIR/archive"
 RUNS_DIR="$STATE_DIR/runs"
 LAST_BRANCH_FILE="$STATE_DIR/.last-branch"
@@ -150,6 +172,9 @@ ensure_prereqs() {
 	ensure_uint "RALPH_EVAL_MAX_RETRIES" "$RALPH_EVAL_MAX_RETRIES"
 	ensure_uint "RALPH_EVAL_RETRY_WAIT_SECONDS" "$RALPH_EVAL_RETRY_WAIT_SECONDS"
 	ensure_uint "RALPH_SEMANTIC_MAX_FIX_ROUNDS" "$RALPH_SEMANTIC_MAX_FIX_ROUNDS"
+	ensure_uint "RALPH_FINAL_EVAL_MAX_RETRIES" "$RALPH_FINAL_EVAL_MAX_RETRIES"
+	ensure_uint "RALPH_FINAL_EVAL_RETRY_WAIT_SECONDS" "$RALPH_FINAL_EVAL_RETRY_WAIT_SECONDS"
+	ensure_uint "RALPH_FINAL_FIX_MAX_ROUNDS" "$RALPH_FINAL_FIX_MAX_ROUNDS"
 }
 
 ensure_state_layout() {
@@ -166,6 +191,62 @@ init_progress_file() {
 			echo
 			echo "---"
 		} >"$PROGRESS_FILE"
+	fi
+}
+
+init_completed_stories_file() {
+	if [[ ! -f "$COMPLETED_STORIES_FILE" ]]; then
+		printf '[]\n' >"$COMPLETED_STORIES_FILE"
+	fi
+}
+
+backfill_completed_stories_file() {
+	local tmp_file
+	tmp_file="$(mktemp)"
+	jq '
+		.userStories
+		| map(select(.passes == true) | { storyId: .id, title: .title })
+	' "$PRD_FILE" | jq --slurpfile completed "$COMPLETED_STORIES_FILE" '
+		($completed[0] // []) as $completed
+		| reduce .[] as $story ($completed;
+			if any(.[]; .storyId == $story.storyId) then
+				.
+			else
+				. + [{
+					storyId: $story.storyId,
+					title: $story.title,
+					commitSha: "",
+					completedAt: "",
+					executionArtifactPath: "",
+					evalArtifactPath: "",
+					mechanicalChecks: [],
+					summary: "completed before completed-stories tracking"
+				}]
+			end
+		)
+	' >"$tmp_file"
+	mv "$tmp_file" "$COMPLETED_STORIES_FILE"
+}
+
+show_missing_prd_source_help() {
+	cat <<EOF >&2
+Missing Ralph PRD source snapshot: $(relative_to_root "$PRD_SOURCE_FILE")
+
+Ralph final eval requires the canonical PRD markdown for this run.
+
+To continue:
+1. Copy the source PRD markdown into the state directory, for example:
+   cp outputs/v0.0.8/your-prd.md "$(relative_to_root "$PRD_SOURCE_FILE")"
+2. Re-run Ralph.
+
+If you create prd.json through the Ralph PRD JSON workflow, it should write prd-source.md alongside prd.json.
+EOF
+}
+
+ensure_prd_source_exists() {
+	if [[ ! -f "$PRD_SOURCE_FILE" ]]; then
+		show_missing_prd_source_help
+		exit 1
 	fi
 }
 
@@ -197,6 +278,30 @@ current_branch_name() {
 	fi
 
 	printf 'unlabeled\n'
+}
+
+latest_run_dir() {
+	if [[ -f "$LAST_RUN_FILE" ]]; then
+		cat "$LAST_RUN_FILE"
+	fi
+}
+
+latest_final_eval_artifact() {
+	local run_dir
+	run_dir="$(latest_run_dir)"
+	if [[ -n "$run_dir" && -f "$run_dir/final.eval.semantic-eval.json" ]]; then
+		printf '%s\n' "$run_dir/final.eval.semantic-eval.json"
+	fi
+}
+
+latest_final_eval_passed() {
+	local artifact
+	artifact="$(latest_final_eval_artifact || true)"
+	if [[ -n "$artifact" && -f "$artifact" ]]; then
+		[[ "$(jq -r '.status // empty' "$artifact")" == "pass" ]]
+		return
+	fi
+	return 1
 }
 
 sanitize_archive_label() {
@@ -234,6 +339,17 @@ archive_current_state() {
 	cp "$PRD_FILE" "${archive_base}.prd.json"
 	if [[ -f "$PROGRESS_FILE" ]]; then
 		cp "$PROGRESS_FILE" "${archive_base}.progress.txt"
+	fi
+	if [[ -f "$PRD_SOURCE_FILE" ]]; then
+		cp "$PRD_SOURCE_FILE" "${archive_base}.prd-source.md"
+	fi
+	if [[ -f "$COMPLETED_STORIES_FILE" ]]; then
+		cp "$COMPLETED_STORIES_FILE" "${archive_base}.completed-stories.json"
+	fi
+	local final_eval_artifact
+	final_eval_artifact="$(latest_final_eval_artifact || true)"
+	if [[ -n "$final_eval_artifact" && -f "$final_eval_artifact" ]]; then
+		cp "$final_eval_artifact" "${archive_base}.final.eval.json"
 	fi
 
 	cat >"${archive_base}.meta.txt" <<EOF
@@ -343,10 +459,12 @@ write_active_story_checkpoint() {
 	local run_dir="$5"
 	local execution_artifact_path="$6"
 	local eval_artifact_path="$7"
+	local scope="${8:-story}"
 	local dirty_json
 	dirty_json="$(dirty_worktree_files_json)"
 
 	jq -n \
+		--arg scope "$scope" \
 		--arg storyId "$story_id" \
 		--argjson storyIteration "$story_iteration" \
 		--arg phase "$phase" \
@@ -357,6 +475,7 @@ write_active_story_checkpoint() {
 		--arg startedAt "$(timestamp_utc)" \
 		--argjson worktreeDirtyFiles "$dirty_json" \
 		'{
+			scope: $scope,
 			storyId: $storyId,
 			storyIteration: $storyIteration,
 			phase: $phase,
@@ -522,6 +641,63 @@ EOF
 	cat "$SCRIPT_DIR/EVAL.md" >>"$prompt_path"
 }
 
+render_final_eval_prompt() {
+	local prompt_path="$1"
+	local final_eval_artifact="$2"
+
+	cat >"$prompt_path" <<EOF
+# Ralph Final Eval Context
+
+Repository root: $ROOT_DIR
+Ralph state directory: $STATE_DIR
+
+Canonical source of truth for this run:
+- PRD source snapshot: $PRD_SOURCE_FILE
+- Active prd.json: $PRD_FILE
+- Completed stories summary: $COMPLETED_STORIES_FILE
+
+Review the current branch state against the whole PRD, not one individual story.
+
+Write no files except the final evaluator JSON response to the standard Codex last-message output path.
+The current canonical final eval artifact path is:
+- $final_eval_artifact
+
+EOF
+	cat "$SCRIPT_DIR/FINAL_EVAL.md" >>"$prompt_path"
+}
+
+render_final_fix_prompt() {
+	local prompt_path="$1"
+	local final_eval_artifact="$2"
+	local fix_artifact_path="$3"
+	local fix_round="$4"
+
+	cat >"$prompt_path" <<EOF
+# Ralph Final Fix Context
+
+Repository root: $ROOT_DIR
+Ralph state directory: $STATE_DIR
+Current final fix round: $fix_round of $RALPH_FINAL_FIX_MAX_ROUNDS
+
+Canonical source of truth for this run:
+- PRD source snapshot: $PRD_SOURCE_FILE
+- Active prd.json: $PRD_FILE
+- Completed stories summary: $COMPLETED_STORIES_FILE
+- Final eval artifact: $final_eval_artifact
+
+Write the final-fix artifact JSON to:
+- $fix_artifact_path
+
+Do not modify:
+- $PRD_FILE
+- $PRD_SOURCE_FILE
+- $PROGRESS_FILE
+- $COMPLETED_STORIES_FILE
+
+EOF
+	cat "$SCRIPT_DIR/FINAL_FIX.md" >>"$prompt_path"
+}
+
 show_missing_prd_help() {
 	cat <<EOF >&2
 Missing Ralph PRD: $(relative_to_root "$PRD_FILE")
@@ -531,7 +707,9 @@ To start:
    mkdir -p "$(relative_to_root "$STATE_DIR")"
 2. Copy the example PRD:
    cp scripts/ralph/prd.json.example "$(relative_to_root "$PRD_FILE")"
-3. Edit the PRD stories for your feature.
+3. Copy the source PRD markdown:
+   cp /path/to/source-prd.md "$(relative_to_root "$PRD_SOURCE_FILE")"
+4. Edit the PRD stories for your feature.
 EOF
 }
 
@@ -596,6 +774,113 @@ validate_eval_core() {
 				and all(.approvedCommit.bodyBullets[]?; type == "string")
 			)
 		)
+	' "$artifact_path" >/dev/null
+}
+
+validate_final_eval_core() {
+	local artifact_path="$1"
+	jq -e '
+		((.status == "pass") or (.status == "soft_fail") or (.status == "hard_fail") or (.status == "infra_fail"))
+		and (.summary | type == "string")
+		and (.prdReview | type == "object")
+		and (.prdReview.goals | type == "array")
+		and (.prdReview.userStories | type == "array")
+		and (.prdReview.functionalRequirements | type == "array")
+		and (.prdReview.nonGoals | type == "array")
+		and all(
+			(.prdReview.goals + .prdReview.userStories + .prdReview.functionalRequirements + .prdReview.nonGoals)[];
+			(.id | type == "string")
+			and (.text | type == "string")
+			and ((.judgment == "met") or (.judgment == "unmet") or (.judgment == "unclear"))
+			and has("evidence")
+		)
+		and (.scopeDrift | type == "object")
+		and (.scopeDrift.underfit | type == "object")
+		and (.scopeDrift.underfit.present | type == "boolean")
+		and (.scopeDrift.underfit.summary | type == "string")
+		and (.scopeDrift.underfit | has("evidence"))
+		and (.scopeDrift.overreach | type == "object")
+		and (.scopeDrift.overreach.present | type == "boolean")
+		and (.scopeDrift.overreach.summary | type == "string")
+		and (.scopeDrift.overreach | has("evidence"))
+		and (.scopeDrift.cross_story_conflict | type == "object")
+		and (.scopeDrift.cross_story_conflict.present | type == "boolean")
+		and (.scopeDrift.cross_story_conflict.summary | type == "string")
+		and (.scopeDrift.cross_story_conflict | has("evidence"))
+		and (.scopeDrift.shared_constraint_loss | type == "object")
+		and (.scopeDrift.shared_constraint_loss.present | type == "boolean")
+		and (.scopeDrift.shared_constraint_loss.summary | type == "string")
+		and (.scopeDrift.shared_constraint_loss | has("evidence"))
+		and (.findings | type == "array")
+		and all(
+			.findings[];
+			(.id | type == "string")
+			and ((.kind == "implementation_fix") or (.kind == "story_slicing_issue") or (.kind == "prd_scope_issue"))
+			and (.summary | type == "string")
+			and has("evidence")
+		)
+		and (.requiredFixes | type == "array")
+		and all(
+			.requiredFixes[];
+			(.id | type == "string")
+			and ((.kind == "implementation_fix") or (.kind == "story_slicing_issue") or (.kind == "prd_scope_issue"))
+			and (.summary | type == "string")
+			and has("targets")
+			and has("evidence")
+		)
+		and (.verdictSummary | type == "object")
+		and (.verdictSummary.decision | type == "string")
+		and (.verdictSummary.primaryReason | type == "string")
+		and (.verdictSummary.requiredFixesCount | type == "number")
+		and ((.verdictSummary.overallDriftLevel == "low") or (.verdictSummary.overallDriftLevel == "medium") or (.verdictSummary.overallDriftLevel == "high"))
+		and (
+			(has("approvedCommit") | not)
+			or (
+				(.approvedCommit | type == "object")
+				and (.approvedCommit.title | type == "string")
+				and (.approvedCommit.bodyBullets | type == "array")
+				and all(.approvedCommit.bodyBullets[]?; type == "string")
+			)
+		)
+		and (
+			(has("humanGuidance") | not)
+			or (
+				(.humanGuidance | type == "object")
+				and ((.humanGuidance.recommendedLayer == "implementation_fix") or (.humanGuidance.recommendedLayer == "story_slicing_issue") or (.humanGuidance.recommendedLayer == "prd_scope_issue"))
+				and (.humanGuidance.nextAction | type == "string")
+			)
+		)
+	' "$artifact_path" >/dev/null
+}
+
+validate_final_fix_core() {
+	local artifact_path="$1"
+	jq -e '
+		((.status == "ok") or (.status == "mechanical_failed") or (.status == "infra_fail"))
+		and (.summary | type == "string")
+		and (.filesChanged | type == "array")
+		and all(.filesChanged[]?; type == "string")
+		and (.mechanicalChecks | type == "array")
+		and all(
+			.mechanicalChecks[]?;
+			(.command | type == "string")
+			and ((.status == "passed") or (.status == "failed") or (.status == "skipped"))
+			and ((has("outputPath") | not) or (.outputPath | type == "string"))
+		)
+		and (.addressedFindings | type == "array")
+		and all(
+			.addressedFindings[]?;
+			(.findingId | type == "string")
+			and ((.kind == "implementation_fix") or (.kind == "story_slicing_issue") or (.kind == "prd_scope_issue"))
+			and ((.status == "addressed") or (.status == "not_addressed") or (.status == "unclear"))
+			and has("evidence")
+		)
+		and (.proposedCommit | type == "object")
+		and (.proposedCommit.title | type == "string")
+		and (.proposedCommit.bodyBullets | type == "array")
+		and all(.proposedCommit.bodyBullets[]?; type == "string")
+		and (.learnings | type == "array")
+		and all(.learnings[]?; type == "string")
 	' "$artifact_path" >/dev/null
 }
 
@@ -738,6 +1023,124 @@ write_synthetic_eval_infra_artifact() {
 				primaryReason: $summary,
 				requiredFixesCount: 0
 			}
+	}' >"$artifact_path"
+}
+
+normalize_final_eval_artifact() {
+	local raw_message_path="$1"
+	local artifact_path="$2"
+	local dirty_json git_head
+	dirty_json="$(dirty_worktree_files_json)"
+	git_head="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || true)"
+	if [[ -z "$git_head" ]]; then
+		git_head="unborn"
+	fi
+
+	jq \
+		--arg generatedAt "$(timestamp_utc)" \
+		--arg gitHead "$git_head" \
+		--argjson worktreeDirtyFiles "$dirty_json" \
+		'. + {
+			generatedAt: $generatedAt,
+			gitHead: $gitHead,
+			worktreeDirtyFiles: $worktreeDirtyFiles
+		}' "$raw_message_path" >"$artifact_path"
+}
+
+write_synthetic_final_eval_infra_artifact() {
+	local artifact_path="$1"
+	local reason="$2"
+	local dirty_json git_head
+	dirty_json="$(dirty_worktree_files_json)"
+	git_head="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || true)"
+	if [[ -z "$git_head" ]]; then
+		git_head="unborn"
+	fi
+
+	jq -n \
+		--arg summary "$reason" \
+		--arg generatedAt "$(timestamp_utc)" \
+		--arg gitHead "$git_head" \
+		--argjson worktreeDirtyFiles "$dirty_json" \
+		'{
+			status: "infra_fail",
+			summary: $summary,
+			prdReview: {
+				goals: [],
+				userStories: [],
+				functionalRequirements: [],
+				nonGoals: []
+			},
+			scopeDrift: {
+				underfit: { present: false, summary: "", evidence: [] },
+				overreach: { present: false, summary: "", evidence: [] },
+				cross_story_conflict: { present: false, summary: "", evidence: [] },
+				shared_constraint_loss: { present: false, summary: "", evidence: [] }
+			},
+			findings: [],
+			requiredFixes: [],
+			verdictSummary: {
+				decision: "infra_fail",
+				primaryReason: $summary,
+				requiredFixesCount: 0,
+				overallDriftLevel: "high"
+			},
+			generatedAt: $generatedAt,
+			gitHead: $gitHead,
+			worktreeDirtyFiles: $worktreeDirtyFiles
+		}' >"$artifact_path"
+}
+
+normalize_final_fix_artifact() {
+	local raw_path="$1"
+	local artifact_path="$2"
+	local dirty_json git_head
+	dirty_json="$(dirty_worktree_files_json)"
+	git_head="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || true)"
+	if [[ -z "$git_head" ]]; then
+		git_head="unborn"
+	fi
+
+	jq \
+		--arg generatedAt "$(timestamp_utc)" \
+		--arg gitHead "$git_head" \
+		--argjson worktreeDirtyFiles "$dirty_json" \
+		'. + {
+			generatedAt: $generatedAt,
+			gitHead: $gitHead,
+			worktreeDirtyFiles: $worktreeDirtyFiles
+		}' "$raw_path" >"$artifact_path"
+}
+
+write_synthetic_final_fix_infra_artifact() {
+	local artifact_path="$1"
+	local reason="$2"
+	local dirty_json git_head
+	dirty_json="$(dirty_worktree_files_json)"
+	git_head="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || true)"
+	if [[ -z "$git_head" ]]; then
+		git_head="unborn"
+	fi
+
+	jq -n \
+		--arg summary "$reason" \
+		--arg generatedAt "$(timestamp_utc)" \
+		--arg gitHead "$git_head" \
+		--argjson worktreeDirtyFiles "$dirty_json" \
+		'{
+			status: "infra_fail",
+			summary: $summary,
+			filesChanged: [],
+			mechanicalChecks: [],
+			addressedFindings: [],
+			proposedCommit: {
+				title: "",
+				bodyBullets: []
+			},
+			learnings: [],
+			generatedAt: $generatedAt,
+			gitHead: $gitHead,
+			worktreeDirtyFiles: $worktreeDirtyFiles
 		}' >"$artifact_path"
 }
 
@@ -792,6 +1195,38 @@ mark_story_passed() {
 	mv "$tmp_file" "$PRD_FILE"
 }
 
+append_completed_story_entry() {
+	local story_id="$1"
+	local commit_sha="$2"
+	local exec_artifact_path="$3"
+	local eval_artifact_path="$4"
+	local tmp_file
+	tmp_file="$(mktemp)"
+	jq \
+		--arg storyId "$story_id" \
+		--arg title "$(story_title "$story_id")" \
+		--arg commitSha "$commit_sha" \
+		--arg completedAt "$(timestamp_utc)" \
+		--arg executionArtifactPath "$exec_artifact_path" \
+		--arg evalArtifactPath "$eval_artifact_path" \
+		--slurpfile mechanicalChecks "$exec_artifact_path" \
+		--arg summary "$(jq -r '.summary' "$exec_artifact_path")" \
+		'
+		map(select(.storyId != $storyId))
+		+ [{
+			storyId: $storyId,
+			title: $title,
+			commitSha: $commitSha,
+			completedAt: $completedAt,
+			executionArtifactPath: $executionArtifactPath,
+			evalArtifactPath: $evalArtifactPath,
+			mechanicalChecks: ($mechanicalChecks[0].mechanicalChecks // []),
+			summary: $summary
+		}]
+		' "$COMPLETED_STORIES_FILE" >"$tmp_file"
+	mv "$tmp_file" "$COMPLETED_STORIES_FILE"
+}
+
 append_progress_entry() {
 	local story_id="$1"
 	local exec_artifact_path="$2"
@@ -815,6 +1250,23 @@ append_progress_entry() {
 		echo "- primary_reason: $reason"
 		echo "- required_fixes_count: $fix_count"
 		echo "- Learnings for future iterations: $learnings"
+		echo "---"
+	} >>"$PROGRESS_FILE"
+}
+
+append_final_progress_entry() {
+	local final_eval_artifact="$1"
+	local final_commit_sha="$2"
+	{
+		echo "## [$(timestamp_utc)] - FINAL EVAL SUMMARY"
+		echo "- final_eval_status: $(jq -r '.status' "$final_eval_artifact")"
+		echo "- decision: $(jq -r '.verdictSummary.decision' "$final_eval_artifact")"
+		echo "- primary_reason: $(jq -r '.verdictSummary.primaryReason' "$final_eval_artifact")"
+		echo "- overall_drift_level: $(jq -r '.verdictSummary.overallDriftLevel' "$final_eval_artifact")"
+		echo "- required_fixes_count: $(jq -r '.verdictSummary.requiredFixesCount' "$final_eval_artifact")"
+		if [[ -n "$final_commit_sha" ]]; then
+			echo "- final_commit_sha: $final_commit_sha"
+		fi
 		echo "---"
 	} >>"$PROGRESS_FILE"
 }
@@ -846,6 +1298,15 @@ run_codex_purpose() {
 	fi
 	rm -f "$temp_output"
 	return "$rc"
+}
+
+final_eval_soft_fail_is_fixable() {
+	local final_eval_artifact="$1"
+	jq -e '
+		(.status == "soft_fail")
+		and ((.requiredFixes | length) > 0)
+		and all(.requiredFixes[]; .kind == "implementation_fix")
+	' "$final_eval_artifact" >/dev/null
 }
 
 process_story_iteration() {
@@ -985,6 +1446,11 @@ process_story_iteration() {
 
 				git -C "$ROOT_DIR" add -A -- .
 				git -C "$ROOT_DIR" commit -F "$commit_message_file"
+				append_completed_story_entry \
+					"$story_id" \
+					"$(git -C "$ROOT_DIR" rev-parse HEAD)" \
+					"$execution_artifact_path" \
+					"$eval_artifact_path"
 				mark_story_passed "$story_id"
 				append_progress_entry "$story_id" "$execution_artifact_path" "$eval_artifact_path"
 				clear_active_story_checkpoint
@@ -1021,6 +1487,177 @@ process_story_iteration() {
 	done
 }
 
+process_final_phase() {
+	local run_dir="$1"
+	local initial_phase="$2"
+	local initial_fix_round="$3"
+	local final_fix_artifact_path="$4"
+	local final_eval_artifact_path="$5"
+	local phase fix_round
+
+	phase="${initial_phase:-final_eval}"
+	fix_round="${initial_fix_round:-0}"
+
+	if [[ "$phase" != "final_eval" && "$phase" != "final_fix" ]]; then
+		phase="final_eval"
+	fi
+
+	while true; do
+		if [[ "$phase" == "final_fix" ]]; then
+			local fix_label fix_prefix fix_prompt fix_raw fix_rc fix_status
+			fix_label="$(printf 'final.fix-%02d.exec' "$fix_round")"
+			fix_prefix="$run_dir/$fix_label"
+			fix_prompt="$fix_prefix.prompt.md"
+			fix_raw="$fix_prefix.fix-result.raw.json"
+			final_fix_artifact_path="$fix_prefix.fix-result.json"
+
+			render_final_fix_prompt "$fix_prompt" "$final_eval_artifact_path" "$fix_raw" "$fix_round"
+			write_active_story_checkpoint "FINAL" 0 "final_fix" "$fix_round" "$run_dir" "$final_fix_artifact_path" "$final_eval_artifact_path" "final"
+
+			echo "  Running final fix round $fix_round"
+			if run_codex_purpose "execute" "$fix_prompt" "$run_dir" "$fix_label"; then
+				fix_rc=0
+			else
+				fix_rc=$?
+			fi
+
+			if [[ "$fix_rc" -ne 0 ]]; then
+				write_synthetic_final_fix_infra_artifact "$final_fix_artifact_path" "final fix runner failed before a trustworthy corrective artifact was produced"
+				echo "  Final fix runner failed. See $(relative_to_root "$run_dir/$fix_label.status.txt")." >&2
+				return 1
+			fi
+
+			if [[ ! -f "$fix_raw" ]] || ! validate_final_fix_core "$fix_raw"; then
+				write_synthetic_final_fix_infra_artifact "$final_fix_artifact_path" "final fix artifact missing or invalid"
+				echo "  Final fix artifact missing or invalid: $(relative_to_root "$fix_raw")" >&2
+				return 1
+			fi
+
+			normalize_final_fix_artifact "$fix_raw" "$final_fix_artifact_path"
+			fix_status="$(jq -r '.status' "$final_fix_artifact_path")"
+
+			case "$fix_status" in
+			ok)
+				phase="final_eval"
+				;;
+			mechanical_failed)
+				echo "  Final fix mechanical checks failed. Preserving state for manual inspection." >&2
+				return 1
+				;;
+			infra_fail)
+				echo "  Final fix reported infra_fail. Preserving state for manual inspection." >&2
+				return 1
+				;;
+			*)
+				echo "  Unsupported final fix status: $fix_status" >&2
+				return 1
+				;;
+			esac
+		fi
+
+		if [[ "$phase" == "final_eval" ]]; then
+			local eval_attempt eval_label eval_prompt eval_message eval_rc eval_status wait_seconds eval_canonical
+			eval_attempt=0
+			while true; do
+				if [[ "$fix_round" -gt 0 ]]; then
+					eval_label="$(printf 'final.fix-%02d.eval' "$fix_round")"
+				else
+					eval_label="final.eval"
+				fi
+				eval_prompt="$run_dir/$eval_label.prompt.md"
+				eval_message="$run_dir/$eval_label.last-message.txt"
+				final_eval_artifact_path="$run_dir/$eval_label.semantic-eval.json"
+				eval_canonical="$run_dir/final.eval.semantic-eval.json"
+
+				render_final_eval_prompt "$eval_prompt" "$final_eval_artifact_path"
+				write_active_story_checkpoint "FINAL" 0 "final_eval" "$fix_round" "$run_dir" "$final_fix_artifact_path" "$final_eval_artifact_path" "final"
+
+				echo "  Running final eval (fix_round=$fix_round attempt=$((eval_attempt + 1)))"
+				if run_codex_purpose "final-eval" "$eval_prompt" "$run_dir" "$eval_label"; then
+					eval_rc=0
+				else
+					eval_rc=$?
+				fi
+
+				if [[ "$eval_rc" -ne 0 ]]; then
+					write_synthetic_final_eval_infra_artifact "$final_eval_artifact_path" "final evaluator runner failed before a trustworthy verdict was produced"
+				elif [[ ! -f "$eval_message" ]] || ! validate_final_eval_core "$eval_message"; then
+					write_synthetic_final_eval_infra_artifact "$final_eval_artifact_path" "final evaluator output missing or invalid"
+				else
+					normalize_final_eval_artifact "$eval_message" "$final_eval_artifact_path"
+				fi
+
+				if [[ "$final_eval_artifact_path" != "$eval_canonical" ]]; then
+					cp "$final_eval_artifact_path" "$eval_canonical"
+				fi
+
+				eval_status="$(jq -r '.status' "$final_eval_artifact_path")"
+				if [[ "$eval_status" == "infra_fail" && "$eval_attempt" -lt "$RALPH_FINAL_EVAL_MAX_RETRIES" ]]; then
+					eval_attempt=$((eval_attempt + 1))
+					wait_seconds=$((RALPH_FINAL_EVAL_RETRY_WAIT_SECONDS * eval_attempt))
+					echo "  Final eval infra_fail. Retrying in ${wait_seconds}s..." >&2
+					sleep "$wait_seconds"
+					continue
+				fi
+				break
+			done
+
+			case "$eval_status" in
+			pass)
+				local final_commit_sha commit_source commit_message_file
+				final_commit_sha=""
+				if [[ "$(dirty_worktree_count)" -gt 0 ]]; then
+					if [[ "$fix_round" -eq 0 ]]; then
+						echo "  Final eval passed with unexpected dirty worktree and no final fix round. Preserving state." >&2
+						return 1
+					fi
+					commit_source="$(extract_commit_json_path "$final_eval_artifact_path" "$final_fix_artifact_path")"
+					commit_message_file="$run_dir/$(printf 'final.fix-%02d.commit-message.txt' "$fix_round")"
+					write_commit_message_file "$commit_source" "$commit_message_file"
+					git -C "$ROOT_DIR" add -A -- .
+					git -C "$ROOT_DIR" commit -F "$commit_message_file"
+					final_commit_sha="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+				fi
+				append_final_progress_entry "$final_eval_artifact_path" "$final_commit_sha"
+				clear_active_story_checkpoint
+				return 0
+				;;
+			soft_fail)
+				if ! final_eval_soft_fail_is_fixable "$final_eval_artifact_path"; then
+					echo "  Final eval soft_fail included non-implementation fixes; treating as hard stop." >&2
+					write_active_story_checkpoint "FINAL" 0 "final_eval" "$fix_round" "$run_dir" "$final_fix_artifact_path" "$final_eval_artifact_path" "final"
+					return 1
+				fi
+				if [[ "$fix_round" -ge "$RALPH_FINAL_FIX_MAX_ROUNDS" ]]; then
+					echo "  Final eval exhausted corrective rounds." >&2
+					write_active_story_checkpoint "FINAL" 0 "final_fix" "$fix_round" "$run_dir" "$final_fix_artifact_path" "$final_eval_artifact_path" "final"
+					return 1
+				fi
+				fix_round=$((fix_round + 1))
+				phase="final_fix"
+				write_active_story_checkpoint "FINAL" 0 "$phase" "$fix_round" "$run_dir" "$final_fix_artifact_path" "$final_eval_artifact_path" "final"
+				echo "  Final eval soft_fail. Entering final fix round $fix_round."
+				continue
+				;;
+			hard_fail)
+				echo "  Final eval hard_fail. Preserving state for manual intervention." >&2
+				write_active_story_checkpoint "FINAL" 0 "final_eval" "$fix_round" "$run_dir" "$final_fix_artifact_path" "$final_eval_artifact_path" "final"
+				return 1
+				;;
+			infra_fail)
+				echo "  Final eval infra_fail after retries. Preserving state." >&2
+				write_active_story_checkpoint "FINAL" 0 "final_eval" "$fix_round" "$run_dir" "$final_fix_artifact_path" "$final_eval_artifact_path" "final"
+				return 1
+				;;
+			*)
+				echo "  Unsupported final eval status: $eval_status" >&2
+				return 1
+				;;
+			esac
+		fi
+	done
+}
+
 show_run_banner() {
 	local run_dir="$1"
 	echo "Starting Ralph"
@@ -1037,24 +1674,29 @@ main() {
 	ensure_prereqs
 	ensure_state_layout
 	init_progress_file
+	init_completed_stories_file
 
 	if [[ ! -f "$PRD_FILE" ]]; then
 		show_missing_prd_help
 		exit 1
 	fi
+	ensure_prd_source_exists
+	backfill_completed_stories_file
 
 	track_current_branch
 	ensure_story_context
 
 	if [[ "$(pending_story_count)" -eq 0 ]]; then
-		if [[ -f "$ACTIVE_STORY_FILE" ]]; then
+		if [[ -f "$ACTIVE_STORY_FILE" && "$(jq -r '.scope // "story"' "$ACTIVE_STORY_FILE")" == "story" ]]; then
 			clear_active_story_checkpoint
 		fi
-		echo "Ralph state already complete."
-		archive_current_state "already_completed"
-		echo "<promise>COMPLETE</promise>"
-		echo "Progress log: $(relative_to_root "$PROGRESS_FILE")"
-		exit 0
+		if [[ ! -f "$ACTIVE_STORY_FILE" && latest_final_eval_passed ]]; then
+			echo "Ralph state already complete."
+			archive_current_state "already_completed"
+			echo "<promise>COMPLETE</promise>"
+			echo "Progress log: $(relative_to_root "$PROGRESS_FILE")"
+			exit 0
+		fi
 	fi
 
 	local run_id run_dir
@@ -1067,7 +1709,7 @@ main() {
 
 	local i resumed_existing_story=0
 	for i in $(seq 1 "$MAX_ITERATIONS"); do
-		local story_id story_phase fix_round execution_artifact_path eval_artifact_path
+		local story_id story_phase fix_round execution_artifact_path eval_artifact_path active_scope
 
 		echo
 		echo "==============================================================="
@@ -1076,6 +1718,28 @@ main() {
 		echo "  Pending stories before story iteration: $(pending_story_count)"
 
 		if [[ -f "$ACTIVE_STORY_FILE" && "$resumed_existing_story" -eq 0 ]]; then
+			active_scope="$(jq -r '.scope // "story"' "$ACTIVE_STORY_FILE")"
+			if [[ "$active_scope" == "final" ]]; then
+				echo "  Resuming final-phase checkpoint."
+				if ! process_final_phase \
+					"$run_dir" \
+					"$(jq -r '.phase' "$ACTIVE_STORY_FILE")" \
+					"$(jq -r '.fixRound // 0' "$ACTIVE_STORY_FILE")" \
+					"$(jq -r '.executionArtifactPath // ""' "$ACTIVE_STORY_FILE")" \
+					"$(jq -r '.evalArtifactPath // ""' "$ACTIVE_STORY_FILE")"; then
+					echo "Ralph stopped during final eval." >&2
+					echo "Progress log: $(relative_to_root "$PROGRESS_FILE")" >&2
+					echo "Run logs: $(relative_to_root "$run_dir")" >&2
+					exit 1
+				fi
+				archive_current_state "completed"
+				echo "Ralph completed all tasks."
+				echo "<promise>COMPLETE</promise>"
+				echo "Completed after final evaluation."
+				echo "Progress log: $(relative_to_root "$PROGRESS_FILE")"
+				echo "Run logs: $(relative_to_root "$run_dir")"
+				exit 0
+			fi
 			story_id="$(jq -r '.storyId' "$ACTIVE_STORY_FILE")"
 			story_phase="$(jq -r '.phase' "$ACTIVE_STORY_FILE")"
 			fix_round="$(jq -r '.fixRound // 0' "$ACTIVE_STORY_FILE")"
@@ -1092,11 +1756,17 @@ main() {
 		else
 			story_id="$(next_pending_story_id)"
 			if [[ -z "$story_id" ]]; then
+				if ! process_final_phase "$run_dir" "final_eval" 0 "" ""; then
+					echo "Ralph stopped during final eval." >&2
+					echo "Progress log: $(relative_to_root "$PROGRESS_FILE")" >&2
+					echo "Run logs: $(relative_to_root "$run_dir")" >&2
+					exit 1
+				fi
 				echo
 				archive_current_state "completed"
 				echo "Ralph completed all tasks."
 				echo "<promise>COMPLETE</promise>"
-				echo "Completed at story iteration $i of $MAX_ITERATIONS"
+				echo "Completed after final evaluation."
 				echo "Progress log: $(relative_to_root "$PROGRESS_FILE")"
 				echo "Run logs: $(relative_to_root "$run_dir")"
 				exit 0
@@ -1129,10 +1799,16 @@ main() {
 
 		if [[ "$(pending_story_count)" -eq 0 ]]; then
 			echo
+			if ! process_final_phase "$run_dir" "final_eval" 0 "" ""; then
+				echo "Ralph stopped during final eval." >&2
+				echo "Progress log: $(relative_to_root "$PROGRESS_FILE")" >&2
+				echo "Run logs: $(relative_to_root "$run_dir")" >&2
+				exit 1
+			fi
 			archive_current_state "completed"
 			echo "Ralph completed all tasks."
 			echo "<promise>COMPLETE</promise>"
-			echo "Completed at story iteration $i of $MAX_ITERATIONS"
+			echo "Completed after final evaluation at story iteration $i of $MAX_ITERATIONS"
 			echo "Progress log: $(relative_to_root "$PROGRESS_FILE")"
 			echo "Run logs: $(relative_to_root "$run_dir")"
 			exit 0
