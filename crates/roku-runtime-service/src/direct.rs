@@ -421,7 +421,7 @@ mod tests {
 	}
 
 	#[test]
-	fn finalize_direct_path_freezes_and_resumes_execution_approval() {
+	fn finalize_direct_path_resumes_execution_approval_through_direct_boundary() {
 		let service = RuntimeService::default();
 		let directory = tempdir().expect("tempdir should succeed");
 		let cwd = directory
@@ -491,6 +491,62 @@ mod tests {
 			.expect("task lookup should succeed")
 			.expect("task should persist");
 		assert_eq!(persisted_task.state, TaskState::Succeeded);
+		assert_eq!(persisted_task.completed_nodes, vec![node.node_id.clone()]);
+
+		let experiment = service
+			.get_experiment_run(&task.task_id)
+			.expect("experiment lookup should succeed")
+			.expect("direct route task should keep its experiment run");
+		assert_eq!(experiment.strategy, "direct_route");
+
+		let node_id = node.node_id.0.clone();
+		let node_events = service
+			.list_task_events(&task.task_id)
+			.expect("event lookup should succeed")
+			.into_iter()
+			.filter_map(|event| {
+				event
+					.node_id
+					.map(|event_node_id| (event.kind, event_node_id.0))
+			})
+			.filter(|(_, event_node_id)| event_node_id == &node_id)
+			.collect::<Vec<_>>();
+		assert_eq!(
+			node_events,
+			vec![
+				(TaskEventKind::ApprovalPending, node_id.clone()),
+				(TaskEventKind::ApprovalApproved, node_id.clone()),
+				(TaskEventKind::NodeCompleted, node_id.clone()),
+			]
+		);
+
+		let result = service
+			.list_results(&task.task_id)
+			.expect("result lookup should succeed")
+			.into_iter()
+			.find(|result| result.node_id == node.node_id)
+			.expect("execution result should be persisted");
+		assert_eq!(result.producer, "approval-resume:direct-route");
+		assert!(
+			result
+				.evidence
+				.iter()
+				.any(|item| { item.kind == "runtime" && item.value == "approval-resume" })
+		);
+		assert!(result.evidence.iter().any(|item| {
+			item.kind == "execution_digest" && item.value == "direct-route-digest"
+		}));
+		assert!(
+			result
+				.evidence
+				.iter()
+				.any(|item| item.kind == "frozen_payload_ref")
+		);
+		let payload = serde_json::from_str::<serde_json::Value>(&result.payload)
+			.expect("payload should decode");
+		assert_eq!(payload["tool_name"], "command.run");
+		assert_eq!(payload["output"]["data"]["command"], "pwd");
+		assert_eq!(payload["output"]["data"]["digest"], "direct-route-digest");
 	}
 
 	#[test]
