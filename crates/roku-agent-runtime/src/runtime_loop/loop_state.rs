@@ -62,6 +62,7 @@ pub(crate) struct AmbiguityStagnation {
 /// - `remaining_step_budget`: Remaining loop steps before forced termination.
 /// - `remaining_recovery_budget`: Remaining recovery opportunities after non-terminal errors.
 /// - `working_directory`: Current working directory after prior steps.
+/// - `working_summary`: Runtime-owned short-term summary carried alongside replay history.
 /// - `visible_tools`: Tools visible for the next decision round.
 /// - `bound_resources`: Resources already bound to the loop.
 /// - `history`: Recorded step facts for replay and context projection.
@@ -91,6 +92,8 @@ pub struct LoopState {
 	pub remaining_step_budget: u32,
 	pub remaining_recovery_budget: u32,
 	pub working_directory: String,
+	#[serde(default)]
+	pub working_summary: String,
 	pub visible_tools: Vec<String>,
 	pub bound_resources: Vec<ResourceSelector>,
 	pub history: Vec<StepRecord>,
@@ -131,6 +134,7 @@ impl LoopState {
 			remaining_step_budget: initial_step_budget,
 			remaining_recovery_budget: initial_recovery_budget,
 			working_directory: context.working_directory.clone(),
+			working_summary: String::new(),
 			visible_tools: context.visible_tools.clone(),
 			bound_resources: context.bound_resources.clone(),
 			history: Vec::new(),
@@ -275,4 +279,77 @@ fn ambiguous_candidate_fingerprint(observation: &ToolObservation) -> Option<Stri
 	}
 	matches.sort();
 	Some(matches.join("|"))
+}
+
+#[cfg(test)]
+mod tests {
+	use roku_common_types::ResourceSelector;
+	use serde_json::json;
+
+	use super::LoopState;
+	use crate::router::{IntentFamily, RouteDecision, RouteRisk};
+	use crate::runtime_loop::LoopContext;
+
+	fn loop_context() -> LoopContext {
+		LoopContext {
+			request_id: "req-1".to_string(),
+			session_id: "session-1".to_string(),
+			goal: "Inspect the runtime".to_string(),
+			workspace_root: "/workspace".to_string(),
+			working_directory: "/workspace".to_string(),
+			visible_tools: vec!["inventory.describe".to_string()],
+			bound_resources: vec![ResourceSelector::tool("inventory.describe".to_string())],
+			route_decision: RouteDecision::new(
+				IntentFamily::Chat,
+				0.9,
+				false,
+				RouteRisk::Low,
+				vec!["inventory.describe".to_string()],
+				Vec::new(),
+				Vec::new(),
+				"chat request",
+			),
+			last_observation: None,
+		}
+	}
+
+	#[test]
+	fn new_loop_state_starts_with_empty_working_summary() {
+		let state = LoopState::new("loop-1", &loop_context());
+
+		assert_eq!(state.working_summary, "");
+	}
+
+	#[test]
+	fn serde_round_trip_preserves_explicit_working_summary() {
+		let mut state = LoopState::new("loop-1", &loop_context());
+		state.working_summary = "Grounded repo layout and pending blocker.".to_string();
+
+		let value = serde_json::to_value(&state).expect("loop state should serialize");
+		assert_eq!(
+			value.get("working_summary"),
+			Some(&json!("Grounded repo layout and pending blocker."))
+		);
+
+		let restored: LoopState =
+			serde_json::from_value(value).expect("loop state should deserialize");
+		assert_eq!(
+			restored.working_summary,
+			"Grounded repo layout and pending blocker."
+		);
+	}
+
+	#[test]
+	fn serde_defaults_missing_working_summary_for_legacy_snapshots() {
+		let state = LoopState::new("loop-1", &loop_context());
+		let mut value = serde_json::to_value(&state).expect("loop state should serialize");
+		value
+			.as_object_mut()
+			.expect("loop state json should be an object")
+			.remove("working_summary");
+
+		let restored: LoopState =
+			serde_json::from_value(value).expect("legacy loop state should deserialize");
+		assert_eq!(restored.working_summary, "");
+	}
 }

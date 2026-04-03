@@ -13,10 +13,12 @@
 // limitations under the License.
 
 use roku_agent_runtime::LoopState;
-use roku_common_types::{RequestEnvelope, ResponseEnvelope, RuntimeError, Task, TaskId};
+use roku_common_types::{
+	RequestEnvelope, ResponseEnvelope, RuntimeError, RuntimeMemorySections, Task, TaskId,
+};
 use roku_observability::LogLevel;
 
-use crate::{ContextBundle, RuntimeService};
+use crate::{ContextBundle, RuntimeMemoryLayers, RuntimeService};
 use crate::{log_runtime, truncate_for_log};
 
 impl RuntimeService {
@@ -104,14 +106,14 @@ impl RuntimeService {
 		request: &RequestEnvelope,
 		loop_state: &mut LoopState,
 		context_bundle: &ContextBundle,
-		memory_context: &str,
+		runtime_memory_sections: &RuntimeMemorySections,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let initial_history_len = loop_state.history.len();
 		let execution = self.runtime.execute_tool_loop(
 			&task.task_id,
 			request,
 			loop_state,
-			memory_context,
+			runtime_memory_sections,
 			Some(&request.goal),
 		);
 		self.record_runtime_loop_history(loop_state, initial_history_len);
@@ -129,25 +131,29 @@ impl RuntimeService {
 		}
 		self.sync_pending_loop(loop_state)?;
 		self.apply_memory_write_back(request, &response, context_bundle);
-		self.clear_memory_context(&task.task_id);
+		self.clear_runtime_memory_layers(&task.task_id);
 		Ok(response)
 	}
 
-	pub(crate) fn cache_memory_context(&self, task_id: &TaskId, context: &str) {
-		if let Ok(mut map) = self.memory_contexts.lock() {
-			map.insert(task_id.0.clone(), context.to_string());
+	pub(crate) fn cache_runtime_memory_layers(
+		&self,
+		task_id: &TaskId,
+		layers: &RuntimeMemoryLayers,
+	) {
+		if let Ok(mut map) = self.runtime_memory_layers.lock() {
+			map.insert(task_id.0.clone(), layers.clone());
 		}
 	}
 
-	pub(crate) fn task_memory_context(&self, task_id: &TaskId) -> String {
-		if let Ok(map) = self.memory_contexts.lock() {
+	pub(crate) fn task_runtime_memory_layers(&self, task_id: &TaskId) -> RuntimeMemoryLayers {
+		if let Ok(map) = self.runtime_memory_layers.lock() {
 			return map.get(&task_id.0).cloned().unwrap_or_default();
 		}
-		String::new()
+		RuntimeMemoryLayers::default()
 	}
 
-	pub(crate) fn clear_memory_context(&self, task_id: &TaskId) {
-		if let Ok(mut map) = self.memory_contexts.lock() {
+	pub(crate) fn clear_runtime_memory_layers(&self, task_id: &TaskId) {
+		if let Ok(mut map) = self.runtime_memory_layers.lock() {
 			map.remove(&task_id.0);
 		}
 	}

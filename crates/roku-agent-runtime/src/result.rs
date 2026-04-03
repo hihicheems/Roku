@@ -259,7 +259,7 @@ mod tests {
 	use roku_common_types::{
 		ApprovalRequirement, ApprovalRequirementScope, CanonicalDigest, ExecutionActionClass,
 		ExecutionEnvPolicy, ExecutionEnvPolicyMode, ExecutionResourceScope, InvocationMode, NodeId,
-		PolicyBindings, PolicyReasonCode, TaskId,
+		PolicyBindings, PolicyReasonCode, RuntimeMemorySections, TaskId,
 	};
 	use roku_plugin_host::ToolRuntimeError;
 
@@ -273,6 +273,7 @@ mod tests {
 				resources: Vec::new(),
 				conversation_history: Vec::new(),
 				memory_context: String::new(),
+				runtime_memory_sections: RuntimeMemorySections::default(),
 			},
 			capabilities: Vec::new(),
 			capability_tokens: Vec::new(),

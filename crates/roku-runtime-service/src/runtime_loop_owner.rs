@@ -13,11 +13,14 @@
 // limitations under the License.
 
 use roku_agent_runtime::{EscalationAction, EscalationReason, RouteDecisionResult};
-use roku_common_types::{RequestEnvelope, ResponseEnvelope, RuntimeError, Task};
+use roku_common_types::{
+	RequestEnvelope, ResponseEnvelope, RuntimeError, RuntimeMemorySections, Task,
+};
 use roku_observability::LogLevel;
 
 use crate::{
-	ContextBundle, RuntimeService, compatibility_fallback_plan, log_route_decision, log_runtime,
+	ContextBundle, RuntimeMemoryLayers, RuntimeService, compatibility_fallback_plan,
+	log_route_decision, log_runtime,
 };
 
 pub(super) struct RuntimeLoopOwner<'a> {
@@ -26,7 +29,13 @@ pub(super) struct RuntimeLoopOwner<'a> {
 
 struct PreparedRuntimeLoopRequest {
 	context_bundle: ContextBundle,
-	memory_context_text: String,
+	runtime_memory_layers: RuntimeMemoryLayers,
+}
+
+impl PreparedRuntimeLoopRequest {
+	fn runtime_memory_sections(&self) -> RuntimeMemorySections {
+		self.runtime_memory_layers.structured_sections()
+	}
 }
 
 impl<'a> RuntimeLoopOwner<'a> {
@@ -44,19 +53,27 @@ impl<'a> RuntimeLoopOwner<'a> {
 		}
 
 		let mut resumable_loop = self.service.take_resumable_pending_loop(request)?;
-		let mut prepared = self.prepare_request_context(task, request, resumable_loop.is_some())?;
+		let mut prepared = self.prepare_request_context(
+			task,
+			request,
+			resumable_loop.is_some(),
+			resumable_loop
+				.as_ref()
+				.map(|loop_state| loop_state.working_summary.as_str()),
+		)?;
 
 		if let Some(mut loop_state) = resumable_loop.take() {
 			self.service
 				.attach_resumed_loop_resources(&mut prepared.context_bundle, &loop_state);
 			self.service
 				.start_experiment_run(task, &request.goal, "runtime_loop_resume")?;
+			let runtime_memory_sections = prepared.runtime_memory_sections();
 			return self.service.resume_pending_loop(
 				task,
 				request,
 				&mut loop_state,
 				&prepared.context_bundle,
-				&prepared.memory_context_text,
+				&runtime_memory_sections,
 			);
 		}
 
@@ -82,7 +99,7 @@ impl<'a> RuntimeLoopOwner<'a> {
 			return Ok(None);
 		};
 
-		let prepared = self.prepare_request_context(task, request, false)?;
+		let prepared = self.prepare_request_context(task, request, false, None)?;
 		self.service.clear_pending_loop(&request.session_id)?;
 		self.service.metrics.inc_route_escalations();
 		self.service.metrics.inc_route_limited_planning();
@@ -103,13 +120,14 @@ impl<'a> RuntimeLoopOwner<'a> {
 			request,
 			&RouteDecisionResult::Escalate(compatibility_plan.clone()),
 		);
+		let runtime_memory_sections = prepared.runtime_memory_sections();
 		let response = self.service.process_direct_escalation(
 			task,
 			request,
 			&compatibility_plan,
 			&mut loop_state,
 			&prepared.context_bundle,
-			&prepared.memory_context_text,
+			&runtime_memory_sections,
 		)?;
 		Ok(Some(response))
 	}
@@ -119,16 +137,18 @@ impl<'a> RuntimeLoopOwner<'a> {
 		task: &Task,
 		request: &RequestEnvelope,
 		pending_loop_active: bool,
+		working_memory: Option<&str>,
 	) -> Result<PreparedRuntimeLoopRequest, RuntimeError> {
 		let context_bundle = self
 			.service
 			.build_context_bundle(request, pending_loop_active)?;
-		let memory_context_text = context_bundle.memory_context_text();
+		let runtime_memory_layers = context_bundle
+			.runtime_memory_layers_with_working_memory(working_memory.unwrap_or_default());
 		self.service
-			.cache_memory_context(&task.task_id, &memory_context_text);
+			.cache_runtime_memory_layers(&task.task_id, &runtime_memory_layers);
 		Ok(PreparedRuntimeLoopRequest {
 			context_bundle,
-			memory_context_text,
+			runtime_memory_layers,
 		})
 	}
 
@@ -140,6 +160,7 @@ impl<'a> RuntimeLoopOwner<'a> {
 		loop_state: &mut roku_agent_runtime::LoopState,
 		prepared: &PreparedRuntimeLoopRequest,
 	) -> Result<ResponseEnvelope, RuntimeError> {
+		let runtime_memory_sections = prepared.runtime_memory_sections();
 		match route {
 			RouteDecisionResult::Direct(plan) => {
 				self.service.metrics.inc_direct_route_hits();
@@ -151,7 +172,7 @@ impl<'a> RuntimeLoopOwner<'a> {
 					plan,
 					loop_state,
 					&prepared.context_bundle,
-					&prepared.memory_context_text,
+					&runtime_memory_sections,
 				)
 			}
 			RouteDecisionResult::Escalate(plan) => {
@@ -179,7 +200,7 @@ impl<'a> RuntimeLoopOwner<'a> {
 							plan,
 							loop_state,
 							&prepared.context_bundle,
-							&prepared.memory_context_text,
+							&runtime_memory_sections,
 						)
 					}
 					EscalationAction::FallbackAnswer => {
@@ -192,7 +213,7 @@ impl<'a> RuntimeLoopOwner<'a> {
 							plan,
 							loop_state,
 							&prepared.context_bundle,
-							&prepared.memory_context_text,
+							&runtime_memory_sections,
 						)
 					}
 					EscalationAction::EnterLimitedPlanning => {
@@ -209,7 +230,7 @@ impl<'a> RuntimeLoopOwner<'a> {
 							plan,
 							loop_state,
 							&prepared.context_bundle,
-							&prepared.memory_context_text,
+							&runtime_memory_sections,
 						)
 					}
 				}

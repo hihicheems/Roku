@@ -44,8 +44,8 @@ use crate::workers::{
 use roku_common_types::{
 	AgentContext, AggregationMode, CanonicalExecution, ConversationRole, ConversationTurn,
 	EvidenceItem, GeneralExecuteCompletion, JoinPolicy, NodeBudgetSnapshot, NodeId, PolicyBindings,
-	RequestEnvelope, RerunPolicy, ResourceSelector, ResultStatus, RetryPolicy, Task, TaskId,
-	TaskNodeDispatchPolicy, TaskNodeKind,
+	RequestEnvelope, RerunPolicy, ResourceSelector, ResultStatus, RetryPolicy,
+	RuntimeMemorySections, Task, TaskId, TaskNodeDispatchPolicy, TaskNodeKind,
 };
 use roku_common_types::{AgentInstanceSpec, ResultEnvelope, TaskNode};
 use roku_plugin_catalog::{ResourceCatalog, ResourceKind};
@@ -657,7 +657,7 @@ impl GenericAgentRuntime {
 		task_id: &TaskId,
 		request: &RequestEnvelope,
 		loop_state: &mut LoopState,
-		memory_context: &str,
+		runtime_memory_sections: &RuntimeMemorySections,
 		user_reply: Option<&str>,
 	) -> DirectRouteExecutionResult {
 		let grounding_input = user_reply.unwrap_or(&loop_state.goal).to_string();
@@ -690,7 +690,7 @@ impl GenericAgentRuntime {
 						request,
 						loop_state,
 						&context_projection,
-						memory_context,
+						runtime_memory_sections,
 						tool_name,
 						next_step.arguments.clone().unwrap_or_else(|| json!({})),
 						&attachments,
@@ -858,7 +858,7 @@ impl GenericAgentRuntime {
 		task_id: &TaskId,
 		request: &RequestEnvelope,
 		result: &crate::router::RouteEscalationPlan,
-		memory_context: &str,
+		runtime_memory_sections: &RuntimeMemorySections,
 	) -> DirectRouteExecutionResult {
 		let fallback_message = match result.action {
 			EscalationAction::AskForMoreInfo => {
@@ -926,7 +926,7 @@ impl GenericAgentRuntime {
 				crate::tool_config::BuiltinToolRole::General,
 			))],
 			None,
-			memory_context,
+			runtime_memory_sections,
 		)
 	}
 
@@ -1025,8 +1025,9 @@ impl GenericAgentRuntime {
 		step_summary: &str,
 		resources: Vec<ResourceSelector>,
 		explicit_source_url: Option<&String>,
-		memory_context: &str,
+		runtime_memory_sections: &RuntimeMemorySections,
 	) -> DirectRouteExecutionResult {
+		let memory_context = runtime_memory_sections.named_sections_text();
 		let capabilities = route_capabilities(&self.resource_catalog, &resources);
 		let node = TaskNode {
 			node_id: NodeId(node_id.to_string()),
@@ -1055,7 +1056,8 @@ impl GenericAgentRuntime {
 				summary: node.description.clone(),
 				resources,
 				conversation_history: request.conversation_history.clone(),
-				memory_context: memory_context.to_string(),
+				memory_context: memory_context.clone(),
+				runtime_memory_sections: runtime_memory_sections.clone(),
 			},
 			capabilities,
 			capability_tokens: Vec::new(),
@@ -1206,6 +1208,7 @@ impl GenericAgentRuntime {
 				resources: node.resources.clone(),
 				conversation_history: task.conversation_history.clone(),
 				memory_context: String::new(),
+				runtime_memory_sections: RuntimeMemorySections::default(),
 			},
 			capabilities: capabilities.clone(),
 			capability_tokens: Vec::new(),
@@ -1249,11 +1252,12 @@ impl GenericAgentRuntime {
 		request: &RequestEnvelope,
 		selector: &ResourceSelector,
 		arguments: Value,
-		memory_context: &str,
+		runtime_memory_sections: &RuntimeMemorySections,
 		attachments: &[PathBuf],
 		bound_resources: &[ResourceSelector],
 		step_summary: &str,
 	) -> DirectRouteExecutionResult {
+		let memory_context = runtime_memory_sections.named_sections_text();
 		let mut resources = vec![selector.clone()];
 		for resource in bound_resources {
 			if !resources.iter().any(|existing| existing == resource) {
@@ -1288,7 +1292,8 @@ impl GenericAgentRuntime {
 				summary: node.description.clone(),
 				resources,
 				conversation_history: request.conversation_history.clone(),
-				memory_context: memory_context.to_string(),
+				memory_context: memory_context.clone(),
+				runtime_memory_sections: runtime_memory_sections.clone(),
 			},
 			capabilities: capabilities.clone(),
 			capability_tokens: Vec::new(),
@@ -1311,6 +1316,7 @@ impl GenericAgentRuntime {
 				.collect::<Vec<_>>(),
 			"conversation_history": render_conversation_history(&request.conversation_history),
 			"memory_context": memory_context,
+			"runtime_memory_sections": runtime_memory_sections,
 			"budget_tokens": spec.policy_bindings.budget_tokens,
 			"time_budget_ms": spec.policy_bindings.time_budget_ms,
 		});
@@ -1378,7 +1384,7 @@ impl GenericAgentRuntime {
 		request: &RequestEnvelope,
 		loop_state: &LoopState,
 		context_projection: &ContextProjection,
-		memory_context: &str,
+		runtime_memory_sections: &RuntimeMemorySections,
 		tool_name: &str,
 		arguments: Value,
 		attachments: &[PathBuf],
@@ -1398,7 +1404,7 @@ impl GenericAgentRuntime {
 			request,
 			&selector,
 			arguments,
-			memory_context,
+			runtime_memory_sections,
 			attachments,
 			&loop_state.bound_resources,
 			&tool_loop_step_summary(context_projection, tool_name),
@@ -1926,6 +1932,7 @@ mod tests {
 				resources: Vec::new(),
 				conversation_history: Vec::new(),
 				memory_context: String::new(),
+				runtime_memory_sections: RuntimeMemorySections::default(),
 			},
 			capabilities: capabilities
 				.into_iter()
@@ -1997,7 +2004,13 @@ mod tests {
 			plan.bound_resources.clone(),
 		);
 		let task_id = TaskId(format!("task-{}", request.request_id.0));
-		let _ = runtime.execute_tool_loop(&task_id, &request, &mut loop_state, "", None);
+		let _ = runtime.execute_tool_loop(
+			&task_id,
+			&request,
+			&mut loop_state,
+			&RuntimeMemorySections::default(),
+			None,
+		);
 		crate::runtime_loop::runtime_loop_trace(&loop_state)
 	}
 
@@ -2648,7 +2661,7 @@ mod tests {
 			&TaskId("task-loop".to_string()),
 			&request,
 			&mut loop_state,
-			"",
+			&RuntimeMemorySections::default(),
 			None,
 		);
 
@@ -2747,7 +2760,7 @@ mod tests {
 			&TaskId("task-ask-user".to_string()),
 			&request,
 			&mut loop_state,
-			"",
+			&RuntimeMemorySections::default(),
 			None,
 		);
 
@@ -2807,7 +2820,7 @@ mod tests {
 			&TaskId("task-command-approval".to_string()),
 			&request,
 			&mut loop_state,
-			"",
+			&RuntimeMemorySections::default(),
 			None,
 		);
 
@@ -3374,7 +3387,7 @@ mod tests {
 			&TaskId("task-command-run-visibility-boundary".to_string()),
 			&request,
 			&mut loop_state,
-			"",
+			&RuntimeMemorySections::default(),
 			None,
 		);
 		let payload = payload_value(&execution.result);
@@ -4106,7 +4119,13 @@ mod tests {
 		let mut loop_state =
 			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
 		let task_id = TaskId("task-react-recovery".to_string());
-		let result = runtime.execute_tool_loop(&task_id, &request, &mut loop_state, "", None);
+		let result = runtime.execute_tool_loop(
+			&task_id,
+			&request,
+			&mut loop_state,
+			&RuntimeMemorySections::default(),
+			None,
+		);
 
 		let tool_sequence = loop_state
 			.history

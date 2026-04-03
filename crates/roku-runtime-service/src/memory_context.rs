@@ -16,7 +16,8 @@ use std::sync::Arc;
 
 use roku_agent_runtime::RouteDecisionResult;
 use roku_common_types::{
-	ConversationTurn, RequestEnvelope, ResourceSelector, ResponseEnvelope, RuntimeError,
+	ConversationRole, ConversationTurn, RequestEnvelope, ResourceSelector, ResponseEnvelope,
+	RuntimeError, RuntimeMemorySections,
 };
 use roku_memory::{
 	LongTermMemoryBackend, MemoryHit, MemoryLifecyclePolicy, MemoryRecallInput,
@@ -25,6 +26,62 @@ use roku_memory::{
 use roku_observability::LogLevel;
 
 use crate::{RuntimeService, log_runtime};
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RuntimeMemoryLayers {
+	pub short_term_continuity: Vec<ConversationTurn>,
+	pub long_term_recall: Vec<MemoryHit>,
+	pub working_memory: String,
+}
+
+impl RuntimeMemoryLayers {
+	pub fn new(
+		short_term_continuity: Vec<ConversationTurn>,
+		long_term_recall: Vec<MemoryHit>,
+		working_memory: impl Into<String>,
+	) -> Self {
+		Self {
+			short_term_continuity,
+			long_term_recall,
+			working_memory: working_memory.into(),
+		}
+	}
+
+	pub fn structured_sections(&self) -> RuntimeMemorySections {
+		RuntimeMemorySections {
+			short_term_continuity: self
+				.short_term_continuity
+				.iter()
+				.map(|turn| format!("- {}: {}", conversation_role_label(turn.role), turn.content))
+				.collect::<Vec<_>>()
+				.join("\n"),
+			long_term_recall: self
+				.long_term_recall
+				.iter()
+				.map(|hit| {
+					format!(
+						"- {} | {:?} | {}",
+						hit.record.record_id, hit.record.kind, hit.record.summary
+					)
+				})
+				.collect::<Vec<_>>()
+				.join("\n"),
+			working_memory: self.working_memory.trim().to_string(),
+		}
+	}
+
+	pub fn memory_context_text(&self) -> String {
+		self.structured_sections().named_sections_text()
+	}
+}
+
+fn conversation_role_label(role: ConversationRole) -> &'static str {
+	match role {
+		ConversationRole::User => "user",
+		ConversationRole::Assistant => "assistant",
+		ConversationRole::System => "system",
+	}
+}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ContextBundle {
@@ -37,20 +94,23 @@ pub struct ContextBundle {
 }
 
 impl ContextBundle {
+	pub fn runtime_memory_layers(&self) -> RuntimeMemoryLayers {
+		self.runtime_memory_layers_with_working_memory(String::new())
+	}
+
+	pub fn runtime_memory_layers_with_working_memory(
+		&self,
+		working_memory: impl Into<String>,
+	) -> RuntimeMemoryLayers {
+		RuntimeMemoryLayers::new(
+			self.short_term_continuity.clone(),
+			self.long_term_memory_hits.clone(),
+			working_memory,
+		)
+	}
+
 	pub fn memory_context_text(&self) -> String {
-		if self.long_term_memory_hits.is_empty() {
-			return String::new();
-		}
-		self.long_term_memory_hits
-			.iter()
-			.map(|hit| {
-				format!(
-					"- {} | {:?} | {}",
-					hit.record.record_id, hit.record.kind, hit.record.summary
-				)
-			})
-			.collect::<Vec<_>>()
-			.join("\n")
+		self.runtime_memory_layers().memory_context_text()
 	}
 }
 
