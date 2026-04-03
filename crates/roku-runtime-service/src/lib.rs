@@ -18,6 +18,7 @@ mod data_plane;
 mod direct;
 mod execution;
 mod helpers;
+mod legacy_compat;
 mod legacy_graph;
 mod memory_context;
 mod pending_loop_snapshot_store;
@@ -550,22 +551,7 @@ impl RuntimeService {
 			if let Some(execution_resume) = execution_resume {
 				return self.resume_approved_execution_ticket(&mut task, &ticket, execution_resume);
 			}
-			self.mark_node_completed_by_id(&mut task, &ticket.node_id);
-			if let Some(graph_node) = task.graph.as_ref().and_then(|graph| {
-				graph
-					.nodes
-					.iter()
-					.find(|node| node.node_id == ticket.node_id)
-			}) {
-				self.append_node_event(
-					&task,
-					graph_node,
-					TaskEventKind::ApprovalApproved,
-					"approval granted",
-				)?;
-			}
-			self.record_transition(&mut task, TaskState::Executing, "approval granted")?;
-			self.process_task(&mut task, RunMode::Normal)
+			self.continue_legacy_graph_after_approval(&mut task, &ticket)
 		} else {
 			if let Some(graph_node) = task.graph.as_ref().and_then(|graph| {
 				graph
