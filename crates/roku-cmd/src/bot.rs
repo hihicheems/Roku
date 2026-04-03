@@ -15,9 +15,9 @@
 //! CLI-side Telegram runtime adapter.
 //!
 //! This module binds the Telegram transport layer to the runtime service and Telegram-scoped
-//! session state. It owns chat-local concerns such as conversation history, pending-loop resume
-//! bindings, out-of-band control commands, and Telegram-local session UX. Session truth still
-//! lives in the memory subsystem; this module does not introduce a provider-specific state system.
+//! session state. It owns chat-local concerns such as conversation history, out-of-band control
+//! commands, and Telegram-local session UX. Pending-loop truth stays on the runtime-owned shared
+//! substrate; this module only projects that state into Telegram-facing status surfaces.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -29,8 +29,7 @@ use roku_common_types::{
 };
 use roku_memory::{
 	InMemorySessionManagementBackend, InMemorySessionStateBackend,
-	InMemoryShortTermContinuityBackend, PendingLoopSnapshot, PendingLoopSnapshotBackend,
-	PendingLoopSnapshotError, ResolvedMemorySubsystem, SESSION_NAME_MAX_CHARS,
+	InMemoryShortTermContinuityBackend, ResolvedMemorySubsystem, SESSION_NAME_MAX_CHARS,
 	SESSION_NAME_MIN_CHARS, SessionCreateRequest, SessionDeleteMode, SessionDescriptor,
 	SessionManagementBackend, SessionManagementError, SessionState, SessionStateBackend,
 	SessionStateError, SessionSummary, ShortTermContinuityBackend, ShortTermContinuityError,
@@ -57,9 +56,6 @@ use crate::runtime::{
 };
 use crate::runtime_config::load_runtime_configs;
 use crate::storage::LocalStorageLayout;
-use crate::telegram_loop_bridge::{
-	restore_pending_loop_from_session, sync_pending_loop_to_session,
-};
 use crate::telegram_session_ux_config::TelegramSessionUxConfig;
 
 /// Starts the Telegram bot polling loop using env-driven layout and plugin bootstrap.
@@ -186,10 +182,10 @@ fn telegram_bot_config_from_env(
 
 /// Binds Telegram transport to the runtime service and Telegram-scoped session state.
 ///
-/// Owns one shared runtime service and one [`TelegramTransportState`]; each request restores
-/// pending loop from session, runs the runtime, then syncs pending loop and conversation back.
-/// Active-session selection stays in the entry + memory session subsystem; runtime only receives
-/// the resolved provider-neutral session_id.
+/// Owns one shared runtime service and one [`TelegramTransportState`]; each request executes
+/// against the resolved provider-neutral session and relies on the runtime-owned pending-loop
+/// substrate for resume and sync. Active-session selection stays in the entry + memory session
+/// subsystem; runtime only receives the resolved provider-neutral session_id.
 struct RuntimeServiceTelegramHandler {
 	service: Arc<roku_runtime_service::RuntimeService>,
 	transport_state: Arc<TelegramTransportState>,
@@ -234,8 +230,6 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 		let active_session = self.resolve_or_bootstrap_active_session(&binding_id)?;
 		let session_id = active_session.session_id.clone();
 		request.session_id = session_id.clone();
-		// Restore pending loop so this request continues from last saved state; then load history.
-		restore_pending_loop_from_session(&self.service, &*self.transport_state, &session_id)?;
 		request.conversation_history = self.transport_state.load_short_term_continuity(
 			&session_id,
 			self.session_ux_config.short_term_history_turn_limit,
@@ -249,10 +243,12 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 			},
 		)?;
 
-		match self.service.execute(request) {
+		let execution = self.service.execute(request);
+		self.transport_state
+			.clear_pending_loop_session_mirror(&session_id)?;
+
+		match execution {
 			Ok(response) => {
-				// Sync pending loop and append assistant turn so session always reflects last outcome.
-				sync_pending_loop_to_session(&self.service, &*self.transport_state, &session_id)?;
 				self.transport_state.append_turn(
 					&session_id,
 					ConversationTurn {
@@ -264,8 +260,6 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 				Ok(response.into())
 			}
 			Err(error) => {
-				// Same sync and append on error so conversation history and pending state stay consistent.
-				sync_pending_loop_to_session(&self.service, &*self.transport_state, &session_id)?;
 				self.transport_state.append_turn(
 					&session_id,
 					ConversationTurn {
@@ -311,13 +305,7 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 					.transport_state
 					.get_active_session(&command.session_id)?;
 				let snapshot = match active_session {
-					Some(active_session) => {
-						self.refresh_session_pending_state(&active_session.session_id)?;
-						Some(
-							self.transport_state
-								.status_snapshot(&active_session, &self.session_ux_config)?,
-						)
-					}
+					Some(active_session) => Some(self.session_snapshot(&active_session)?),
 					None => None,
 				};
 				Ok(self
@@ -344,10 +332,7 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 						)
 						.into());
 				};
-				self.refresh_session_pending_state(&active_session.session_id)?;
-				let snapshot = self
-					.transport_state
-					.status_snapshot(&active_session, &self.session_ux_config)?;
+				let snapshot = self.session_snapshot(&active_session)?;
 				if snapshot.pending_run_id.is_none() {
 					return Ok(self
 						.control_command_response(
@@ -357,15 +342,11 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 						)
 						.into());
 				}
-				// Clear both runtime and session binding so no stale pending loop remains.
 				self.service
 					.clear_pending_loop(&active_session.session_id)?;
 				self.transport_state
-					.clear_pending_loop_snapshot(&active_session.session_id)
-					.map_err(|error| RuntimeError::new(error.to_string()))?;
-				let snapshot = self
-					.transport_state
-					.status_snapshot(&active_session, &self.session_ux_config)?;
+					.clear_pending_loop_session_mirror(&active_session.session_id)?;
+				let snapshot = self.session_snapshot(&active_session)?;
 				Ok(self
 					.control_command_response(
 						command.command,
@@ -391,9 +372,7 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 					.clear_pending_loop(&active_session.session_id)?;
 				self.transport_state
 					.clear_transport_session(&active_session.session_id)?;
-				let snapshot = self
-					.transport_state
-					.status_snapshot(&active_session, &self.session_ux_config)?;
+				let snapshot = self.session_snapshot(&active_session)?;
 				Ok(self
 					.control_command_response(
 						command.command,
@@ -577,13 +556,17 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 }
 
 impl RuntimeServiceTelegramHandler {
-	/// Reconciles the runtime's pending-loop state with the Telegram session binding.
-	///
-	/// Status-like commands should call this before reading a session snapshot so Telegram control
-	/// views reflect the latest resumable-loop truth instead of stale session metadata.
-	fn refresh_session_pending_state(&self, session_id: &str) -> Result<(), RuntimeError> {
-		restore_pending_loop_from_session(&self.service, &*self.transport_state, session_id)?;
-		sync_pending_loop_to_session(&self.service, &*self.transport_state, session_id)
+	fn session_snapshot(
+		&self,
+		descriptor: &SessionDescriptor,
+	) -> Result<TelegramSessionSnapshot, RuntimeError> {
+		self.transport_state.status_snapshot(
+			descriptor,
+			&self.session_ux_config,
+			self.service
+				.pending_loop(&descriptor.session_id)?
+				.map(|loop_state| loop_state.run_id),
+		)
 	}
 
 	/// Builds a response envelope for control commands; request_id is synthetic (tg-control-{command}-{ts}).
@@ -737,13 +720,7 @@ impl RuntimeServiceTelegramHandler {
 			None => self.transport_state.get_active_session(binding_id)?,
 		};
 		let active_snapshot = match active_session.as_ref() {
-			Some(active_session) => {
-				self.refresh_session_pending_state(&active_session.session_id)?;
-				Some(
-					self.transport_state
-						.status_snapshot(active_session, &self.session_ux_config)?,
-				)
-			}
+			Some(active_session) => Some(self.session_snapshot(active_session)?),
 			None => None,
 		};
 		let mut sessions = self.transport_state.list_sessions(binding_id)?;
@@ -1098,12 +1075,12 @@ fn telegram_parse_mode_label(mode: TelegramParseMode) -> &'static str {
 	}
 }
 
-/// Telegram-scoped transport state: session state (e.g. pending loop binding) and conversation history.
+/// Telegram-scoped transport state: session state and conversation history.
 ///
-/// Consumed by [`RuntimeServiceTelegramHandler`] to restore/sync pending loop and to load/append
-/// turns. Source of truth for Telegram session data; runtime service holds the actual loop state.
+/// Consumed by [`RuntimeServiceTelegramHandler`] to load/append turns and to manage Telegram-owned
+/// session metadata. The runtime service owns pending-loop truth on the shared substrate.
 pub(crate) struct TelegramTransportState {
-	/// Session-scoped transport state (planning mode, pending loop binding); one store per process.
+	/// Session-scoped transport state; one store per process.
 	session_state_store: Mutex<Box<dyn SessionStateBackend + Send>>,
 	/// Conversation turns per session_id; one store per process.
 	conversation_store: Mutex<Box<dyn ShortTermContinuityBackend + Send>>,
@@ -1209,6 +1186,15 @@ impl TelegramTransportState {
 		Ok(())
 	}
 
+	fn clear_pending_loop_session_mirror(&self, session_id: &str) -> Result<(), RuntimeError> {
+		let mut session_state = self.load_session_state_or_default(session_id)?;
+		if session_state.pending_loop.is_none() {
+			return Ok(());
+		}
+		session_state.pending_loop = None;
+		self.save_session_state(session_id, session_state)
+	}
+
 	/// Builds the stable minimal snapshot exposed by `/status` and `/sessions`.
 	///
 	/// The snapshot is intentionally small and deterministic so Telegram control surfaces can stay
@@ -1217,8 +1203,8 @@ impl TelegramTransportState {
 		&self,
 		descriptor: &SessionDescriptor,
 		session_ux_config: &TelegramSessionUxConfig,
+		pending_run_id: Option<String>,
 	) -> Result<TelegramSessionSnapshot, RuntimeError> {
-		let session_state = self.load_session_state_or_default(&descriptor.session_id)?;
 		let turns = self.load_short_term_continuity(
 			&descriptor.session_id,
 			session_ux_config.short_term_history_turn_limit,
@@ -1226,7 +1212,7 @@ impl TelegramTransportState {
 		Ok(TelegramSessionSnapshot {
 			session_id: descriptor.session_id.clone(),
 			session_name: descriptor.name.clone(),
-			pending_run_id: session_state.pending_loop.map(|binding| binding.run_id),
+			pending_run_id,
 			recent_turn_count: turns.len(),
 			latest_activity: turns
 				.last()
@@ -1320,30 +1306,6 @@ impl TelegramTransportState {
 	}
 }
 
-impl PendingLoopSnapshotBackend for TelegramTransportState {
-	fn load_pending_loop_snapshot(
-		&self,
-		session_id: &str,
-	) -> Result<Option<PendingLoopSnapshot>, PendingLoopSnapshotError> {
-		self.load_session_state_or_default(session_id)
-			.map(|state| state.pending_loop)
-			.map_err(|error| PendingLoopSnapshotError::Backend(error.to_string()))
-	}
-
-	fn save_pending_loop_snapshot(
-		&self,
-		session_id: &str,
-		binding: Option<PendingLoopSnapshot>,
-	) -> Result<(), PendingLoopSnapshotError> {
-		let mut session_state = self
-			.load_session_state_or_default(session_id)
-			.map_err(|error| PendingLoopSnapshotError::Backend(error.to_string()))?;
-		session_state.pending_loop = binding;
-		self.save_session_state(session_id, session_state)
-			.map_err(|error| PendingLoopSnapshotError::Backend(error.to_string()))
-	}
-}
-
 impl Default for TelegramTransportState {
 	/// In-memory backends only; for tests. Production uses [`TelegramTransportState::from_env`].
 	fn default() -> Self {
@@ -1378,15 +1340,19 @@ fn now_unix_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+	use std::collections::HashMap;
 	use std::io::{Cursor, Write};
-	use std::sync::Arc;
+	use std::sync::{Arc, Mutex};
 
 	use roku_agent_runtime::{
 		AskUserPayload, GenericAgentRuntime, IntentFamily, LoopContext, LoopState, LoopStatus,
 		RouteDecision, RouteRisk,
 	};
 	use roku_common_types::{RequestEnvelope, RequestId, ResourceSelector, ResponseStatus};
-	use roku_memory::{NoopLongTermMemoryBackend, NoopPendingLoopSnapshotBackend};
+	use roku_memory::{
+		NoopLongTermMemoryBackend, NoopPendingLoopSnapshotBackend, PendingLoopSnapshot,
+		PendingLoopSnapshotBackend, PendingLoopSnapshotError,
+	};
 	use roku_plugin_llm::{
 		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderCallError,
 		ProviderResponse, RiskTier, RoutingPolicy,
@@ -1399,8 +1365,75 @@ mod tests {
 	use serde_json::Value;
 
 	use super::*;
+	use crate::pending_loop_substrate::MemoryPendingLoopSnapshotStore;
+	use crate::test_support::pending_inventory_resume_success_loop_state;
 
 	struct SessionAwareLlmProvider;
+
+	#[derive(Clone, Default)]
+	struct RecordingPendingLoopSnapshotBackend {
+		snapshots: Arc<Mutex<HashMap<String, PendingLoopSnapshot>>>,
+		events: Arc<Mutex<Vec<String>>>,
+	}
+
+	impl RecordingPendingLoopSnapshotBackend {
+		fn seed(&self, session_id: &str, snapshot: PendingLoopSnapshot) {
+			self.snapshots
+				.lock()
+				.expect("snapshot seed lock should not be poisoned")
+				.insert(session_id.to_string(), snapshot);
+		}
+
+		fn snapshot(&self, session_id: &str) -> Option<PendingLoopSnapshot> {
+			self.snapshots
+				.lock()
+				.expect("snapshot load lock should not be poisoned")
+				.get(session_id)
+				.cloned()
+		}
+
+		fn events(&self) -> Vec<String> {
+			self.events
+				.lock()
+				.expect("event log lock should not be poisoned")
+				.clone()
+		}
+	}
+
+	impl PendingLoopSnapshotBackend for RecordingPendingLoopSnapshotBackend {
+		fn load_pending_loop_snapshot(
+			&self,
+			session_id: &str,
+		) -> Result<Option<PendingLoopSnapshot>, PendingLoopSnapshotError> {
+			self.events
+				.lock()
+				.expect("event log lock should not be poisoned")
+				.push(format!("load:{session_id}"));
+			Ok(self.snapshot(session_id))
+		}
+
+		fn save_pending_loop_snapshot(
+			&self,
+			session_id: &str,
+			snapshot: Option<PendingLoopSnapshot>,
+		) -> Result<(), PendingLoopSnapshotError> {
+			let event = if snapshot.is_some() { "save" } else { "clear" };
+			self.events
+				.lock()
+				.expect("event log lock should not be poisoned")
+				.push(format!("{event}:{session_id}"));
+			let mut snapshots = self
+				.snapshots
+				.lock()
+				.expect("snapshot save lock should not be poisoned");
+			if let Some(snapshot) = snapshot {
+				snapshots.insert(session_id.to_string(), snapshot);
+			} else {
+				snapshots.remove(session_id);
+			}
+			Ok(())
+		}
+	}
 
 	#[derive(Clone)]
 	struct StaticArchiveFetcher {
@@ -1592,6 +1625,57 @@ mod tests {
 	}
 
 	#[test]
+	fn telegram_request_flow_resumes_pending_loop_snapshots_from_shared_memory_substrate() {
+		let backend = RecordingPendingLoopSnapshotBackend::default();
+		let handler = test_handler_with_service(
+			RuntimeService::default().with_pending_loop_snapshot_store(Arc::new(
+				MemoryPendingLoopSnapshotStore::new(Box::new(backend.clone())),
+			)),
+		);
+		let binding_id = "telegram-shared-pending-loop";
+		let session = bootstrap_session(&handler, binding_id);
+		let (mut pending_loop, selected_topic) = pending_inventory_resume_success_loop_state();
+		pending_loop.session_id = session.session_id.clone();
+		backend.seed(
+			&session.session_id,
+			PendingLoopSnapshot {
+				run_id: pending_loop.run_id.clone(),
+				loop_state_json: serde_json::to_string(&pending_loop)
+					.expect("pending loop should encode"),
+			},
+		);
+
+		let response = handler
+			.handle_request(request(binding_id, &selected_topic))
+			.expect("telegram request should resume through the shared substrate");
+
+		assert_eq!(response.response.status, ResponseStatus::Succeeded);
+		assert!(
+			backend.snapshot(&session.session_id).is_none(),
+			"Telegram request flow should consume the shared pending loop snapshot"
+		);
+		assert!(
+			handler
+				.transport_state
+				.load_session_state_or_default(&session.session_id)
+				.expect("session state should load")
+				.pending_loop
+				.is_none(),
+			"Telegram request flow should not persist a Telegram-only pending-loop mirror"
+		);
+
+		let events = backend.events();
+		assert!(
+			events.contains(&format!("load:{}", session.session_id)),
+			"shared pending loop substrate should be read through the memory adapter"
+		);
+		assert!(
+			events.contains(&format!("clear:{}", session.session_id)),
+			"shared pending loop substrate should clear the consumed snapshot"
+		);
+	}
+
+	#[test]
 	fn telegram_control_cancel_clears_pending_loop_without_clearing_continuity() {
 		let handler = test_handler();
 		let binding_id = "telegram-control-cancel";
@@ -1612,12 +1696,6 @@ mod tests {
 			.service
 			.restore_pending_loop(loop_state)
 			.expect("pending loop should restore");
-		sync_pending_loop_to_session(
-			&handler.service,
-			&*handler.transport_state,
-			&session.session_id,
-		)
-		.expect("pending loop should sync");
 
 		let response = handler
 			.handle_control_command(control_command(binding_id, TelegramControlCommand::Cancel))
@@ -1685,12 +1763,6 @@ mod tests {
 			.service
 			.restore_pending_loop(loop_state)
 			.expect("pending loop should restore");
-		sync_pending_loop_to_session(
-			&handler.service,
-			&*handler.transport_state,
-			&session.session_id,
-		)
-		.expect("pending loop should sync");
 
 		let response = handler
 			.handle_control_command(control_command(binding_id, TelegramControlCommand::Clear))
@@ -1748,12 +1820,6 @@ mod tests {
 			.service
 			.restore_pending_loop(loop_state)
 			.expect("pending loop should restore");
-		sync_pending_loop_to_session(
-			&handler.service,
-			&*handler.transport_state,
-			&session.session_id,
-		)
-		.expect("pending loop should sync");
 
 		let response = handler
 			.handle_control_command(control_command(binding_id, TelegramControlCommand::Status))
@@ -2173,8 +2239,12 @@ mod tests {
 	}
 
 	fn test_handler() -> RuntimeServiceTelegramHandler {
+		test_handler_with_service(RuntimeService::in_memory())
+	}
+
+	fn test_handler_with_service(service: RuntimeService) -> RuntimeServiceTelegramHandler {
 		RuntimeServiceTelegramHandler {
-			service: Arc::new(RuntimeService::in_memory()),
+			service: Arc::new(service),
 			transport_state: Arc::new(TelegramTransportState::default()),
 			session_ux_config: TelegramSessionUxConfig::default(),
 			pending_session_rename_by_chat: Mutex::new(HashMap::new()),

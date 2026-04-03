@@ -32,7 +32,6 @@ mod pending_loop_substrate;
 mod runtime;
 mod runtime_config;
 mod storage;
-mod telegram_loop_bridge;
 mod telegram_session_ux_config;
 
 #[cfg(test)]
