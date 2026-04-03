@@ -210,6 +210,7 @@ If final eval enters corrective rounds, Ralph also writes:
 - `semantic-eval.status=hard_fail` stops the run for human intervention
 - `semantic-eval.status=infra_fail` retries the evaluator first, then stops without blaming the story
 - `final-eval.status=pass` is required before Ralph may archive and announce completion
+- if final eval passes but the worktree is still dirty outside a final corrective round, Ralph stops and asks you either to clean the worktree or explicitly adopt that diff into `FINAL`
 - `final-eval.status=soft_fail` enters a bounded final-fix round
 - `final-eval.status=hard_fail` stops the run for human intervention
 - `final-eval.status=infra_fail` retries the final evaluator first, then stops without blaming the implementation
@@ -302,6 +303,8 @@ Primary progress surfaces:
 - `.ralph/runs/<timestamp>/iteration-*.semantic-eval.json`
 - `.ralph/runs/<timestamp>/final.eval.semantic-eval.json`
 - `.ralph/runs/<timestamp>/final.fix-*.fix-result.json`
+
+At the end of a launch, Ralph also prints a human-readable elapsed-time summary. This appears both on successful completion and when the launch stops because it hit the current story cap.
 
 Useful commands:
 
