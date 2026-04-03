@@ -28,11 +28,116 @@ mod api;
 mod bot;
 mod entry_registry;
 mod memory_runtime_config;
+mod pending_loop_substrate;
 mod runtime;
 mod runtime_config;
 mod storage;
-mod telegram_loop_bridge;
 mod telegram_session_ux_config;
+
+#[cfg(test)]
+pub(crate) mod test_support {
+	use std::sync::{LazyLock, Mutex};
+
+	use roku_agent_runtime::{
+		AskUserPayload, AskUserResumeContract, AskUserResumeDirective, IntentFamily, LoopContext,
+		LoopState, RouteDecision, RouteRisk, StepObservation, StepRecord, ToolObservation,
+	};
+	use roku_common_types::ResourceSelector;
+
+	pub(crate) static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+	pub(crate) fn pending_inventory_resume_success_loop_state() -> (LoopState, String) {
+		let context = LoopContext {
+			request_id: "req-pending-inventory-loop-success".to_string(),
+			session_id: "session-1".to_string(),
+			goal: "告诉我你当前暴露的 tools 和 skills，并按我选择的主题继续".to_string(),
+			workspace_root: "/workspace".to_string(),
+			working_directory: "/workspace".to_string(),
+			visible_tools: vec!["inventory.describe".to_string()],
+			bound_resources: vec![ResourceSelector::tool("inventory.describe".to_string())],
+			route_decision: RouteDecision::new(
+				IntentFamily::Chat,
+				0.93,
+				false,
+				RouteRisk::Low,
+				vec!["inventory.describe".to_string()],
+				Vec::new(),
+				Vec::new(),
+				"inventory resume success request",
+			),
+			last_observation: None,
+		};
+		let mut loop_state = LoopState::new("loop-pending-inventory-loop-success", &context);
+		let observation = ToolObservation {
+			ok: false,
+			tool_name: "inventory.describe".to_string(),
+			error_type: Some("multiple_candidates".to_string()),
+			terminal: false,
+			data: serde_json::json!({
+				"matches": ["tools", "skills"],
+			}),
+			message: "I can continue with either `tools` or `skills`.".to_string(),
+		};
+		let interpreted =
+			roku_agent_runtime::interpret_observation(&loop_state, observation.clone(), None);
+		loop_state.record_step(StepRecord::tool_call(
+			1,
+			roku_agent_runtime::NextStepDecision {
+				action: roku_agent_runtime::NextStepAction::CallTool,
+				tool_name: Some("inventory.describe".to_string()),
+				arguments: Some(serde_json::json!({})),
+				reason: "Inspect the runtime inventory before answering.".to_string(),
+				final_message: None,
+			},
+			loop_state.visible_tools.clone(),
+			loop_state.bound_resources.clone(),
+			serde_json::json!({
+				"ok": false,
+				"error_type": "multiple_candidates",
+				"terminal": false,
+				"message": "I can continue with either `tools` or `skills`.",
+				"data": observation.data.clone(),
+			}),
+			StepObservation::Tool(observation),
+			interpreted.clone(),
+			Some(12),
+			interpreted.remaining_step_budget,
+			interpreted.remaining_recovery_budget,
+			"/workspace",
+		));
+		loop_state.record_step(StepRecord::terminal(
+			2,
+			roku_agent_runtime::StepAction::AskUser,
+			roku_agent_runtime::NextStepDecision {
+				action: roku_agent_runtime::NextStepAction::AskUser,
+				tool_name: None,
+				arguments: None,
+				reason: "Runtime paused for user clarification after the latest tool observation."
+					.to_string(),
+				final_message: Some("你想继续看 `tools` 还是 `skills`？".to_string()),
+			},
+			loop_state.visible_tools.clone(),
+			loop_state.bound_resources.clone(),
+			Some(StepObservation::AskUser {
+				final_message: "你想继续看 `tools` 还是 `skills`？".to_string(),
+			}),
+			3,
+			2,
+			"/workspace",
+		));
+		loop_state.awaiting_user = Some(AskUserPayload {
+			final_message: "你想继续看 `tools` 还是 `skills`？".to_string(),
+			resume_contract: AskUserResumeContract::CandidateSelection {
+				candidates: vec!["tools".to_string(), "skills".to_string()],
+			},
+			resume_directive: Some(AskUserResumeDirective::RepeatToolWithSelectedCandidate {
+				tool_name: "inventory.describe".to_string(),
+				argument_key: "topic".to_string(),
+			}),
+		});
+		(loop_state, "tools".to_string())
+	}
+}
 
 use std::env;
 use std::path::PathBuf;

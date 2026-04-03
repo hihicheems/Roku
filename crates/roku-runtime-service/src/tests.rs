@@ -770,7 +770,7 @@ fn compact_approval_id_stays_short_for_telegram_callbacks() {
 }
 
 #[test]
-fn new_requests_execute_without_graph_compilation() {
+fn new_requests_execute_without_graph_compilation_and_expose_direct_runtime_markers() {
 	let service = RuntimeService::default();
 	let response = service
 		.execute(request("What skills and tools do you have right now?"))
@@ -787,7 +787,45 @@ fn new_requests_execute_without_graph_compilation() {
 		.expect("task lookup should succeed")
 		.expect("task should be persisted");
 	assert!(task.graph.is_none());
+	let last_result = task
+		.last_result
+		.as_ref()
+		.expect("direct runtime execution should persist a terminal result");
+	let payload: serde_json::Value =
+		serde_json::from_str(&last_result.payload).expect("payload should be valid json");
+	let trace: roku_common_types::RuntimeLoopTrace =
+		serde_json::from_value(payload["probe_trace"].clone()).expect("probe trace should decode");
+	assert_eq!(payload["runtime_loop"], "tool");
+	assert_eq!(trace.status, "succeeded");
+	assert_eq!(
+		trace.final_outcome.terminal_action.as_deref(),
+		Some("final_answer")
+	);
+	assert_eq!(
+		trace
+			.steps
+			.first()
+			.map(|step| step.decision.action.as_str()),
+		Some("call_tool")
+	);
+	assert_eq!(
+		trace
+			.steps
+			.first()
+			.and_then(|step| step.decision.tool_name.as_deref()),
+		Some("inventory.describe")
+	);
+	assert!(trace.steps.first().is_some_and(|step| {
+		step.visible_tools_before
+			.iter()
+			.any(|tool| tool == "inventory.describe")
+	}));
 	assert_eq!(task.state, TaskState::Succeeded);
+	let experiment = service
+		.get_experiment_run(&TaskId("task-req-1".to_string()))
+		.expect("experiment lookup should succeed")
+		.expect("direct request should record an experiment run");
+	assert_eq!(experiment.strategy, "direct_route");
 }
 
 #[test]
@@ -862,7 +900,7 @@ fn successful_requests_skip_write_back_when_policy_effectively_disables_it() {
 }
 
 #[test]
-fn planning_mode_hint_returns_compatibility_fallback_without_graph() {
+fn planning_mode_hint_returns_compatibility_fallback_runtime_markers_without_graph() {
 	let service = RuntimeService::default();
 	let mut request = request("Read the first part of Cargo.toml.");
 	request.planning_mode_hint = Some(PlanningModeHint::TreeSearch);
@@ -874,11 +912,27 @@ fn planning_mode_hint_returns_compatibility_fallback_without_graph() {
 	assert_eq!(response.status, ResponseStatus::Succeeded);
 	assert!(response.message.contains("planning-heavy"));
 
+	let task_id = TaskId("task-req-1".to_string());
 	let task = service
-		.get_task(&TaskId("task-req-1".to_string()))
+		.get_task(&task_id)
 		.expect("task lookup should succeed")
 		.expect("task should be persisted");
 	assert!(task.graph.is_none());
+	assert_eq!(task.state, TaskState::Succeeded);
+	let last_result = task
+		.last_result
+		.as_ref()
+		.expect("compatibility fallback should persist a terminal result");
+	assert_eq!(last_result.producer, "direct-route:compatibility-fallback");
+	let payload: serde_json::Value =
+		serde_json::from_str(&last_result.payload).expect("payload should be valid json");
+	assert_eq!(payload["direct_route"], true);
+
+	let experiment = service
+		.get_experiment_run(&task_id)
+		.expect("experiment lookup should succeed")
+		.expect("compatibility fallback should record an experiment run");
+	assert_eq!(experiment.strategy, "compatibility_fallback");
 }
 
 #[test]
