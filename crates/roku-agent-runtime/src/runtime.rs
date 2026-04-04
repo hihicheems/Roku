@@ -3090,6 +3090,13 @@ mod tests {
 			plan.decision
 				.candidate_tools
 				.iter()
+				.all(|tool_name| loop_state.visible_tools.contains(tool_name)),
+			"classifier shortlist must remain visible in the initialized loop"
+		);
+		assert!(
+			plan.decision
+				.candidate_tools
+				.iter()
 				.any(|tool_name| tool_name == "table.preview")
 		);
 		assert!(
@@ -4222,7 +4229,19 @@ mod tests {
 
 	#[test]
 	fn visible_tools_recompute_keeps_shortlist_and_safe_baseline_after_tool_steps() {
-		let runtime = GenericAgentRuntime::default();
+		let runtime = GenericAgentRuntime {
+			runtime_visible_tool_availability_snapshot: RuntimeVisibleToolAvailabilitySnapshot {
+				enabled_tools: [
+					"fs.read_text".to_string(),
+					"inventory.describe".to_string(),
+					"table.preview".to_string(),
+				]
+				.into_iter()
+				.collect(),
+				baseline_visible_tools: vec!["inventory.describe".to_string()],
+			},
+			..GenericAgentRuntime::default()
+		};
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-followup".to_string()),
 			session_id: "session-followup".to_string(),
@@ -4242,6 +4261,10 @@ mod tests {
 		);
 		let mut loop_state =
 			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+		assert_eq!(
+			loop_state.visible_tools,
+			vec!["fs.read_text".to_string(), "inventory.describe".to_string(),]
+		);
 		let observation = ToolObservation {
 			ok: true,
 			tool_name: "fs.read_text".to_string(),
@@ -4283,12 +4306,21 @@ mod tests {
 		let visible_tools = runtime.visible_tools_for_loop_state(&loop_state);
 
 		assert_eq!(
-			visible_tools.first().map(String::as_str),
-			Some("fs.read_text")
+			visible_tools,
+			vec!["fs.read_text".to_string(), "inventory.describe".to_string(),]
 		);
-		assert!(visible_tools.contains(&"general.execute".to_string()));
-		assert!(visible_tools.contains(&"table.preview".to_string()));
-		assert!(visible_tools.contains(&"python.run".to_string()));
+		assert!(
+			!visible_tools.contains(&"general.execute".to_string()),
+			"recompute must not reintroduce tools outside the snapshot-owned visible baseline"
+		);
+		assert!(
+			!visible_tools.contains(&"table.preview".to_string()),
+			"enabled tools that are neither shortlist seeds nor snapshot baseline must stay hidden"
+		);
+		assert!(
+			!visible_tools.contains(&"python.run".to_string()),
+			"recompute must not fall back to a second hard-coded visibility list"
+		);
 	}
 
 	#[test]

@@ -57,6 +57,12 @@ impl RuntimeVisibleToolAvailabilitySnapshot {
 		self.enabled_tools.contains(tool_name)
 	}
 
+	pub fn has_enabled_tool_with_prefix(&self, tool_name_prefix: &str) -> bool {
+		self.enabled_tools
+			.iter()
+			.any(|tool_name| tool_name.starts_with(tool_name_prefix))
+	}
+
 	pub fn filter_candidate_tools(
 		&self,
 		preferred_tool: Option<&str>,

@@ -154,7 +154,9 @@ fn deterministic_pre_classify(
 	}
 
 	if explanatory_shell_command_request(&request.goal)
-		&& tool_selector(context.catalog, "general.execute").is_some()
+		&& context
+			.availability_snapshot
+			.is_tool_enabled("general.execute")
 	{
 		let decision = RouteDecision::new(
 			IntentFamily::Chat,
@@ -175,7 +177,9 @@ fn deterministic_pre_classify(
 	}
 
 	if explanatory_python_code_request(&request.goal)
-		&& tool_selector(context.catalog, "general.execute").is_some()
+		&& context
+			.availability_snapshot
+			.is_tool_enabled("general.execute")
 	{
 		let decision = RouteDecision::new(
 			IntentFamily::Chat,
@@ -196,7 +200,7 @@ fn deterministic_pre_classify(
 	}
 
 	if goal_requests_python_execution(&request.goal)
-		&& tool_selector(context.catalog, "python.run").is_some()
+		&& context.availability_snapshot.is_tool_enabled("python.run")
 		&& extract_explicit_python_code(&request.goal).is_none()
 	{
 		return Some(missing_argument_route(
@@ -207,7 +211,7 @@ fn deterministic_pre_classify(
 	}
 
 	if goal_requests_web_lookup(&request.goal)
-		&& tool_selector(context.catalog, "web.search").is_some()
+		&& context.availability_snapshot.is_tool_enabled("web.search")
 		&& extract_web_query(&request.goal).is_none()
 	{
 		return Some(missing_argument_route(
@@ -267,7 +271,10 @@ fn deterministic_pre_classify(
 		return Some(result);
 	}
 
-	if context.route_router.is_none() && tool_selector(context.catalog, "general.execute").is_some()
+	if context.route_router.is_none()
+		&& context
+			.availability_snapshot
+			.is_tool_enabled("general.execute")
 	{
 		let decision = RouteDecision::new(
 			IntentFamily::Chat,
@@ -323,7 +330,7 @@ fn classify_contract_level_grounded_hint(
 	context: &RouteClassifierContext<'_>,
 	request: &RequestEnvelope,
 ) -> Option<RouteDecisionResult> {
-	if let Some(selector) = explicit_tool_selector(context.catalog, &request.goal) {
+	if let Some(selector) = explicit_tool_selector(context, &request.goal) {
 		let descriptor = context.catalog.descriptor(&selector)?;
 		let tool_name = descriptor.name.clone();
 		if !explicit_tool_hint_is_grounded(&tool_name, &request.goal) {
@@ -351,7 +358,7 @@ fn classify_contract_level_grounded_hint(
 
 	if grounded_python_code_allows_execution(&request.goal)
 		&& let Some(code) = extract_explicit_python_code(&request.goal)
-		&& let Some(selector) = tool_selector(context.catalog, "python.run")
+		&& context.availability_snapshot.is_tool_enabled("python.run")
 	{
 		let decision = RouteDecision::new(
 			IntentFamily::CodeExec,
@@ -363,7 +370,6 @@ fn classify_contract_level_grounded_hint(
 			Vec::new(),
 			"contract-level grounded Python code provides a non-authoritative `python.run` hint",
 		);
-		let _ = selector;
 		let _ = code;
 		return Some(build_tool_loop_route(
 			context,
@@ -375,7 +381,7 @@ fn classify_contract_level_grounded_hint(
 
 	if grounded_shell_command_allows_execution(&request.goal)
 		&& let Some(command) = extract_explicit_shell_command(&request.goal)
-		&& let Some(selector) = tool_selector(context.catalog, "command.run")
+		&& context.availability_snapshot.is_tool_enabled("command.run")
 	{
 		let decision = RouteDecision::new(
 			IntentFamily::CodeExec,
@@ -387,7 +393,6 @@ fn classify_contract_level_grounded_hint(
 			Vec::new(),
 			"contract-level grounded shell command provides a non-authoritative `command.run` hint",
 		);
-		let _ = selector;
 		let _ = command;
 		return Some(build_tool_loop_route(
 			context,
@@ -399,7 +404,7 @@ fn classify_contract_level_grounded_hint(
 
 	if goal_requests_web_lookup(&request.goal)
 		&& let Some(query) = extract_web_query(&request.goal)
-		&& let Some(selector) = tool_selector(context.catalog, "web.search")
+		&& context.availability_snapshot.is_tool_enabled("web.search")
 	{
 		let decision = RouteDecision::new(
 			IntentFamily::WebLookup,
@@ -411,7 +416,6 @@ fn classify_contract_level_grounded_hint(
 			Vec::new(),
 			"contract-level grounded web lookup provides a non-authoritative `web.search` hint",
 		);
-		let _ = selector;
 		let _ = query;
 		return Some(build_tool_loop_route(
 			context,
@@ -422,7 +426,7 @@ fn classify_contract_level_grounded_hint(
 	}
 
 	if extract_glob_pattern(&request.goal).is_some()
-		&& tool_selector(context.catalog, "fs.glob").is_some()
+		&& context.availability_snapshot.is_tool_enabled("fs.glob")
 	{
 		let decision = RouteDecision::new(
 			IntentFamily::FilesystemRead,
@@ -443,11 +447,13 @@ fn classify_contract_level_grounded_hint(
 	}
 
 	if extract_explicit_table_path(&request.goal).is_some()
-		&& has_enabled_tool_with_prefix(context.catalog, "table.")
+		&& context
+			.availability_snapshot
+			.has_enabled_tool_with_prefix("table.")
 	{
 		if extract_concrete_table_path(&request.goal).is_some()
 			&& let Some(tool_name) = explicit_table_action_tool(&request.goal)
-			&& tool_selector(context.catalog, tool_name).is_some()
+			&& context.availability_snapshot.is_tool_enabled(tool_name)
 		{
 			let decision = RouteDecision::new(
 				IntentFamily::TableRead,
@@ -483,11 +489,13 @@ fn classify_contract_level_grounded_hint(
 	}
 
 	if !extract_explicit_path_candidates(&request.goal).is_empty()
-		&& has_enabled_tool_with_prefix(context.catalog, "fs.")
+		&& context
+			.availability_snapshot
+			.has_enabled_tool_with_prefix("fs.")
 	{
 		if !extract_concrete_path_candidates(&request.goal).is_empty()
 			&& let Some(tool_name) = explicit_filesystem_action_tool(&request.goal)
-			&& tool_selector(context.catalog, tool_name).is_some()
+			&& context.availability_snapshot.is_tool_enabled(tool_name)
 		{
 			let decision = RouteDecision::new(
 				IntentFamily::FilesystemRead,
@@ -524,12 +532,19 @@ fn classify_contract_level_grounded_hint(
 	None
 }
 
-fn explicit_tool_selector(catalog: &ResourceCatalog, goal: &str) -> Option<ResourceSelector> {
+fn explicit_tool_selector(
+	context: &RouteClassifierContext<'_>,
+	goal: &str,
+) -> Option<ResourceSelector> {
 	let explicit_tokens = explicit_skill_tokens(goal);
-	let mut entries = catalog
+	let mut entries = context
+		.catalog
 		.entries()
 		.iter()
-		.filter(|entry| entry.kind == ResourceKind::Tool)
+		.filter(|entry| {
+			entry.kind == ResourceKind::Tool
+				&& context.availability_snapshot.is_tool_enabled(&entry.name)
+		})
 		.collect::<Vec<_>>();
 	entries.sort_by(|left, right| right.name.len().cmp(&left.name.len()));
 	entries.into_iter().find_map(|entry| {
@@ -578,15 +593,20 @@ fn classify_with_llm(
 	request: &RequestEnvelope,
 	router: &LlmRouter,
 ) -> RouteDecisionResult {
-	let tool_matches = discoverable_tool_matches(context.catalog.retrieve(
-		&request.goal,
-		Some(ResourceKind::Tool),
-		8,
-	));
+	let tool_matches = discoverable_tool_matches(
+		context
+			.catalog
+			.retrieve(&request.goal, Some(ResourceKind::Tool), 8),
+		context.availability_snapshot,
+	);
 	let skill_matches = context
 		.catalog
 		.retrieve(&request.goal, Some(ResourceKind::Skill), 4);
-	let candidates = llm_candidates(context.catalog, context.agent_runtime_config);
+	let candidates = llm_candidates(
+		context.catalog,
+		context.availability_snapshot,
+		context.agent_runtime_config,
+	);
 	let response = router.generate_json_value(&GenerationRequest {
 		system_prompt: Some(
 			"You are Roku's route classifier. Return only valid JSON matching the requested schema."
@@ -698,11 +718,15 @@ fn llm_classifier_failure_route(
 
 fn llm_candidates(
 	catalog: &ResourceCatalog,
+	availability_snapshot: &RuntimeVisibleToolAvailabilitySnapshot,
 	config: &AgentRuntimeConfig,
 ) -> Vec<serde_json::Value> {
 	let mut entries = catalog
 		.entries()
 		.iter()
+		.filter(|entry| {
+			entry.kind != ResourceKind::Tool || availability_snapshot.is_tool_enabled(&entry.name)
+		})
 		.map(|entry| {
 			json!({
 				"selector": entry.selector.display_key(),
@@ -802,7 +826,7 @@ fn classify_structural_fallback(
 ) -> Option<RouteDecisionResult> {
 	let goal = request.goal.trim();
 	if grounded_python_code_allows_execution(goal)
-		&& tool_selector(context.catalog, "python.run").is_none()
+		&& !context.availability_snapshot.is_tool_enabled("python.run")
 	{
 		return Some(unavailable_family_route(
 			IntentFamily::CodeExec,
@@ -810,21 +834,25 @@ fn classify_structural_fallback(
 		));
 	}
 	if grounded_shell_command_allows_execution(goal)
-		&& tool_selector(context.catalog, "command.run").is_none()
+		&& !context.availability_snapshot.is_tool_enabled("command.run")
 	{
 		return Some(unavailable_family_route(
 			IntentFamily::CodeExec,
 			"explicit shell command was provided, but `command.run` is not enabled in the current runtime inventory",
 		));
 	}
-	if goal_requests_web_lookup(goal) && tool_selector(context.catalog, "web.search").is_none() {
+	if goal_requests_web_lookup(goal)
+		&& !context.availability_snapshot.is_tool_enabled("web.search")
+	{
 		return Some(unavailable_family_route(
 			IntentFamily::WebLookup,
 			"an explicit web lookup request was provided, but `web.search` is not enabled in the current runtime inventory",
 		));
 	}
 	if extract_explicit_table_path(goal).is_some()
-		&& !has_enabled_tool_with_prefix(context.catalog, "table.")
+		&& !context
+			.availability_snapshot
+			.has_enabled_tool_with_prefix("table.")
 	{
 		return Some(unavailable_family_route(
 			IntentFamily::TableRead,
@@ -832,7 +860,9 @@ fn classify_structural_fallback(
 		));
 	}
 	if (extract_glob_pattern(goal).is_some() || !extract_explicit_path_candidates(goal).is_empty())
-		&& !has_enabled_tool_with_prefix(context.catalog, "fs.")
+		&& !context
+			.availability_snapshot
+			.has_enabled_tool_with_prefix("fs.")
 	{
 		return Some(unavailable_family_route(
 			IntentFamily::FilesystemRead,
@@ -891,13 +921,14 @@ fn classify_deterministic_contract_tool_match(
 		return None;
 	}
 
-	let tool_matches = discoverable_tool_matches(context.catalog.retrieve(
-		&request.goal,
-		Some(ResourceKind::Tool),
-		6,
-	));
+	let tool_matches = discoverable_tool_matches(
+		context
+			.catalog
+			.retrieve(&request.goal, Some(ResourceKind::Tool), 6),
+		context.availability_snapshot,
+	);
 	let best_match = select_deterministic_contract_tool_match(&tool_matches, &request.goal, None)?;
-	if let Some(selector) = explicit_tool_selector(context.catalog, &request.goal)
+	if let Some(selector) = explicit_tool_selector(context, &request.goal)
 		&& let Some(descriptor) = context.catalog.descriptor(&selector)
 		&& !explicit_tool_hint_is_grounded(&descriptor.name, &request.goal)
 	{
@@ -1226,13 +1257,6 @@ fn dedup_tools(tools: Vec<String>) -> Vec<String> {
 	deduped
 }
 
-fn has_enabled_tool_with_prefix(catalog: &ResourceCatalog, prefix: &str) -> bool {
-	catalog
-		.entries()
-		.iter()
-		.any(|entry| entry.kind == ResourceKind::Tool && entry.name.starts_with(prefix))
-}
-
 fn build_tool_loop_route(
 	context: &RouteClassifierContext<'_>,
 	mut decision: RouteDecision,
@@ -1313,24 +1337,20 @@ fn build_skill_route_result(
 		Vec::new(),
 		reason,
 	);
-	RouteDecisionResult::Direct(DirectRoutePlan {
-		decision,
-		bound_resources: vec![selector],
-	})
+	let preferred_tool = decision.candidate_tools.first().cloned();
+	build_tool_loop_route(context, decision, preferred_tool.as_deref(), vec![selector])
 }
 
-fn tool_selector(catalog: &ResourceCatalog, tool_name: &str) -> Option<ResourceSelector> {
-	catalog
-		.entries()
-		.iter()
-		.find(|entry| entry.kind == ResourceKind::Tool && entry.name == tool_name)
-		.map(|entry| entry.selector.clone())
-}
-
-fn discoverable_tool_matches(matches: Vec<CatalogMatch>) -> Vec<CatalogMatch> {
+fn discoverable_tool_matches(
+	matches: Vec<CatalogMatch>,
+	availability_snapshot: &RuntimeVisibleToolAvailabilitySnapshot,
+) -> Vec<CatalogMatch> {
 	matches
 		.into_iter()
-		.filter(|entry| entry.descriptor.discoverable)
+		.filter(|entry| {
+			entry.descriptor.discoverable
+				&& availability_snapshot.is_tool_enabled(&entry.descriptor.name)
+		})
 		.collect()
 }
 
@@ -1722,7 +1742,17 @@ mod tests {
 	#[test]
 	fn llm_candidates_emit_compact_selection_inventory_without_examples() {
 		let catalog = ResourceCatalog::new(vec![tool_descriptor("web.search")]);
-		let candidates = llm_candidates(&catalog, &AgentRuntimeConfig::default());
+		let availability_snapshot = RuntimeVisibleToolAvailabilitySnapshot {
+			enabled_tools: ["web.search".to_string()]
+				.into_iter()
+				.collect::<BTreeSet<_>>(),
+			baseline_visible_tools: Vec::new(),
+		};
+		let candidates = llm_candidates(
+			&catalog,
+			&availability_snapshot,
+			&AgentRuntimeConfig::default(),
+		);
 		let candidate = candidates
 			.first()
 			.expect("selection inventory should include one candidate");
