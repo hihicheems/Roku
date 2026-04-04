@@ -40,7 +40,7 @@ use roku_memory::{
 
 use crate::{
 	PendingLoopSnapshotStore, RuntimeExecutionMode, RuntimeMemoryLayers, RuntimeModeReport,
-	RuntimeService, compact_approval_id,
+	RuntimeService, compact_approval_id, legacy_graph::LegacyTaskGraphScheduler,
 };
 use tempfile::tempdir;
 
@@ -1277,6 +1277,7 @@ fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
 fn historical_graph_tasks_remain_resumable() {
 	let service = RuntimeService::default();
 	let task_id = TaskId("task-legacy-resume".to_string());
+	let scheduler = LegacyTaskGraphScheduler;
 	let graph = TaskGraph {
 		task_id: task_id.clone(),
 		nodes: vec![node("legacy-step", TaskNodeKind::Execution)],
@@ -1287,7 +1288,7 @@ fn historical_graph_tasks_remain_resumable() {
 		"req-legacy-resume",
 		"Resume the old graph task",
 		TaskState::Failed,
-		graph,
+		graph.clone(),
 	);
 
 	service
@@ -1295,6 +1296,9 @@ fn historical_graph_tasks_remain_resumable() {
 		.expect("experiment should start");
 	service.save_task(task).expect("task should persist");
 
+	let expected_resume_candidates = scheduler
+		.resume_candidates(&graph, &[])
+		.expect("legacy scheduler should derive resume candidates");
 	let report = service
 		.get_task_replay_report(&task_id)
 		.expect("replay report lookup should succeed")
@@ -1303,7 +1307,36 @@ fn historical_graph_tasks_remain_resumable() {
 		report.recovery_eligibility,
 		RecoveryEligibility::ResumeReady
 	);
-	assert!(!report.resume_candidates.is_empty());
+	assert_eq!(
+		report.resume_candidates.len(),
+		expected_resume_candidates.len()
+	);
+	assert_eq!(
+		report.resume_candidates.first().map(|candidate| (
+			&candidate.node_id,
+			candidate.kind,
+			candidate.eligibility
+		)),
+		expected_resume_candidates.first().map(|candidate| (
+			&candidate.node_id,
+			candidate.kind,
+			candidate.eligibility
+		))
+	);
+	assert_eq!(
+		report
+			.resume_candidates
+			.first()
+			.map(|candidate| candidate.resume_point_id.as_str()),
+		expected_resume_candidates
+			.first()
+			.map(|candidate| candidate.resume_point_id.as_str())
+	);
+	let experiment = service
+		.get_experiment_run(&task_id)
+		.expect("experiment lookup should succeed")
+		.expect("historical resume should preserve a legacy experiment marker");
+	assert_eq!(experiment.strategy, "legacy_graph");
 
 	let response = service
 		.resume_task(&task_id)
@@ -1315,7 +1348,21 @@ fn historical_graph_tasks_remain_resumable() {
 		.expect("task lookup should succeed")
 		.expect("task should exist");
 	assert_eq!(resumed.state, TaskState::Succeeded);
-	assert!(resumed.graph.is_some());
+	let resumed_graph = resumed
+		.graph
+		.as_ref()
+		.expect("historical resume should keep the graph-backed legacy shape");
+	assert_eq!(resumed_graph.nodes.len(), graph.nodes.len());
+	assert_eq!(resumed_graph.nodes[0].node_id, graph.nodes[0].node_id);
+	assert_eq!(
+		resumed.completed_nodes,
+		vec![graph.nodes[0].node_id.clone()]
+	);
+	assert!(
+		scheduler
+			.is_complete(resumed_graph, &resumed.completed_nodes)
+			.expect("legacy scheduler should complete the resumed graph")
+	);
 }
 
 #[test]
