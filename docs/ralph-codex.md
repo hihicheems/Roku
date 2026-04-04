@@ -50,7 +50,7 @@ This keeps Ralph workflow state repo-local without mixing it into Roku runtime c
 
 Story completion now flows through:
 
-`execute -> mechanical gate -> semantic eval -> optional fix/re-eval -> commit -> passes=true -> progress`
+`execute -> mechanical gate -> semantic eval -> optional fix/re-eval -> commit if diff exists -> passes=true -> progress`
 
 Run completion now flows through:
 
@@ -65,6 +65,8 @@ Important ownership rules:
   - create the final git commit
   - mark `passes=true`
   - append progress
+
+If a story is already satisfied by the current repo state and semantic eval returns `pass` with a clean worktree, Ralph records a no-op story completion with an empty `commitSha` instead of creating an empty commit.
 
 Every story defaults to mandatory semantic eval before completion.
 Every completed run also defaults to mandatory final eval before Ralph may declare the PRD complete.

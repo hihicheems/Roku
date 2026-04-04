@@ -1529,24 +1529,26 @@ process_story_iteration() {
 			done
 
 			case "$eval_status" in
-			pass)
-				local commit_source commit_message_file
-				commit_source="$(extract_commit_json_path "$eval_artifact_path" "$execution_artifact_path")"
-				commit_message_file="$run_dir/$(printf 'iteration-%03d.commit-message.txt' "$story_iteration")"
-				write_commit_message_file "$commit_source" "$commit_message_file"
+				pass)
+					local commit_source commit_message_file story_commit_sha
+					story_commit_sha=""
+					commit_source="$(extract_commit_json_path "$eval_artifact_path" "$execution_artifact_path")"
+					commit_message_file="$run_dir/$(printf 'iteration-%03d.commit-message.txt' "$story_iteration")"
+					write_commit_message_file "$commit_source" "$commit_message_file"
 
-				if [[ "$(dirty_worktree_count)" -eq 0 ]]; then
-					echo "  No worktree changes remain for $story_id; refusing to create an empty commit." >&2
-					return 1
-				fi
+					if [[ "$(dirty_worktree_count)" -eq 0 ]]; then
+						echo "  No worktree changes remain for $story_id; recording a no-op semantic pass without creating an empty commit."
+					else
+						git -C "$ROOT_DIR" add -A -- .
+						git -C "$ROOT_DIR" commit -F "$commit_message_file"
+						story_commit_sha="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+					fi
 
-				git -C "$ROOT_DIR" add -A -- .
-				git -C "$ROOT_DIR" commit -F "$commit_message_file"
-				append_completed_story_entry \
-					"$story_id" \
-					"$(git -C "$ROOT_DIR" rev-parse HEAD)" \
-					"$execution_artifact_path" \
-					"$eval_artifact_path"
+					append_completed_story_entry \
+						"$story_id" \
+						"$story_commit_sha" \
+						"$execution_artifact_path" \
+						"$eval_artifact_path"
 				mark_story_passed "$story_id"
 				append_progress_entry "$story_id" "$execution_artifact_path" "$eval_artifact_path"
 				clear_active_story_checkpoint

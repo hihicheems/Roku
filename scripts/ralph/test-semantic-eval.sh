@@ -197,6 +197,56 @@ pass:final-eval)
 		}
 	}' >"$LAST_MESSAGE_FILE"
 	;;
+no_op_pass:execute)
+	write_execution_artifact \
+		"$EXEC_ARTIFACT" \
+		"ok" \
+		"story was already satisfied by the current repo state" \
+		'[]' \
+		'[{"command":"echo no-op-pass","status":"passed"}]' \
+		'[{"criterionId":"AC-1","criterionText":"Typecheck passes","claimedStatus":"met","evidence":"existing repo state already satisfies the story"}]' \
+		'chore(test): no-op pass scenario' \
+		'["no source changes were needed"]' \
+		'["record semantic pass without an empty commit"]'
+	printf 'execution no-op done\n' >"$LAST_MESSAGE_FILE"
+	;;
+no_op_pass:eval)
+	write_eval_message \
+		"pass" \
+		"current repo state already satisfies the story" \
+		'[{"criterionId":"AC-1","criterionText":"Typecheck passes","judgment":"met","evidence":"no-op execution artifact and clean worktree"}]' \
+		'[]' \
+		'[]' \
+		"pass" \
+		"story is already satisfied without code changes" \
+		0
+	;;
+no_op_pass:final-eval)
+	jq -n '{
+		status: "pass",
+		summary: "whole PRD still holds after a no-op story pass",
+		prdReview: {
+			goals: [{ id: "G-1", text: "Finish the requested workflow", judgment: "met", evidence: ["story was accepted without extra source changes"] }],
+			userStories: [{ id: "US-001", text: "no-op pass story", judgment: "met", evidence: ["semantic pass recorded with an empty commitSha"] }],
+			functionalRequirements: [{ id: "FR-1", text: "Typecheck passes", judgment: "met", evidence: ["echo no-op-pass"] }],
+			nonGoals: [{ id: "NG-1", text: "Do not widen scope", judgment: "met", evidence: ["no files changed"] }]
+		},
+		scopeDrift: {
+			underfit: { present: false, summary: "", evidence: [] },
+			overreach: { present: false, summary: "", evidence: [] },
+			cross_story_conflict: { present: false, summary: "", evidence: [] },
+			shared_constraint_loss: { present: false, summary: "", evidence: [] }
+		},
+		findings: [],
+		requiredFixes: [],
+		verdictSummary: {
+			decision: "pass",
+			primaryReason: "final aggregate review passed without requiring a no-op commit",
+			requiredFixesCount: 0,
+			overallDriftLevel: "low"
+		}
+	}' >"$LAST_MESSAGE_FILE"
+	;;
 soft_fix:execute)
 	if [[ -f "$REPO_ROOT/.mock-state/soft-fix-ready" ]]; then
 		echo "good" >"$REPO_ROOT/story.txt"
@@ -835,6 +885,22 @@ run_case_pass() {
 	fi
 }
 
+run_case_no_op_pass() {
+	local tmp_dir="$1/no-op-pass"
+	setup_temp_repo "$tmp_dir"
+	write_prd "$tmp_dir" "no-op pass story"
+	(
+		cd "$tmp_dir"
+		RALPH_CODEX_BIN="$tmp_dir/mock-codex.sh" \
+		RALPH_TEST_SCENARIO="no_op_pass" \
+		./scripts/ralph/ralph.sh --state-dir .ralph 1
+	)
+	assert_eq "true" "$(jq -r '.userStories[0].passes' "$tmp_dir/.ralph/prd.json")" "no-op pass scenario should mark story complete"
+	assert_eq "1" "$(git -C "$tmp_dir" rev-list --count HEAD)" "no-op pass scenario should not create an empty story commit"
+	assert_eq "" "$(jq -r '.[0].commitSha' "$tmp_dir/.ralph/completed-stories.json")" "no-op pass scenario should record an empty commitSha"
+	assert_eq "pass" "$(jq -r '.status' "$tmp_dir/.ralph/runs/$(basename "$(cat "$tmp_dir/.ralph/.last-run")")/final.eval.semantic-eval.json")" "no-op pass scenario should finish with final pass"
+}
+
 run_case_soft_fix() {
 	local tmp_dir="$1/soft-fix"
 	setup_temp_repo "$tmp_dir"
@@ -1002,6 +1068,7 @@ main() {
 	trap "rm -rf '$tmp_root'" EXIT
 
 	run_case_pass "$tmp_root"
+	run_case_no_op_pass "$tmp_root"
 	run_case_soft_fix "$tmp_root"
 	run_case_eval_infra_retry "$tmp_root"
 	run_case_adopt "$tmp_root"
