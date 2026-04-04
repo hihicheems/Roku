@@ -3034,6 +3034,16 @@ mod tests {
 
 	#[test]
 	fn classify_route_and_loop_initialization_agree_on_snapshot_visibility() {
+		// Ownership proof surface:
+		// - Contract owner: `RuntimeVisibleToolAvailabilitySnapshot` is the single shared
+		//   availability contract consumed by both `classify_route` and `initialize_runtime_loop`.
+		// - Registry owner: the injected snapshot already carries catalog/plugin enablement truth;
+		//   runtime adapters may consume that truth but must not mutate it locally.
+		// - Execution owner: `classify_route` may shortlist enabled `candidate_tools`, and
+		//   `initialize_runtime_loop` may seed `visible_tools`, but neither may invent a second
+		//   adapter-local visibility rule.
+		// - Gating owner: policy / approval remains downstream in tool invocation handling, so
+		//   route or loop initialization must not hide enabled tools by pre-applying policy.
 		let runtime = GenericAgentRuntime {
 			runtime_visible_tool_availability_snapshot: RuntimeVisibleToolAvailabilitySnapshot {
 				enabled_tools: [
