@@ -1079,12 +1079,57 @@ fn env_var_bool(key: &'static str) -> Result<Option<bool>, CommandError> {
 
 #[cfg(test)]
 mod tests {
+	use std::ffi::OsString;
+	use std::path::Path;
+
 	use roku_common_types::ResponseStatus;
 
 	use super::*;
+	use crate::test_support::ENV_MUTEX;
+
+	struct TestEnvGuard {
+		key: &'static str,
+		original: Option<OsString>,
+	}
+
+	impl TestEnvGuard {
+		fn set_path(key: &'static str, value: &Path) -> Self {
+			let original = std::env::var_os(key);
+			unsafe {
+				std::env::set_var(key, value);
+			}
+			Self { key, original }
+		}
+	}
+
+	impl Drop for TestEnvGuard {
+		fn drop(&mut self) {
+			if let Some(value) = &self.original {
+				unsafe {
+					std::env::set_var(self.key, value);
+				}
+			} else {
+				unsafe {
+					std::env::remove_var(self.key);
+				}
+			}
+		}
+	}
+
+	fn set_temp_runtime_env(tempdir: &Path) -> (TestEnvGuard, TestEnvGuard) {
+		let runtime_config_path = tempdir.join("config").join("runtime.toml");
+		(
+			TestEnvGuard::set_path("ROKU_HOME", tempdir),
+			TestEnvGuard::set_path("ROKU_RUNTIME_CONFIG_PATH", &runtime_config_path),
+		)
+	}
 
 	#[test]
 	fn run_once_returns_success() {
+		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
+		let tempdir = tempfile::tempdir().expect("temp root should exist");
+		let (_home_guard, _config_guard) = set_temp_runtime_env(tempdir.path());
+
 		let response = run_once("analyze market").expect("pipeline should succeed");
 		assert!(matches!(response.status, ResponseStatus::Failed));
 		assert!(
@@ -1096,6 +1141,10 @@ mod tests {
 
 	#[test]
 	fn run_with_missing_evidence_keeps_new_requests_on_direct_runtime() {
+		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
+		let tempdir = tempfile::tempdir().expect("temp root should exist");
+		let (_home_guard, _config_guard) = set_temp_runtime_env(tempdir.path());
+
 		let response = run_with_mode(
 			"Read the first part of Cargo.toml.",
 			RunMode::MissingEvidence,
@@ -1106,6 +1155,10 @@ mod tests {
 
 	#[test]
 	fn run_with_capability_denied_keeps_new_requests_on_direct_runtime() {
+		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
+		let tempdir = tempfile::tempdir().expect("temp root should exist");
+		let (_home_guard, _config_guard) = set_temp_runtime_env(tempdir.path());
+
 		let response = run_with_mode(
 			"Read the first part of Cargo.toml.",
 			RunMode::CapabilityDenied,
