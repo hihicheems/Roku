@@ -3418,6 +3418,12 @@ mod tests {
 				.and_then(serde_json::Value::as_str),
 			Some("require_approval")
 		);
+		assert!(
+			loop_state
+				.visible_tools
+				.contains(&"command.run".to_string()),
+			"command.run should remain visible after invocation-time policy rejects the call"
+		);
 		assert_eq!(loop_state.history.len(), 2);
 		assert_eq!(
 			loop_state.history[0].decision.tool_name.as_deref(),
