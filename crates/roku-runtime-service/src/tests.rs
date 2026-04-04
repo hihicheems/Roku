@@ -901,7 +901,9 @@ fn successful_requests_skip_write_back_when_policy_effectively_disables_it() {
 
 #[test]
 fn planning_mode_hint_returns_compatibility_fallback_runtime_markers_without_graph() {
-	let service = RuntimeService::default();
+	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
+	store.seed(pending_filesystem_candidate_loop_state());
+	let service = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
 	let mut request = request("Read the first part of Cargo.toml.");
 	request.planning_mode_hint = Some(PlanningModeHint::TreeSearch);
 
@@ -933,6 +935,13 @@ fn planning_mode_hint_returns_compatibility_fallback_runtime_markers_without_gra
 		.expect("experiment lookup should succeed")
 		.expect("compatibility fallback should record an experiment run");
 	assert_eq!(experiment.strategy, "compatibility_fallback");
+
+	let events = store.events();
+	assert!(
+		events.iter().all(|event| event == "delete:session-1"),
+		"compatibility fallback should clear pending-loop snapshots without loading a resumable loop: {events:?}"
+	);
+	assert!(store.is_empty());
 }
 
 #[test]
