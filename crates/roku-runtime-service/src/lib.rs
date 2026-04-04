@@ -39,7 +39,8 @@ use roku_artifact_store::ArtifactStore;
 use roku_capability_auth::CapabilityAuthority;
 use roku_common_types::{
 	ApprovalDecision, ApprovalId, ApprovalStatus, ApprovalTicket, ErrorClass, RequestEnvelope,
-	ResponseEnvelope, ResponseStatus, RuntimeError, Task, TaskEventKind, TaskNode, TaskState,
+	ResponseEnvelope, ResponseStatus, RuntimeError, Task, TaskEventKind, TaskNode, TaskNodeKind,
+	TaskState,
 };
 use roku_experiment_registry::ExperimentRegistry;
 use roku_memory::{
@@ -553,15 +554,28 @@ impl RuntimeService {
 			}
 			self.continue_legacy_graph_after_approval(&mut task, &ticket)
 		} else {
-			if let Some(graph_node) = task.graph.as_ref().and_then(|graph| {
-				graph
-					.nodes
-					.iter()
-					.find(|node| node.node_id == ticket.node_id)
-			}) {
+			let approval_node = task
+				.graph
+				.as_ref()
+				.and_then(|graph| {
+					graph
+						.nodes
+						.iter()
+						.find(|node| node.node_id == ticket.node_id)
+						.cloned()
+				})
+				.or_else(|| {
+					ticket.pending_execution.as_ref().map(|_| TaskNode {
+						node_id: ticket.node_id.clone(),
+						kind: TaskNodeKind::Execution,
+						description: ticket.summary.clone(),
+						..TaskNode::default()
+					})
+				});
+			if let Some(approval_node) = approval_node.as_ref() {
 				self.append_node_event(
 					&task,
-					graph_node,
+					approval_node,
 					TaskEventKind::ApprovalRejected,
 					"approval rejected",
 				)?;

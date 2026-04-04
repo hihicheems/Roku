@@ -20,10 +20,10 @@ use std::time::Instant;
 use roku_common_types::{
 	ApprovalId, ApprovalStatus, ApprovalTicket, ApprovedExecutionRef, CanonicalExecution,
 	CapabilityToken, CompensationAction, CompensationRecord, CompensationStatus, ErrorClass,
-	EvidenceItem, ExecutionEnvPolicyMode, ExecutionPreview, InvocationMode,
+	EvidenceItem, ExecutionEnvPolicyMode, ExecutionPreview, InvocationMode, NodeBudgetSnapshot,
 	PendingExecutionApproval, PolicyDecision, PolicyOutcome, PolicyReasonCode, RecoveryEligibility,
-	ResponseEnvelope, ResponseStatus, ResultEnvelope, ResultStatus, RuntimeError, Task,
-	TaskEventKind, TaskGraph, TaskId, TaskNode, TaskNodeKind, TaskState, ToolOutputEnvelope,
+	ResourceSelector, ResponseEnvelope, ResponseStatus, ResultEnvelope, ResultStatus, RuntimeError,
+	Task, TaskEventKind, TaskId, TaskNode, TaskNodeKind, TaskState, ToolOutputEnvelope,
 	project_execution_preview,
 };
 use roku_observability::{AuditCorrelation, AuditRecord};
@@ -726,7 +726,6 @@ impl RuntimeService {
 		frozen_payload: &str,
 		frozen_payload_schema_version: &str,
 	) -> Result<ResponseEnvelope, RuntimeError> {
-		ensure_pending_execution_resume_graph(task, node);
 		let approval_id = ApprovalId(compact_approval_id(&task.task_id.0, &node.node_id.0));
 		let digest = fact.canonical_execution.digest.clone();
 		let frozen_payload_ref = self.persist_frozen_execution_snapshot_artifact(
@@ -787,18 +786,7 @@ impl RuntimeService {
 			return Ok(None);
 		};
 
-		let graph = task
-			.graph
-			.as_ref()
-			.ok_or_else(|| RuntimeError::new("execution approval ticket requires a task graph"))?;
-		let node = graph
-			.nodes
-			.iter()
-			.find(|node| node.node_id == ticket.node_id)
-			.cloned()
-			.ok_or_else(|| {
-				RuntimeError::new("execution approval ticket points to a missing graph node")
-			})?;
+		let node = validated_execution_resume_node(task, ticket, &pending_execution)?;
 		if node.kind != TaskNodeKind::Execution {
 			return Err(RuntimeError::new(
 				"execution approval ticket must target an execution node",
@@ -964,6 +952,20 @@ impl RuntimeService {
 				message: failure_message(&reason, terminal_state),
 				artifacts: vec![artifact.uri],
 			});
+		}
+
+		if task.graph.is_none() {
+			let message = result_message(&result);
+			let response = self.complete_direct_runtime_path(
+				task,
+				&resume.node,
+				result,
+				message,
+				artifact,
+				"execution resumed from approved frozen payload",
+			)?;
+			self.clear_runtime_memory_layers(&task.task_id);
+			return Ok(response);
 		}
 
 		task.last_result = Some(result);
@@ -1206,15 +1208,35 @@ pub(super) fn pending_execution_approval_fact(
 	})
 }
 
-fn ensure_pending_execution_resume_graph(task: &mut Task, node: &TaskNode) {
-	if task.graph.is_some() {
-		return;
+fn validated_execution_resume_node(
+	task: &Task,
+	ticket: &ApprovalTicket,
+	pending_execution: &PendingExecutionApproval,
+) -> Result<TaskNode, RuntimeError> {
+	if let Some(graph) = task.graph.as_ref() {
+		return graph
+			.nodes
+			.iter()
+			.find(|node| node.node_id == ticket.node_id)
+			.cloned()
+			.ok_or_else(|| {
+				RuntimeError::new("execution approval ticket points to a missing graph node")
+			});
 	}
-	task.graph = Some(TaskGraph {
-		task_id: task.task_id.clone(),
-		nodes: vec![node.clone()],
-		edges: Vec::new(),
-	});
+
+	Ok(TaskNode {
+		node_id: ticket.node_id.clone(),
+		kind: TaskNodeKind::Execution,
+		description: ticket.summary.clone(),
+		resources: vec![ResourceSelector::tool(
+			pending_execution.canonical_execution.tool_name.clone(),
+		)],
+		budget_snapshot: NodeBudgetSnapshot {
+			token_budget: 8_000,
+			time_budget_ms: 60_000,
+		},
+		..TaskNode::default()
+	})
 }
 
 fn validate_frozen_execution_payload(

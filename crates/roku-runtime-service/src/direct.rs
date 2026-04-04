@@ -153,27 +153,41 @@ impl RuntimeService {
 			});
 		}
 
-		task.last_result = Some(result.clone());
-		self.mark_node_completed(task, &node);
-		self.append_node_event(
+		self.complete_direct_runtime_path(
 			task,
 			&node,
-			TaskEventKind::NodeCompleted,
+			result,
+			message,
+			artifact,
 			"direct route execution completed",
+		)
+	}
+
+	pub(super) fn complete_direct_runtime_path(
+		&self,
+		task: &mut Task,
+		node: &TaskNode,
+		result: ResultEnvelope,
+		message: String,
+		result_artifact: roku_common_types::Artifact,
+		node_completion_reason: &str,
+	) -> Result<ResponseEnvelope, RuntimeError> {
+		task.last_result = Some(result.clone());
+		self.mark_node_completed(task, node);
+		self.append_node_event(
+			task,
+			node,
+			TaskEventKind::NodeCompleted,
+			node_completion_reason,
 		)?;
 
 		self.record_transition(task, TaskState::Validating, "validate direct route")?;
-		let validation_node = TaskNode {
-			node_id: roku_common_types::NodeId("direct-route-validation".to_string()),
-			kind: roku_common_types::TaskNodeKind::Validation,
-			description: "Validate direct-route result".to_string(),
-			..TaskNode::default()
-		};
+		let validation_node = direct_validation_node();
 		let validation_report =
 			self.validator
 				.validate_evidence_set(&roku_common_types::ValidationEvidenceSet {
 					result: result.clone(),
-					artifacts: vec![artifact.clone()],
+					artifacts: vec![result_artifact.clone()],
 				});
 		let validation_result =
 			build_direct_validation_result(task, &validation_node, &validation_report);
@@ -198,7 +212,7 @@ impl RuntimeService {
 				request_id: task.request_id.clone(),
 				status: ResponseStatus::Failed,
 				message: failure_message(&reason, terminal_state),
-				artifacts: vec![artifact.uri],
+				artifacts: vec![result_artifact.uri],
 			});
 		}
 
@@ -218,6 +232,15 @@ impl RuntimeService {
 			message,
 			artifacts,
 		})
+	}
+}
+
+fn direct_validation_node() -> TaskNode {
+	TaskNode {
+		node_id: roku_common_types::NodeId("direct-route-validation".to_string()),
+		kind: roku_common_types::TaskNodeKind::Validation,
+		description: "Validate direct-route result".to_string(),
+		..TaskNode::default()
 	}
 }
 
@@ -421,7 +444,7 @@ mod tests {
 	}
 
 	#[test]
-	fn finalize_direct_path_resumes_execution_approval_through_direct_boundary() {
+	fn finalize_direct_path_resumes_execution_approval_without_synthesized_graph() {
 		let service = RuntimeService::default();
 		let directory = tempdir().expect("tempdir should succeed");
 		let cwd = directory
@@ -458,17 +481,7 @@ mod tests {
 			)
 		);
 		assert_eq!(task.state, TaskState::WaitingApproval);
-		assert!(task.graph.is_some());
-		assert_eq!(
-			task.graph
-				.as_ref()
-				.expect("direct route approval should synthesize a resume graph")
-				.nodes
-				.iter()
-				.map(|node| node.node_id.0.as_str())
-				.collect::<Vec<_>>(),
-			vec!["direct-route"]
-		);
+		assert!(task.graph.is_none());
 
 		let approval_id = task
 			.pending_approval_id
@@ -491,7 +504,14 @@ mod tests {
 			.expect("task lookup should succeed")
 			.expect("task should persist");
 		assert_eq!(persisted_task.state, TaskState::Succeeded);
-		assert_eq!(persisted_task.completed_nodes, vec![node.node_id.clone()]);
+		assert!(persisted_task.graph.is_none());
+		assert_eq!(
+			persisted_task.completed_nodes,
+			vec![
+				node.node_id.clone(),
+				NodeId("direct-route-validation".to_string()),
+			]
+		);
 
 		let experiment = service
 			.get_experiment_run(&task.task_id)
