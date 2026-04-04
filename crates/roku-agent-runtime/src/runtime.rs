@@ -663,6 +663,7 @@ impl GenericAgentRuntime {
 		let grounding_input = user_reply.unwrap_or(&loop_state.goal).to_string();
 		loop_state.note_grounding_input(&grounding_input);
 		loop {
+			self.refresh_tool_loop_visible_tools(loop_state);
 			let context_projection = self.refresh_tool_loop_projection(loop_state);
 			let next_step = decide_tool_loop_next_step(
 				loop_state,
@@ -969,10 +970,14 @@ impl GenericAgentRuntime {
 		self.compose_visible_tools(&loop_state.route_decision, Some(loop_state))
 	}
 
-	fn refresh_tool_loop_projection(&self, loop_state: &mut LoopState) -> ContextProjection {
-		loop_state.visible_tools = self.visible_tools_for_loop_state(loop_state);
+	fn refresh_tool_loop_visible_tools(&self, loop_state: &mut LoopState) {
+		let visible_tools = self.visible_tools_for_loop_state(loop_state);
+		loop_state.visible_tools = visible_tools;
+	}
+
+	fn refresh_tool_loop_projection(&self, loop_state: &LoopState) -> ContextProjection {
 		let mut projection = build_context_projection(loop_state);
-		projection.visible_tool_hints = self.visible_tool_hints_for(&loop_state.visible_tools);
+		projection.visible_tool_hints = self.visible_tool_hints_for(&projection.visible_tools);
 		projection
 	}
 
@@ -4190,9 +4195,20 @@ mod tests {
 		);
 		let mut loop_state =
 			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+		loop_state.visible_tools = vec!["fs.glob".to_string()];
 
-		let projection = runtime.refresh_tool_loop_projection(&mut loop_state);
+		let projection = runtime.refresh_tool_loop_projection(&loop_state);
 
+		assert_eq!(projection.visible_tools, vec!["fs.glob".to_string()]);
+		assert_eq!(loop_state.visible_tools, vec!["fs.glob".to_string()]);
+		assert_eq!(
+			projection
+				.visible_tool_hints
+				.keys()
+				.cloned()
+				.collect::<Vec<_>>(),
+			vec!["fs.glob".to_string()]
+		);
 		let glob_hint = projection
 			.visible_tool_hints
 			.get("fs.glob")
