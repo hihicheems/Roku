@@ -929,6 +929,46 @@ fn planning_mode_hint_returns_compatibility_fallback_runtime_markers_without_gra
 	let payload: serde_json::Value =
 		serde_json::from_str(&last_result.payload).expect("payload should be valid json");
 	assert_eq!(payload["direct_route"], true);
+	let shell = &payload["planning_mode_compatibility_shell"];
+	assert_eq!(shell["branch"], "planning_mode_hint:TreeSearch");
+	assert_eq!(shell["compatibility_only"], true);
+	assert_eq!(
+		shell["replacement_path"]["authority_path"],
+		"runtime_loop_owner.classify_route -> dispatch_route"
+	);
+	assert_eq!(shell["replacement_path"]["route_kind"], "direct");
+	assert_eq!(shell["replacement_path"]["strategy"], "direct_route");
+	assert_eq!(
+		shell["replacement_path"]["decision"]["intent_family"],
+		"filesystem_read"
+	);
+	let candidate_tools = shell["replacement_path"]["decision"]["candidate_tools"]
+		.as_array()
+		.expect("replacement path should record route candidate tools");
+	assert!(
+		candidate_tools
+			.iter()
+			.any(|tool| tool.as_str() == Some("fs.read_text")),
+		"replacement path should preserve direct-route candidate markers: {candidate_tools:?}"
+	);
+	assert_eq!(
+		shell["route_markers"]["experiment_strategy"],
+		"compatibility_fallback"
+	);
+	assert_eq!(shell["route_markers"]["replacement_route_kind"], "direct");
+	assert_eq!(
+		shell["route_markers"]["result_producer"],
+		"direct-route:compatibility-fallback"
+	);
+	let blockers = shell["remaining_blockers"]
+		.as_array()
+		.expect("compatibility shell should record remaining blockers");
+	assert!(
+		blockers.iter().any(|blocker| blocker
+			.as_str()
+			.is_some_and(|value| value.contains("PlanningModeHint::TreeSearch"))),
+		"compatibility shell should preserve the remaining removal blockers: {blockers:?}"
+	);
 
 	let experiment = service
 		.get_experiment_run(&task_id)
@@ -937,9 +977,13 @@ fn planning_mode_hint_returns_compatibility_fallback_runtime_markers_without_gra
 	assert_eq!(experiment.strategy, "compatibility_fallback");
 
 	let events = store.events();
+	assert_eq!(events.first().map(String::as_str), Some("load:session-1"));
 	assert!(
-		events.iter().all(|event| event == "delete:session-1"),
-		"compatibility fallback should clear pending-loop snapshots without loading a resumable loop: {events:?}"
+		events
+			.iter()
+			.skip(1)
+			.all(|event| event == "delete:session-1"),
+		"compatibility shell should clear pending-loop snapshots after default resume intake checks: {events:?}"
 	);
 	assert!(store.is_empty());
 }
@@ -960,6 +1004,7 @@ fn planning_mode_hints_clear_pending_loop_snapshots_without_resuming() {
 	assert_eq!(
 		store.events(),
 		vec![
+			"load:session-1".to_string(),
 			"delete:session-1".to_string(),
 			"delete:session-1".to_string(),
 		]

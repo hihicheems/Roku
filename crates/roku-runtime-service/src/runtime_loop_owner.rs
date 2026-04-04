@@ -14,9 +14,10 @@
 
 use roku_agent_runtime::{EscalationAction, EscalationReason, RouteDecisionResult};
 use roku_common_types::{
-	RequestEnvelope, ResponseEnvelope, RuntimeError, RuntimeMemorySections, Task,
+	PlanningModeHint, RequestEnvelope, ResponseEnvelope, RuntimeError, RuntimeMemorySections, Task,
 };
 use roku_observability::LogLevel;
+use serde_json::{Value, json};
 
 use crate::{
 	ContextBundle, RuntimeMemoryLayers, RuntimeService, compatibility_fallback_plan,
@@ -48,10 +49,6 @@ impl<'a> RuntimeLoopOwner<'a> {
 		task: &mut Task,
 		request: &RequestEnvelope,
 	) -> Result<ResponseEnvelope, RuntimeError> {
-		if let Some(response) = self.handle_planning_mode_hint(task, request)? {
-			return Ok(response);
-		}
-
 		let mut resumable_loop = self.service.take_resumable_pending_loop(request)?;
 		let mut prepared = self.prepare_request_context(
 			task,
@@ -81,9 +78,18 @@ impl<'a> RuntimeLoopOwner<'a> {
 			.service
 			.runtime
 			.classify_route(request, &request.session_id);
+		log_route_decision(request, &route);
+		if let Some(planning_mode_hint) = request.planning_mode_hint.as_ref() {
+			return self.handle_planning_mode_hint(
+				task,
+				request,
+				planning_mode_hint,
+				&route,
+				&prepared,
+			);
+		}
 		self.service
 			.attach_visible_resources(&mut prepared.context_bundle, &route);
-		log_route_decision(request, &route);
 		let mut loop_state = self
 			.service
 			.initialize_runtime_loop_for_route(request, &route);
@@ -94,21 +100,22 @@ impl<'a> RuntimeLoopOwner<'a> {
 		&self,
 		task: &mut Task,
 		request: &RequestEnvelope,
-	) -> Result<Option<ResponseEnvelope>, RuntimeError> {
-		let Some(planning_mode_hint) = request.planning_mode_hint.as_ref() else {
-			return Ok(None);
-		};
-
-		let prepared = self.prepare_request_context(task, request, false, None)?;
-		self.service.clear_pending_loop(&request.session_id)?;
+		planning_mode_hint: &PlanningModeHint,
+		replacement_route: &RouteDecisionResult,
+		prepared: &PreparedRuntimeLoopRequest,
+	) -> Result<ResponseEnvelope, RuntimeError> {
 		self.service.metrics.inc_route_escalations();
 		self.service.metrics.inc_route_limited_planning();
 		log_runtime(
 			LogLevel::Info,
-			"planning mode hint resolved as compatibility fallback",
+			"planning mode hint resolved as compatibility-only shell",
 			[
 				("request_id", request.request_id.0.clone()),
 				("planning_mode_hint", format!("{planning_mode_hint:?}")),
+				(
+					"replacement_route_kind",
+					replacement_route_kind(replacement_route).to_string(),
+				),
 			],
 		);
 		self.service
@@ -116,10 +123,9 @@ impl<'a> RuntimeLoopOwner<'a> {
 		let compatibility_plan = compatibility_fallback_plan(
 			"planning mode hints are deprecated compatibility signals; planning-heavy workflow is not enabled in this runtime",
 		);
-		let mut loop_state = self.service.initialize_runtime_loop_for_route(
-			request,
-			&RouteDecisionResult::Escalate(compatibility_plan.clone()),
-		);
+		let mut loop_state = self
+			.service
+			.initialize_runtime_loop_for_route(request, replacement_route);
 		let runtime_memory_sections = prepared.runtime_memory_sections();
 		let response = self.service.process_direct_escalation(
 			task,
@@ -129,7 +135,41 @@ impl<'a> RuntimeLoopOwner<'a> {
 			&prepared.context_bundle,
 			&runtime_memory_sections,
 		)?;
-		Ok(Some(response))
+		self.persist_planning_mode_shell_readiness(task, planning_mode_hint, replacement_route)?;
+		Ok(response)
+	}
+
+	fn persist_planning_mode_shell_readiness(
+		&self,
+		task: &mut Task,
+		planning_mode_hint: &PlanningModeHint,
+		replacement_route: &RouteDecisionResult,
+	) -> Result<(), RuntimeError> {
+		let Some(last_result) = task.last_result.as_mut() else {
+			return Ok(());
+		};
+
+		let original_payload = last_result.payload.clone();
+		let mut payload = serde_json::from_str::<Value>(&original_payload).unwrap_or_else(|_| {
+			json!({
+				"message": original_payload.clone(),
+			})
+		});
+		if !payload.is_object() {
+			payload = json!({
+				"message": payload,
+			});
+		}
+		payload["planning_mode_compatibility_shell"] = planning_mode_shell_readiness_payload(
+			planning_mode_hint,
+			replacement_route,
+			last_result.producer.as_str(),
+		);
+		last_result.payload = serde_json::to_string(&payload).unwrap_or(original_payload);
+
+		self.service.save_result(last_result.clone())?;
+		self.service.save_task(task.clone())?;
+		Ok(())
 	}
 
 	fn prepare_request_context(
@@ -236,5 +276,51 @@ impl<'a> RuntimeLoopOwner<'a> {
 				}
 			}
 		}
+	}
+}
+
+fn planning_mode_shell_readiness_payload(
+	planning_mode_hint: &PlanningModeHint,
+	replacement_route: &RouteDecisionResult,
+	result_producer: &str,
+) -> Value {
+	json!({
+		"branch": format!("planning_mode_hint:{planning_mode_hint:?}"),
+		"compatibility_only": true,
+		"replacement_path": replacement_path_payload(replacement_route),
+		"route_markers": {
+			"experiment_strategy": "compatibility_fallback",
+			"replacement_route_kind": replacement_route_kind(replacement_route),
+			"result_producer": result_producer,
+		},
+		"remaining_blockers": [
+			"Transport or session callers can still send PlanningModeHint::TreeSearch; remove those emitters before deleting this compatibility shell."
+		],
+	})
+}
+
+fn replacement_path_payload(replacement_route: &RouteDecisionResult) -> Value {
+	match replacement_route {
+		RouteDecisionResult::Direct(plan) => json!({
+			"authority_path": "runtime_loop_owner.classify_route -> dispatch_route",
+			"route_kind": "direct",
+			"strategy": "direct_route",
+			"decision": &plan.decision,
+		}),
+		RouteDecisionResult::Escalate(plan) => json!({
+			"authority_path": "runtime_loop_owner.classify_route -> dispatch_route",
+			"route_kind": "escalate",
+			"strategy": "direct_escalation",
+			"decision": &plan.decision,
+			"escalation_action": format!("{:?}", plan.action),
+			"escalation_reason": format!("{:?}", plan.reason),
+		}),
+	}
+}
+
+fn replacement_route_kind(replacement_route: &RouteDecisionResult) -> &'static str {
+	match replacement_route {
+		RouteDecisionResult::Direct(_) => "direct",
+		RouteDecisionResult::Escalate(_) => "escalate",
 	}
 }
