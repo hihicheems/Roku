@@ -657,12 +657,48 @@ fn wire_memory_subsystem(
 	} else {
 		Arc::new(DisabledMemoryLifecyclePolicy)
 	};
+
+	let pending_loop_backend = wire_sqlite_pending_loop(memory_config, pending_loop);
+
 	Ok(service
 		.with_pending_loop_snapshot_store(Arc::new(MemoryPendingLoopSnapshotStore::new(
-			pending_loop,
+			pending_loop_backend,
 		)))
 		.with_long_term_memory_backend(long_term)
 		.with_memory_lifecycle_policy(policy))
+}
+
+/// Always use SQLite for pending-loop persistence regardless of the configured memory backend.
+///
+/// This ensures pending-loop snapshots survive process restarts via a dedicated SQLite table
+/// even when the primary memory backend is OpenViking or another provider.
+fn wire_sqlite_pending_loop(
+	memory_config: &MemoryRuntimeConfig,
+	fallback: Box<dyn roku_memory::PendingLoopSnapshotBackend>,
+) -> Box<dyn roku_memory::PendingLoopSnapshotBackend> {
+	let store_config = roku_plugin_memory_sqlite::SqliteMemoryStoreConfig::new(
+		memory_config.backends.sqlite.path.clone(),
+	);
+	match roku_plugin_memory_sqlite::SqlitePendingLoopSnapshotAdapter::connect(store_config) {
+		Ok(adapter) => Box::new(adapter),
+		Err(error) => {
+			let _ = emit_global_log(
+				LogRecord::new(
+					"roku-cmd",
+					LogLevel::Warn,
+					format!(
+						"failed to open dedicated SQLite pending-loop store, \
+						 falling back to subsystem backend: {error}"
+					),
+				)
+				.with_field(
+					"sqlite_path",
+					memory_config.backends.sqlite.path.display().to_string(),
+				),
+			);
+			fallback
+		}
+	}
 }
 
 fn build_enabled_memory_backend_from_env()

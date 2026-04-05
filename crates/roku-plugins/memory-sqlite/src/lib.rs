@@ -36,3 +36,4 @@ pub use control_plane::{
 	SqliteTaskRepository,
 };
 pub use registration::{SqliteMemoryRegistration, SqliteMemorySubsystemRegistration};
+pub use store::SqliteMemoryStoreConfig;
