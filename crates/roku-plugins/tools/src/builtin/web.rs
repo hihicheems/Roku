@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::env;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use crate::contract::{
@@ -38,37 +39,67 @@ pub(crate) fn catalog_descriptors_with_config(
 	runtime_config: &WebToolRuntimeConfig,
 ) -> Vec<CatalogDescriptor> {
 	let contract = web_contract();
-	vec![CatalogDescriptor {
-		selector: roku_common_types::ResourceSelector::tool("web.search"),
-		kind: ResourceKind::Tool,
-		name: "web.search".to_string(),
-		role: Some("core_web".to_string()),
-		description: "Use this when you have a concrete search query and need fresh external search results from the configured backend. Do not use it for filesystem questions, broad research planning without a query, or as a substitute for final synthesis. It returns structured result summaries that usually need a follow-up explanation or comparison before the final answer."
-			.to_string(),
-		selection_hint: "Run a concrete web search query to gather fresh external results."
-			.to_string(),
-		discoverable: true,
-		tags: vec!["web".to_string(), "search".to_string(), "lookup".to_string()],
-		examples: vec!["Search the web for the latest Rust edition.".to_string()],
-		input_schema: contract_input_schema(
-			Some(&contract),
-			&["query".to_string(), "top_k".to_string()],
-		),
-		risk: ResourceRisk::Low,
-		cost: ResourceCost {
-			estimated_tokens: 0,
-			estimated_latency_ms: runtime_config
-				.endpoint
-				.as_ref()
-				.map(|_| 3_000)
-				.unwrap_or(500),
+	vec![
+		CatalogDescriptor {
+			selector: roku_common_types::ResourceSelector::tool("web.search"),
+			kind: ResourceKind::Tool,
+			name: "web.search".to_string(),
+			role: Some("core_web".to_string()),
+			description: "Use this when you have a concrete search query and need fresh external search results from the configured backend. Do not use it for filesystem questions, broad research planning without a query, or as a substitute for final synthesis. It returns structured result summaries that usually need a follow-up explanation or comparison before the final answer."
+				.to_string(),
+			selection_hint: "Run a concrete web search query to gather fresh external results."
+				.to_string(),
+			discoverable: true,
+			tags: vec!["web".to_string(), "search".to_string(), "lookup".to_string()],
+			examples: vec!["Search the web for the latest Rust edition.".to_string()],
+			input_schema: contract_input_schema(
+				Some(&contract),
+				&["query".to_string(), "top_k".to_string()],
+			),
+			risk: ResourceRisk::Low,
+			cost: ResourceCost {
+				estimated_tokens: 0,
+				estimated_latency_ms: runtime_config
+					.endpoint
+					.as_ref()
+					.map(|_| 3_000)
+					.unwrap_or(500),
+			},
+			required_capabilities: vec!["web.search".to_string()],
+			summary: "Run a concrete web query and return structured search results.".to_string(),
+			key_commands: Vec::new(),
+			use_cases: Vec::new(),
+			contract: Some(contract),
 		},
-		required_capabilities: vec!["web.search".to_string()],
-		summary: "Run a concrete web query and return structured search results.".to_string(),
-		key_commands: Vec::new(),
-		use_cases: Vec::new(),
-		contract: Some(contract),
-	}]
+		CatalogDescriptor {
+			selector: roku_common_types::ResourceSelector::tool("web.fetch"),
+			kind: ResourceKind::Tool,
+			name: "web.fetch".to_string(),
+			role: Some("core_web".to_string()),
+			description: "Use this when you have a specific URL and need to read its content. Do not use it for searching the web or when a URL is not yet known. It fetches the page and returns extracted text content."
+				.to_string(),
+			selection_hint: "Fetch and read the text content of a specific URL.".to_string(),
+			discoverable: true,
+			tags: vec![
+				"web".to_string(),
+				"fetch".to_string(),
+				"url".to_string(),
+				"read".to_string(),
+			],
+			examples: vec!["Read the content at https://example.com/docs".to_string()],
+			input_schema: vec!["url".to_string()],
+			risk: ResourceRisk::Low,
+			cost: ResourceCost {
+				estimated_tokens: 0,
+				estimated_latency_ms: 3_000,
+			},
+			required_capabilities: vec!["web.fetch".to_string()],
+			summary: "Fetch a URL and return its text content.".to_string(),
+			key_commands: Vec::new(),
+			use_cases: Vec::new(),
+			contract: None,
+		},
+	]
 }
 
 #[allow(dead_code)]
@@ -81,6 +112,9 @@ pub(crate) fn register_tools_with_config(
 	config: &WebToolRuntimeConfig,
 ) -> Result<(), ToolRuntimeError> {
 	runtime.register_tool(WebSearchTool {
+		config: config.clone(),
+	})?;
+	runtime.register_tool(WebFetchTool {
 		config: config.clone(),
 	})?;
 	Ok(())
@@ -213,6 +247,149 @@ impl Tool for WebSearchTool {
 		)
 		.into_value())
 	}
+}
+
+// ---------------------------------------------------------------------------
+// web.fetch
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct WebFetchTool {
+	config: WebToolRuntimeConfig,
+}
+
+impl Tool for WebFetchTool {
+	fn descriptor(&self) -> ToolDescriptor {
+		let runtime_constraints = RuntimeConstraints {
+			timeout_ms: self.config.fetch_timeout_ms,
+			max_retries: 0,
+			retry_backoff_ms: 0,
+			sandbox_profile: SandboxProfile::NoIsolation,
+			deterministic_hooks: true,
+			allowed_read_roots: Vec::new(),
+			allowed_write_roots: Vec::new(),
+		};
+		ToolDescriptor {
+			name: "web.fetch".to_string(),
+			version: "1.0.0".to_string(),
+			input_schema: contract_tool_schema(None, &["url"]),
+			output_schema: "tool_observation.v1".to_string(),
+			required_capabilities: vec!["web.fetch".to_string()],
+			runtime_constraints,
+			contract: None,
+		}
+	}
+
+	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
+		let url = request
+			.input
+			.get("url")
+			.and_then(Value::as_str)
+			.filter(|value| !value.trim().is_empty())
+			.ok_or_else(|| ToolFailure::terminal("missing required field `url`"))?;
+
+		let timeout_ms = self.config.fetch_timeout_ms;
+		let max_bytes = self.config.max_fetch_bytes;
+
+		let client = Client::builder()
+			.timeout(Duration::from_millis(timeout_ms))
+			.build()
+			.map_err(|error| {
+				ToolFailure::terminal(format!("failed to build fetch client: {error}"))
+			})?;
+
+		let response = match client.get(url).send() {
+			Ok(response) => response,
+			Err(error) => {
+				return Ok(fetch_error_output(
+					"connection_error",
+					format!("failed to fetch url: {error}"),
+					url,
+				));
+			}
+		};
+
+		let status = response.status();
+		if !status.is_success() {
+			return Ok(fetch_error_output(
+				"http_error",
+				format!("HTTP {}", status.as_u16()),
+				url,
+			));
+		}
+
+		let content_type = response
+			.headers()
+			.get("content-type")
+			.and_then(|value| value.to_str().ok())
+			.unwrap_or("unknown")
+			.to_string();
+
+		// Read bytes and cap at max_bytes to protect against oversized payloads.
+		let bytes = response
+			.bytes()
+			.map_err(|error| {
+				ToolFailure::terminal(format!("failed to read response body: {error}"))
+			})?;
+		let truncated = bytes.len() > max_bytes;
+		// Cap at max_bytes, then walk back to a valid UTF-8 char boundary
+		// before converting, so we never produce replacement characters from
+		// a truncation split.
+		let cap = if truncated { max_bytes } else { bytes.len() };
+		let mut boundary = cap;
+		while boundary > 0 && std::str::from_utf8(&bytes[..boundary]).is_err() {
+			boundary -= 1;
+		}
+		let raw = std::str::from_utf8(&bytes[..boundary]).unwrap_or("");
+		let is_html = content_type.contains("html");
+		let content = if is_html {
+			strip_html_tags(raw)
+		} else {
+			raw.to_string()
+		};
+		let byte_length = content.len();
+
+		Ok(ToolOutputEnvelope::new(
+			true,
+			Option::<String>::None,
+			false,
+			format!("Fetched {} ({byte_length} bytes).", url),
+			json!({
+				"url": url,
+				"content": content,
+				"content_type": content_type,
+				"byte_length": byte_length,
+				"truncated": truncated,
+			}),
+		)
+		.into_value())
+	}
+}
+
+fn fetch_error_output(error_type: &str, message: impl Into<String>, url: &str) -> Value {
+	ToolOutputEnvelope::new(
+		false,
+		Some(error_type),
+		true,
+		message,
+		json!({ "url": url }),
+	)
+	.into_value()
+}
+
+static HTML_TAG_PATTERN: LazyLock<regex::Regex> =
+	LazyLock::new(|| regex::Regex::new(r"<[^>]+>").expect("HTML tag regex should compile"));
+
+fn strip_html_tags(raw: &str) -> String {
+	let stripped = HTML_TAG_PATTERN.replace_all(raw, "");
+
+	// Decode common HTML entities
+	stripped
+		.replace("&amp;", "&")
+		.replace("&lt;", "<")
+		.replace("&gt;", ">")
+		.replace("&nbsp;", " ")
+		.replace("&quot;", "\"")
 }
 
 fn error_output(
@@ -445,6 +622,7 @@ mod tests {
 			config: WebToolRuntimeConfig {
 				endpoint: Some(endpoint),
 				default_top_k: 5,
+				..WebToolRuntimeConfig::default()
 			},
 		};
 		let output = tool
@@ -466,5 +644,130 @@ mod tests {
 				.map(Vec::len),
 			Some(1)
 		);
+	}
+
+	// -----------------------------------------------------------------------
+	// web.fetch tests
+	// -----------------------------------------------------------------------
+
+	fn spawn_mock_http_server(
+		status: u16,
+		content_type: &'static str,
+		body: &'static str,
+	) -> String {
+		let listener = TcpListener::bind("127.0.0.1:0").expect("mock listener should bind");
+		let address = listener
+			.local_addr()
+			.expect("mock listener should expose an address");
+		thread::spawn(move || {
+			let Ok((mut stream, _)) = listener.accept() else {
+				return;
+			};
+			let mut buffer = [0_u8; 1024];
+			let _ = stream.read(&mut buffer);
+			let reason = if status == 200 { "OK" } else { "Error" };
+			let response = format!(
+				"HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+				body.len()
+			);
+			let _ = stream.write_all(response.as_bytes());
+		});
+		format!("http://{address}/page")
+	}
+
+	fn fetch_tool() -> WebFetchTool {
+		WebFetchTool {
+			config: WebToolRuntimeConfig::default(),
+		}
+	}
+
+	#[test]
+	fn web_fetch_successful() {
+		let url = spawn_mock_http_server(200, "text/plain", "Hello, World!");
+		let output = fetch_tool()
+			.invoke(invocation_request(json!({ "url": url })))
+			.expect("web.fetch should succeed");
+		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
+			.expect("web.fetch should emit ToolOutputEnvelope");
+		assert!(envelope.ok);
+		assert!(!envelope.terminal);
+		assert_eq!(envelope.data["content"], "Hello, World!");
+		assert_eq!(envelope.data["truncated"], false);
+	}
+
+	#[test]
+	fn web_fetch_http_error() {
+		let url = spawn_mock_http_server(404, "text/plain", "Not Found");
+		let output = fetch_tool()
+			.invoke(invocation_request(json!({ "url": url })))
+			.expect("web.fetch should return structured error");
+		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
+			.expect("web.fetch should emit ToolOutputEnvelope");
+		assert!(!envelope.ok);
+		assert_eq!(envelope.error_type.as_deref(), Some("http_error"));
+		assert!(envelope.terminal);
+	}
+
+	#[test]
+	fn web_fetch_strips_html_tags() {
+		let html = "<html><body><h1>Title</h1><p>Content &amp; more</p></body></html>";
+		let url = spawn_mock_http_server(200, "text/html", html);
+		let output = fetch_tool()
+			.invoke(invocation_request(json!({ "url": url })))
+			.expect("web.fetch should succeed");
+		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
+			.expect("web.fetch should emit ToolOutputEnvelope");
+		assert!(envelope.ok);
+		let content = envelope.data["content"].as_str().unwrap();
+		assert!(!content.contains('<'));
+		assert!(content.contains("Title"));
+		assert!(content.contains("Content & more"));
+	}
+
+	#[test]
+	fn web_fetch_truncates_at_max_bytes() {
+		// Use a body larger than max_fetch_bytes (default 102400).
+		// We use a small custom config to test truncation without a huge body.
+		let body: &'static str = Box::leak("A".repeat(200).into_boxed_str());
+		let url = spawn_mock_http_server(200, "text/plain", body);
+		let tool = WebFetchTool {
+			config: WebToolRuntimeConfig {
+				max_fetch_bytes: 50,
+				..Default::default()
+			},
+		};
+		let output = tool
+			.invoke(invocation_request(json!({ "url": url })))
+			.expect("web.fetch should succeed with truncation");
+		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
+			.expect("web.fetch should emit ToolOutputEnvelope");
+		assert!(envelope.ok);
+		assert_eq!(envelope.data["truncated"], true);
+		let content = envelope.data["content"].as_str().unwrap();
+		assert!(content.len() <= 50);
+	}
+
+	#[test]
+	fn web_fetch_truncation_respects_utf8_boundary() {
+		// "你好" is 6 bytes in UTF-8 (3 bytes each). With max_bytes=4,
+		// truncation must not split a character.
+		let body = "你好世界";
+		let url = spawn_mock_http_server(200, "text/plain", body);
+		let tool = WebFetchTool {
+			config: WebToolRuntimeConfig {
+				max_fetch_bytes: 4,
+				..Default::default()
+			},
+		};
+		let output = tool
+			.invoke(invocation_request(json!({ "url": url })))
+			.expect("web.fetch should not panic on multi-byte boundary");
+		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
+			.expect("web.fetch should emit ToolOutputEnvelope");
+		assert!(envelope.ok);
+		assert_eq!(envelope.data["truncated"], true);
+		let content = envelope.data["content"].as_str().unwrap();
+		// Should only contain "你" (3 bytes fits within boundary ≤ 4)
+		assert_eq!(content, "你");
 	}
 }

@@ -14,7 +14,7 @@
 
 use std::env;
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{Read, Write as _};
 use std::path::{Path, PathBuf};
 
 use crate::contract::{
@@ -184,6 +184,65 @@ pub(crate) fn catalog_descriptors_with_config(
 			&["test -e <path>", "exists <path>"],
 			&["check whether a grounded file or directory exists"],
 		),
+		{
+			let mut desc = descriptor_catalog(
+				"fs.edit",
+				"Use this when you need to make a precise string replacement in an existing file. Provide a unique old_string that appears exactly once in the file, along with the new_string to replace it. Do not use it for creating new files or overwriting entire files; use fs.write for that.",
+				"Replace a unique string in an existing file.",
+				&["edit", "replace", "modify", "file mutation"],
+				&["Replace 'foo' with 'bar' in config.toml"],
+				&["file_path", "old_string", "new_string"],
+				&["fs.edit"],
+				&["edit <path>"],
+				&[
+					"replace a unique string in an existing file",
+					"make a targeted text substitution in a source file",
+				],
+			);
+			desc.risk = ResourceRisk::Medium;
+			desc
+		},
+		{
+			let mut desc = descriptor_catalog(
+				"fs.write",
+				"Use this when you need to create a new file or overwrite an existing one entirely. Do not use it for targeted edits within an existing file; use fs.edit for that.",
+				"Create a new file or overwrite an existing one.",
+				&["write", "create", "overwrite", "file mutation"],
+				&["Create a new README.md with content"],
+				&["file_path", "content"],
+				&["fs.write"],
+				&["write <path>"],
+				&[
+					"create a new file with specified content",
+					"overwrite an existing file with new content",
+				],
+			);
+			desc.risk = ResourceRisk::Medium;
+			desc
+		},
+		descriptor_catalog(
+			"fs.grep",
+			"Use this when you need to search for a pattern in file contents across the workspace. Returns matched lines with file paths and line numbers. Do not use it for filename-based search; use fs.find or fs.glob for that.",
+			"Search file contents for a regex or literal pattern.",
+			&[
+				"grep",
+				"search content",
+				"find in files",
+				"pattern match",
+				"code search",
+			],
+			&[
+				"Search for 'TODO' in all Rust files.",
+				"Find function definitions matching 'fn main'.",
+			],
+			&["pattern"],
+			&["fs.grep"],
+			&["grep <pattern>"],
+			&[
+				"search for a pattern in file contents",
+				"find all occurrences of a string across workspace files",
+			],
+		),
 	]
 }
 
@@ -214,6 +273,15 @@ pub(crate) fn register_tools_with_config(
 	runtime.register_tool(FsExistsTool {
 		config: config.clone(),
 	})?;
+	runtime.register_tool(FsEditTool {
+		config: config.clone(),
+	})?;
+	runtime.register_tool(FsWriteTool {
+		config: config.clone(),
+	})?;
+	runtime.register_tool(FsGrepTool {
+		config: config.clone(),
+	})?;
 	Ok(())
 }
 
@@ -221,23 +289,33 @@ pub(crate) fn canonical_execution_from_runtime_input(
 	tool_name: &str,
 	input: &Value,
 ) -> Option<CanonicalExecution> {
-	if !matches!(
-		tool_name,
-		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text"
-	) {
-		return None;
+	match tool_name {
+		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => {
+			let request = ToolInvocationRequest {
+				invocation_key: format!("{tool_name}:agent-runtime-canonicalization"),
+				attempt: 1,
+				input: input.clone(),
+				sandbox_profile: SandboxProfile::ReadOnlyFs,
+				attachments: Vec::new(),
+				allowed_read_roots: default_allowed_roots(),
+				allowed_write_roots: Vec::new(),
+			};
+			canonical_fs_execution(tool_name, &request).ok()
+		}
+		"fs.edit" | "fs.write" => {
+			let request = ToolInvocationRequest {
+				invocation_key: format!("{tool_name}:agent-runtime-canonicalization"),
+				attempt: 1,
+				input: input.clone(),
+				sandbox_profile: SandboxProfile::ReadOnlyFs,
+				attachments: Vec::new(),
+				allowed_read_roots: Vec::new(),
+				allowed_write_roots: default_allowed_roots(),
+			};
+			canonical_fs_write_execution(tool_name, &request).ok()
+		}
+		_ => None,
 	}
-
-	let request = ToolInvocationRequest {
-		invocation_key: format!("{tool_name}:agent-runtime-canonicalization"),
-		attempt: 1,
-		input: input.clone(),
-		sandbox_profile: SandboxProfile::ReadOnlyFs,
-		attachments: Vec::new(),
-		allowed_read_roots: default_allowed_roots(),
-		allowed_write_roots: Vec::new(),
-	};
-	canonical_fs_execution(tool_name, &request).ok()
 }
 
 #[derive(Clone)]
@@ -267,6 +345,18 @@ struct FsGlobTool {
 
 #[derive(Clone)]
 struct FsExistsTool {
+	config: FsToolRuntimeConfig,
+}
+
+#[derive(Clone)]
+struct FsEditTool {
+	#[allow(dead_code)]
+	config: FsToolRuntimeConfig,
+}
+
+#[derive(Clone)]
+struct FsWriteTool {
+	#[allow(dead_code)]
 	config: FsToolRuntimeConfig,
 }
 
@@ -544,6 +634,178 @@ impl Tool for FsExistsTool {
 	}
 }
 
+impl Tool for FsEditTool {
+	fn descriptor(&self) -> ToolDescriptor {
+		write_tool_descriptor(
+			"fs.edit",
+			&["file_path", "old_string", "new_string"],
+			&["fs.edit"],
+		)
+	}
+
+	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
+		let file_path = required_string(&request.input, "file_path")?;
+		let old_string = required_string(&request.input, "old_string")?;
+		let new_string = required_string(&request.input, "new_string")?;
+		let roots = allowed_write_roots(&request)?;
+		let working_directory = roots.first().cloned().ok_or_else(|| {
+			ToolFailure::terminal("no allowed write roots are configured for filesystem tools")
+		})?;
+		let resolved = resolve_scope_target(file_path, &working_directory)?;
+		ensure_allowed_write(&resolved, &roots)?;
+
+		if !resolved.exists() {
+			let data = json!({ "file_path": resolved.display().to_string() });
+			return Ok(observation_like_output(
+				format!("`{}` does not exist.", resolved.display()),
+				false,
+				Some("file_not_found"),
+				false,
+				data,
+			));
+		}
+
+		let content = fs::read_to_string(&resolved).map_err(|error| {
+			ToolFailure::terminal(format!("failed to read `{}`: {error}", resolved.display()))
+		})?;
+
+		let match_count = content.matches(old_string).count();
+		match match_count {
+			0 => {
+				// Provide a short excerpt of the file so the agent knows what it
+				// actually contains and can retry with the correct old_string.
+				let excerpt: String = content.lines().take(20).collect::<Vec<_>>().join("\n");
+				let data = json!({
+					"file_path": resolved.display().to_string(),
+					"match_count": 0,
+					"file_excerpt": excerpt,
+				});
+				Ok(observation_like_output(
+					format!(
+						"string not found in `{}`. File has {} lines.",
+						resolved.display(),
+						content.lines().count()
+					),
+					false,
+					Some("string_not_found"),
+					false,
+					data,
+				))
+			}
+			1 => {
+				let new_content = content.replacen(old_string, new_string, 1);
+				let byte_offset = content.find(old_string).unwrap_or(0);
+				let line_start = content[..byte_offset].matches('\n').count() + 1;
+				let line_end = line_start + old_string.matches('\n').count();
+
+				fs::write(&resolved, &new_content).map_err(|error| {
+					ToolFailure::terminal(format!(
+						"failed to write `{}`: {error}",
+						resolved.display()
+					))
+				})?;
+
+				let data = json!({
+					"file_path": resolved.display().to_string(),
+					"line_start": line_start,
+					"line_end": line_end,
+					"match_count": 1,
+				});
+				Ok(observation_like_output(
+					format!("Edited `{}`.", resolved.display()),
+					true,
+					None,
+					false,
+					data,
+				))
+			}
+			count => {
+				let data = json!({
+					"file_path": resolved.display().to_string(),
+					"match_count": count,
+				});
+				Ok(observation_like_output(
+					format!("{count} matches found, provide more surrounding context"),
+					false,
+					Some("multiple_matches"),
+					false,
+					data,
+				))
+			}
+		}
+	}
+
+	fn policy_decision(&self, execution: &CanonicalExecution) -> Option<PolicyDecision> {
+		(execution.tool_name == "fs.edit").then(|| evaluate_fs_write_policy(execution))
+	}
+}
+
+impl Tool for FsWriteTool {
+	fn descriptor(&self) -> ToolDescriptor {
+		write_tool_descriptor("fs.write", &["file_path", "content"], &["fs.write"])
+	}
+
+	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
+		let file_path = required_string(&request.input, "file_path")?;
+		let content = request
+			.input
+			.get("content")
+			.and_then(Value::as_str)
+			.ok_or_else(|| ToolFailure::terminal("missing required field `content`"))?;
+		let roots = allowed_write_roots(&request)?;
+		let working_directory = roots.first().cloned().ok_or_else(|| {
+			ToolFailure::terminal("no allowed write roots are configured for filesystem tools")
+		})?;
+		let resolved = resolve_scope_target(file_path, &working_directory)?;
+		ensure_allowed_write(&resolved, &roots)?;
+
+		let created = !resolved.exists();
+
+		if let Some(parent) = resolved.parent()
+			&& !parent.exists()
+		{
+			fs::create_dir_all(parent).map_err(|error| {
+				ToolFailure::terminal(format!(
+					"failed to create parent directories for `{}`: {error}",
+					resolved.display()
+				))
+			})?;
+		}
+
+		let bytes_written = content.len();
+		let mut file = File::create(&resolved).map_err(|error| {
+			ToolFailure::terminal(format!(
+				"failed to create `{}`: {error}",
+				resolved.display()
+			))
+		})?;
+		file.write_all(content.as_bytes()).map_err(|error| {
+			ToolFailure::terminal(format!("failed to write `{}`: {error}", resolved.display()))
+		})?;
+
+		let data = json!({
+			"file_path": resolved.display().to_string(),
+			"created": created,
+			"bytes_written": bytes_written,
+		});
+		Ok(observation_like_output(
+			if created {
+				format!("Created `{}`.", resolved.display())
+			} else {
+				format!("Wrote `{}`.", resolved.display())
+			},
+			true,
+			None,
+			false,
+			data,
+		))
+	}
+
+	fn policy_decision(&self, execution: &CanonicalExecution) -> Option<PolicyDecision> {
+		(execution.tool_name == "fs.write").then(|| evaluate_fs_write_policy(execution))
+	}
+}
+
 fn observation_like_output(
 	message: String,
 	ok: bool,
@@ -743,6 +1005,41 @@ fn tool_descriptor(
 	}
 }
 
+fn write_tool_descriptor(
+	name: &str,
+	required_fields: &[&str],
+	required_capabilities: &[&str],
+) -> ToolDescriptor {
+	let runtime_constraints = RuntimeConstraints {
+		timeout_ms: 10_000,
+		max_retries: 0,
+		retry_backoff_ms: 0,
+		sandbox_profile: SandboxProfile::NoIsolation,
+		deterministic_hooks: true,
+		allowed_read_roots: default_allowed_roots(),
+		allowed_write_roots: default_allowed_roots(),
+	};
+	let contract = fs_tool_contract(name);
+	ToolDescriptor {
+		name: name.to_string(),
+		version: "1.0.0".to_string(),
+		input_schema: contract_tool_schema(
+			contract.as_ref(),
+			&base_required_field_names(required_fields),
+		),
+		output_schema: contract
+			.as_ref()
+			.map(|contract| contract.output.observation_schema.clone())
+			.unwrap_or_else(|| "result.v1".to_string()),
+		required_capabilities: required_capabilities
+			.iter()
+			.map(|value| (*value).to_string())
+			.collect(),
+		runtime_constraints,
+		contract,
+	}
+}
+
 fn base_required_field_names<'a>(extra: &'a [&'a str]) -> Vec<&'a str> {
 	let mut fields = vec![
 		"task_id",
@@ -839,6 +1136,34 @@ fn compute_fs_digest(
 	Ok(CanonicalDigest(format!("{digest:x}")))
 }
 
+fn compute_fs_write_digest(
+	tool_name: &str,
+	argv: &[String],
+	working_directory: &Path,
+	env_policy: &ExecutionEnvPolicy,
+	resource_scope: &ExecutionResourceScope,
+) -> Result<CanonicalDigest, ToolFailure> {
+	let payload = json!({
+		"tool_name": tool_name,
+		"program": tool_name,
+		"argv": argv,
+		"invocation_mode": InvocationMode::DirectExec,
+		"cwd": working_directory.display().to_string(),
+		"env_policy": env_policy,
+		"resource_scope": resource_scope,
+		"action_class": ExecutionActionClass::Write,
+	});
+	let bytes = serde_json::to_vec(&payload).map_err(|error| {
+		ToolFailure::terminal(format!(
+			"failed to encode canonical fs write digest input: {error}"
+		))
+	})?;
+	let mut hasher = Sha256::new();
+	hasher.update(bytes);
+	let digest = hasher.finalize();
+	Ok(CanonicalDigest(format!("{digest:x}")))
+}
+
 fn path_strings(paths: &[PathBuf]) -> Vec<String> {
 	paths
 		.iter()
@@ -862,6 +1187,145 @@ fn evaluate_fs_policy(execution: &CanonicalExecution) -> PolicyDecision {
 		return require_fs_approval(PolicyReasonCode::ApprovalRequiredByOutOfScopePath);
 	}
 	allow_fs()
+}
+
+fn evaluate_fs_write_policy(execution: &CanonicalExecution) -> PolicyDecision {
+	if execution
+		.resource_scope
+		.resolved_targets
+		.iter()
+		.any(|target| !path_in_any_root(target, &execution.resource_scope.effective_write_roots))
+	{
+		return require_fs_approval(PolicyReasonCode::ApprovalRequiredByOutOfScopePath);
+	}
+	// PRD-01 US-002: create-vs-overwrite policy seam.
+	// Today both are allowed by default. Downstream policy can inspect
+	// is_overwrite_execution() to require higher-level approval for overwrites.
+	// This seam exists so that future policy tightening does not require
+	// structural changes — only a policy condition update here.
+	let _overwrite = is_overwrite_execution(execution);
+	allow_fs()
+}
+
+fn canonical_fs_write_execution(
+	tool_name: &str,
+	request: &ToolInvocationRequest,
+) -> Result<CanonicalExecution, ToolFailure> {
+	let file_path = required_string(&request.input, "file_path")?;
+	let roots = allowed_write_roots(request)?;
+	let working_directory = roots.first().cloned().ok_or_else(|| {
+		ToolFailure::terminal("no allowed write roots are configured for filesystem tools")
+	})?;
+	let resolved_target = resolve_scope_target(file_path, &working_directory)?;
+	// Encode create-vs-overwrite distinction in argv so the policy bridge can
+	// differentiate. When the target already exists, argv includes "--overwrite".
+	// This is the policy seam required by PRD-01 US-002 — downstream policy can
+	// require higher-level approval for overwrites if configured.
+	let overwrite_existing = resolved_target.exists();
+	let mut argv = vec![tool_name.to_string(), resolved_target.display().to_string()];
+	if overwrite_existing {
+		argv.push("--overwrite".to_string());
+	}
+	let env_policy = ExecutionEnvPolicy {
+		mode: ExecutionEnvPolicyMode::Clean,
+		allowed_keys: Vec::new(),
+	};
+	let resource_scope = ExecutionResourceScope {
+		working_directory: working_directory.display().to_string(),
+		resolved_targets: vec![resolved_target.display().to_string()],
+		effective_read_roots: Vec::new(),
+		effective_write_roots: path_strings(&roots),
+	};
+	let digest = compute_fs_write_digest(
+		tool_name,
+		&argv,
+		&working_directory,
+		&env_policy,
+		&resource_scope,
+	)?;
+
+	Ok(CanonicalExecution {
+		tool_name: tool_name.to_string(),
+		program: tool_name.to_string(),
+		argv,
+		invocation_mode: InvocationMode::DirectExec,
+		shell_context: None,
+		cwd: working_directory.display().to_string(),
+		env_policy,
+		resource_scope,
+		action_class: ExecutionActionClass::Write,
+		digest,
+	})
+}
+
+/// Returns true if this canonical write execution represents an overwrite of an existing file.
+fn is_overwrite_execution(execution: &CanonicalExecution) -> bool {
+	execution.argv.iter().any(|arg| arg == "--overwrite")
+}
+
+fn allowed_write_roots(request: &ToolInvocationRequest) -> Result<Vec<PathBuf>, ToolFailure> {
+	let mut roots = if request.allowed_write_roots.is_empty() {
+		default_allowed_roots()
+	} else {
+		request.allowed_write_roots.clone()
+	};
+	if roots.is_empty() {
+		return Err(ToolFailure::terminal(
+			"no allowed write roots are configured for filesystem tools",
+		));
+	}
+	for root in &mut roots {
+		if !root.is_absolute() {
+			*root = env::current_dir()
+				.map(|cwd| cwd.join(&*root))
+				.unwrap_or_else(|_| root.clone());
+		}
+		*root = root.canonicalize().map_err(|error| {
+			ToolFailure::terminal(format!(
+				"failed to canonicalize write root `{}`: {error}",
+				root.display()
+			))
+		})?;
+	}
+	Ok(roots)
+}
+
+fn ensure_allowed_write(path: &Path, roots: &[PathBuf]) -> Result<(), ToolFailure> {
+	// For write targets, the path (or ancestors) may not yet exist, so we walk
+	// up to the nearest existing ancestor and canonicalize from there.
+	let check = nearest_canonical(path).unwrap_or_else(|| path.to_path_buf());
+	if roots.iter().any(|root| check.starts_with(root)) {
+		Ok(())
+	} else {
+		Err(ToolFailure::terminal(format!(
+			"path `{}` is outside the allowed write roots",
+			path.display()
+		)))
+	}
+}
+
+/// Walk up the ancestor chain until we find an existing directory that can be
+/// canonicalized, then re-append the remaining suffix.
+fn nearest_canonical(path: &Path) -> Option<PathBuf> {
+	let mut current = path.to_path_buf();
+	let mut suffix_parts: Vec<std::ffi::OsString> = Vec::new();
+	loop {
+		if current.exists() {
+			let mut canonical = current.canonicalize().ok()?;
+			for part in suffix_parts.into_iter().rev() {
+				canonical.push(part);
+			}
+			return Some(canonical);
+		}
+		if let Some(name) = current.file_name() {
+			suffix_parts.push(name.to_os_string());
+		} else {
+			return None;
+		}
+		if !current.pop() {
+			return None;
+		}
+	}
 }
 
 fn allow_fs() -> PolicyDecision {
@@ -1283,6 +1747,189 @@ fn render_directory_message(path: &Path, entries: &[Value], truncated: bool) -> 
 	lines.join("\n")
 }
 
+// ---------------------------------------------------------------------------
+// fs.grep
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct FsGrepTool {
+	config: FsToolRuntimeConfig,
+}
+
+impl Tool for FsGrepTool {
+	fn descriptor(&self) -> ToolDescriptor {
+		let runtime_constraints = RuntimeConstraints {
+			timeout_ms: 15_000,
+			max_retries: 0,
+			retry_backoff_ms: 0,
+			sandbox_profile: SandboxProfile::ReadOnlyFs,
+			deterministic_hooks: true,
+			allowed_read_roots: Vec::new(),
+			allowed_write_roots: Vec::new(),
+		};
+		ToolDescriptor {
+			name: "fs.grep".to_string(),
+			version: "1.0.0".to_string(),
+			input_schema: contract_tool_schema(None, &base_required_field_names(&["pattern"])),
+			output_schema: "tool_observation.v1".to_string(),
+			required_capabilities: vec!["fs.grep".to_string()],
+			runtime_constraints,
+			contract: None,
+		}
+	}
+
+	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
+		let pattern = required_string(&request.input, "pattern")?;
+		let literal = request
+			.input
+			.get("literal")
+			.and_then(Value::as_bool)
+			.unwrap_or(false);
+		let effective_pattern = if literal {
+			regex::escape(pattern)
+		} else {
+			pattern.to_string()
+		};
+		let compiled = regex::Regex::new(&effective_pattern)
+			.map_err(|error| ToolFailure::terminal(format!("invalid regex pattern: {error}")))?;
+		let glob_filter = request
+			.input
+			.get("glob")
+			.and_then(Value::as_str)
+			.filter(|value| !value.trim().is_empty())
+			.map(|value| {
+				glob::Pattern::new(value).map_err(|error| {
+					ToolFailure::terminal(format!("invalid glob filter `{value}`: {error}"))
+				})
+			})
+			.transpose()?;
+		let roots = allowed_read_roots(&request)?;
+		let search_root = request
+			.input
+			.get("path")
+			.and_then(Value::as_str)
+			.filter(|value| !value.trim().is_empty())
+			.map(|value| {
+				let candidate = expand_user_path(value, roots.first().unwrap());
+				if !candidate.is_dir() {
+					return Err(ToolFailure::terminal(format!(
+						"`{value}` is not a directory"
+					)));
+				}
+				let canonical = candidate.canonicalize().map_err(|error| {
+					ToolFailure::terminal(format!("failed to resolve `{value}`: {error}"))
+				})?;
+				ensure_allowed(&canonical, &roots)?;
+				Ok(canonical)
+			})
+			.transpose()?
+			.unwrap_or_else(|| roots.first().cloned().unwrap_or_default());
+		let limit = self.config.max_grep_results;
+		let mut matches: Vec<Value> = Vec::new();
+		let mut truncated = false;
+		grep_walk_directory(
+			&search_root,
+			&compiled,
+			glob_filter.as_ref(),
+			limit,
+			&mut matches,
+			&mut truncated,
+		)?;
+		let match_count = matches.len();
+		let message = if match_count == 0 {
+			format!("No matches found for `{pattern}`.")
+		} else if truncated {
+			format!("Found {match_count} matches for `{pattern}` (truncated at {limit}).")
+		} else {
+			format!("Found {match_count} matches for `{pattern}`.")
+		};
+		let data = json!({
+			"pattern": pattern,
+			"matches": matches,
+			"match_count": match_count,
+			"truncated": truncated,
+		});
+		Ok(observation_like_output(message, true, None, false, data))
+	}
+}
+
+#[allow(dead_code)]
+fn grep_walk_directory(
+	directory: &Path,
+	pattern: &regex::Regex,
+	glob_filter: Option<&glob::Pattern>,
+	limit: usize,
+	matches: &mut Vec<Value>,
+	truncated: &mut bool,
+) -> Result<(), ToolFailure> {
+	let mut stack = vec![directory.to_path_buf()];
+	while let Some(dir) = stack.pop() {
+		let entries = match fs::read_dir(&dir) {
+			Ok(entries) => entries,
+			Err(_) => continue,
+		};
+		for entry in entries.filter_map(Result::ok) {
+			let path = entry.path();
+			let name = entry.file_name().to_string_lossy().to_string();
+			let metadata = match fs::symlink_metadata(&path) {
+				Ok(metadata) => metadata,
+				Err(_) => continue,
+			};
+			if metadata.is_dir() {
+				if !should_skip_workspace_search_dir(&name) {
+					stack.push(path);
+				}
+				continue;
+			}
+			if !metadata.is_file() {
+				continue;
+			}
+			if let Some(filter) = glob_filter
+				&& !filter.matches(&name)
+			{
+				continue;
+			}
+			if matches.len() >= limit {
+				*truncated = true;
+				return Ok(());
+			}
+			grep_search_file(&path, pattern, limit, matches, truncated)?;
+			if *truncated {
+				return Ok(());
+			}
+		}
+	}
+	Ok(())
+}
+
+#[allow(dead_code)]
+fn grep_search_file(
+	path: &Path,
+	pattern: &regex::Regex,
+	limit: usize,
+	matches: &mut Vec<Value>,
+	truncated: &mut bool,
+) -> Result<(), ToolFailure> {
+	let content = match fs::read_to_string(path) {
+		Ok(content) => content,
+		Err(_) => return Ok(()),
+	};
+	for (line_number, line) in content.lines().enumerate() {
+		if pattern.is_match(line) {
+			if matches.len() >= limit {
+				*truncated = true;
+				return Ok(());
+			}
+			matches.push(json!({
+				"file_path": path.display().to_string(),
+				"line_number": line_number + 1,
+				"line_content": line,
+			}));
+		}
+	}
+	Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1377,5 +2024,513 @@ mod tests {
 		);
 		assert_eq!(envelope.data["exists"], true);
 		assert_eq!(envelope.data["kind"], "file");
+	}
+
+	// -----------------------------------------------------------------------
+	// fs.grep tests
+	// -----------------------------------------------------------------------
+
+	fn grep_tool() -> FsGrepTool {
+		FsGrepTool {
+			config: FsToolRuntimeConfig::default(),
+		}
+	}
+
+	fn grep_request(input: Value, root: &Path) -> ToolInvocationRequest {
+		ToolInvocationRequest {
+			invocation_key: "fs.grep:test".to_string(),
+			attempt: 1,
+			input,
+			sandbox_profile: SandboxProfile::ReadOnlyFs,
+			attachments: Vec::new(),
+			allowed_read_roots: vec![root.to_path_buf()],
+			allowed_write_roots: Vec::new(),
+		}
+	}
+
+	#[test]
+	fn fs_grep_single_match() {
+		let dir = tempdir().expect("tempdir");
+		fs::write(dir.path().join("a.txt"), "hello world\ngoodbye\n").unwrap();
+		let output = grep_tool()
+			.invoke(grep_request(json!({"pattern": "hello"}), dir.path()))
+			.expect("invoke");
+		let env = serde_json::from_value::<ToolOutputEnvelope>(output).expect("envelope");
+		assert!(env.ok);
+		let matches = env.data["matches"].as_array().unwrap();
+		assert_eq!(matches.len(), 1);
+		assert_eq!(matches[0]["line_number"], 1);
+		assert!(
+			matches[0]["line_content"]
+				.as_str()
+				.unwrap()
+				.contains("hello")
+		);
+	}
+
+	#[test]
+	fn fs_grep_multiple_matches() {
+		let dir = tempdir().expect("tempdir");
+		fs::write(dir.path().join("a.txt"), "foo\nbar\nfoo again\n").unwrap();
+		let output = grep_tool()
+			.invoke(grep_request(json!({"pattern": "foo"}), dir.path()))
+			.expect("invoke");
+		let env = serde_json::from_value::<ToolOutputEnvelope>(output).expect("envelope");
+		assert!(env.ok);
+		assert_eq!(env.data["match_count"], 2);
+	}
+
+	#[test]
+	fn fs_grep_regex_pattern() {
+		let dir = tempdir().expect("tempdir");
+		fs::write(dir.path().join("a.txt"), "abc123\ndef456\nabc789\n").unwrap();
+		let output = grep_tool()
+			.invoke(grep_request(json!({"pattern": "abc\\d+"}), dir.path()))
+			.expect("invoke");
+		let env = serde_json::from_value::<ToolOutputEnvelope>(output).expect("envelope");
+		assert!(env.ok);
+		assert_eq!(env.data["match_count"], 2);
+	}
+
+	#[test]
+	fn fs_grep_literal_pattern() {
+		let dir = tempdir().expect("tempdir");
+		fs::write(dir.path().join("a.txt"), "a.b\naxb\na\\.b\n").unwrap();
+		let output = grep_tool()
+			.invoke(grep_request(
+				json!({"pattern": "a.b", "literal": true}),
+				dir.path(),
+			))
+			.expect("invoke");
+		let env = serde_json::from_value::<ToolOutputEnvelope>(output).expect("envelope");
+		assert!(env.ok);
+		// literal "a.b" matches only the first line, not "axb"
+		assert_eq!(env.data["match_count"], 1);
+		let matches = env.data["matches"].as_array().unwrap();
+		assert_eq!(matches[0]["line_content"], "a.b");
+	}
+
+	#[test]
+	fn fs_grep_invalid_regex_returns_error() {
+		let dir = tempdir().expect("tempdir");
+		fs::write(dir.path().join("a.txt"), "text").unwrap();
+		let result = grep_tool().invoke(grep_request(json!({"pattern": "[invalid"}), dir.path()));
+		assert!(result.is_err());
+	}
+
+	#[test]
+	fn fs_grep_no_matches_returns_success() {
+		let dir = tempdir().expect("tempdir");
+		fs::write(dir.path().join("a.txt"), "hello world\n").unwrap();
+		let output = grep_tool()
+			.invoke(grep_request(json!({"pattern": "zzz_no_match"}), dir.path()))
+			.expect("invoke");
+		let env = serde_json::from_value::<ToolOutputEnvelope>(output).expect("envelope");
+		assert!(env.ok);
+		assert_eq!(env.data["match_count"], 0);
+		assert_eq!(env.data["truncated"], false);
+	}
+
+	#[test]
+	fn fs_grep_truncation_at_limit() {
+		let dir = tempdir().expect("tempdir");
+		let lines = (0..300)
+			.map(|i| format!("match_{i}"))
+			.collect::<Vec<_>>()
+			.join("\n");
+		fs::write(dir.path().join("a.txt"), &lines).unwrap();
+		let tool = FsGrepTool {
+			config: FsToolRuntimeConfig {
+				max_grep_results: 5,
+				..FsToolRuntimeConfig::default()
+			},
+		};
+		let output = tool
+			.invoke(grep_request(json!({"pattern": "match_"}), dir.path()))
+			.expect("invoke");
+		let env = serde_json::from_value::<ToolOutputEnvelope>(output).expect("envelope");
+		assert!(env.ok);
+		assert_eq!(env.data["match_count"], 5);
+		assert_eq!(env.data["truncated"], true);
+	}
+
+	#[test]
+	fn fs_grep_glob_filter() {
+		let dir = tempdir().expect("tempdir");
+		fs::write(dir.path().join("a.rs"), "fn main() {}\n").unwrap();
+		fs::write(dir.path().join("b.txt"), "fn main() {}\n").unwrap();
+		let output = grep_tool()
+			.invoke(grep_request(
+				json!({"pattern": "fn main", "glob": "*.rs"}),
+				dir.path(),
+			))
+			.expect("invoke");
+		let env = serde_json::from_value::<ToolOutputEnvelope>(output).expect("envelope");
+		assert!(env.ok);
+		assert_eq!(env.data["match_count"], 1);
+		let matches = env.data["matches"].as_array().unwrap();
+		assert!(matches[0]["file_path"].as_str().unwrap().ends_with("a.rs"));
+	}
+
+	// -----------------------------------------------------------------------
+	// fs.edit tests
+	// -----------------------------------------------------------------------
+
+	fn write_request(input: Value, write_roots: Vec<PathBuf>) -> ToolInvocationRequest {
+		ToolInvocationRequest {
+			invocation_key: "fs-mutation:test".to_string(),
+			attempt: 1,
+			input,
+			sandbox_profile: SandboxProfile::ReadOnlyFs,
+			attachments: Vec::new(),
+			allowed_read_roots: Vec::new(),
+			allowed_write_roots: write_roots,
+		}
+	}
+
+	#[test]
+	fn fs_edit_unique_match_succeeds() {
+		let directory = tempdir().expect("tempdir should succeed");
+		let file = directory.path().join("hello.txt");
+		fs::write(&file, "Hello World").expect("fixture write should succeed");
+		let tool = FsEditTool {
+			config: FsToolRuntimeConfig::default(),
+		};
+
+		let output = tool
+			.invoke(write_request(
+				json!({
+					"file_path": file.display().to_string(),
+					"old_string": "World",
+					"new_string": "Rust",
+				}),
+				vec![directory.path().to_path_buf()],
+			))
+			.expect("fs.edit invocation should succeed");
+
+		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
+			.expect("fs.edit output should deserialize as ToolOutputEnvelope");
+		assert!(envelope.ok);
+		assert_eq!(envelope.error_type, None);
+		assert_eq!(envelope.data["match_count"], 1);
+		assert_eq!(envelope.data["line_start"], 1);
+		assert_eq!(envelope.data["line_end"], 1);
+
+		let content = fs::read_to_string(&file).expect("file should be readable");
+		assert_eq!(content, "Hello Rust");
+	}
+
+	#[test]
+	fn fs_edit_zero_matches_returns_error() {
+		let directory = tempdir().expect("tempdir should succeed");
+		let file = directory.path().join("hello.txt");
+		fs::write(&file, "Hello World").expect("fixture write should succeed");
+		let tool = FsEditTool {
+			config: FsToolRuntimeConfig::default(),
+		};
+
+		let output = tool
+			.invoke(write_request(
+				json!({
+					"file_path": file.display().to_string(),
+					"old_string": "nonexistent string",
+					"new_string": "replacement",
+				}),
+				vec![directory.path().to_path_buf()],
+			))
+			.expect("fs.edit invocation should succeed even for zero matches");
+
+		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
+			.expect("fs.edit output should deserialize as ToolOutputEnvelope");
+		assert!(!envelope.ok);
+		assert_eq!(envelope.error_type.as_deref(), Some("string_not_found"));
+	}
+
+	#[test]
+	fn fs_edit_multiple_matches_returns_error() {
+		let directory = tempdir().expect("tempdir should succeed");
+		let file = directory.path().join("repeat.txt");
+		fs::write(&file, "aaa bbb aaa").expect("fixture write should succeed");
+		let tool = FsEditTool {
+			config: FsToolRuntimeConfig::default(),
+		};
+
+		let output = tool
+			.invoke(write_request(
+				json!({
+					"file_path": file.display().to_string(),
+					"old_string": "aaa",
+					"new_string": "ccc",
+				}),
+				vec![directory.path().to_path_buf()],
+			))
+			.expect("fs.edit invocation should succeed even for multiple matches");
+
+		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
+			.expect("fs.edit output should deserialize as ToolOutputEnvelope");
+		assert!(!envelope.ok);
+		assert_eq!(envelope.error_type.as_deref(), Some("multiple_matches"));
+		assert_eq!(envelope.data["match_count"], 2);
+
+		let content = fs::read_to_string(&file).expect("file should be readable");
+		assert_eq!(content, "aaa bbb aaa", "file should not be modified");
+	}
+
+	#[test]
+	fn fs_edit_nonexistent_file_returns_error() {
+		let directory = tempdir().expect("tempdir should succeed");
+		let tool = FsEditTool {
+			config: FsToolRuntimeConfig::default(),
+		};
+
+		let output = tool
+			.invoke(write_request(
+				json!({
+					"file_path": directory.path().join("missing.txt").display().to_string(),
+					"old_string": "foo",
+					"new_string": "bar",
+				}),
+				vec![directory.path().to_path_buf()],
+			))
+			.expect("fs.edit invocation should succeed even for missing file");
+
+		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
+			.expect("fs.edit output should deserialize as ToolOutputEnvelope");
+		assert!(!envelope.ok);
+		assert_eq!(envelope.error_type.as_deref(), Some("file_not_found"));
+	}
+
+	// -----------------------------------------------------------------------
+	// fs.write tests
+	// -----------------------------------------------------------------------
+
+	#[test]
+	fn fs_write_creates_new_file() {
+		let directory = tempdir().expect("tempdir should succeed");
+		let file = directory.path().join("new.txt");
+		let tool = FsWriteTool {
+			config: FsToolRuntimeConfig::default(),
+		};
+
+		let output = tool
+			.invoke(write_request(
+				json!({
+					"file_path": file.display().to_string(),
+					"content": "brand new content",
+				}),
+				vec![directory.path().to_path_buf()],
+			))
+			.expect("fs.write invocation should succeed");
+
+		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
+			.expect("fs.write output should deserialize as ToolOutputEnvelope");
+		assert!(envelope.ok);
+		assert_eq!(envelope.data["created"], true);
+		assert_eq!(envelope.data["bytes_written"], 17);
+
+		let content = fs::read_to_string(&file).expect("file should be readable");
+		assert_eq!(content, "brand new content");
+	}
+
+	#[test]
+	fn fs_write_overwrites_existing_file() {
+		let directory = tempdir().expect("tempdir should succeed");
+		let file = directory.path().join("existing.txt");
+		fs::write(&file, "old content").expect("fixture write should succeed");
+		let tool = FsWriteTool {
+			config: FsToolRuntimeConfig::default(),
+		};
+
+		let output = tool
+			.invoke(write_request(
+				json!({
+					"file_path": file.display().to_string(),
+					"content": "new content",
+				}),
+				vec![directory.path().to_path_buf()],
+			))
+			.expect("fs.write invocation should succeed");
+
+		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
+			.expect("fs.write output should deserialize as ToolOutputEnvelope");
+		assert!(envelope.ok);
+		assert_eq!(envelope.data["created"], false);
+
+		let content = fs::read_to_string(&file).expect("file should be readable");
+		assert_eq!(content, "new content");
+	}
+
+	#[test]
+	fn fs_write_creates_parent_directories() {
+		let directory = tempdir().expect("tempdir should succeed");
+		let file = directory.path().join("deep/nested/dir/file.txt");
+		let tool = FsWriteTool {
+			config: FsToolRuntimeConfig::default(),
+		};
+
+		let output = tool
+			.invoke(write_request(
+				json!({
+					"file_path": file.display().to_string(),
+					"content": "nested content",
+				}),
+				vec![directory.path().to_path_buf()],
+			))
+			.expect("fs.write invocation should succeed");
+
+		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
+			.expect("fs.write output should deserialize as ToolOutputEnvelope");
+		assert!(envelope.ok);
+		assert_eq!(envelope.data["created"], true);
+
+		let content = fs::read_to_string(&file).expect("file should be readable");
+		assert_eq!(content, "nested content");
+	}
+
+	#[test]
+	fn fs_write_empty_content_succeeds() {
+		let directory = tempdir().expect("tempdir should succeed");
+		let file = directory.path().join("empty.txt");
+		let tool = FsWriteTool {
+			config: FsToolRuntimeConfig::default(),
+		};
+
+		let output = tool
+			.invoke(write_request(
+				json!({
+					"file_path": file.display().to_string(),
+					"content": "",
+				}),
+				vec![directory.path().to_path_buf()],
+			))
+			.expect("fs.write invocation should succeed");
+
+		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
+			.expect("fs.write output should deserialize as ToolOutputEnvelope");
+		assert!(envelope.ok);
+		assert_eq!(envelope.data["created"], true);
+		assert_eq!(envelope.data["bytes_written"], 0);
+
+		let content = fs::read_to_string(&file).expect("file should be readable");
+		assert_eq!(content, "");
+	}
+
+	// -----------------------------------------------------------------------
+	// fs write policy tests
+	// -----------------------------------------------------------------------
+
+	#[test]
+	fn fs_write_policy_requires_approval_for_out_of_scope_paths() {
+		let execution = CanonicalExecution {
+			tool_name: "fs.edit".to_string(),
+			program: "fs.edit".to_string(),
+			argv: vec!["fs.edit".to_string(), "/tmp/outside".to_string()],
+			invocation_mode: InvocationMode::DirectExec,
+			shell_context: None,
+			cwd: "/workspace".to_string(),
+			env_policy: ExecutionEnvPolicy {
+				mode: ExecutionEnvPolicyMode::Clean,
+				allowed_keys: Vec::new(),
+			},
+			resource_scope: ExecutionResourceScope {
+				working_directory: "/workspace".to_string(),
+				resolved_targets: vec!["/tmp/outside".to_string()],
+				effective_read_roots: Vec::new(),
+				effective_write_roots: vec!["/workspace".to_string()],
+			},
+			action_class: ExecutionActionClass::Write,
+			digest: CanonicalDigest("digest-fs-write-out-of-scope".to_string()),
+		};
+
+		let decision = evaluate_fs_write_policy(&execution);
+		assert_eq!(decision.outcome, PolicyOutcome::RequireApproval);
+		assert_eq!(
+			decision.reason_code,
+			PolicyReasonCode::ApprovalRequiredByOutOfScopePath
+		);
+	}
+
+	#[test]
+	fn fs_write_policy_allows_in_scope_paths() {
+		let execution = CanonicalExecution {
+			tool_name: "fs.write".to_string(),
+			program: "fs.write".to_string(),
+			argv: vec![
+				"fs.write".to_string(),
+				"/workspace/new_file.txt".to_string(),
+			],
+			invocation_mode: InvocationMode::DirectExec,
+			shell_context: None,
+			cwd: "/workspace".to_string(),
+			env_policy: ExecutionEnvPolicy {
+				mode: ExecutionEnvPolicyMode::Clean,
+				allowed_keys: Vec::new(),
+			},
+			resource_scope: ExecutionResourceScope {
+				working_directory: "/workspace".to_string(),
+				resolved_targets: vec!["/workspace/new_file.txt".to_string()],
+				effective_read_roots: Vec::new(),
+				effective_write_roots: vec!["/workspace".to_string()],
+			},
+			action_class: ExecutionActionClass::Write,
+			digest: CanonicalDigest("digest-fs-write-in-scope".to_string()),
+		};
+
+		let decision = evaluate_fs_write_policy(&execution);
+		assert_eq!(decision.outcome, PolicyOutcome::Allow);
+		assert_eq!(decision.reason_code, PolicyReasonCode::AllowedByPolicy);
+	}
+
+	#[test]
+	fn fs_write_overwrite_execution_detected_via_argv() {
+		let overwrite = CanonicalExecution {
+			tool_name: "fs.write".to_string(),
+			program: "fs.write".to_string(),
+			argv: vec![
+				"fs.write".to_string(),
+				"/workspace/existing.txt".to_string(),
+				"--overwrite".to_string(),
+			],
+			invocation_mode: InvocationMode::DirectExec,
+			shell_context: None,
+			cwd: "/workspace".to_string(),
+			env_policy: ExecutionEnvPolicy {
+				mode: ExecutionEnvPolicyMode::Clean,
+				allowed_keys: Vec::new(),
+			},
+			resource_scope: ExecutionResourceScope {
+				working_directory: "/workspace".to_string(),
+				resolved_targets: vec!["/workspace/existing.txt".to_string()],
+				effective_read_roots: Vec::new(),
+				effective_write_roots: vec!["/workspace".to_string()],
+			},
+			action_class: ExecutionActionClass::Write,
+			digest: CanonicalDigest("digest-fs-write-overwrite".to_string()),
+		};
+
+		assert!(is_overwrite_execution(&overwrite));
+
+		let create = CanonicalExecution {
+			tool_name: "fs.write".to_string(),
+			program: "fs.write".to_string(),
+			argv: vec!["fs.write".to_string(), "/workspace/new.txt".to_string()],
+			invocation_mode: InvocationMode::DirectExec,
+			shell_context: None,
+			cwd: "/workspace".to_string(),
+			env_policy: ExecutionEnvPolicy {
+				mode: ExecutionEnvPolicyMode::Clean,
+				allowed_keys: Vec::new(),
+			},
+			resource_scope: ExecutionResourceScope {
+				working_directory: "/workspace".to_string(),
+				resolved_targets: vec!["/workspace/new.txt".to_string()],
+				effective_read_roots: Vec::new(),
+				effective_write_roots: vec!["/workspace".to_string()],
+			},
+			action_class: ExecutionActionClass::Write,
+			digest: CanonicalDigest("digest-fs-write-create".to_string()),
+		};
+
+		assert!(!is_overwrite_execution(&create));
 	}
 }

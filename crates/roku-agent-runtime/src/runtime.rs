@@ -1851,11 +1851,16 @@ fn safe_baseline_tool_pool() -> &'static [&'static str] {
 		"fs.inspect",
 		"fs.exists",
 		"fs.glob",
+		// EPIC-0 tools — will migrate to descriptor-driven pool under EPIC-5.
+		"fs.edit",
+		"fs.write",
+		"fs.grep",
 		"table.preview",
 		"table.inspect",
 		"table.list_sheets",
 		"table.schema",
 		"web.search",
+		"web.fetch",
 		"command.run",
 		"python.run",
 	]
