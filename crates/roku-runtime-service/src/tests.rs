@@ -33,10 +33,11 @@ use roku_common_types::{
 	TaskNode, TaskNodeKind, TaskState,
 };
 use roku_memory::{
-	DisabledMemoryLifecyclePolicy, InMemoryLongTermMemoryBackend, LongTermMemoryBackend,
-	MemoryBackendHealth, MemoryBackendStatus, MemoryDeleteSelector, MemoryError, MemoryKind,
-	MemoryLifecyclePolicy, MemoryQuery, MemoryRecallInput, MemoryScope, MemoryWriteAck,
-	MemoryWritePolicyInput, MemoryWriteReason, MemoryWriteRequest,
+	ConservativeMemoryLifecyclePolicy, DisabledMemoryLifecyclePolicy,
+	InMemoryLongTermMemoryBackend, LongTermMemoryBackend, MemoryBackendHealth, MemoryBackendStatus,
+	MemoryDeleteSelector, MemoryError, MemoryKind, MemoryLifecyclePolicy, MemoryQuery,
+	MemoryRecallInput, MemoryRecallReason, MemoryScope, MemoryWriteAck, MemoryWritePolicyInput,
+	MemoryWriteReason, MemoryWriteRequest,
 };
 
 use crate::{
@@ -514,6 +515,34 @@ impl MemoryLifecyclePolicy for AlwaysWriteMemoryPolicy {
 		);
 		request.session_id = Some(input.session_id.clone());
 		Some(request)
+	}
+}
+
+struct FailingWriteBackend;
+
+impl LongTermMemoryBackend for FailingWriteBackend {
+	fn backend_name(&self) -> &'static str {
+		"failing-write"
+	}
+
+	fn search(&self, _query: &MemoryQuery) -> Result<Vec<roku_memory::MemoryHit>, MemoryError> {
+		Ok(vec![])
+	}
+
+	fn write(&self, _request: &MemoryWriteRequest) -> Result<MemoryWriteAck, MemoryError> {
+		Err(MemoryError::Internal("simulated write outage".to_string()))
+	}
+
+	fn delete(&self, _selector: &MemoryDeleteSelector) -> Result<(), MemoryError> {
+		Ok(())
+	}
+
+	fn health(&self) -> Result<MemoryBackendHealth, MemoryError> {
+		Ok(MemoryBackendHealth {
+			backend: self.backend_name().to_string(),
+			status: MemoryBackendStatus::Degraded,
+			detail: Some("simulated write outage".to_string()),
+		})
 	}
 }
 
@@ -1933,4 +1962,90 @@ fn execution_approval_tickets_reject_mismatched_frozen_digest() {
 		)
 		.expect_err("mismatched frozen digest should be rejected");
 	assert!(error.message.contains("digest"));
+}
+
+#[test]
+fn write_back_roundtrip_persists_and_recalls_via_in_memory_backend() {
+	let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
+	let policy = ConservativeMemoryLifecyclePolicy {
+		recall_limit: 8,
+		automatic_write_back: true,
+	};
+	let service = RuntimeService::default()
+		.with_long_term_memory_backend(backend.clone())
+		.with_memory_lifecycle_policy(Arc::new(policy));
+
+	let goal = "What skills and tools do you have right now?";
+	let response = service
+		.execute(request(goal))
+		.expect("request with conservative write-back should succeed");
+
+	assert_eq!(response.status, ResponseStatus::Succeeded);
+	assert_eq!(backend.recorded_writes().len(), 1);
+	assert_eq!(backend.stored_records().len(), 1);
+
+	let stored = &backend.stored_records()[0];
+	assert!(
+		stored.content.contains(goal),
+		"stored record content should contain the goal text"
+	);
+
+	// Verify recall via the in-memory backend's substring search.
+	// The InMemoryLongTermMemoryBackend uses naive substring matching, so
+	// a query containing part of the written content should return the record.
+	let mut recall_query = MemoryQuery::new(
+		goal,
+		MemoryRecallReason::RequestIntake,
+		MemoryScope::Session,
+	);
+	recall_query.session_id = Some("session-1".to_string());
+	let hits = backend
+		.search(&recall_query)
+		.expect("in-memory recall should succeed");
+	assert_eq!(
+		hits.len(),
+		1,
+		"recall should return the previously written record"
+	);
+	assert!(hits[0].record.content.contains(goal));
+
+	// US-003: OpenViking E2E smoke test procedure (manual, not automated).
+	//
+	// 1. Start OpenViking dev service:
+	//    ./scripts/dev-openviking.sh start
+	//
+	// 2. Run write:
+	//    cargo run -p roku-cmd --features memory-openviking -- \
+	//        live-once --session-id writeback-smoke \
+	//        "Remember that the project uses Apache 2.0 license"
+	//
+	// 3. Verify logs show `apply_memory_write_back` was called.
+	//
+	// 4. Run recall:
+	//    cargo run -p roku-cmd --features memory-openviking -- \
+	//        live-once --session-id writeback-smoke \
+	//        "What license does this project use?"
+	//
+	// 5. Verify recall includes the written memory.
+}
+
+#[test]
+fn write_back_failure_does_not_block_response() {
+	let policy = ConservativeMemoryLifecyclePolicy {
+		recall_limit: 8,
+		automatic_write_back: true,
+	};
+	let service = RuntimeService::default()
+		.with_long_term_memory_backend(Arc::new(FailingWriteBackend))
+		.with_memory_lifecycle_policy(Arc::new(policy));
+
+	let response = service
+		.execute(request("What skills and tools do you have right now?"))
+		.expect("request should succeed even when write-back fails");
+
+	assert_eq!(
+		response.status,
+		ResponseStatus::Succeeded,
+		"write-back failure must not propagate to the response"
+	);
 }

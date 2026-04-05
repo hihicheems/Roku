@@ -24,7 +24,7 @@ use thiserror::Error;
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 const SQLITE_WAL_AUTOCHECKPOINT_PAGES: i64 = 200;
 const SQLITE_APPLICATION_ID: i64 = 0x524f_4b55;
-const SQLITE_USER_VERSION: i64 = 2;
+const SQLITE_USER_VERSION: i64 = 3;
 
 #[derive(Debug, Error)]
 pub enum SqliteMemoryStoreError {
@@ -104,6 +104,107 @@ impl SqliteSessionPreferenceRepository {
 		connection.execute(
 			"DELETE FROM session_preferences WHERE session_id = ?1",
 			params![session_id],
+		)?;
+		Ok(())
+	}
+}
+
+#[derive(Debug, Clone)]
+pub struct SqlitePendingLoopSnapshotRepository {
+	config: SqliteMemoryStoreConfig,
+}
+
+impl SqlitePendingLoopSnapshotRepository {
+	pub fn connect(config: SqliteMemoryStoreConfig) -> Result<Self, SqliteMemoryStoreError> {
+		open_connection(&config.path)?;
+		Ok(Self { config })
+	}
+
+	fn open(&self) -> Result<Connection, SqliteMemoryStoreError> {
+		open_connection(&self.config.path)
+	}
+
+	pub fn store_snapshot(
+		&self,
+		session_id: &str,
+		run_id: &str,
+		loop_state_json: &str,
+	) -> Result<(), SqliteMemoryStoreError> {
+		let connection = self.open()?;
+		connection.execute(
+			"INSERT INTO pending_loop_snapshots (session_id, run_id, loop_state_json, updated_at_unix_ms)
+			 VALUES (?1, ?2, ?3, ?4)
+			 ON CONFLICT(session_id) DO UPDATE SET
+			   run_id = excluded.run_id,
+			   loop_state_json = excluded.loop_state_json,
+			   updated_at_unix_ms = excluded.updated_at_unix_ms",
+			params![
+				session_id,
+				run_id,
+				loop_state_json,
+				sql_i64_from_u64(now_unix_ms(), "pending_loop_snapshots.updated_at_unix_ms")?,
+			],
+		)?;
+		Ok(())
+	}
+
+	pub fn load_snapshot(
+		&self,
+		session_id: &str,
+	) -> Result<Option<(String, String)>, SqliteMemoryStoreError> {
+		let connection = self.open()?;
+		connection
+			.query_row(
+				"SELECT run_id, loop_state_json FROM pending_loop_snapshots WHERE session_id = ?1",
+				params![session_id],
+				|row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+			)
+			.optional()
+			.map_err(SqliteMemoryStoreError::from)
+	}
+
+	pub fn delete_snapshot(&self, session_id: &str) -> Result<(), SqliteMemoryStoreError> {
+		let connection = self.open()?;
+		connection.execute(
+			"DELETE FROM pending_loop_snapshots WHERE session_id = ?1",
+			params![session_id],
+		)?;
+		Ok(())
+	}
+
+	/// Clear the `pending_loop` field from the legacy `session_preferences` JSON blob.
+	///
+	/// Used during lazy migration to prevent stale legacy data from resurrecting
+	/// after a delete on the dedicated table.
+	pub fn clear_legacy_pending_loop(
+		&self,
+		session_id: &str,
+	) -> Result<(), SqliteMemoryStoreError> {
+		let connection = self.open()?;
+		let encoded: Option<String> = connection
+			.query_row(
+				"SELECT preferences_json FROM session_preferences WHERE session_id = ?1",
+				params![session_id],
+				|row| row.get(0),
+			)
+			.optional()?;
+		let Some(json) = encoded else {
+			return Ok(());
+		};
+		let mut prefs: SessionPreferences =
+			serde_json::from_str(&json).map_err(SqliteMemoryStoreError::from)?;
+		if prefs.pending_loop.is_none() {
+			return Ok(());
+		}
+		prefs.pending_loop = None;
+		let updated = serde_json::to_string(&prefs).map_err(SqliteMemoryStoreError::from)?;
+		connection.execute(
+			"UPDATE session_preferences SET preferences_json = ?2, updated_at_unix_ms = ?3 WHERE session_id = ?1",
+			params![
+				session_id,
+				updated,
+				sql_i64_from_u64(now_unix_ms(), "session_preferences.updated_at_unix_ms")?,
+			],
 		)?;
 		Ok(())
 	}
@@ -368,6 +469,10 @@ impl SqliteSessionCatalogRepository {
 			params![session_id],
 		)?;
 		transaction.execute(
+			"DELETE FROM pending_loop_snapshots WHERE session_id = ?1",
+			params![session_id],
+		)?;
+		transaction.execute(
 			"DELETE FROM conversation_turns WHERE session_id = ?1",
 			params![session_id],
 		)?;
@@ -424,6 +529,12 @@ fn ensure_schema_objects(connection: &Connection) -> Result<(), SqliteMemoryStor
 		CREATE TABLE IF NOT EXISTS active_session_bindings (
 			binding_id TEXT PRIMARY KEY,
 			session_id TEXT NOT NULL,
+			updated_at_unix_ms INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE TABLE IF NOT EXISTS pending_loop_snapshots (
+			session_id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL,
+			loop_state_json TEXT NOT NULL,
 			updated_at_unix_ms INTEGER NOT NULL DEFAULT 0
 		);
 		CREATE INDEX IF NOT EXISTS idx_conversation_turns_session_seq

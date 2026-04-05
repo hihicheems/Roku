@@ -657,12 +657,94 @@ fn wire_memory_subsystem(
 	} else {
 		Arc::new(DisabledMemoryLifecyclePolicy)
 	};
+
+	let pending_loop_backend = wire_sqlite_pending_loop(memory_config, pending_loop);
+
 	Ok(service
 		.with_pending_loop_snapshot_store(Arc::new(MemoryPendingLoopSnapshotStore::new(
-			pending_loop,
+			pending_loop_backend,
 		)))
 		.with_long_term_memory_backend(long_term)
 		.with_memory_lifecycle_policy(policy))
+}
+
+/// Always use SQLite for pending-loop persistence regardless of the configured memory backend.
+///
+/// Wraps the SQLite adapter with a read-through to the prior subsystem backend so that
+/// pending-loop snapshots stored by a previous backend (e.g. OpenViking) are migrated on
+/// first access rather than silently lost.
+fn wire_sqlite_pending_loop(
+	memory_config: &MemoryRuntimeConfig,
+	prior_backend: Box<dyn roku_memory::PendingLoopSnapshotBackend>,
+) -> Box<dyn roku_memory::PendingLoopSnapshotBackend> {
+	let store_config = roku_plugin_memory_sqlite::SqliteMemoryStoreConfig::new(
+		memory_config.backends.sqlite.path.clone(),
+	);
+	match roku_plugin_memory_sqlite::SqlitePendingLoopSnapshotAdapter::connect(store_config) {
+		Ok(adapter) => Box::new(MigratingPendingLoopBackend {
+			primary: Box::new(adapter),
+			prior: prior_backend,
+		}),
+		Err(error) => {
+			let _ = emit_global_log(
+				LogRecord::new(
+					"roku-cmd",
+					LogLevel::Warn,
+					format!(
+						"failed to open dedicated SQLite pending-loop store, \
+						 falling back to subsystem backend: {error}"
+					),
+				)
+				.with_field(
+					"sqlite_path",
+					memory_config.backends.sqlite.path.display().to_string(),
+				),
+			);
+			prior_backend
+		}
+	}
+}
+
+/// Read-through wrapper that migrates pending-loop snapshots from a prior backend
+/// (e.g. OpenViking, or the old SQLite session_preferences path) into the primary
+/// SQLite dedicated-table backend on first access.
+struct MigratingPendingLoopBackend {
+	primary: Box<dyn roku_memory::PendingLoopSnapshotBackend>,
+	prior: Box<dyn roku_memory::PendingLoopSnapshotBackend>,
+}
+
+impl roku_memory::PendingLoopSnapshotBackend for MigratingPendingLoopBackend {
+	fn load_pending_loop_snapshot(
+		&self,
+		session_id: &str,
+	) -> Result<
+		Option<roku_memory::PendingLoopSnapshot>,
+		roku_memory::PendingLoopSnapshotError,
+	> {
+		// Try primary (SQLite dedicated table) first.
+		if let Some(snapshot) = self.primary.load_pending_loop_snapshot(session_id)? {
+			return Ok(Some(snapshot));
+		}
+		// Read-through to prior backend for pre-migration data.
+		let prior_snapshot = self.prior.load_pending_loop_snapshot(session_id)?;
+		if let Some(ref snapshot) = prior_snapshot {
+			// Promote to primary and clear from prior.
+			let _ = self
+				.primary
+				.save_pending_loop_snapshot(session_id, Some(snapshot.clone()));
+			let _ = self.prior.clear_pending_loop_snapshot(session_id);
+		}
+		Ok(prior_snapshot)
+	}
+
+	fn save_pending_loop_snapshot(
+		&self,
+		session_id: &str,
+		snapshot: Option<roku_memory::PendingLoopSnapshot>,
+	) -> Result<(), roku_memory::PendingLoopSnapshotError> {
+		self.primary
+			.save_pending_loop_snapshot(session_id, snapshot)
+	}
 }
 
 fn build_enabled_memory_backend_from_env()

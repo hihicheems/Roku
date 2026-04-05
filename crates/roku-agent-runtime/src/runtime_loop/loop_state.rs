@@ -286,9 +286,14 @@ mod tests {
 	use roku_common_types::ResourceSelector;
 	use serde_json::json;
 
-	use super::LoopState;
+	use super::{LoopState, LoopStatus};
 	use crate::router::{IntentFamily, RouteDecision, RouteRisk};
 	use crate::runtime_loop::LoopContext;
+	use crate::runtime_loop::ask_user::{AskUserPayload, AskUserResumeContract};
+	use crate::runtime_loop::next_step::{NextStepAction, NextStepDecision};
+	use crate::runtime_loop::observation::{StepObservation, ToolObservation};
+	use crate::runtime_loop::state_update::InterpretedObservation;
+	use crate::runtime_loop::step_record::{StepAction, StepRecord};
 
 	fn loop_context() -> LoopContext {
 		LoopContext {
@@ -351,5 +356,138 @@ mod tests {
 		let restored: LoopState =
 			serde_json::from_value(value).expect("legacy loop state should deserialize");
 		assert_eq!(restored.working_summary, "");
+	}
+
+	#[test]
+	fn loop_state_serialization_roundtrip_preserves_all_fields() {
+		let tool_observation = ToolObservation {
+			ok: true,
+			tool_name: "inventory.describe".to_string(),
+			error_type: None,
+			terminal: false,
+			data: json!({"path": "/workspace/README.md", "size": 1024}),
+			message: "File described successfully".to_string(),
+		};
+
+		let decision_call_tool = NextStepDecision {
+			action: NextStepAction::CallTool,
+			tool_name: Some("inventory.describe".to_string()),
+			arguments: Some(json!({"path": "/workspace/README.md"})),
+			reason: "Need to inspect the file".to_string(),
+			final_message: None,
+		};
+
+		let decision_ask_user = NextStepDecision {
+			action: NextStepAction::AskUser,
+			tool_name: None,
+			arguments: None,
+			reason: "Need clarification from user".to_string(),
+			final_message: Some("Which file did you mean?".to_string()),
+		};
+
+		let decision_final = NextStepDecision {
+			action: NextStepAction::FinalAnswer,
+			tool_name: None,
+			arguments: None,
+			reason: "Task complete".to_string(),
+			final_message: Some("Done.".to_string()),
+		};
+
+		let interpreted = InterpretedObservation {
+			raw_observation: tool_observation.clone(),
+			continue_allowed: true,
+			should_ask_user: false,
+			should_emit_final_answer: false,
+			should_fail: false,
+			terminal: false,
+			budget_exhausted: false,
+			recovery_exhausted: false,
+			remaining_step_budget: 9,
+			remaining_recovery_budget: 3,
+			new_working_directory: Some("/workspace/sub".to_string()),
+			visible_tools: vec!["inventory.describe".to_string(), "shell.exec".to_string()],
+		};
+
+		let step_tool = StepRecord::tool_call(
+			1,
+			decision_call_tool,
+			vec!["inventory.describe".to_string(), "shell.exec".to_string()],
+			vec![ResourceSelector::tool("inventory.describe".to_string())],
+			json!({"raw": "output"}),
+			StepObservation::Tool(tool_observation.clone()),
+			interpreted,
+			Some(42),
+			9,
+			3,
+			"/workspace/sub",
+		);
+
+		let step_ask = StepRecord::terminal(
+			2,
+			StepAction::AskUser,
+			decision_ask_user,
+			vec!["inventory.describe".to_string()],
+			vec![],
+			Some(StepObservation::AskUser {
+				final_message: "Which file did you mean?".to_string(),
+			}),
+			8,
+			3,
+			"/workspace/sub",
+		);
+
+		let step_final = StepRecord::terminal(
+			3,
+			StepAction::FinalAnswer,
+			decision_final,
+			vec!["inventory.describe".to_string(), "web.search".to_string()],
+			vec![ResourceSelector::tool("web.search".to_string())],
+			Some(StepObservation::FinalMessage {
+				final_message: "Done.".to_string(),
+			}),
+			7,
+			3,
+			"/workspace/sub",
+		);
+
+		let mut state = LoopState::new("loop-roundtrip", &loop_context());
+		state.record_step(step_tool);
+		state.record_step(step_ask);
+		state.record_step(step_final);
+
+		state.working_summary = "Inspected file, asked user, completed.".to_string();
+		state.visible_tools = vec![
+			"inventory.describe".to_string(),
+			"shell.exec".to_string(),
+			"web.search".to_string(),
+		];
+		state.bound_resources = vec![
+			ResourceSelector::tool("inventory.describe".to_string()),
+			ResourceSelector::tool("web.search".to_string()),
+		];
+		state.awaiting_user = Some(AskUserPayload {
+			final_message: "Which file did you mean?".to_string(),
+			resume_contract: AskUserResumeContract::CandidateSelection {
+				candidates: vec!["file_a.txt".to_string(), "file_b.txt".to_string()],
+			},
+			resume_directive: None,
+		});
+		state.status = LoopStatus::AwaitingUser;
+
+		let json_str = serde_json::to_string(&state).expect("loop state should serialize to JSON");
+		let deserialized: LoopState =
+			serde_json::from_str(&json_str).expect("loop state should deserialize from JSON");
+
+		assert_eq!(state, deserialized);
+		assert_eq!(deserialized.history.len(), 3);
+		assert_eq!(deserialized.status, LoopStatus::AwaitingUser);
+		assert_eq!(
+			deserialized.working_summary,
+			"Inspected file, asked user, completed."
+		);
+		assert!(deserialized.awaiting_user.is_some());
+		assert_eq!(deserialized.visible_tools.len(), 3);
+		assert_eq!(deserialized.bound_resources.len(), 2);
+		assert!(deserialized.last_observation.is_some());
 	}
 }

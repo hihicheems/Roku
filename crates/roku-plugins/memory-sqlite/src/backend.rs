@@ -14,7 +14,6 @@
 
 //! SQLite implementations of Roku-owned memory contracts.
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -29,8 +28,8 @@ use thiserror::Error;
 
 use crate::SqliteMemoryConfig;
 use crate::store::{
-	SqliteConversationRepository, SqliteMemoryStoreConfig, SqliteSessionCatalogRepository,
-	SqliteSessionPreferenceRepository,
+	SqliteConversationRepository, SqliteMemoryStoreConfig, SqlitePendingLoopSnapshotRepository,
+	SqliteSessionCatalogRepository, SqliteSessionPreferenceRepository,
 };
 
 /// Connection or resolution failures for SQLite memory adapters.
@@ -145,18 +144,23 @@ impl ShortTermContinuityBackend for SqliteShortTermContinuityAdapter {
 }
 
 /// SQLite implementation of [`PendingLoopSnapshotBackend`].
+///
+/// Stores pending-loop snapshots in a dedicated `pending_loop_snapshots` table.
+/// On load, falls back to the legacy `session_preferences.pending_loop` field
+/// if the dedicated table has no row, promoting the data on first access.
 #[derive(Debug)]
 pub struct SqlitePendingLoopSnapshotAdapter {
-	inner: Mutex<SqliteSessionPreferenceRepository>,
+	inner: SqlitePendingLoopSnapshotRepository,
+	legacy: SqliteSessionPreferenceRepository,
 }
 
 impl SqlitePendingLoopSnapshotAdapter {
 	pub fn connect(config: SqliteMemoryStoreConfig) -> Result<Self, SqliteMemoryAdapterError> {
-		let inner = SqliteSessionPreferenceRepository::connect(config)
+		let inner = SqlitePendingLoopSnapshotRepository::connect(config.clone())
 			.map_err(|error| SqliteMemoryAdapterError::Resolution(error.to_string()))?;
-		Ok(Self {
-			inner: Mutex::new(inner),
-		})
+		let legacy = SqliteSessionPreferenceRepository::connect(config)
+			.map_err(|error| SqliteMemoryAdapterError::Resolution(error.to_string()))?;
+		Ok(Self { inner, legacy })
 	}
 }
 
@@ -165,13 +169,38 @@ impl PendingLoopSnapshotBackend for SqlitePendingLoopSnapshotAdapter {
 		&self,
 		session_id: &str,
 	) -> Result<Option<PendingLoopSnapshot>, PendingLoopSnapshotError> {
-		let store = self.inner.lock().map_err(|_| {
-			PendingLoopSnapshotError::Backend("sqlite pending-loop store is poisoned".to_string())
-		})?;
-		Ok(store
+		// Try dedicated table first.
+		let from_dedicated = self
+			.inner
+			.load_snapshot(session_id)
+			.map(|opt| {
+				opt.map(|(run_id, loop_state_json)| PendingLoopSnapshot {
+					run_id,
+					loop_state_json,
+				})
+			})
+			.map_err(|error| PendingLoopSnapshotError::Backend(error.to_string()))?;
+		if from_dedicated.is_some() {
+			return Ok(from_dedicated);
+		}
+
+		// Fallback: check legacy session_preferences for pre-migration data.
+		let legacy_snapshot = self
+			.legacy
 			.load_preferences(session_id)
 			.map_err(|error| PendingLoopSnapshotError::Backend(error.to_string()))?
-			.and_then(|state| state.pending_loop))
+			.and_then(|prefs| prefs.pending_loop);
+		if let Some(ref snapshot) = legacy_snapshot {
+			// Lazy migration: copy to dedicated table, then clear legacy to prevent
+			// resurrection after a subsequent delete on the dedicated table.
+			let _ = self.inner.store_snapshot(
+				session_id,
+				&snapshot.run_id,
+				&snapshot.loop_state_json,
+			);
+			let _ = self.inner.clear_legacy_pending_loop(session_id);
+		}
+		Ok(legacy_snapshot)
 	}
 
 	fn save_pending_loop_snapshot(
@@ -179,17 +208,16 @@ impl PendingLoopSnapshotBackend for SqlitePendingLoopSnapshotAdapter {
 		session_id: &str,
 		snapshot: Option<PendingLoopSnapshot>,
 	) -> Result<(), PendingLoopSnapshotError> {
-		let mut store = self.inner.lock().map_err(|_| {
-			PendingLoopSnapshotError::Backend("sqlite pending-loop store is poisoned".to_string())
-		})?;
-		let mut state = store
-			.load_preferences(session_id)
-			.map_err(|error| PendingLoopSnapshotError::Backend(error.to_string()))?
-			.unwrap_or_default();
-		state.pending_loop = snapshot;
-		store
-			.save_preferences(session_id, state)
-			.map_err(|error| PendingLoopSnapshotError::Backend(error.to_string()))
+		match snapshot {
+			Some(snapshot) => self
+				.inner
+				.store_snapshot(session_id, &snapshot.run_id, &snapshot.loop_state_json)
+				.map_err(|error| PendingLoopSnapshotError::Backend(error.to_string())),
+			None => self
+				.inner
+				.delete_snapshot(session_id)
+				.map_err(|error| PendingLoopSnapshotError::Backend(error.to_string())),
+		}
 	}
 }
 
@@ -535,5 +563,129 @@ mod tests {
 				.expect("pending loop should load")
 				.is_none()
 		);
+	}
+
+	#[test]
+	fn pending_loop_snapshot_survives_simulated_process_restart() {
+		let tempdir = tempfile::tempdir().unwrap();
+		let db_path = tempdir.path().join("pending-restart-test.db");
+		let config = crate::store::SqliteMemoryStoreConfig::new(db_path.clone());
+
+		// Phase 1: Store snapshot
+		{
+			let adapter = SqlitePendingLoopSnapshotAdapter::connect(config.clone()).unwrap();
+			let snapshot = PendingLoopSnapshot {
+				run_id: "run-restart-test".to_string(),
+				loop_state_json:
+					r#"{"session_id":"s1","status":"awaiting_user","goal":"test restart"}"#
+						.to_string(),
+			};
+			adapter
+				.save_pending_loop_snapshot("session-restart", Some(snapshot))
+				.unwrap();
+		} // adapter dropped -- simulates process exit
+
+		// Phase 2: New adapter, same database -- simulates restart
+		{
+			let adapter = SqlitePendingLoopSnapshotAdapter::connect(config.clone()).unwrap();
+			let loaded = adapter
+				.load_pending_loop_snapshot("session-restart")
+				.unwrap();
+			assert!(loaded.is_some(), "snapshot should survive restart");
+			let loaded = loaded.unwrap();
+			assert_eq!(loaded.run_id, "run-restart-test");
+			assert!(loaded.loop_state_json.contains("awaiting_user"));
+
+			// Phase 3: Delete and verify
+			adapter
+				.clear_pending_loop_snapshot("session-restart")
+				.unwrap();
+			let after_delete = adapter
+				.load_pending_loop_snapshot("session-restart")
+				.unwrap();
+			assert!(after_delete.is_none(), "snapshot should be deleted");
+		}
+	}
+
+	#[test]
+	fn pending_loop_store_load_returns_none_for_nonexistent() {
+		let tempdir = tempfile::tempdir().unwrap();
+		let config = crate::store::SqliteMemoryStoreConfig::new(
+			tempdir.path().join("pending-nonexistent.db"),
+		);
+		let adapter = SqlitePendingLoopSnapshotAdapter::connect(config).unwrap();
+
+		let loaded = adapter
+			.load_pending_loop_snapshot("no-such-session")
+			.unwrap();
+		assert!(loaded.is_none());
+	}
+
+	#[test]
+	fn pending_loop_store_overwrites_previous_snapshot() {
+		let tempdir = tempfile::tempdir().unwrap();
+		let config =
+			crate::store::SqliteMemoryStoreConfig::new(tempdir.path().join("pending-overwrite.db"));
+		let adapter = SqlitePendingLoopSnapshotAdapter::connect(config).unwrap();
+
+		let first = PendingLoopSnapshot {
+			run_id: "run-v1".to_string(),
+			loop_state_json: r#"{"version":1}"#.to_string(),
+		};
+		adapter
+			.save_pending_loop_snapshot("session-ow", Some(first))
+			.unwrap();
+
+		let second = PendingLoopSnapshot {
+			run_id: "run-v2".to_string(),
+			loop_state_json: r#"{"version":2}"#.to_string(),
+		};
+		adapter
+			.save_pending_loop_snapshot("session-ow", Some(second))
+			.unwrap();
+
+		let loaded = adapter
+			.load_pending_loop_snapshot("session-ow")
+			.unwrap()
+			.expect("snapshot should exist after overwrite");
+		assert_eq!(loaded.run_id, "run-v2");
+		assert!(loaded.loop_state_json.contains("\"version\":2"));
+	}
+
+	#[test]
+	fn pending_loop_load_falls_back_to_legacy_session_preferences() {
+		let tempdir = tempfile::tempdir().unwrap();
+		let config =
+			crate::store::SqliteMemoryStoreConfig::new(tempdir.path().join("legacy-fallback.db"));
+
+		// Phase 1: Write a pending-loop snapshot via the LEGACY path (session_preferences).
+		{
+			let mut legacy_repo =
+				crate::store::SqliteSessionPreferenceRepository::connect(config.clone()).unwrap();
+			let prefs = roku_common_types::SessionPreferences {
+				pending_loop: Some(PendingLoopSnapshot {
+					run_id: "legacy-run".to_string(),
+					loop_state_json: r#"{"status":"awaiting_user","goal":"legacy"}"#.to_string(),
+				}),
+				..Default::default()
+			};
+			legacy_repo.save_preferences("session-legacy", prefs).unwrap();
+		}
+
+		// Phase 2: Load via the NEW adapter — should fall back to legacy and return data.
+		let adapter = SqlitePendingLoopSnapshotAdapter::connect(config.clone()).unwrap();
+		let loaded = adapter
+			.load_pending_loop_snapshot("session-legacy")
+			.unwrap();
+		assert!(loaded.is_some(), "should fall back to legacy session_preferences");
+		let loaded = loaded.unwrap();
+		assert_eq!(loaded.run_id, "legacy-run");
+		assert!(loaded.loop_state_json.contains("awaiting_user"));
+
+		// Phase 3: After fallback read, data should be promoted to dedicated table.
+		// Verify by checking the dedicated table directly.
+		let repo = crate::store::SqlitePendingLoopSnapshotRepository::connect(config).unwrap();
+		let promoted = repo.load_snapshot("session-legacy").unwrap();
+		assert!(promoted.is_some(), "legacy data should be promoted to dedicated table");
 	}
 }
