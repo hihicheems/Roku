@@ -1134,7 +1134,10 @@ fn compute_fs_digest(
 	hasher.update(bytes);
 	let digest = hasher.finalize();
 	Ok(CanonicalDigest(
-		digest.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+		digest
+			.iter()
+			.map(|b| format!("{b:02x}"))
+			.collect::<String>(),
 	))
 }
 
@@ -1164,7 +1167,10 @@ fn compute_fs_write_digest(
 	hasher.update(bytes);
 	let digest = hasher.finalize();
 	Ok(CanonicalDigest(
-		digest.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+		digest
+			.iter()
+			.map(|b| format!("{b:02x}"))
+			.collect::<String>(),
 	))
 }
 

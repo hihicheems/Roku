@@ -326,11 +326,9 @@ impl Tool for WebFetchTool {
 			.to_string();
 
 		// Read bytes and cap at max_bytes to protect against oversized payloads.
-		let bytes = response
-			.bytes()
-			.map_err(|error| {
-				ToolFailure::terminal(format!("failed to read response body: {error}"))
-			})?;
+		let bytes = response.bytes().map_err(|error| {
+			ToolFailure::terminal(format!("failed to read response body: {error}"))
+		})?;
 		let truncated = bytes.len() > max_bytes;
 		// Cap at max_bytes, then walk back to a valid UTF-8 char boundary
 		// before converting, so we never produce replacement characters from
