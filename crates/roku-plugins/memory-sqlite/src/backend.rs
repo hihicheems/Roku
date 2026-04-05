@@ -145,18 +145,22 @@ impl ShortTermContinuityBackend for SqliteShortTermContinuityAdapter {
 
 /// SQLite implementation of [`PendingLoopSnapshotBackend`].
 ///
-/// Stores pending-loop snapshots in a dedicated `pending_loop_snapshots` table
-/// instead of embedding them inside the `session_preferences` JSON blob.
+/// Stores pending-loop snapshots in a dedicated `pending_loop_snapshots` table.
+/// On load, falls back to the legacy `session_preferences.pending_loop` field
+/// if the dedicated table has no row, promoting the data on first access.
 #[derive(Debug)]
 pub struct SqlitePendingLoopSnapshotAdapter {
 	inner: SqlitePendingLoopSnapshotRepository,
+	legacy: SqliteSessionPreferenceRepository,
 }
 
 impl SqlitePendingLoopSnapshotAdapter {
 	pub fn connect(config: SqliteMemoryStoreConfig) -> Result<Self, SqliteMemoryAdapterError> {
-		let inner = SqlitePendingLoopSnapshotRepository::connect(config)
+		let inner = SqlitePendingLoopSnapshotRepository::connect(config.clone())
 			.map_err(|error| SqliteMemoryAdapterError::Resolution(error.to_string()))?;
-		Ok(Self { inner })
+		let legacy = SqliteSessionPreferenceRepository::connect(config)
+			.map_err(|error| SqliteMemoryAdapterError::Resolution(error.to_string()))?;
+		Ok(Self { inner, legacy })
 	}
 }
 
@@ -165,7 +169,9 @@ impl PendingLoopSnapshotBackend for SqlitePendingLoopSnapshotAdapter {
 		&self,
 		session_id: &str,
 	) -> Result<Option<PendingLoopSnapshot>, PendingLoopSnapshotError> {
-		self.inner
+		// Try dedicated table first.
+		let from_dedicated = self
+			.inner
 			.load_snapshot(session_id)
 			.map(|opt| {
 				opt.map(|(run_id, loop_state_json)| PendingLoopSnapshot {
@@ -173,7 +179,26 @@ impl PendingLoopSnapshotBackend for SqlitePendingLoopSnapshotAdapter {
 					loop_state_json,
 				})
 			})
-			.map_err(|error| PendingLoopSnapshotError::Backend(error.to_string()))
+			.map_err(|error| PendingLoopSnapshotError::Backend(error.to_string()))?;
+		if from_dedicated.is_some() {
+			return Ok(from_dedicated);
+		}
+
+		// Fallback: check legacy session_preferences for pre-migration data.
+		let legacy_snapshot = self
+			.legacy
+			.load_preferences(session_id)
+			.map_err(|error| PendingLoopSnapshotError::Backend(error.to_string()))?
+			.and_then(|prefs| prefs.pending_loop);
+		if let Some(ref snapshot) = legacy_snapshot {
+			// Lazy promotion: copy to dedicated table so subsequent loads skip the fallback.
+			let _ = self.inner.store_snapshot(
+				session_id,
+				&snapshot.run_id,
+				&snapshot.loop_state_json,
+			);
+		}
+		Ok(legacy_snapshot)
 	}
 
 	fn save_pending_loop_snapshot(
@@ -623,5 +648,42 @@ mod tests {
 			.expect("snapshot should exist after overwrite");
 		assert_eq!(loaded.run_id, "run-v2");
 		assert!(loaded.loop_state_json.contains("\"version\":2"));
+	}
+
+	#[test]
+	fn pending_loop_load_falls_back_to_legacy_session_preferences() {
+		let tempdir = tempfile::tempdir().unwrap();
+		let config =
+			crate::store::SqliteMemoryStoreConfig::new(tempdir.path().join("legacy-fallback.db"));
+
+		// Phase 1: Write a pending-loop snapshot via the LEGACY path (session_preferences).
+		{
+			let mut legacy_repo =
+				crate::store::SqliteSessionPreferenceRepository::connect(config.clone()).unwrap();
+			let prefs = roku_common_types::SessionPreferences {
+				pending_loop: Some(PendingLoopSnapshot {
+					run_id: "legacy-run".to_string(),
+					loop_state_json: r#"{"status":"awaiting_user","goal":"legacy"}"#.to_string(),
+				}),
+				..Default::default()
+			};
+			legacy_repo.save_preferences("session-legacy", prefs).unwrap();
+		}
+
+		// Phase 2: Load via the NEW adapter — should fall back to legacy and return data.
+		let adapter = SqlitePendingLoopSnapshotAdapter::connect(config.clone()).unwrap();
+		let loaded = adapter
+			.load_pending_loop_snapshot("session-legacy")
+			.unwrap();
+		assert!(loaded.is_some(), "should fall back to legacy session_preferences");
+		let loaded = loaded.unwrap();
+		assert_eq!(loaded.run_id, "legacy-run");
+		assert!(loaded.loop_state_json.contains("awaiting_user"));
+
+		// Phase 3: After fallback read, data should be promoted to dedicated table.
+		// Verify by checking the dedicated table directly.
+		let repo = crate::store::SqlitePendingLoopSnapshotRepository::connect(config).unwrap();
+		let promoted = repo.load_snapshot("session-legacy").unwrap();
+		assert!(promoted.is_some(), "legacy data should be promoted to dedicated table");
 	}
 }
