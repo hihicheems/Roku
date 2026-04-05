@@ -541,6 +541,23 @@ fn command_run_deny_policy_rejects_before_invoke() {
 		error.policy_decision(),
 		Some(&deny_decision(PolicyReasonCode::DeniedByCommandPolicy))
 	);
+
+	let bypassed = runtime
+		.invoke(ToolInvocation {
+			tool_name: "command.run".to_string(),
+			input: json!({}),
+			canonical_execution: Some(sample_canonical_execution("command.run", "pwd")),
+			approved_scope: None,
+			skip_policy_check: true,
+			granted_capabilities: Vec::new(),
+			invocation_key: Some("command-deny-policy-bypassed".to_string()),
+			attachments: Vec::new(),
+		})
+		.expect(
+			"registered command.run should still invoke when invocation-time policy is skipped",
+		);
+	assert_eq!(bypassed.output["status"], "ok");
+	assert_eq!(*invocations.lock().expect("poisoned lock"), 1);
 }
 
 #[test]
@@ -601,6 +618,23 @@ fn command_run_require_approval_rejects_before_invoke() {
 			PolicyReasonCode::ApprovalRequiredByWriteScope
 		))
 	);
+
+	let bypassed = runtime
+		.invoke(ToolInvocation {
+			tool_name: "command.run".to_string(),
+			input: json!({}),
+			canonical_execution: Some(sample_canonical_execution("command.run", "pwd")),
+			approved_scope: None,
+			skip_policy_check: true,
+			granted_capabilities: Vec::new(),
+			invocation_key: Some("command-approval-policy-bypassed".to_string()),
+			attachments: Vec::new(),
+		})
+		.expect(
+			"registered command.run should still invoke when invocation-time approval policy is skipped",
+		);
+	assert_eq!(bypassed.output["status"], "ok");
+	assert_eq!(*invocations.lock().expect("poisoned lock"), 1);
 }
 
 #[test]

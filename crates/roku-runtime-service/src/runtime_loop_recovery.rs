@@ -145,13 +145,6 @@ impl RuntimeService {
 		}
 	}
 
-	pub(crate) fn task_runtime_memory_layers(&self, task_id: &TaskId) -> RuntimeMemoryLayers {
-		if let Ok(map) = self.runtime_memory_layers.lock() {
-			return map.get(&task_id.0).cloned().unwrap_or_default();
-		}
-		RuntimeMemoryLayers::default()
-	}
-
 	pub(crate) fn clear_runtime_memory_layers(&self, task_id: &TaskId) {
 		if let Ok(mut map) = self.runtime_memory_layers.lock() {
 			map.remove(&task_id.0);

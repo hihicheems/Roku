@@ -23,10 +23,11 @@ use roku_agent_runtime::{
 };
 use roku_common_types::ResourceSelector;
 use roku_common_types::{
-	AggregationMode, ApprovalDecision, ApprovalId, ApprovalRequirement, ApprovalRequirementScope,
-	ApprovalStatus, ApprovalTicket, ApprovedExecutionRef, CanonicalDigest, CanonicalExecution,
-	ExecutionActionClass, ExecutionEnvPolicy, ExecutionEnvPolicyMode, ExecutionResourceScope,
-	InvocationMode, JoinPolicy, NodeId, PendingExecutionApproval, PlanningModeHint, PolicyDecision,
+	AgentContext, AgentInstanceSpec, AggregationMode, ApprovalDecision, ApprovalId,
+	ApprovalRequirement, ApprovalRequirementScope, ApprovalStatus, ApprovalTicket,
+	ApprovedExecutionRef, CanonicalDigest, CanonicalExecution, ExecutionActionClass,
+	ExecutionEnvPolicy, ExecutionEnvPolicyMode, ExecutionResourceScope, InvocationMode, JoinPolicy,
+	NodeId, PendingExecutionApproval, PlanningModeHint, PolicyBindings, PolicyDecision,
 	PolicyOutcome, PolicyReasonCode, RecoveryEligibility, RequestEnvelope, RequestId,
 	ResponseStatus, ResultEnvelope, ResultStatus, RuntimeError, Task, TaskEdge, TaskGraph, TaskId,
 	TaskNode, TaskNodeKind, TaskState,
@@ -390,6 +391,22 @@ fn graph_task(
 	}
 }
 
+fn direct_task(task_id: &str, request_id: &str, goal: &str, state: TaskState) -> Task {
+	let mut task = graph_task(
+		task_id,
+		request_id,
+		goal,
+		state,
+		TaskGraph {
+			task_id: TaskId(task_id.to_string()),
+			nodes: Vec::new(),
+			edges: Vec::new(),
+		},
+	);
+	task.graph = None;
+	task
+}
+
 fn sample_execution_policy_decision() -> PolicyDecision {
 	PolicyDecision {
 		outcome: PolicyOutcome::RequireApproval,
@@ -686,6 +703,99 @@ fn runtime_memory_layers_keep_continuity_recall_and_working_memory_distinct() {
 }
 
 #[test]
+fn cached_runtime_memory_layers_project_structured_sections_as_primary_spec_memory() {
+	let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
+	let mut seed = MemoryWriteRequest::new(
+		MemoryKind::UserPreference,
+		MemoryScope::Session,
+		"User prefers Rust snippets.",
+		"Rust preference".to_string(),
+		MemoryWriteReason::OperatorRequested,
+	);
+	seed.session_id = Some("session-1".to_string());
+	backend
+		.write(&seed)
+		.expect("seed long-term memory write should succeed");
+
+	let service = RuntimeService::default().with_long_term_memory_backend(backend);
+	let request = RequestEnvelope {
+		request_id: RequestId("req-memory-spec".to_string()),
+		session_id: "session-1".to_string(),
+		goal: "Rust preference".to_string(),
+		planning_mode_hint: None,
+		conversation_history: vec![roku_common_types::ConversationTurn {
+			role: roku_common_types::ConversationRole::User,
+			content: "Please use concise answers.".to_string(),
+			created_at_unix_ms: 0,
+		}],
+	};
+	let runtime_memory_layers = service
+		.build_context_bundle(&request, false)
+		.expect("context bundle should build")
+		.runtime_memory_layers_with_working_memory(
+			"WORKING_MEMORY_ONLY::resume from pending runtime summary",
+		);
+	let mut task = graph_task(
+		"task-memory-spec",
+		"req-memory-spec",
+		"Rust preference",
+		TaskState::Executing,
+		TaskGraph {
+			task_id: TaskId("task-memory-spec".to_string()),
+			nodes: Vec::new(),
+			edges: Vec::new(),
+		},
+	);
+	task.graph = None;
+	task.conversation_history = request.conversation_history.clone();
+	service.cache_runtime_memory_layers(&task.task_id, &runtime_memory_layers);
+
+	let runtime_memory_sections = runtime_memory_layers.structured_sections();
+	let spec = AgentInstanceSpec {
+		instance_id: "agent-memory-node".to_string(),
+		context: AgentContext {
+			task_id: task.task_id.clone(),
+			node_id: NodeId("memory-node".to_string()),
+			summary: "memory-node".to_string(),
+			resources: Vec::new(),
+			conversation_history: task.conversation_history.clone(),
+			memory_context: runtime_memory_sections.named_sections_text(),
+			runtime_memory_sections: runtime_memory_sections.clone(),
+		},
+		capabilities: Vec::new(),
+		capability_tokens: Vec::new(),
+		policy_bindings: PolicyBindings {
+			budget_tokens: 8_000,
+			time_budget_ms: 60_000,
+		},
+	};
+
+	assert_eq!(
+		spec.context.runtime_memory_sections.short_term_continuity,
+		"- user: Please use concise answers."
+	);
+	assert_eq!(
+		spec.context.runtime_memory_sections.long_term_recall,
+		"- memory-record-1 | UserPreference | Rust preference"
+	);
+	assert_eq!(
+		spec.context.runtime_memory_sections.working_memory,
+		"WORKING_MEMORY_ONLY::resume from pending runtime summary"
+	);
+	assert_eq!(
+		spec.context.memory_context,
+		runtime_memory_sections.named_sections_text(),
+		"legacy memory_context should be derived from the structured sections snapshot"
+	);
+	assert_eq!(
+		spec.context.compatibility_memory_context(),
+		runtime_memory_sections.named_sections_text(),
+		"structured sections should remain the primary source for compatibility projection"
+	);
+	service.clear_runtime_memory_layers(&task.task_id);
+}
+
+#[test]
 fn resumed_pending_loops_project_bound_resources_into_context_bundle() {
 	let service = RuntimeService::default();
 	let cwd = env::current_dir().expect("cwd should resolve");
@@ -901,7 +1011,9 @@ fn successful_requests_skip_write_back_when_policy_effectively_disables_it() {
 
 #[test]
 fn planning_mode_hint_returns_compatibility_fallback_runtime_markers_without_graph() {
-	let service = RuntimeService::default();
+	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
+	store.seed(pending_filesystem_candidate_loop_state());
+	let service = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
 	let mut request = request("Read the first part of Cargo.toml.");
 	request.planning_mode_hint = Some(PlanningModeHint::TreeSearch);
 
@@ -927,12 +1039,63 @@ fn planning_mode_hint_returns_compatibility_fallback_runtime_markers_without_gra
 	let payload: serde_json::Value =
 		serde_json::from_str(&last_result.payload).expect("payload should be valid json");
 	assert_eq!(payload["direct_route"], true);
+	let shell = &payload["planning_mode_compatibility_shell"];
+	assert_eq!(shell["branch"], "planning_mode_hint:TreeSearch");
+	assert_eq!(shell["compatibility_only"], true);
+	assert_eq!(
+		shell["replacement_path"]["authority_path"],
+		"runtime_loop_owner.classify_route -> dispatch_route"
+	);
+	assert_eq!(shell["replacement_path"]["route_kind"], "direct");
+	assert_eq!(shell["replacement_path"]["strategy"], "direct_route");
+	assert_eq!(
+		shell["replacement_path"]["decision"]["intent_family"],
+		"filesystem_read"
+	);
+	let candidate_tools = shell["replacement_path"]["decision"]["candidate_tools"]
+		.as_array()
+		.expect("replacement path should record route candidate tools");
+	assert!(
+		candidate_tools
+			.iter()
+			.any(|tool| tool.as_str() == Some("fs.read_text")),
+		"replacement path should preserve direct-route candidate markers: {candidate_tools:?}"
+	);
+	assert_eq!(
+		shell["route_markers"]["experiment_strategy"],
+		"compatibility_fallback"
+	);
+	assert_eq!(shell["route_markers"]["replacement_route_kind"], "direct");
+	assert_eq!(
+		shell["route_markers"]["result_producer"],
+		"direct-route:compatibility-fallback"
+	);
+	let blockers = shell["remaining_blockers"]
+		.as_array()
+		.expect("compatibility shell should record remaining blockers");
+	assert!(
+		blockers.iter().any(|blocker| blocker
+			.as_str()
+			.is_some_and(|value| value.contains("PlanningModeHint::TreeSearch"))),
+		"compatibility shell should preserve the remaining removal blockers: {blockers:?}"
+	);
 
 	let experiment = service
 		.get_experiment_run(&task_id)
 		.expect("experiment lookup should succeed")
 		.expect("compatibility fallback should record an experiment run");
 	assert_eq!(experiment.strategy, "compatibility_fallback");
+
+	let events = store.events();
+	assert_eq!(events.first().map(String::as_str), Some("load:session-1"));
+	assert!(
+		events
+			.iter()
+			.skip(1)
+			.all(|event| event == "delete:session-1"),
+		"compatibility shell should clear pending-loop snapshots after default resume intake checks: {events:?}"
+	);
+	assert!(store.is_empty());
 }
 
 #[test]
@@ -951,6 +1114,7 @@ fn planning_mode_hints_clear_pending_loop_snapshots_without_resuming() {
 	assert_eq!(
 		store.events(),
 		vec![
+			"load:session-1".to_string(),
 			"delete:session-1".to_string(),
 			"delete:session-1".to_string(),
 		]
@@ -1265,7 +1429,7 @@ fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
 }
 
 #[test]
-fn historical_graph_tasks_remain_resumable() {
+fn historical_graph_tasks_are_compatibility_only_and_no_longer_auto_resumable() {
 	let service = RuntimeService::default();
 	let task_id = TaskId("task-legacy-resume".to_string());
 	let graph = TaskGraph {
@@ -1278,7 +1442,7 @@ fn historical_graph_tasks_remain_resumable() {
 		"req-legacy-resume",
 		"Resume the old graph task",
 		TaskState::Failed,
-		graph,
+		graph.clone(),
 	);
 
 	service
@@ -1292,25 +1456,83 @@ fn historical_graph_tasks_remain_resumable() {
 		.expect("replay report should exist");
 	assert_eq!(
 		report.recovery_eligibility,
-		RecoveryEligibility::ResumeReady
+		RecoveryEligibility::NotRecoverable
 	);
-	assert!(!report.resume_candidates.is_empty());
+	assert!(!report.recoverable);
+	assert!(report.resume_candidates.is_empty());
+	let experiment = service
+		.get_experiment_run(&task_id)
+		.expect("experiment lookup should succeed")
+		.expect("historical resume should preserve a legacy experiment marker");
+	assert_eq!(experiment.strategy, "legacy_graph");
 
-	let response = service
+	let error = service
 		.resume_task(&task_id)
-		.expect("historical graph task should resume");
-	assert_eq!(response.status, ResponseStatus::Succeeded);
+		.expect_err("historical graph task replay should be de-authorized");
+	assert!(
+		error
+			.message
+			.contains("legacy graph-backed task replay/resume is de-authorized"),
+		"unexpected legacy resume error: {}",
+		error.message
+	);
 
 	let resumed = service
 		.get_task(&task_id)
 		.expect("task lookup should succeed")
 		.expect("task should exist");
-	assert_eq!(resumed.state, TaskState::Succeeded);
-	assert!(resumed.graph.is_some());
+	assert_eq!(resumed.state, TaskState::Failed);
+	let resumed_graph = resumed
+		.graph
+		.as_ref()
+		.expect("historical graph shape should be preserved only as compatibility metadata");
+	assert_eq!(resumed_graph.nodes.len(), graph.nodes.len());
+	assert_eq!(resumed_graph.nodes[0].node_id, graph.nodes[0].node_id);
+	assert!(resumed.completed_nodes.is_empty());
 }
 
 #[test]
-fn historical_waiting_approval_graph_tasks_can_finish_after_decision() {
+fn graphless_failed_direct_tasks_report_not_recoverable_through_task_replay() {
+	let service = RuntimeService::default();
+	let task_id = TaskId("task-direct-report".to_string());
+	let mut task = direct_task(
+		&task_id.0,
+		"req-direct-report",
+		"Graphless direct replay should stay non-authoritative",
+		TaskState::Failed,
+	);
+	task.last_result = Some(execution_result(
+		&task_id,
+		"direct-route",
+		"direct path failed",
+	));
+	service.save_task(task).expect("task should persist");
+
+	let report = service
+		.get_task_replay_report(&task_id)
+		.expect("replay report lookup should succeed")
+		.expect("replay report should exist");
+	assert_eq!(
+		report.recovery_eligibility,
+		RecoveryEligibility::NotRecoverable
+	);
+	assert!(!report.recoverable);
+	assert!(report.resume_candidates.is_empty());
+
+	let error = service
+		.resume_task(&task_id)
+		.expect_err("graphless failed direct task should not resume through task replay");
+	assert!(
+		error
+			.message
+			.contains("direct runtime tasks resume through session-owned pending-loop intake"),
+		"unexpected direct replay error: {}",
+		error.message
+	);
+}
+
+#[test]
+fn historical_waiting_approval_graph_tasks_reject_approved_decisions_without_graph_fallback() {
 	let service = RuntimeService::default();
 	let task_id = TaskId("task-legacy-approval".to_string());
 	let request_id = RequestId("req-legacy-approval".to_string());
@@ -1373,10 +1595,12 @@ fn historical_waiting_approval_graph_tasks_can_finish_after_decision() {
 		.expect("replay report should exist");
 	assert_eq!(
 		replay.recovery_eligibility,
-		RecoveryEligibility::PendingApproval
+		RecoveryEligibility::NotRecoverable
 	);
+	assert!(!replay.recoverable);
+	assert!(replay.resume_candidates.is_empty());
 
-	let response = service
+	let error = service
 		.decide_approval(
 			&approval_id,
 			ApprovalDecision {
@@ -1385,15 +1609,28 @@ fn historical_waiting_approval_graph_tasks_can_finish_after_decision() {
 				comment: Some("approved".to_string()),
 			},
 		)
-		.expect("approval should complete the historical graph task");
-	assert_eq!(response.status, ResponseStatus::Succeeded);
+		.expect_err("historical graph approval resume should be de-authorized");
+	assert!(
+		error
+			.message
+			.contains("legacy graph-backed approval resume is de-authorized"),
+		"unexpected legacy approval error: {}",
+		error.message
+	);
 
 	let task = service
 		.get_task(&task_id)
 		.expect("task lookup should succeed")
 		.expect("task should exist");
-	assert_eq!(task.state, TaskState::Succeeded);
+	assert_eq!(task.state, TaskState::WaitingApproval);
+	assert_eq!(task.pending_approval_id, Some(approval_id.clone()));
 	assert!(task.graph.is_some());
+
+	let ticket = service
+		.get_approval(&approval_id)
+		.expect("approval lookup should succeed")
+		.expect("approval ticket should exist");
+	assert_eq!(ticket.status, ApprovalStatus::Pending);
 }
 
 #[test]
@@ -1412,17 +1649,11 @@ fn execution_approval_tickets_resume_frozen_command_and_preserve_digest() {
 		..node("approved-execution", TaskNodeKind::Execution)
 	};
 	let approval_id = ApprovalId(compact_approval_id(&task_id.0, &execution_node.node_id.0));
-	let graph = TaskGraph {
-		task_id: task_id.clone(),
-		nodes: vec![execution_node.clone()],
-		edges: Vec::new(),
-	};
-	let mut task = graph_task(
+	let mut task = direct_task(
 		&task_id.0,
 		&request_id.0,
 		"Resume the approved command",
 		TaskState::WaitingApproval,
-		graph,
 	);
 	task.pending_approval_id = Some(approval_id.clone());
 	let canonical_execution = sample_frozen_command_execution(&cwd_text, "digest-from-ticket");
@@ -1531,7 +1762,14 @@ fn execution_approval_tickets_resume_frozen_command_and_preserve_digest() {
 		.expect("task lookup should succeed")
 		.expect("task should exist");
 	assert_eq!(task.state, TaskState::Succeeded);
-	assert_eq!(task.completed_nodes, vec![execution_node.node_id.clone()]);
+	assert!(task.graph.is_none());
+	assert_eq!(
+		task.completed_nodes,
+		vec![
+			execution_node.node_id.clone(),
+			NodeId("direct-route-validation".to_string())
+		]
+	);
 
 	let result = service
 		.list_results(&task_id)
@@ -1562,17 +1800,11 @@ fn execution_approval_tickets_reject_missing_frozen_payload_ref() {
 	let request_id = RequestId("req-execution-approval-missing-ref".to_string());
 	let execution_node = node("approved-execution", TaskNodeKind::Execution);
 	let approval_id = ApprovalId(compact_approval_id(&task_id.0, &execution_node.node_id.0));
-	let graph = TaskGraph {
-		task_id: task_id.clone(),
-		nodes: vec![execution_node.clone()],
-		edges: Vec::new(),
-	};
-	let mut task = graph_task(
+	let mut task = direct_task(
 		&task_id.0,
 		&request_id.0,
 		"Resume the approved command",
 		TaskState::WaitingApproval,
-		graph,
 	);
 	task.pending_approval_id = Some(approval_id.clone());
 
@@ -1626,17 +1858,11 @@ fn execution_approval_tickets_reject_mismatched_frozen_digest() {
 	let request_id = RequestId("req-execution-approval-digest-mismatch".to_string());
 	let execution_node = node("approved-execution", TaskNodeKind::Execution);
 	let approval_id = ApprovalId(compact_approval_id(&task_id.0, &execution_node.node_id.0));
-	let graph = TaskGraph {
-		task_id: task_id.clone(),
-		nodes: vec![execution_node.clone()],
-		edges: Vec::new(),
-	};
-	let mut task = graph_task(
+	let mut task = direct_task(
 		&task_id.0,
 		&request_id.0,
 		"Resume the approved command",
 		TaskState::WaitingApproval,
-		graph,
 	);
 	task.pending_approval_id = Some(approval_id.clone());
 	let frozen_result = ResultEnvelope {

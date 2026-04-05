@@ -66,7 +66,7 @@ impl ToolBackedWorker {
 				.map(|resource| resource.display_key())
 				.collect::<Vec<_>>(),
 			"conversation_history": render_conversation_history(&spec.context.conversation_history),
-			"memory_context": spec.context.memory_context.clone(),
+			"memory_context": spec.context.compatibility_memory_context(),
 			"runtime_memory_sections": spec.context.runtime_memory_sections.clone(),
 			"budget_tokens": spec.policy_bindings.budget_tokens,
 			"time_budget_ms": spec.policy_bindings.time_budget_ms,
@@ -297,7 +297,7 @@ mod test_workers {
 	use roku_plugin_host::ToolRuntime;
 
 	#[test]
-	fn worker_invocation_adds_memory_context() {
+	fn worker_invocation_derives_compatibility_memory_context_from_structured_sections() {
 		let tool_runtime = Arc::new(ToolRuntime::default());
 		let worker = ToolBackedWorker::new("test-worker", "tool", &[], tool_runtime, 0.5);
 		let spec = AgentInstanceSpec {
@@ -308,7 +308,7 @@ mod test_workers {
 				summary: "summary".to_string(),
 				resources: Vec::new(),
 				conversation_history: Vec::new(),
-				memory_context: "long-term context".to_string(),
+				memory_context: "stale legacy blob that must not win".to_string(),
 				runtime_memory_sections: RuntimeMemorySections {
 					short_term_continuity: "user: hi".to_string(),
 					long_term_recall: "memory-record-1 | UserPreference | Rust".to_string(),
@@ -329,11 +329,55 @@ mod test_workers {
 				.input
 				.get("memory_context")
 				.and_then(|value| value.as_str()),
-			Some("long-term context")
+			Some(
+				"Short-term continuity:\nuser: hi\n\nLong-term recall:\nmemory-record-1 | UserPreference | Rust\n\nWorking memory:\nremember runtime seam"
+			)
 		);
 		assert_eq!(
 			invocation.input["runtime_memory_sections"]["working_memory"].as_str(),
 			Some("remember runtime seam")
+		);
+	}
+
+	#[test]
+	fn worker_invocation_preserves_legacy_memory_context_fallback_when_sections_are_empty() {
+		let tool_runtime = Arc::new(ToolRuntime::default());
+		let worker = ToolBackedWorker::new("test-worker", "tool", &[], tool_runtime, 0.5);
+		let spec = AgentInstanceSpec {
+			instance_id: "agent-1".to_string(),
+			context: AgentContext {
+				task_id: TaskId("task-1".to_string()),
+				node_id: NodeId("node-1".to_string()),
+				summary: "summary".to_string(),
+				resources: Vec::new(),
+				conversation_history: Vec::new(),
+				memory_context: "legacy fallback blob".to_string(),
+				runtime_memory_sections: RuntimeMemorySections::default(),
+			},
+			capabilities: Vec::new(),
+			capability_tokens: Vec::new(),
+			policy_bindings: PolicyBindings {
+				budget_tokens: 1,
+				time_budget_ms: 1,
+			},
+		};
+		let invocation = worker.invocation(&spec, &TaskNode::default());
+
+		assert_eq!(
+			invocation
+				.input
+				.get("memory_context")
+				.and_then(|value| value.as_str()),
+			Some("legacy fallback blob")
+		);
+		assert_eq!(
+			invocation
+				.input
+				.get("runtime_memory_sections")
+				.and_then(|value| value.as_object())
+				.map(|sections| sections.is_empty()),
+			Some(false),
+			"default structured sections should still be serialized as an explicit object"
 		);
 	}
 }

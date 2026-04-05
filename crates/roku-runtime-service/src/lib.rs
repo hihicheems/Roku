@@ -18,8 +18,6 @@ mod data_plane;
 mod direct;
 mod execution;
 mod helpers;
-mod legacy_compat;
-mod legacy_graph;
 mod memory_context;
 mod pending_loop_snapshot_store;
 mod runtime_loop_lifecycle;
@@ -36,16 +34,16 @@ use roku_agent_runtime::{
 	RouteDecisionResult, RouteEscalationPlan, RouteRisk,
 };
 use roku_artifact_store::ArtifactStore;
-use roku_capability_auth::CapabilityAuthority;
 use roku_common_types::{
 	ApprovalDecision, ApprovalId, ApprovalStatus, ApprovalTicket, ErrorClass, RequestEnvelope,
-	ResponseEnvelope, ResponseStatus, RuntimeError, Task, TaskEventKind, TaskNode, TaskState,
+	ResponseEnvelope, ResponseStatus, RuntimeError, TaskEventKind, TaskNode, TaskNodeKind,
+	TaskState,
 };
 use roku_experiment_registry::ExperimentRegistry;
 use roku_memory::{
-	ApprovalRepository, ConservativeMemoryLifecyclePolicy, ControlPlaneDataPlane, DispatchQueue,
-	EventRepository, InMemoryDispatchQueue, LongTermMemoryBackend, MemoryLifecyclePolicy,
-	NoopLongTermMemoryBackend, ResultRepository, TaskRepository,
+	ApprovalRepository, ConservativeMemoryLifecyclePolicy, ControlPlaneDataPlane, EventRepository,
+	LongTermMemoryBackend, MemoryLifecyclePolicy, NoopLongTermMemoryBackend, ResultRepository,
+	TaskRepository,
 };
 use roku_observability::{
 	AuditCorrelation, AuditRecord, AuditSink, InMemoryAuditSink, LogLevel, LogRecord, Metrics,
@@ -54,7 +52,7 @@ use roku_observability::{
 use roku_orchestrator::Orchestrator;
 use roku_validation_plane::ValidationPipeline;
 
-use crate::helpers::{approval_artifact, failure_message, ticket_status_label};
+use crate::helpers::{failure_message, ticket_status_label};
 pub use crate::memory_context::{ContextBundle, RuntimeMemoryLayers};
 pub use crate::pending_loop_snapshot_store::{
 	InMemoryPendingLoopSnapshotStore, PendingLoopSnapshotStore,
@@ -146,12 +144,10 @@ impl RuntimeModeReport {
 }
 
 struct RuntimeState {
-	capability_auth: CapabilityAuthority,
 	task_repo: Box<dyn TaskRepository + Send>,
 	event_repo: Box<dyn EventRepository + Send>,
 	approval_repo: Box<dyn ApprovalRepository + Send>,
 	result_repo: Box<dyn ResultRepository + Send>,
-	dispatch_queue: Box<dyn DispatchQueue + Send>,
 	artifact_store: ArtifactStore,
 	experiment_registry: ExperimentRegistry,
 }
@@ -192,7 +188,6 @@ impl RuntimeService {
 					event_repo,
 					approval_repo,
 					result_repo,
-					dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
 				},
 				artifact_store: ArtifactStore::default(),
 				experiment_registry: ExperimentRegistry::default(),
@@ -220,7 +215,6 @@ impl RuntimeService {
 					event_repo,
 					approval_repo,
 					result_repo,
-					dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
 				},
 				artifact_store,
 				experiment_registry,
@@ -248,7 +242,6 @@ impl RuntimeService {
 					event_repo,
 					approval_repo,
 					result_repo,
-					dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
 				},
 				artifact_store,
 				experiment_registry,
@@ -277,7 +270,6 @@ impl RuntimeService {
 					event_repo,
 					approval_repo,
 					result_repo,
-					dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
 				},
 				artifact_store,
 				experiment_registry,
@@ -324,7 +316,6 @@ impl RuntimeService {
 			event_repo,
 			approval_repo,
 			result_repo,
-			dispatch_queue,
 		} = control_plane;
 
 		Self {
@@ -337,12 +328,10 @@ impl RuntimeService {
 			memory_backend: Arc::new(NoopLongTermMemoryBackend),
 			memory_policy: Arc::new(ConservativeMemoryLifecyclePolicy::default()),
 			state: Mutex::new(RuntimeState {
-				capability_auth: CapabilityAuthority::default(),
 				task_repo,
 				event_repo,
 				approval_repo,
 				result_repo,
-				dispatch_queue,
 				artifact_store,
 				experiment_registry,
 			}),
@@ -513,6 +502,19 @@ impl RuntimeService {
 		} else {
 			None
 		};
+		if decision.approved {
+			if task.graph.is_some() {
+				return Err(execution::legacy_graph_runtime_deauthorized_error(
+					&task.task_id,
+					"approval resume",
+				));
+			}
+			if execution_resume.is_none() {
+				return Err(RuntimeError::new(
+					"approval resume requires a runtime-owned frozen execution payload",
+				));
+			}
+		}
 
 		ticket.status = if decision.approved {
 			ApprovalStatus::Approved
@@ -548,20 +550,34 @@ impl RuntimeService {
 
 		task.pending_approval_id = None;
 		if decision.approved {
-			if let Some(execution_resume) = execution_resume {
-				return self.resume_approved_execution_ticket(&mut task, &ticket, execution_resume);
-			}
-			self.continue_legacy_graph_after_approval(&mut task, &ticket)
+			self.resume_approved_execution_ticket(
+				&mut task,
+				&ticket,
+				execution_resume.expect("approved direct execution resume is validated above"),
+			)
 		} else {
-			if let Some(graph_node) = task.graph.as_ref().and_then(|graph| {
-				graph
-					.nodes
-					.iter()
-					.find(|node| node.node_id == ticket.node_id)
-			}) {
+			let approval_node = task
+				.graph
+				.as_ref()
+				.and_then(|graph| {
+					graph
+						.nodes
+						.iter()
+						.find(|node| node.node_id == ticket.node_id)
+						.cloned()
+				})
+				.or_else(|| {
+					ticket.pending_execution.as_ref().map(|_| TaskNode {
+						node_id: ticket.node_id.clone(),
+						kind: TaskNodeKind::Execution,
+						description: ticket.summary.clone(),
+						..TaskNode::default()
+					})
+				});
+			if let Some(approval_node) = approval_node.as_ref() {
 				self.append_node_event(
 					&task,
-					graph_node,
+					approval_node,
 					TaskEventKind::ApprovalRejected,
 					"approval rejected",
 				)?;
@@ -583,45 +599,6 @@ impl RuntimeService {
 
 	pub fn metrics_snapshot(&self) -> MetricsSnapshot {
 		self.metrics.snapshot()
-	}
-
-	fn process_approval_node(
-		&self,
-		task: &mut Task,
-		node: &TaskNode,
-	) -> Result<ResponseEnvelope, RuntimeError> {
-		let approval_id = ApprovalId(compact_approval_id(&task.task_id.0, &node.node_id.0));
-		let ticket = ApprovalTicket {
-			approval_id: approval_id.clone(),
-			task_id: task.task_id.clone(),
-			request_id: task.request_id.clone(),
-			node_id: node.node_id.clone(),
-			summary: node.description.clone(),
-			status: ApprovalStatus::Pending,
-			decided_by: None,
-			comment: None,
-			pending_execution: None,
-		};
-
-		self.record_transition(task, TaskState::WaitingApproval, "approval required")?;
-		task.pending_approval_id = Some(approval_id.clone());
-		self.append_node_event(
-			task,
-			node,
-			TaskEventKind::ApprovalPending,
-			"approval required",
-		)?;
-		self.metrics.inc_approvals_created();
-		let response_message = crate::execution::pending_approval_message(&ticket);
-		self.save_approval_ticket(ticket)?;
-		self.save_task(task.clone())?;
-
-		Ok(ResponseEnvelope {
-			request_id: task.request_id.clone(),
-			status: ResponseStatus::PendingApproval,
-			message: response_message,
-			artifacts: vec![approval_artifact(&approval_id)],
-		})
 	}
 }
 

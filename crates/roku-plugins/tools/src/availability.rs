@@ -57,6 +57,12 @@ impl RuntimeVisibleToolAvailabilitySnapshot {
 		self.enabled_tools.contains(tool_name)
 	}
 
+	pub fn has_enabled_tool_with_prefix(&self, tool_name_prefix: &str) -> bool {
+		self.enabled_tools
+			.iter()
+			.any(|tool_name| tool_name.starts_with(tool_name_prefix))
+	}
+
 	pub fn filter_candidate_tools(
 		&self,
 		preferred_tool: Option<&str>,
@@ -150,6 +156,15 @@ mod tests {
 
 	#[test]
 	fn snapshot_keeps_enabled_and_baseline_visible_tool_truth_aligned() {
+		// Ownership proof surface:
+		// - Contract owner: `RuntimeVisibleToolAvailabilitySnapshot` defines the enabled/baseline
+		//   visibility contract and may align route/loop views, but must not encode approval policy.
+		// - Registry owner: `ResourceCatalog` + `PluginRegistrySnapshot` decide which tool names are
+		//   enabled before snapshot construction; adapter-local code must not override that truth.
+		// - Execution owner: runtime route/loop code may derive shortlist and `visible_tools` seeds
+		//   from this snapshot only, and must not re-infer local availability from tool adapters.
+		// - Gating owner: policy bridge / tool runtime owns `policy_denied` and
+		//   `approval_required` after invocation starts, not snapshot visibility.
 		let snapshot = build_runtime_visible_tool_availability_snapshot(
 			&runtime_catalog(false),
 			&[
@@ -163,6 +178,10 @@ mod tests {
 
 		assert!(!snapshot.is_tool_enabled("skill.execute"));
 		assert!(snapshot.is_tool_enabled("general.execute"));
+		assert!(
+			snapshot.is_tool_enabled("command.run"),
+			"policy-gated tools must remain enabled in the visibility contract"
+		);
 		assert_eq!(
 			snapshot.baseline_visible_tools,
 			vec!["general.execute".to_string(), "fs.read_text".to_string()]

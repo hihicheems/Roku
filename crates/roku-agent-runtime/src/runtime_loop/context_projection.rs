@@ -395,6 +395,17 @@ mod tests {
 	}
 
 	#[test]
+	fn context_projection_mirrors_current_round_visible_tools_from_loop_state() {
+		let mut loop_state = sample_loop_state();
+		loop_state.visible_tools = vec!["fs.glob".to_string()];
+
+		let projection = build_context_projection(&loop_state);
+
+		assert_eq!(projection.visible_tools, vec!["fs.glob".to_string()]);
+		assert!(projection.visible_tool_hints.is_empty());
+	}
+
+	#[test]
 	fn context_projection_keeps_working_summary_separate_from_history_digest() {
 		let mut loop_state = sample_loop_state();
 		loop_state.working_summary = "WORKING_SUMMARY_ONLY::grounded repo layout".to_string();

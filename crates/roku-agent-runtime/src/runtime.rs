@@ -663,6 +663,7 @@ impl GenericAgentRuntime {
 		let grounding_input = user_reply.unwrap_or(&loop_state.goal).to_string();
 		loop_state.note_grounding_input(&grounding_input);
 		loop {
+			self.refresh_tool_loop_visible_tools(loop_state);
 			let context_projection = self.refresh_tool_loop_projection(loop_state);
 			let next_step = decide_tool_loop_next_step(
 				loop_state,
@@ -969,10 +970,14 @@ impl GenericAgentRuntime {
 		self.compose_visible_tools(&loop_state.route_decision, Some(loop_state))
 	}
 
-	fn refresh_tool_loop_projection(&self, loop_state: &mut LoopState) -> ContextProjection {
-		loop_state.visible_tools = self.visible_tools_for_loop_state(loop_state);
+	fn refresh_tool_loop_visible_tools(&self, loop_state: &mut LoopState) {
+		let visible_tools = self.visible_tools_for_loop_state(loop_state);
+		loop_state.visible_tools = visible_tools;
+	}
+
+	fn refresh_tool_loop_projection(&self, loop_state: &LoopState) -> ContextProjection {
 		let mut projection = build_context_projection(loop_state);
-		projection.visible_tool_hints = self.visible_tool_hints_for(&loop_state.visible_tools);
+		projection.visible_tool_hints = self.visible_tool_hints_for(&projection.visible_tools);
 		projection
 	}
 
@@ -3034,6 +3039,16 @@ mod tests {
 
 	#[test]
 	fn classify_route_and_loop_initialization_agree_on_snapshot_visibility() {
+		// Ownership proof surface:
+		// - Contract owner: `RuntimeVisibleToolAvailabilitySnapshot` is the single shared
+		//   availability contract consumed by both `classify_route` and `initialize_runtime_loop`.
+		// - Registry owner: the injected snapshot already carries catalog/plugin enablement truth;
+		//   runtime adapters may consume that truth but must not mutate it locally.
+		// - Execution owner: `classify_route` may shortlist enabled `candidate_tools`, and
+		//   `initialize_runtime_loop` may seed `visible_tools`, but neither may invent a second
+		//   adapter-local visibility rule.
+		// - Gating owner: policy / approval remains downstream in tool invocation handling, so
+		//   route or loop initialization must not hide enabled tools by pre-applying policy.
 		let runtime = GenericAgentRuntime {
 			runtime_visible_tool_availability_snapshot: RuntimeVisibleToolAvailabilitySnapshot {
 				enabled_tools: [
@@ -3075,6 +3090,13 @@ mod tests {
 				"table.preview".to_string(),
 				"inventory.describe".to_string(),
 			]
+		);
+		assert!(
+			plan.decision
+				.candidate_tools
+				.iter()
+				.all(|tool_name| loop_state.visible_tools.contains(tool_name)),
+			"classifier shortlist must remain visible in the initialized loop"
 		);
 		assert!(
 			plan.decision
@@ -3400,6 +3422,12 @@ mod tests {
 				.and_then(|value| value.get("outcome"))
 				.and_then(serde_json::Value::as_str),
 			Some("require_approval")
+		);
+		assert!(
+			loop_state
+				.visible_tools
+				.contains(&"command.run".to_string()),
+			"command.run should remain visible after invocation-time policy rejects the call"
 		);
 		assert_eq!(loop_state.history.len(), 2);
 		assert_eq!(
@@ -4167,9 +4195,20 @@ mod tests {
 		);
 		let mut loop_state =
 			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+		loop_state.visible_tools = vec!["fs.glob".to_string()];
 
-		let projection = runtime.refresh_tool_loop_projection(&mut loop_state);
+		let projection = runtime.refresh_tool_loop_projection(&loop_state);
 
+		assert_eq!(projection.visible_tools, vec!["fs.glob".to_string()]);
+		assert_eq!(loop_state.visible_tools, vec!["fs.glob".to_string()]);
+		assert_eq!(
+			projection
+				.visible_tool_hints
+				.keys()
+				.cloned()
+				.collect::<Vec<_>>(),
+			vec!["fs.glob".to_string()]
+		);
 		let glob_hint = projection
 			.visible_tool_hints
 			.get("fs.glob")
@@ -4212,7 +4251,19 @@ mod tests {
 
 	#[test]
 	fn visible_tools_recompute_keeps_shortlist_and_safe_baseline_after_tool_steps() {
-		let runtime = GenericAgentRuntime::default();
+		let runtime = GenericAgentRuntime {
+			runtime_visible_tool_availability_snapshot: RuntimeVisibleToolAvailabilitySnapshot {
+				enabled_tools: [
+					"fs.read_text".to_string(),
+					"inventory.describe".to_string(),
+					"table.preview".to_string(),
+				]
+				.into_iter()
+				.collect(),
+				baseline_visible_tools: vec!["inventory.describe".to_string()],
+			},
+			..GenericAgentRuntime::default()
+		};
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-followup".to_string()),
 			session_id: "session-followup".to_string(),
@@ -4232,6 +4283,10 @@ mod tests {
 		);
 		let mut loop_state =
 			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+		assert_eq!(
+			loop_state.visible_tools,
+			vec!["fs.read_text".to_string(), "inventory.describe".to_string(),]
+		);
 		let observation = ToolObservation {
 			ok: true,
 			tool_name: "fs.read_text".to_string(),
@@ -4273,12 +4328,21 @@ mod tests {
 		let visible_tools = runtime.visible_tools_for_loop_state(&loop_state);
 
 		assert_eq!(
-			visible_tools.first().map(String::as_str),
-			Some("fs.read_text")
+			visible_tools,
+			vec!["fs.read_text".to_string(), "inventory.describe".to_string(),]
 		);
-		assert!(visible_tools.contains(&"general.execute".to_string()));
-		assert!(visible_tools.contains(&"table.preview".to_string()));
-		assert!(visible_tools.contains(&"python.run".to_string()));
+		assert!(
+			!visible_tools.contains(&"general.execute".to_string()),
+			"recompute must not reintroduce tools outside the snapshot-owned visible baseline"
+		);
+		assert!(
+			!visible_tools.contains(&"table.preview".to_string()),
+			"enabled tools that are neither shortlist seeds nor snapshot baseline must stay hidden"
+		);
+		assert!(
+			!visible_tools.contains(&"python.run".to_string()),
+			"recompute must not fall back to a second hard-coded visibility list"
+		);
 	}
 
 	#[test]
