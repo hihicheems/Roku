@@ -717,10 +717,7 @@ impl roku_memory::PendingLoopSnapshotBackend for MigratingPendingLoopBackend {
 	fn load_pending_loop_snapshot(
 		&self,
 		session_id: &str,
-	) -> Result<
-		Option<roku_memory::PendingLoopSnapshot>,
-		roku_memory::PendingLoopSnapshotError,
-	> {
+	) -> Result<Option<roku_memory::PendingLoopSnapshot>, roku_memory::PendingLoopSnapshotError> {
 		// Try primary (SQLite dedicated table) first.
 		if let Some(snapshot) = self.primary.load_pending_loop_snapshot(session_id)? {
 			return Ok(Some(snapshot));

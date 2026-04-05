@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -49,12 +48,6 @@ impl RuntimeService {
 		let task = self
 			.get_task(task_id)?
 			.ok_or_else(|| RuntimeError::new(format!("task not found: {}", task_id.0)))?;
-		if task.graph.is_some() {
-			return Err(legacy_graph_runtime_deauthorized_error(
-				&task.task_id,
-				"task replay/resume",
-			));
-		}
 		match task.state {
 			TaskState::Succeeded | TaskState::Cancelled | TaskState::DeadLetter => {
 				return Err(RuntimeError::new(format!(
@@ -179,31 +172,13 @@ impl RuntimeService {
 	}
 
 	fn plan_compensation_records(&self, task: &Task) -> Vec<CompensationRecord> {
-		let node_by_id = task
-			.graph
-			.as_ref()
-			.map(|graph| {
-				graph
-					.nodes
-					.iter()
-					.map(|node| (node.node_id.clone(), node.kind))
-					.collect::<HashMap<_, _>>()
-			})
-			.unwrap_or_default();
-
 		task.completed_nodes
 			.iter()
-			.map(|node_id| {
-				let action = match node_by_id.get(node_id) {
-					Some(TaskNodeKind::Execution) => CompensationAction::AuditOnly,
-					_ => CompensationAction::Noop,
-				};
-				CompensationRecord {
-					node_id: node_id.clone(),
-					action,
-					status: CompensationStatus::Pending,
-					note: "cancellation compensation recorded".to_string(),
-				}
+			.map(|node_id| CompensationRecord {
+				node_id: node_id.clone(),
+				action: CompensationAction::Noop,
+				status: CompensationStatus::Pending,
+				note: "cancellation compensation recorded".to_string(),
 			})
 			.collect()
 	}
@@ -468,13 +443,6 @@ impl RuntimeService {
 			});
 		}
 
-		if task.graph.is_some() {
-			return Err(legacy_graph_runtime_deauthorized_error(
-				&task.task_id,
-				"approval resume",
-			));
-		}
-
 		let message = result_message(&result);
 		let response = self.complete_direct_runtime_path(
 			task,
@@ -487,16 +455,6 @@ impl RuntimeService {
 		self.clear_runtime_memory_layers(&task.task_id);
 		Ok(response)
 	}
-}
-
-pub(super) fn legacy_graph_runtime_deauthorized_error(
-	task_id: &TaskId,
-	operation: &str,
-) -> RuntimeError {
-	RuntimeError::new(format!(
-		"legacy graph-backed {operation} is de-authorized for task {}; rerun the request through the direct runtime path",
-		task_id.0
-	))
 }
 
 fn compensation_note(action: CompensationAction) -> &'static str {
@@ -1094,14 +1052,12 @@ mod tests {
 			goal: "remove tmp".to_string(),
 			state: TaskState::Executing,
 			attempts: 0,
-			planning_mode_hint: None,
 			conversation_history: Vec::new(),
 			completed_nodes: Vec::new(),
 			next_node_index: 0,
 			pending_approval_id: None,
 			last_result: None,
 			compensation_records: Vec::new(),
-			graph: None,
 		};
 		let node = TaskNode {
 			node_id: NodeId("node-1".to_string()),

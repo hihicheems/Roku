@@ -266,9 +266,6 @@ pub struct Task {
 	pub state: TaskState,
 	pub attempts: u32,
 	#[serde(default)]
-	/// Legacy compatibility hint preserved for replay/resume metadata only.
-	pub planning_mode_hint: Option<PlanningModeHint>,
-	#[serde(default)]
 	/// Legacy persisted short-term continuity snapshot; not a canonical long-term memory source.
 	pub conversation_history: Vec<ConversationTurn>,
 	#[serde(default)]
@@ -281,7 +278,6 @@ pub struct Task {
 	pub last_result: Option<ResultEnvelope>,
 	#[serde(default)]
 	pub compensation_records: Vec<CompensationRecord>,
-	pub graph: Option<TaskGraph>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -343,13 +339,6 @@ pub struct PlanLoopControl {
 	pub loop_id: String,
 	pub iteration: u8,
 	pub max_iterations: u8,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskGraph {
-	pub task_id: TaskId,
-	pub nodes: Vec<TaskNode>,
-	pub edges: Vec<TaskEdge>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -450,24 +439,6 @@ pub struct TaskNode {
 	pub retry_policy: RetryPolicy,
 	#[serde(default)]
 	pub rerun_policy: RerunPolicy,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskEdge {
-	pub from: NodeId,
-	pub to: NodeId,
-	#[serde(default)]
-	pub condition: TaskEdgeCondition,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum TaskEdgeCondition {
-	#[default]
-	Always,
-	OnSuccess,
-	OnApproved,
-	OnFailureRetryable,
-	OnFailureExhausted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
