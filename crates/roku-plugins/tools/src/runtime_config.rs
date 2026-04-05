@@ -59,6 +59,7 @@ pub struct FsToolRuntimeConfig {
 	pub max_dir_entries: usize,
 	pub max_glob_matches: usize,
 	pub max_descendant_scan_entries: usize,
+	pub max_grep_results: usize,
 }
 
 /// Partial overrides for [`FsToolRuntimeConfig`].
@@ -69,6 +70,7 @@ pub struct FsToolRuntimeConfigPatch {
 	pub max_dir_entries: Option<usize>,
 	pub max_glob_matches: Option<usize>,
 	pub max_descendant_scan_entries: Option<usize>,
+	pub max_grep_results: Option<usize>,
 }
 
 /// Effective runtime settings for the bounded Python executor.
@@ -119,6 +121,8 @@ pub struct TableToolRuntimeConfigPatch {
 pub struct WebToolRuntimeConfig {
 	pub endpoint: Option<String>,
 	pub default_top_k: usize,
+	pub max_fetch_bytes: usize,
+	pub fetch_timeout_ms: u64,
 }
 
 /// Partial overrides for [`WebToolRuntimeConfig`].
@@ -127,6 +131,8 @@ pub struct WebToolRuntimeConfig {
 pub struct WebToolRuntimeConfigPatch {
 	pub endpoint: Option<String>,
 	pub default_top_k: Option<usize>,
+	pub max_fetch_bytes: Option<usize>,
+	pub fetch_timeout_ms: Option<u64>,
 }
 
 /// Effective runtime settings shared by builtin worker-backed tools.
@@ -156,6 +162,8 @@ pub enum ToolsRuntimeConfigError {
 	InvalidFsMaxGlobMatches,
 	#[error("runtime.tools.fs.max_descendant_scan_entries must be greater than zero")]
 	InvalidFsMaxDescendantScanEntries,
+	#[error("runtime.tools.fs.max_grep_results must be greater than zero")]
+	InvalidFsMaxGrepResults,
 	#[error("runtime.tools.command.default_timeout_ms must be greater than zero")]
 	InvalidCommandDefaultTimeoutMs,
 	#[error("runtime.tools.command.max_output_bytes must be greater than zero")]
@@ -170,6 +178,10 @@ pub enum ToolsRuntimeConfigError {
 	InvalidWebDefaultTopK,
 	#[error("runtime.tools.web.endpoint cannot be empty")]
 	InvalidWebEndpoint,
+	#[error("runtime.tools.web.max_fetch_bytes must be greater than zero")]
+	InvalidWebMaxFetchBytes,
+	#[error("runtime.tools.web.fetch_timeout_ms must be greater than zero")]
+	InvalidWebFetchTimeoutMs,
 	#[error("runtime.tools.workers.llm_tool_timeout_ms must be greater than zero")]
 	InvalidWorkerTimeoutMs,
 	#[error("runtime.tools.workers.max_skill_prompt_context_chars must be greater than zero")]
@@ -182,10 +194,13 @@ pub const HARD_MAX_READ_BYTES: usize = 256 * 1024;
 pub const HARD_MAX_DIR_ENTRIES: usize = 2_000;
 pub const HARD_MAX_GLOB_MATCHES: usize = 2_000;
 pub const HARD_MAX_DESCENDANT_SCAN_ENTRIES: usize = 50_000;
+pub const HARD_MAX_GREP_RESULTS: usize = 2_000;
 pub const HARD_MAX_TIMEOUT_MS: u64 = 120_000;
 pub const HARD_MAX_OUTPUT_BYTES: usize = 128 * 1024;
 pub const HARD_MAX_PREVIEW_ROWS: usize = 50;
 pub const HARD_MAX_WEB_TOP_K: usize = 20;
+pub const HARD_MAX_FETCH_BYTES: usize = 512 * 1024;
+pub const HARD_MAX_FETCH_TIMEOUT_MS: u64 = 30_000;
 pub const HARD_MAX_LLM_TOOL_TIMEOUT_MS: u64 = 180_000;
 pub const HARD_MAX_SKILL_PROMPT_CONTEXT_CHARS: usize = 64_000;
 pub const HARD_MAX_SKILL_EXECUTION_OUTPUT_CHARS: usize = 16_000;
@@ -197,6 +212,7 @@ impl Default for FsToolRuntimeConfig {
 			max_dir_entries: 200,
 			max_glob_matches: 200,
 			max_descendant_scan_entries: 8_000,
+			max_grep_results: 200,
 		}
 	}
 }
@@ -232,6 +248,8 @@ impl Default for WebToolRuntimeConfig {
 		Self {
 			endpoint: None,
 			default_top_k: 5,
+			max_fetch_bytes: 102_400,
+			fetch_timeout_ms: 10_000,
 		}
 	}
 }
@@ -303,6 +321,9 @@ impl FsToolRuntimeConfig {
 		if let Some(value) = patch.max_descendant_scan_entries {
 			self.max_descendant_scan_entries = value;
 		}
+		if let Some(value) = patch.max_grep_results {
+			self.max_grep_results = value;
+		}
 	}
 
 	pub fn validate_and_clamp(&mut self) -> Result<(), ToolsRuntimeConfigError> {
@@ -318,12 +339,16 @@ impl FsToolRuntimeConfig {
 		if self.max_descendant_scan_entries == 0 {
 			return Err(ToolsRuntimeConfigError::InvalidFsMaxDescendantScanEntries);
 		}
+		if self.max_grep_results == 0 {
+			return Err(ToolsRuntimeConfigError::InvalidFsMaxGrepResults);
+		}
 		self.default_max_bytes = self.default_max_bytes.min(HARD_MAX_READ_BYTES);
 		self.max_dir_entries = self.max_dir_entries.min(HARD_MAX_DIR_ENTRIES);
 		self.max_glob_matches = self.max_glob_matches.min(HARD_MAX_GLOB_MATCHES);
 		self.max_descendant_scan_entries = self
 			.max_descendant_scan_entries
 			.min(HARD_MAX_DESCENDANT_SCAN_ENTRIES);
+		self.max_grep_results = self.max_grep_results.min(HARD_MAX_GREP_RESULTS);
 		Ok(())
 	}
 
@@ -341,6 +366,9 @@ impl FsToolRuntimeConfig {
 			env_override_usize("ROKU_RUNTIME__TOOLS__FS__MAX_DESCENDANT_SCAN_ENTRIES")
 		{
 			self.max_descendant_scan_entries = value?;
+		}
+		if let Some(value) = env_override_usize("ROKU_RUNTIME__TOOLS__FS__MAX_GREP_RESULTS") {
+			self.max_grep_results = value?;
 		}
 		Ok(())
 	}
@@ -444,6 +472,12 @@ impl WebToolRuntimeConfig {
 		if let Some(value) = patch.default_top_k {
 			self.default_top_k = value;
 		}
+		if let Some(value) = patch.max_fetch_bytes {
+			self.max_fetch_bytes = value;
+		}
+		if let Some(value) = patch.fetch_timeout_ms {
+			self.fetch_timeout_ms = value;
+		}
 	}
 
 	pub fn validate_and_clamp(&mut self) -> Result<(), ToolsRuntimeConfigError> {
@@ -453,7 +487,15 @@ impl WebToolRuntimeConfig {
 		if matches!(self.endpoint.as_deref(), Some(value) if value.trim().is_empty()) {
 			return Err(ToolsRuntimeConfigError::InvalidWebEndpoint);
 		}
+		if self.max_fetch_bytes == 0 {
+			return Err(ToolsRuntimeConfigError::InvalidWebMaxFetchBytes);
+		}
+		if self.fetch_timeout_ms == 0 {
+			return Err(ToolsRuntimeConfigError::InvalidWebFetchTimeoutMs);
+		}
 		self.default_top_k = self.default_top_k.min(HARD_MAX_WEB_TOP_K);
+		self.max_fetch_bytes = self.max_fetch_bytes.min(HARD_MAX_FETCH_BYTES);
+		self.fetch_timeout_ms = self.fetch_timeout_ms.min(HARD_MAX_FETCH_TIMEOUT_MS);
 		self.endpoint = self
 			.endpoint
 			.take()
@@ -471,6 +513,12 @@ impl WebToolRuntimeConfig {
 		}
 		if let Some(value) = env_override_string("ROKU_RUNTIME__TOOLS__WEB__ENDPOINT") {
 			self.endpoint = Some(value);
+		}
+		if let Some(value) = env_override_usize("ROKU_RUNTIME__TOOLS__WEB__MAX_FETCH_BYTES") {
+			self.max_fetch_bytes = value?;
+		}
+		if let Some(value) = env_override_u64("ROKU_RUNTIME__TOOLS__WEB__FETCH_TIMEOUT_MS") {
+			self.fetch_timeout_ms = value?;
 		}
 		Ok(())
 	}
@@ -556,6 +604,9 @@ fn invalid_env_key(key: &'static str) -> ToolsRuntimeConfigError {
 		"ROKU_RUNTIME__TOOLS__FS__MAX_DESCENDANT_SCAN_ENTRIES" => {
 			ToolsRuntimeConfigError::InvalidFsMaxDescendantScanEntries
 		}
+		"ROKU_RUNTIME__TOOLS__FS__MAX_GREP_RESULTS" => {
+			ToolsRuntimeConfigError::InvalidFsMaxGrepResults
+		}
 		"ROKU_RUNTIME__TOOLS__COMMAND__DEFAULT_TIMEOUT_MS" => {
 			ToolsRuntimeConfigError::InvalidCommandDefaultTimeoutMs
 		}
@@ -572,6 +623,12 @@ fn invalid_env_key(key: &'static str) -> ToolsRuntimeConfigError {
 			ToolsRuntimeConfigError::InvalidTableDefaultPreviewRows
 		}
 		"ROKU_RUNTIME__TOOLS__WEB__DEFAULT_TOP_K" => ToolsRuntimeConfigError::InvalidWebDefaultTopK,
+		"ROKU_RUNTIME__TOOLS__WEB__MAX_FETCH_BYTES" => {
+			ToolsRuntimeConfigError::InvalidWebMaxFetchBytes
+		}
+		"ROKU_RUNTIME__TOOLS__WEB__FETCH_TIMEOUT_MS" => {
+			ToolsRuntimeConfigError::InvalidWebFetchTimeoutMs
+		}
 		"ROKU_RUNTIME__TOOLS__WORKERS__LLM_TOOL_TIMEOUT_MS" => {
 			ToolsRuntimeConfigError::InvalidWorkerTimeoutMs
 		}
@@ -598,6 +655,7 @@ mod tests {
 				max_dir_entries: Some(HARD_MAX_DIR_ENTRIES * 2),
 				max_glob_matches: Some(HARD_MAX_GLOB_MATCHES * 2),
 				max_descendant_scan_entries: Some(HARD_MAX_DESCENDANT_SCAN_ENTRIES * 2),
+				max_grep_results: Some(HARD_MAX_GREP_RESULTS * 2),
 			}),
 			command: Some(CommandToolRuntimeConfigPatch {
 				default_timeout_ms: Some(HARD_MAX_TIMEOUT_MS * 2),
@@ -613,6 +671,8 @@ mod tests {
 			web: Some(WebToolRuntimeConfigPatch {
 				endpoint: Some(" https://example.test/search ".to_string()),
 				default_top_k: Some(HARD_MAX_WEB_TOP_K * 2),
+				max_fetch_bytes: Some(HARD_MAX_FETCH_BYTES * 2),
+				fetch_timeout_ms: Some(HARD_MAX_FETCH_TIMEOUT_MS * 2),
 			}),
 			workers: Some(ToolWorkerRuntimeConfigPatch {
 				llm_tool_timeout_ms: Some(HARD_MAX_LLM_TOOL_TIMEOUT_MS * 2),
@@ -630,12 +690,15 @@ mod tests {
 			config.fs.max_descendant_scan_entries,
 			HARD_MAX_DESCENDANT_SCAN_ENTRIES
 		);
+		assert_eq!(config.fs.max_grep_results, HARD_MAX_GREP_RESULTS);
 		assert_eq!(config.command.default_timeout_ms, HARD_MAX_TIMEOUT_MS);
 		assert_eq!(config.command.max_output_bytes, HARD_MAX_OUTPUT_BYTES);
 		assert_eq!(config.python.default_timeout_ms, HARD_MAX_TIMEOUT_MS);
 		assert_eq!(config.python.max_output_bytes, HARD_MAX_OUTPUT_BYTES);
 		assert_eq!(config.table.default_preview_rows, HARD_MAX_PREVIEW_ROWS);
 		assert_eq!(config.web.default_top_k, HARD_MAX_WEB_TOP_K);
+		assert_eq!(config.web.max_fetch_bytes, HARD_MAX_FETCH_BYTES);
+		assert_eq!(config.web.fetch_timeout_ms, HARD_MAX_FETCH_TIMEOUT_MS);
 		assert_eq!(
 			config.web.endpoint.as_deref(),
 			Some("https://example.test/search")

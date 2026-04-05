@@ -60,17 +60,21 @@ static BUILTIN_TOOL_NAMES: LazyLock<BTreeSet<String>> = LazyLock::new(|| {
 	names.extend(
 		[
 			"command.run",
+			"fs.edit",
 			"fs.exists",
 			"fs.find",
 			"fs.glob",
 			"fs.inspect",
 			"fs.list_dir",
 			"fs.read_text",
+			"fs.write",
+			"fs.grep",
 			"python.run",
 			"table.inspect",
 			"table.list_sheets",
 			"table.preview",
 			"table.schema",
+			"web.fetch",
 			"web.search",
 		]
 		.into_iter()
@@ -93,7 +97,7 @@ pub fn canonical_execution_for_builtin_tool_input(
 ) -> Option<CanonicalExecution> {
 	match tool_name {
 		"command.run" => builtin::command::canonical_execution_from_runtime_input(input),
-		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => {
+		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" | "fs.edit" | "fs.write" => {
 			builtin::fs::canonical_execution_from_runtime_input(tool_name, input)
 		}
 		_ => None,

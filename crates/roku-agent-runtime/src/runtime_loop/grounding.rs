@@ -780,13 +780,114 @@ fn is_probable_shell_command(value: &str) -> bool {
 		.all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-'))
 }
 
+// EPIC-5: migrate to descriptor-driven grounding — these helpers are intentionally
+// minimal and temporary, used only by hardcoded match arms in tool_loop.rs.
+
+/// Extracts a grep-like search pattern from the goal text.
+///
+/// Looks for patterns inside backticks, quotes, or after common grep-like markers.
+pub(crate) fn extract_grep_pattern(goal: &str) -> Option<String> {
+	// Try backtick-quoted pattern first
+	if let Some(pattern) = extract_backtick_content(goal)
+		&& !pattern.is_empty()
+	{
+		return Some(pattern);
+	}
+	// Try double-quoted pattern
+	if let Some(start) = goal.find('"')
+		&& let Some(end) = goal[start + 1..].find('"')
+	{
+		let candidate = &goal[start + 1..start + 1 + end];
+		if !candidate.is_empty() {
+			return Some(candidate.to_string());
+		}
+	}
+	// Try single-quoted pattern
+	if let Some(start) = goal.find('\'')
+		&& let Some(end) = goal[start + 1..].find('\'')
+	{
+		let candidate = &goal[start + 1..start + 1 + end];
+		if !candidate.is_empty() {
+			return Some(candidate.to_string());
+		}
+	}
+	None
+}
+
+/// Extracts a URL from the goal text for web.fetch grounding.
+pub(crate) fn extract_fetch_url(goal: &str) -> Option<String> {
+	goal.split_whitespace().find_map(|token| {
+		let cleaned = token.trim_matches(|c: char| {
+			matches!(
+				c,
+				'(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | '"' | '\'' | ',' | ';'
+			)
+		});
+		if cleaned.starts_with("http://") || cleaned.starts_with("https://") {
+			Some(cleaned.to_string())
+		} else {
+			None
+		}
+	})
+}
+
+fn extract_backtick_content(text: &str) -> Option<String> {
+	let start = text.find('`')?;
+	let rest = &text[start + 1..];
+	let end = rest.find('`')?;
+	let content = rest[..end].trim();
+	(!content.is_empty()).then(|| content.to_string())
+}
+
 #[cfg(test)]
 mod tests {
-	use super::extract_explicit_path_candidates;
+	use super::{extract_explicit_path_candidates, extract_fetch_url, extract_grep_pattern};
 
 	#[test]
 	fn extract_explicit_path_candidates_preserves_home_directory_paths() {
 		let paths = extract_explicit_path_candidates("帮我 ll ~/ 看看有啥");
 		assert_eq!(paths, vec!["~/".to_string()]);
+	}
+
+	#[test]
+	fn extract_grep_pattern_from_backticks() {
+		assert_eq!(
+			extract_grep_pattern("Find all `TODO` comments in the code"),
+			Some("TODO".to_string())
+		);
+	}
+
+	#[test]
+	fn extract_grep_pattern_from_double_quotes() {
+		assert_eq!(
+			extract_grep_pattern("Search for \"fn main\" in Rust files"),
+			Some("fn main".to_string())
+		);
+	}
+
+	#[test]
+	fn extract_grep_pattern_returns_none_for_no_pattern() {
+		assert_eq!(extract_grep_pattern("list all files"), None);
+	}
+
+	#[test]
+	fn extract_fetch_url_from_https() {
+		assert_eq!(
+			extract_fetch_url("Read the docs at https://serde.rs/derive.html please"),
+			Some("https://serde.rs/derive.html".to_string())
+		);
+	}
+
+	#[test]
+	fn extract_fetch_url_from_http() {
+		assert_eq!(
+			extract_fetch_url("Fetch http://example.com/api"),
+			Some("http://example.com/api".to_string())
+		);
+	}
+
+	#[test]
+	fn extract_fetch_url_returns_none_for_no_url() {
+		assert_eq!(extract_fetch_url("search the web for Rust docs"), None);
 	}
 }

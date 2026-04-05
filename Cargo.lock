@@ -1816,6 +1816,7 @@ dependencies = [
  "calamine",
  "csv",
  "glob",
+ "regex",
  "reqwest",
  "roku-common-types",
  "roku-observability",

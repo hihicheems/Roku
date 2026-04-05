@@ -21,9 +21,9 @@ use crate::runtime_loop::grounding::{
 	explanatory_python_code_request, explanatory_shell_command_request,
 	extract_concrete_path_candidates, extract_concrete_table_path,
 	extract_explicit_path_candidates, extract_explicit_python_code, extract_explicit_shell_command,
-	extract_glob_pattern, extract_path_candidates, extract_row_limit, extract_sheet_name,
-	extract_skill_source_url, extract_web_query, grounded_python_code_allows_execution,
-	grounded_shell_command_allows_execution,
+	extract_fetch_url, extract_glob_pattern, extract_grep_pattern, extract_path_candidates,
+	extract_row_limit, extract_sheet_name, extract_skill_source_url, extract_web_query,
+	grounded_python_code_allows_execution, grounded_shell_command_allows_execution,
 };
 use crate::runtime_loop::{
 	ContextProjection, LoopState, NextStepAction, NextStepDecision, ToolObservation,
@@ -191,6 +191,20 @@ fn uniquely_grounded_arguments(tool_name: &str, grounding_input: &str) -> Option
 		"fs.glob" => {
 			extract_glob_pattern(grounding_input).map(|pattern| json!({ "pattern": pattern }))
 		}
+		// EPIC-5: migrate to descriptor-driven grounding
+		"fs.grep" => {
+			extract_grep_pattern(grounding_input).map(|pattern| json!({ "pattern": pattern }))
+		}
+		// EPIC-5: migrate to descriptor-driven grounding
+		"fs.edit" => {
+			let concrete_paths = extract_concrete_path_candidates(grounding_input);
+			(concrete_paths.len() == 1).then(|| json!({ "file_path": concrete_paths[0].clone() }))
+		}
+		// EPIC-5: migrate to descriptor-driven grounding
+		"fs.write" => {
+			let concrete_paths = extract_concrete_path_candidates(grounding_input);
+			(concrete_paths.len() == 1).then(|| json!({ "file_path": concrete_paths[0].clone() }))
+		}
 		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
 			let path = extract_concrete_table_path(grounding_input)?;
 			let mut arguments = json!({ "path": path });
@@ -205,6 +219,8 @@ fn uniquely_grounded_arguments(tool_name: &str, grounding_input: &str) -> Option
 		}
 		"web.search" => extract_web_query(grounding_input)
 			.map(|query| json!({ "query": query, "top_k": 5_u64 })),
+		// EPIC-5: migrate to descriptor-driven grounding
+		"web.fetch" => extract_fetch_url(grounding_input).map(|url| json!({ "url": url })),
 		"command.run" => extract_explicit_shell_command(grounding_input)
 			.map(|command| json!({ "command": command })),
 		"python.run" => {
@@ -264,7 +280,12 @@ fn ungrounded_consumer_path_rejection_reason(
 	tool_name: &str,
 	arguments: &serde_json::Map<String, Value>,
 ) -> Option<String> {
-	let path = arguments.get("path").and_then(Value::as_str)?;
+	// EPIC-5: migrate to descriptor-driven grounding
+	// fs.edit and fs.write use "file_path" instead of "path"
+	let path = arguments
+		.get("path")
+		.or_else(|| arguments.get("file_path"))
+		.and_then(Value::as_str)?;
 	let resolved_lookup_path = loop_state
 		.last_observation
 		.as_ref()
@@ -287,11 +308,14 @@ fn ungrounded_consumer_path_rejection_reason(
 		return None;
 	}
 
+	// EPIC-5: migrate to descriptor-driven grounding
 	let requires_grounded_path = matches!(
 		tool_name,
 		"fs.read_text"
 			| "fs.inspect"
 			| "fs.list_dir"
+			| "fs.edit"
+			| "fs.write"
 			| "table.preview"
 			| "table.inspect"
 			| "table.list_sheets"
@@ -514,10 +538,19 @@ fn bootstrap_tool_matches_request(tool_name: &str, grounding_input: &str) -> boo
 			!extract_concrete_path_candidates(grounding_input).is_empty()
 				&& ground_tool_arguments(tool_name, grounding_input).is_some()
 		}
+		// EPIC-5: migrate to descriptor-driven grounding
+		"fs.grep" => extract_grep_pattern(grounding_input).is_some(),
+		// EPIC-5: migrate to descriptor-driven grounding
+		"fs.edit" | "fs.write" => {
+			!extract_concrete_path_candidates(grounding_input).is_empty()
+				&& ground_tool_arguments(tool_name, grounding_input).is_some()
+		}
 		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
 			extract_concrete_table_path(grounding_input).is_some()
 				&& ground_tool_arguments(tool_name, grounding_input).is_some()
 		}
+		// EPIC-5: migrate to descriptor-driven grounding
+		"web.fetch" => extract_fetch_url(grounding_input).is_some(),
 		_ => bootstrap_tool_is_groundable(tool_name, grounding_input),
 	}
 }
@@ -595,6 +628,15 @@ pub(crate) fn ground_tool_arguments(tool_name: &str, grounding_input: &str) -> O
 		"fs.glob" => {
 			extract_glob_pattern(grounding_input).map(|pattern| json!({ "pattern": pattern }))
 		}
+		// EPIC-5: migrate to descriptor-driven grounding
+		"fs.grep" => {
+			extract_grep_pattern(grounding_input).map(|pattern| json!({ "pattern": pattern }))
+		}
+		// EPIC-5: migrate to descriptor-driven grounding
+		"fs.edit" | "fs.write" => extract_concrete_path_candidates(grounding_input)
+			.into_iter()
+			.next()
+			.map(|path| json!({ "file_path": path })),
 		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
 			let path = extract_concrete_table_path(grounding_input)?;
 			let mut arguments = json!({ "path": path });
@@ -609,6 +651,8 @@ pub(crate) fn ground_tool_arguments(tool_name: &str, grounding_input: &str) -> O
 		}
 		"web.search" => extract_web_query(grounding_input)
 			.map(|query| json!({ "query": query, "top_k": 5_u64 })),
+		// EPIC-5: migrate to descriptor-driven grounding
+		"web.fetch" => extract_fetch_url(grounding_input).map(|url| json!({ "url": url })),
 		"command.run" => extract_explicit_shell_command(grounding_input)
 			.map(|command| json!({ "command": command })),
 		"python.run" => {
@@ -752,8 +796,16 @@ pub(crate) fn tool_required_argument_keys(tool_name: &str) -> &'static [&'static
 		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => &["path"],
 		"fs.find" => &["name"],
 		"fs.glob" => &["pattern"],
+		// EPIC-5: migrate to descriptor-driven grounding
+		"fs.grep" => &["pattern"],
+		// EPIC-5: migrate to descriptor-driven grounding
+		"fs.edit" => &["file_path"],
+		// EPIC-5: migrate to descriptor-driven grounding
+		"fs.write" => &["file_path"],
 		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => &["path"],
 		"web.search" => &["query"],
+		// EPIC-5: migrate to descriptor-driven grounding
+		"web.fetch" => &["url"],
 		"command.run" => &["command"],
 		"python.run" => &["code"],
 		"skill.install" | "skill.ensure_installed" => &["source_url"],
