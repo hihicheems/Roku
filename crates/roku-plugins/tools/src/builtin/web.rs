@@ -325,22 +325,28 @@ impl Tool for WebFetchTool {
 			.unwrap_or("unknown")
 			.to_string();
 
-		let body = response.text().map_err(|error| {
-			ToolFailure::terminal(format!("failed to read response body: {error}"))
-		})?;
-
-		let truncated = body.len() > max_bytes;
-		let raw = if truncated {
-			// Find the nearest valid UTF-8 char boundary at or before max_bytes
-			let mut boundary = max_bytes;
-			while boundary > 0 && !body.is_char_boundary(boundary) {
-				boundary -= 1;
-			}
-			&body[..boundary]
+		// Read bytes and cap at max_bytes to protect against oversized payloads.
+		let bytes = response
+			.bytes()
+			.map_err(|error| {
+				ToolFailure::terminal(format!("failed to read response body: {error}"))
+			})?;
+		let truncated = bytes.len() > max_bytes;
+		// Cap at max_bytes, then walk back to a valid UTF-8 char boundary
+		// before converting, so we never produce replacement characters from
+		// a truncation split.
+		let cap = if truncated { max_bytes } else { bytes.len() };
+		let mut boundary = cap;
+		while boundary > 0 && std::str::from_utf8(&bytes[..boundary]).is_err() {
+			boundary -= 1;
+		}
+		let raw = std::str::from_utf8(&bytes[..boundary]).unwrap_or("");
+		let is_html = content_type.contains("html");
+		let content = if is_html {
+			strip_html_tags(raw)
 		} else {
-			body.as_str()
+			raw.to_string()
 		};
-		let content = strip_html_tags(raw);
 		let byte_length = content.len();
 
 		Ok(ToolOutputEnvelope::new(

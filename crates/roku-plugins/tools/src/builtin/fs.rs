@@ -1136,6 +1136,34 @@ fn compute_fs_digest(
 	Ok(CanonicalDigest(format!("{digest:x}")))
 }
 
+fn compute_fs_write_digest(
+	tool_name: &str,
+	argv: &[String],
+	working_directory: &Path,
+	env_policy: &ExecutionEnvPolicy,
+	resource_scope: &ExecutionResourceScope,
+) -> Result<CanonicalDigest, ToolFailure> {
+	let payload = json!({
+		"tool_name": tool_name,
+		"program": tool_name,
+		"argv": argv,
+		"invocation_mode": InvocationMode::DirectExec,
+		"cwd": working_directory.display().to_string(),
+		"env_policy": env_policy,
+		"resource_scope": resource_scope,
+		"action_class": ExecutionActionClass::Write,
+	});
+	let bytes = serde_json::to_vec(&payload).map_err(|error| {
+		ToolFailure::terminal(format!(
+			"failed to encode canonical fs write digest input: {error}"
+		))
+	})?;
+	let mut hasher = Sha256::new();
+	hasher.update(bytes);
+	let digest = hasher.finalize();
+	Ok(CanonicalDigest(format!("{digest:x}")))
+}
+
 fn path_strings(paths: &[PathBuf]) -> Vec<String> {
 	paths
 		.iter()
@@ -1208,7 +1236,13 @@ fn canonical_fs_write_execution(
 		effective_read_roots: Vec::new(),
 		effective_write_roots: path_strings(&roots),
 	};
-	let digest = compute_fs_digest(tool_name, &working_directory, &env_policy, &resource_scope)?;
+	let digest = compute_fs_write_digest(
+		tool_name,
+		&argv,
+		&working_directory,
+		&env_policy,
+		&resource_scope,
+	)?;
 
 	Ok(CanonicalExecution {
 		tool_name: tool_name.to_string(),
@@ -1777,13 +1811,16 @@ impl Tool for FsGrepTool {
 			.filter(|value| !value.trim().is_empty())
 			.map(|value| {
 				let candidate = expand_user_path(value, roots.first().unwrap());
-				if candidate.is_dir() {
-					Ok(candidate)
-				} else {
-					Err(ToolFailure::terminal(format!(
+				if !candidate.is_dir() {
+					return Err(ToolFailure::terminal(format!(
 						"`{value}` is not a directory"
-					)))
+					)));
 				}
+				let canonical = candidate.canonicalize().map_err(|error| {
+					ToolFailure::terminal(format!("failed to resolve `{value}`: {error}"))
+				})?;
+				ensure_allowed(&canonical, &roots)?;
+				Ok(canonical)
 			})
 			.transpose()?
 			.unwrap_or_else(|| roots.first().cloned().unwrap_or_default());
