@@ -13,26 +13,28 @@ debug
 **/mutants.out*/
 
 # IDEs and editor
-.vscode/
 .cursor/
 .idea/
+.vscode/
 /target
-outputs/
 
 # Common
 **/*.DS_Store
-logs/
 .agents/
+.claude/
 .codex/
 .env
-.roku/
 .ralph/
+.roku/
+AGENTS.md
+CLAUDE.md
+draft/
+logs/
+plans/
+prompts/
+outputs/
 run/
 tmp/
-prompts/
-plans/
-AGENTS.md
-draft/
 
 # Python
 **/__pycache__/

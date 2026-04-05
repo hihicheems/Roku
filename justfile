@@ -25,7 +25,7 @@ alias l := lint
 # Calculate lines of code
 @cloc:
     # This command calculates the lines of code in the project, excluding specified directories.
-    cloc . --exclude-dir=vendor,tests,examples,build,target,.roku
+    cloc . --exclude-dir=vendor,tests,examples,build,target,.roku,draft
 
 # Alias for testing
 alias t := test
