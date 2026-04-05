@@ -191,12 +191,14 @@ impl PendingLoopSnapshotBackend for SqlitePendingLoopSnapshotAdapter {
 			.map_err(|error| PendingLoopSnapshotError::Backend(error.to_string()))?
 			.and_then(|prefs| prefs.pending_loop);
 		if let Some(ref snapshot) = legacy_snapshot {
-			// Lazy promotion: copy to dedicated table so subsequent loads skip the fallback.
+			// Lazy migration: copy to dedicated table, then clear legacy to prevent
+			// resurrection after a subsequent delete on the dedicated table.
 			let _ = self.inner.store_snapshot(
 				session_id,
 				&snapshot.run_id,
 				&snapshot.loop_state_json,
 			);
+			let _ = self.inner.clear_legacy_pending_loop(session_id);
 		}
 		Ok(legacy_snapshot)
 	}

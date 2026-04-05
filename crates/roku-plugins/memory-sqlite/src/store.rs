@@ -171,6 +171,43 @@ impl SqlitePendingLoopSnapshotRepository {
 		)?;
 		Ok(())
 	}
+
+	/// Clear the `pending_loop` field from the legacy `session_preferences` JSON blob.
+	///
+	/// Used during lazy migration to prevent stale legacy data from resurrecting
+	/// after a delete on the dedicated table.
+	pub fn clear_legacy_pending_loop(
+		&self,
+		session_id: &str,
+	) -> Result<(), SqliteMemoryStoreError> {
+		let connection = self.open()?;
+		let encoded: Option<String> = connection
+			.query_row(
+				"SELECT preferences_json FROM session_preferences WHERE session_id = ?1",
+				params![session_id],
+				|row| row.get(0),
+			)
+			.optional()?;
+		let Some(json) = encoded else {
+			return Ok(());
+		};
+		let mut prefs: SessionPreferences =
+			serde_json::from_str(&json).map_err(SqliteMemoryStoreError::from)?;
+		if prefs.pending_loop.is_none() {
+			return Ok(());
+		}
+		prefs.pending_loop = None;
+		let updated = serde_json::to_string(&prefs).map_err(SqliteMemoryStoreError::from)?;
+		connection.execute(
+			"UPDATE session_preferences SET preferences_json = ?2, updated_at_unix_ms = ?3 WHERE session_id = ?1",
+			params![
+				session_id,
+				updated,
+				sql_i64_from_u64(now_unix_ms(), "session_preferences.updated_at_unix_ms")?,
+			],
+		)?;
+		Ok(())
+	}
 }
 
 #[derive(Debug, Clone)]
