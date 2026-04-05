@@ -191,16 +191,15 @@ fn uniquely_grounded_arguments(tool_name: &str, grounding_input: &str) -> Option
 		"fs.glob" => {
 			extract_glob_pattern(grounding_input).map(|pattern| json!({ "pattern": pattern }))
 		}
-		// EPIC-5: migrate to descriptor-driven grounding
+		// The following arms are temporary hardcoded integrations added by EPIC-0.
+		// They will be migrated to descriptor-driven grounding under EPIC-5.
 		"fs.grep" => {
 			extract_grep_pattern(grounding_input).map(|pattern| json!({ "pattern": pattern }))
 		}
-		// EPIC-5: migrate to descriptor-driven grounding
 		"fs.edit" => {
 			let concrete_paths = extract_concrete_path_candidates(grounding_input);
 			(concrete_paths.len() == 1).then(|| json!({ "file_path": concrete_paths[0].clone() }))
 		}
-		// EPIC-5: migrate to descriptor-driven grounding
 		"fs.write" => {
 			let concrete_paths = extract_concrete_path_candidates(grounding_input);
 			(concrete_paths.len() == 1).then(|| json!({ "file_path": concrete_paths[0].clone() }))
@@ -219,7 +218,6 @@ fn uniquely_grounded_arguments(tool_name: &str, grounding_input: &str) -> Option
 		}
 		"web.search" => extract_web_query(grounding_input)
 			.map(|query| json!({ "query": query, "top_k": 5_u64 })),
-		// EPIC-5: migrate to descriptor-driven grounding
 		"web.fetch" => extract_fetch_url(grounding_input).map(|url| json!({ "url": url })),
 		"command.run" => extract_explicit_shell_command(grounding_input)
 			.map(|command| json!({ "command": command })),
@@ -280,7 +278,9 @@ fn ungrounded_consumer_path_rejection_reason(
 	tool_name: &str,
 	arguments: &serde_json::Map<String, Value>,
 ) -> Option<String> {
-	// EPIC-5: migrate to descriptor-driven grounding
+	// The following path-key handling and grounded-path checks are temporary
+	// hardcoded integrations added by EPIC-0.
+	// They will be migrated to descriptor-driven grounding under EPIC-5.
 	// fs.edit and fs.write use "file_path" instead of "path"
 	let path = arguments
 		.get("path")
@@ -308,7 +308,6 @@ fn ungrounded_consumer_path_rejection_reason(
 		return None;
 	}
 
-	// EPIC-5: migrate to descriptor-driven grounding
 	let requires_grounded_path = matches!(
 		tool_name,
 		"fs.read_text"
@@ -538,9 +537,9 @@ fn bootstrap_tool_matches_request(tool_name: &str, grounding_input: &str) -> boo
 			!extract_concrete_path_candidates(grounding_input).is_empty()
 				&& ground_tool_arguments(tool_name, grounding_input).is_some()
 		}
-		// EPIC-5: migrate to descriptor-driven grounding
+		// The following arms are temporary hardcoded integrations added by EPIC-0.
+		// They will be migrated to descriptor-driven grounding under EPIC-5.
 		"fs.grep" => extract_grep_pattern(grounding_input).is_some(),
-		// EPIC-5: migrate to descriptor-driven grounding
 		"fs.edit" | "fs.write" => {
 			!extract_concrete_path_candidates(grounding_input).is_empty()
 				&& ground_tool_arguments(tool_name, grounding_input).is_some()
@@ -549,7 +548,6 @@ fn bootstrap_tool_matches_request(tool_name: &str, grounding_input: &str) -> boo
 			extract_concrete_table_path(grounding_input).is_some()
 				&& ground_tool_arguments(tool_name, grounding_input).is_some()
 		}
-		// EPIC-5: migrate to descriptor-driven grounding
 		"web.fetch" => extract_fetch_url(grounding_input).is_some(),
 		_ => bootstrap_tool_is_groundable(tool_name, grounding_input),
 	}
@@ -628,11 +626,11 @@ pub(crate) fn ground_tool_arguments(tool_name: &str, grounding_input: &str) -> O
 		"fs.glob" => {
 			extract_glob_pattern(grounding_input).map(|pattern| json!({ "pattern": pattern }))
 		}
-		// EPIC-5: migrate to descriptor-driven grounding
+		// The following arms are temporary hardcoded integrations added by EPIC-0.
+		// They will be migrated to descriptor-driven grounding under EPIC-5.
 		"fs.grep" => {
 			extract_grep_pattern(grounding_input).map(|pattern| json!({ "pattern": pattern }))
 		}
-		// EPIC-5: migrate to descriptor-driven grounding
 		"fs.edit" | "fs.write" => extract_concrete_path_candidates(grounding_input)
 			.into_iter()
 			.next()
@@ -651,7 +649,6 @@ pub(crate) fn ground_tool_arguments(tool_name: &str, grounding_input: &str) -> O
 		}
 		"web.search" => extract_web_query(grounding_input)
 			.map(|query| json!({ "query": query, "top_k": 5_u64 })),
-		// EPIC-5: migrate to descriptor-driven grounding
 		"web.fetch" => extract_fetch_url(grounding_input).map(|url| json!({ "url": url })),
 		"command.run" => extract_explicit_shell_command(grounding_input)
 			.map(|command| json!({ "command": command })),
@@ -796,15 +793,13 @@ pub(crate) fn tool_required_argument_keys(tool_name: &str) -> &'static [&'static
 		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => &["path"],
 		"fs.find" => &["name"],
 		"fs.glob" => &["pattern"],
-		// EPIC-5: migrate to descriptor-driven grounding
+		// The following arms are temporary hardcoded integrations added by EPIC-0.
+		// They will be migrated to descriptor-driven grounding under EPIC-5.
 		"fs.grep" => &["pattern"],
-		// EPIC-5: migrate to descriptor-driven grounding
 		"fs.edit" => &["file_path"],
-		// EPIC-5: migrate to descriptor-driven grounding
 		"fs.write" => &["file_path"],
 		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => &["path"],
 		"web.search" => &["query"],
-		// EPIC-5: migrate to descriptor-driven grounding
 		"web.fetch" => &["url"],
 		"command.run" => &["command"],
 		"python.run" => &["code"],
