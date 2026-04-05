@@ -220,14 +220,12 @@ mod tests {
 			goal: "analyze market".to_string(),
 			state: TaskState::Queued,
 			attempts: 0,
-			planning_mode_hint: None,
 			conversation_history: Vec::new(),
 			completed_nodes: Vec::new(),
 			next_node_index: 0,
 			pending_approval_id: None,
 			last_result: None,
 			compensation_records: Vec::new(),
-			graph: None,
 		}
 	}
 

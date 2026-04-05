@@ -1660,7 +1660,6 @@ mod tests {
 			.expect("task lookup should succeed")
 			.expect("resumed telegram task should be persisted");
 		assert_eq!(task.state, TaskState::Succeeded);
-		assert!(task.graph.is_none());
 		let last_result = task
 			.last_result
 			.as_ref()

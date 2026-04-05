@@ -496,24 +496,15 @@ impl RuntimeService {
 				"approval ticket does not match task state",
 			));
 		}
-		task = self.reconstruct_task_progress(&task)?;
 		let execution_resume = if decision.approved {
 			self.validated_execution_resume(&task, &ticket)?
 		} else {
 			None
 		};
-		if decision.approved {
-			if task.graph.is_some() {
-				return Err(execution::legacy_graph_runtime_deauthorized_error(
-					&task.task_id,
-					"approval resume",
-				));
-			}
-			if execution_resume.is_none() {
-				return Err(RuntimeError::new(
-					"approval resume requires a runtime-owned frozen execution payload",
-				));
-			}
+		if decision.approved && execution_resume.is_none() {
+			return Err(RuntimeError::new(
+				"approval resume requires a runtime-owned frozen execution payload",
+			));
 		}
 
 		ticket.status = if decision.approved {
@@ -556,24 +547,12 @@ impl RuntimeService {
 				execution_resume.expect("approved direct execution resume is validated above"),
 			)
 		} else {
-			let approval_node = task
-				.graph
-				.as_ref()
-				.and_then(|graph| {
-					graph
-						.nodes
-						.iter()
-						.find(|node| node.node_id == ticket.node_id)
-						.cloned()
-				})
-				.or_else(|| {
-					ticket.pending_execution.as_ref().map(|_| TaskNode {
-						node_id: ticket.node_id.clone(),
-						kind: TaskNodeKind::Execution,
-						description: ticket.summary.clone(),
-						..TaskNode::default()
-					})
-				});
+			let approval_node = ticket.pending_execution.as_ref().map(|_| TaskNode {
+				node_id: ticket.node_id.clone(),
+				kind: TaskNodeKind::Execution,
+				description: ticket.summary.clone(),
+				..TaskNode::default()
+			});
 			if let Some(approval_node) = approval_node.as_ref() {
 				self.append_node_event(
 					&task,

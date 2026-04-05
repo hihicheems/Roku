@@ -110,7 +110,6 @@ impl RuntimeService {
 		mut result: ResultEnvelope,
 		message: String,
 	) -> Result<ResponseEnvelope, RuntimeError> {
-		task.graph = None;
 		task.completed_nodes.clear();
 		task.next_node_index = 0;
 		task.pending_approval_id = None;
@@ -432,14 +431,12 @@ mod tests {
 			goal: goal.to_string(),
 			state: TaskState::Planning,
 			attempts: 0,
-			planning_mode_hint: None,
 			conversation_history: Vec::new(),
 			completed_nodes: Vec::new(),
 			next_node_index: 0,
 			pending_approval_id: None,
 			last_result: None,
 			compensation_records: Vec::new(),
-			graph: None,
 		}
 	}
 
@@ -481,7 +478,6 @@ mod tests {
 			)
 		);
 		assert_eq!(task.state, TaskState::WaitingApproval);
-		assert!(task.graph.is_none());
 
 		let approval_id = task
 			.pending_approval_id
@@ -504,7 +500,6 @@ mod tests {
 			.expect("task lookup should succeed")
 			.expect("task should persist");
 		assert_eq!(persisted_task.state, TaskState::Succeeded);
-		assert!(persisted_task.graph.is_none());
 		assert_eq!(
 			persisted_task.completed_nodes,
 			vec![

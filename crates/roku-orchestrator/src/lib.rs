@@ -54,14 +54,12 @@ impl Orchestrator {
 			goal: request.goal.clone(),
 			state: TaskState::Queued,
 			attempts: 0,
-			planning_mode_hint: request.planning_mode_hint,
 			conversation_history: request.conversation_history.clone(),
 			completed_nodes: Vec::new(),
 			next_node_index: 0,
 			pending_approval_id: None,
 			last_result: None,
 			compensation_records: Vec::new(),
-			graph: None,
 		}
 	}
 

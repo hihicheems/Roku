@@ -29,8 +29,8 @@ use roku_common_types::{
 	ExecutionEnvPolicy, ExecutionEnvPolicyMode, ExecutionResourceScope, InvocationMode, JoinPolicy,
 	NodeId, PendingExecutionApproval, PlanningModeHint, PolicyBindings, PolicyDecision,
 	PolicyOutcome, PolicyReasonCode, RecoveryEligibility, RequestEnvelope, RequestId,
-	ResponseStatus, ResultEnvelope, ResultStatus, RuntimeError, Task, TaskEdge, TaskGraph, TaskId,
-	TaskNode, TaskNodeKind, TaskState,
+	ResponseStatus, ResultEnvelope, ResultStatus, RuntimeError, Task, TaskId, TaskNode,
+	TaskNodeKind, TaskState,
 };
 use roku_memory::{
 	ConservativeMemoryLifecyclePolicy, DisabledMemoryLifecyclePolicy,
@@ -367,13 +367,7 @@ fn execution_result(task_id: &TaskId, node_id: &str, message: &str) -> ResultEnv
 	}
 }
 
-fn graph_task(
-	task_id: &str,
-	request_id: &str,
-	goal: &str,
-	state: TaskState,
-	graph: TaskGraph,
-) -> Task {
+fn direct_task(task_id: &str, request_id: &str, goal: &str, state: TaskState) -> Task {
 	Task {
 		task_id: TaskId(task_id.to_string()),
 		request_id: RequestId(request_id.to_string()),
@@ -381,31 +375,13 @@ fn graph_task(
 		goal: goal.to_string(),
 		state,
 		attempts: 0,
-		planning_mode_hint: None,
 		conversation_history: Vec::new(),
 		completed_nodes: Vec::new(),
 		next_node_index: 0,
 		pending_approval_id: None,
 		last_result: None,
 		compensation_records: Vec::new(),
-		graph: Some(graph),
 	}
-}
-
-fn direct_task(task_id: &str, request_id: &str, goal: &str, state: TaskState) -> Task {
-	let mut task = graph_task(
-		task_id,
-		request_id,
-		goal,
-		state,
-		TaskGraph {
-			task_id: TaskId(task_id.to_string()),
-			nodes: Vec::new(),
-			edges: Vec::new(),
-		},
-	);
-	task.graph = None;
-	task
 }
 
 fn sample_execution_policy_decision() -> PolicyDecision {
@@ -764,18 +740,12 @@ fn cached_runtime_memory_layers_project_structured_sections_as_primary_spec_memo
 		.runtime_memory_layers_with_working_memory(
 			"WORKING_MEMORY_ONLY::resume from pending runtime summary",
 		);
-	let mut task = graph_task(
+	let mut task = direct_task(
 		"task-memory-spec",
 		"req-memory-spec",
 		"Rust preference",
 		TaskState::Executing,
-		TaskGraph {
-			task_id: TaskId("task-memory-spec".to_string()),
-			nodes: Vec::new(),
-			edges: Vec::new(),
-		},
 	);
-	task.graph = None;
 	task.conversation_history = request.conversation_history.clone();
 	service.cache_runtime_memory_layers(&task.task_id, &runtime_memory_layers);
 
@@ -925,7 +895,7 @@ fn new_requests_execute_without_graph_compilation_and_expose_direct_runtime_mark
 		.get_task(&TaskId("task-req-1".to_string()))
 		.expect("task lookup should succeed")
 		.expect("task should be persisted");
-	assert!(task.graph.is_none());
+
 	let last_result = task
 		.last_result
 		.as_ref()
@@ -1058,7 +1028,7 @@ fn planning_mode_hint_returns_compatibility_fallback_runtime_markers_without_gra
 		.get_task(&task_id)
 		.expect("task lookup should succeed")
 		.expect("task should be persisted");
-	assert!(task.graph.is_none());
+
 	assert_eq!(task.state, TaskState::Succeeded);
 	let last_result = task
 		.last_result
@@ -1167,7 +1137,7 @@ fn multistep_requests_enter_the_generic_loop_for_new_requests() {
 		.get_task(&TaskId("task-req-1".to_string()))
 		.expect("task lookup should succeed")
 		.expect("task should be persisted");
-	assert!(task.graph.is_none());
+
 	let last_result = task
 		.last_result
 		.as_ref()
@@ -1262,7 +1232,6 @@ fn reconstructed_service_instances_survive_generic_pending_loop_failures_from_sh
 		.expect("task lookup should succeed")
 		.expect("resumed task should be persisted");
 	assert_eq!(task.state, TaskState::Failed);
-	assert!(task.graph.is_none());
 
 	let experiment = service
 		.get_experiment_run(&task_id)
@@ -1309,7 +1278,7 @@ fn reconstructed_service_instances_resume_generic_pending_loops_to_success_from_
 		.expect("task lookup should succeed")
 		.expect("resumed task should be persisted");
 	assert_eq!(task.state, TaskState::Succeeded);
-	assert!(task.graph.is_none());
+
 	let last_result = task
 		.last_result
 		.as_ref()
@@ -1458,69 +1427,6 @@ fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
 }
 
 #[test]
-fn historical_graph_tasks_are_compatibility_only_and_no_longer_auto_resumable() {
-	let service = RuntimeService::default();
-	let task_id = TaskId("task-legacy-resume".to_string());
-	let graph = TaskGraph {
-		task_id: task_id.clone(),
-		nodes: vec![node("legacy-step", TaskNodeKind::Execution)],
-		edges: Vec::new(),
-	};
-	let task = graph_task(
-		&task_id.0,
-		"req-legacy-resume",
-		"Resume the old graph task",
-		TaskState::Failed,
-		graph.clone(),
-	);
-
-	service
-		.start_experiment_run(&task, &task.goal, "legacy_graph")
-		.expect("experiment should start");
-	service.save_task(task).expect("task should persist");
-
-	let report = service
-		.get_task_replay_report(&task_id)
-		.expect("replay report lookup should succeed")
-		.expect("replay report should exist");
-	assert_eq!(
-		report.recovery_eligibility,
-		RecoveryEligibility::NotRecoverable
-	);
-	assert!(!report.recoverable);
-	assert!(report.resume_candidates.is_empty());
-	let experiment = service
-		.get_experiment_run(&task_id)
-		.expect("experiment lookup should succeed")
-		.expect("historical resume should preserve a legacy experiment marker");
-	assert_eq!(experiment.strategy, "legacy_graph");
-
-	let error = service
-		.resume_task(&task_id)
-		.expect_err("historical graph task replay should be de-authorized");
-	assert!(
-		error
-			.message
-			.contains("legacy graph-backed task replay/resume is de-authorized"),
-		"unexpected legacy resume error: {}",
-		error.message
-	);
-
-	let resumed = service
-		.get_task(&task_id)
-		.expect("task lookup should succeed")
-		.expect("task should exist");
-	assert_eq!(resumed.state, TaskState::Failed);
-	let resumed_graph = resumed
-		.graph
-		.as_ref()
-		.expect("historical graph shape should be preserved only as compatibility metadata");
-	assert_eq!(resumed_graph.nodes.len(), graph.nodes.len());
-	assert_eq!(resumed_graph.nodes[0].node_id, graph.nodes[0].node_id);
-	assert!(resumed.completed_nodes.is_empty());
-}
-
-#[test]
 fn graphless_failed_direct_tasks_report_not_recoverable_through_task_replay() {
 	let service = RuntimeService::default();
 	let task_id = TaskId("task-direct-report".to_string());
@@ -1558,108 +1464,6 @@ fn graphless_failed_direct_tasks_report_not_recoverable_through_task_replay() {
 		"unexpected direct replay error: {}",
 		error.message
 	);
-}
-
-#[test]
-fn historical_waiting_approval_graph_tasks_reject_approved_decisions_without_graph_fallback() {
-	let service = RuntimeService::default();
-	let task_id = TaskId("task-legacy-approval".to_string());
-	let request_id = RequestId("req-legacy-approval".to_string());
-	let execution_node = node("legacy-step", TaskNodeKind::Execution);
-	let approval_node = node("legacy-approval", TaskNodeKind::Approval);
-	let approval_id = ApprovalId(compact_approval_id(&task_id.0, &approval_node.node_id.0));
-	let graph = TaskGraph {
-		task_id: task_id.clone(),
-		nodes: vec![execution_node.clone(), approval_node.clone()],
-		edges: vec![TaskEdge {
-			from: execution_node.node_id.clone(),
-			to: approval_node.node_id.clone(),
-			condition: roku_common_types::TaskEdgeCondition::OnSuccess,
-		}],
-	};
-	let mut task = graph_task(
-		&task_id.0,
-		&request_id.0,
-		"Approve the historical graph task",
-		TaskState::WaitingApproval,
-		graph,
-	);
-	task.completed_nodes = vec![execution_node.node_id.clone()];
-	task.next_node_index = 1;
-	task.pending_approval_id = Some(approval_id.clone());
-	task.last_result = Some(execution_result(
-		&task_id,
-		&execution_node.node_id.0,
-		"execution finished",
-	));
-
-	service
-		.start_experiment_run(&task, &task.goal, "legacy_graph")
-		.expect("experiment should start");
-	service.save_task(task).expect("task should persist");
-	service
-		.save_result(execution_result(
-			&task_id,
-			&execution_node.node_id.0,
-			"execution finished",
-		))
-		.expect("execution result should persist");
-	service
-		.save_approval_ticket(ApprovalTicket {
-			approval_id: approval_id.clone(),
-			task_id: task_id.clone(),
-			request_id: request_id.clone(),
-			node_id: approval_node.node_id.clone(),
-			summary: approval_node.description.clone(),
-			status: ApprovalStatus::Pending,
-			decided_by: None,
-			comment: None,
-			pending_execution: None,
-		})
-		.expect("approval ticket should persist");
-
-	let replay = service
-		.get_task_replay_report(&task_id)
-		.expect("replay report lookup should succeed")
-		.expect("replay report should exist");
-	assert_eq!(
-		replay.recovery_eligibility,
-		RecoveryEligibility::NotRecoverable
-	);
-	assert!(!replay.recoverable);
-	assert!(replay.resume_candidates.is_empty());
-
-	let error = service
-		.decide_approval(
-			&approval_id,
-			ApprovalDecision {
-				actor: "reviewer".to_string(),
-				approved: true,
-				comment: Some("approved".to_string()),
-			},
-		)
-		.expect_err("historical graph approval resume should be de-authorized");
-	assert!(
-		error
-			.message
-			.contains("legacy graph-backed approval resume is de-authorized"),
-		"unexpected legacy approval error: {}",
-		error.message
-	);
-
-	let task = service
-		.get_task(&task_id)
-		.expect("task lookup should succeed")
-		.expect("task should exist");
-	assert_eq!(task.state, TaskState::WaitingApproval);
-	assert_eq!(task.pending_approval_id, Some(approval_id.clone()));
-	assert!(task.graph.is_some());
-
-	let ticket = service
-		.get_approval(&approval_id)
-		.expect("approval lookup should succeed")
-		.expect("approval ticket should exist");
-	assert_eq!(ticket.status, ApprovalStatus::Pending);
 }
 
 #[test]
@@ -1791,7 +1595,7 @@ fn execution_approval_tickets_resume_frozen_command_and_preserve_digest() {
 		.expect("task lookup should succeed")
 		.expect("task should exist");
 	assert_eq!(task.state, TaskState::Succeeded);
-	assert!(task.graph.is_none());
+
 	assert_eq!(
 		task.completed_nodes,
 		vec![

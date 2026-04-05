@@ -193,11 +193,9 @@ impl PendingLoopSnapshotBackend for SqlitePendingLoopSnapshotAdapter {
 		if let Some(ref snapshot) = legacy_snapshot {
 			// Lazy migration: copy to dedicated table, then clear legacy to prevent
 			// resurrection after a subsequent delete on the dedicated table.
-			let _ = self.inner.store_snapshot(
-				session_id,
-				&snapshot.run_id,
-				&snapshot.loop_state_json,
-			);
+			let _ =
+				self.inner
+					.store_snapshot(session_id, &snapshot.run_id, &snapshot.loop_state_json);
 			let _ = self.inner.clear_legacy_pending_loop(session_id);
 		}
 		Ok(legacy_snapshot)
@@ -669,7 +667,9 @@ mod tests {
 				}),
 				..Default::default()
 			};
-			legacy_repo.save_preferences("session-legacy", prefs).unwrap();
+			legacy_repo
+				.save_preferences("session-legacy", prefs)
+				.unwrap();
 		}
 
 		// Phase 2: Load via the NEW adapter — should fall back to legacy and return data.
@@ -677,7 +677,10 @@ mod tests {
 		let loaded = adapter
 			.load_pending_loop_snapshot("session-legacy")
 			.unwrap();
-		assert!(loaded.is_some(), "should fall back to legacy session_preferences");
+		assert!(
+			loaded.is_some(),
+			"should fall back to legacy session_preferences"
+		);
 		let loaded = loaded.unwrap();
 		assert_eq!(loaded.run_id, "legacy-run");
 		assert!(loaded.loop_state_json.contains("awaiting_user"));
@@ -686,6 +689,9 @@ mod tests {
 		// Verify by checking the dedicated table directly.
 		let repo = crate::store::SqlitePendingLoopSnapshotRepository::connect(config).unwrap();
 		let promoted = repo.load_snapshot("session-legacy").unwrap();
-		assert!(promoted.is_some(), "legacy data should be promoted to dedicated table");
+		assert!(
+			promoted.is_some(),
+			"legacy data should be promoted to dedicated table"
+		);
 	}
 }
