@@ -713,7 +713,6 @@ impl SqliteControlPlaneDataPlane {
 			event_repo: Box::new(SqliteEventRepository::connect(config.clone())?),
 			approval_repo: Box::new(SqliteApprovalRepository::connect(config.clone())?),
 			result_repo: Box::new(SqliteResultRepository::connect(config.clone())?),
-			dispatch_queue: Box::new(SqliteDispatchQueue::connect(config)?),
 		})
 	}
 }

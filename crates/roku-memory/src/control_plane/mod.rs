@@ -89,7 +89,6 @@ pub struct ControlPlaneDataPlane {
 	pub event_repo: Box<dyn EventRepository + Send>,
 	pub approval_repo: Box<dyn ApprovalRepository + Send>,
 	pub result_repo: Box<dyn ResultRepository + Send>,
-	pub dispatch_queue: Box<dyn DispatchQueue + Send>,
 }
 
 impl ControlPlaneDataPlane {
@@ -99,7 +98,6 @@ impl ControlPlaneDataPlane {
 			event_repo: Box::new(InMemoryEventRepository::default()),
 			approval_repo: Box::new(InMemoryApprovalRepository::default()),
 			result_repo: Box::new(InMemoryResultRepository::default()),
-			dispatch_queue: Box::new(InMemoryDispatchQueue::default()),
 		}
 	}
 }

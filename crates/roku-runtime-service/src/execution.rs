@@ -12,28 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_agent_runtime::AgentWorker;
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use roku_common_types::{
 	ApprovalId, ApprovalStatus, ApprovalTicket, ApprovedExecutionRef, CanonicalExecution,
-	CapabilityToken, CompensationAction, CompensationRecord, CompensationStatus, ErrorClass,
-	EvidenceItem, ExecutionEnvPolicyMode, ExecutionPreview, InvocationMode, NodeBudgetSnapshot,
-	PendingExecutionApproval, PolicyDecision, PolicyOutcome, PolicyReasonCode, RecoveryEligibility,
-	ResourceSelector, ResponseEnvelope, ResponseStatus, ResultEnvelope, ResultStatus, RuntimeError,
-	Task, TaskEventKind, TaskId, TaskNode, TaskNodeKind, TaskState, ToolOutputEnvelope,
+	CompensationAction, CompensationRecord, CompensationStatus, ErrorClass, EvidenceItem,
+	ExecutionEnvPolicyMode, ExecutionPreview, InvocationMode, NodeBudgetSnapshot,
+	PendingExecutionApproval, PolicyDecision, PolicyOutcome, PolicyReasonCode, ResourceSelector,
+	ResponseEnvelope, ResponseStatus, ResultEnvelope, ResultStatus, RuntimeError, Task,
+	TaskEventKind, TaskId, TaskNode, TaskNodeKind, TaskState, ToolOutputEnvelope,
 	project_execution_preview,
 };
-use roku_observability::{AuditCorrelation, AuditRecord};
 use serde_json::{Value, json};
 
 use crate::helpers::{approval_artifact, failure_message, result_message};
-use crate::legacy_graph::{
-	LegacyTaskGraphScheduler, assess_graph_completion, build_agent_instance_for_node_with_history,
-};
-use crate::{RunMode, RuntimeService, compact_approval_id};
+use crate::{RuntimeService, compact_approval_id};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PendingExecutionApprovalFact {
@@ -50,98 +45,16 @@ pub(super) struct ValidatedExecutionResume {
 }
 
 impl RuntimeService {
-	pub(super) fn process_task(
-		&self,
-		task: &mut Task,
-		mode: RunMode,
-	) -> Result<ResponseEnvelope, RuntimeError> {
-		let request_id = task.request_id.clone();
-		let graph = task
-			.graph
-			.clone()
-			.ok_or_else(|| RuntimeError::new("task graph is missing"))?;
-		let scheduler = LegacyTaskGraphScheduler;
-
-		while !scheduler
-			.is_complete(&graph, &task.completed_nodes)
-			.map_err(|error| RuntimeError::new(error.to_string()))?
-		{
-			let ready_nodes = scheduler
-				.ready_nodes(&graph, &task.completed_nodes)
-				.map_err(|error| RuntimeError::new(error.to_string()))?;
-			if ready_nodes.is_empty() {
-				return Err(RuntimeError::new(
-					"task graph has no ready nodes but is not complete",
-				));
-			}
-			let ready_nodes_by_id = ready_nodes
-				.iter()
-				.cloned()
-				.map(|node| (node.node_id.0.clone(), node))
-				.collect::<HashMap<_, _>>();
-			self.enqueue_ready_nodes(task, &ready_nodes)?;
-
-			while let Some(claim) = self.claim_dispatched_node(&task.task_id)? {
-				let node = ready_nodes_by_id
-					.get(&claim.envelope.node_id.0)
-					.ok_or_else(|| {
-						RuntimeError::new(format!(
-							"dispatched node {} is not ready for task {}",
-							claim.envelope.node_id.0, task.task_id.0
-						))
-					})?;
-				if task
-					.completed_nodes
-					.iter()
-					.any(|completed| completed == &node.node_id)
-				{
-					self.ack_dispatched_node(&claim.lease)?;
-					continue;
-				}
-				match node.kind {
-					TaskNodeKind::Execution => {
-						if let Some(response) = self.process_execution_node(task, node, mode)? {
-							self.ack_dispatched_node(&claim.lease)?;
-							return Ok(response);
-						}
-						self.ack_dispatched_node(&claim.lease)?;
-					}
-					TaskNodeKind::Approval => {
-						let response = self.process_approval_node(task, node)?;
-						self.ack_dispatched_node(&claim.lease)?;
-						return Ok(response);
-					}
-					TaskNodeKind::Validation => {
-						let report = self.process_validation_node(task, node, mode)?;
-						self.ack_dispatched_node(&claim.lease)?;
-						if let Some(response) = report {
-							return Ok(response);
-						}
-					}
-					TaskNodeKind::Aggregation => {
-						self.process_aggregation_node(task, node)?;
-						self.ack_dispatched_node(&claim.lease)?;
-					}
-					TaskNodeKind::Retry | TaskNodeKind::DeadLetter => {
-						return Err(RuntimeError::new(format!(
-							"manual recovery helper node {} was dispatched on the automatic path",
-							node.node_id.0
-						)));
-					}
-				}
-			}
-		}
-
-		self.finalize_task(task, request_id)
-	}
-
 	pub fn resume_task(&self, task_id: &TaskId) -> Result<ResponseEnvelope, RuntimeError> {
 		let task = self
 			.get_task(task_id)?
 			.ok_or_else(|| RuntimeError::new(format!("task not found: {}", task_id.0)))?;
-		let analysis = self.analyze_task_recovery(&task)?;
-		let mut task = analysis.reconstructed_task.clone();
-
+		if task.graph.is_some() {
+			return Err(legacy_graph_runtime_deauthorized_error(
+				&task.task_id,
+				"task replay/resume",
+			));
+		}
 		match task.state {
 			TaskState::Succeeded | TaskState::Cancelled | TaskState::DeadLetter => {
 				return Err(RuntimeError::new(format!(
@@ -165,40 +78,16 @@ impl RuntimeService {
 				});
 			}
 			TaskState::Aggregating => {
-				let request_id = task.request_id.clone();
-				return self.finalize_task(&mut task, request_id);
+				return Err(RuntimeError::new(
+					"graphless direct runtime tasks must finish through their original runtime loop, not task replay",
+				));
 			}
 			_ => {}
 		}
 
-		let target_state = match analysis.recovery_eligibility {
-			RecoveryEligibility::FinalizeReady if analysis.is_complete => TaskState::Validating,
-			RecoveryEligibility::ResumeReady => classify_resume_state(&analysis.ready_nodes),
-			RecoveryEligibility::RequiresManualResume => {
-				return Err(RuntimeError::new(
-					"task requires manual resume before automatic execution can continue",
-				));
-			}
-			RecoveryEligibility::Blocked => {
-				return Err(RuntimeError::new(
-					"task graph has no replay-ready nodes and cannot be resumed",
-				));
-			}
-			RecoveryEligibility::NotRecoverable => {
-				return Err(RuntimeError::new(format!(
-					"task is not resumable from state {:?}",
-					task.state
-				)));
-			}
-			RecoveryEligibility::PendingApproval => {
-				return Err(RuntimeError::new(
-					"task is waiting for approval and must be resumed through approval flow",
-				));
-			}
-			RecoveryEligibility::FinalizeReady => TaskState::Validating,
-		};
-		self.normalize_task_for_resume(&mut task, target_state)?;
-		self.process_task(&mut task, RunMode::Normal)
+		Err(RuntimeError::new(
+			"direct runtime tasks resume through session-owned pending-loop intake or approval decisions, not task replay",
+		))
 	}
 
 	pub fn cancel_task(&self, task_id: &TaskId, actor: &str) -> Result<Task, RuntimeError> {
@@ -287,381 +176,6 @@ impl RuntimeService {
 			self.metrics.inc_dead_letters();
 		}
 		Ok(disposition.terminal_state)
-	}
-
-	pub(super) fn process_execution_node(
-		&self,
-		task: &mut Task,
-		node: &TaskNode,
-		mode: RunMode,
-	) -> Result<Option<ResponseEnvelope>, RuntimeError> {
-		let memory_context = self
-			.task_runtime_memory_layers(&task.task_id)
-			.structured_sections();
-		let mut spec = build_agent_instance_for_node_with_history(task, node, &memory_context);
-		let capability_allowed = {
-			let mut state = self.lock_state()?;
-			let capability_tokens = issue_node_capability_tokens(
-				&mut state.capability_auth,
-				&spec.instance_id,
-				node,
-				self.runtime.resource_catalog(),
-				!matches!(mode, RunMode::CapabilityDenied),
-			);
-			let is_allowed =
-				verify_node_capabilities(&mut state.capability_auth, node, &capability_tokens);
-			spec.capabilities = flatten_granted_capabilities(&capability_tokens);
-			spec.capability_tokens = capability_tokens.clone();
-
-			if !is_allowed {
-				self.audit_sink
-					.record(
-						AuditRecord::new(
-							spec.instance_id.clone(),
-							"invoke",
-							node_resource_label(node),
-							"denied",
-						)
-						.with_correlation(AuditCorrelation {
-							trace_id: format!("trace-{}", task.request_id.0),
-							span_id: "capability-check".to_string(),
-							task_id: Some(task.task_id.0.clone()),
-							request_id: Some(task.request_id.0.clone()),
-						})
-						.with_attribute("node_id", node.node_id.0.clone()),
-					)
-					.map_err(|error| RuntimeError::new(error.to_string()))?;
-			}
-
-			is_allowed
-		};
-
-		if !capability_allowed {
-			self.metrics.inc_failures();
-			if matches!(mode, RunMode::RetryExhausted) {
-				task.attempts = self.orchestrator.config.max_attempts.saturating_sub(1);
-			}
-			let terminal_state = self.fail_task(task, "capability denied", ErrorClass::Security)?;
-			self.fail_experiment_run(task, "capability denied")?;
-			self.save_task(task.clone())?;
-
-			return Ok(Some(ResponseEnvelope {
-				request_id: task.request_id.clone(),
-				status: ResponseStatus::Failed,
-				message: failure_message("capability denied", terminal_state),
-				artifacts: Vec::new(),
-			}));
-		}
-
-		if task.state != TaskState::Executing {
-			self.record_transition(task, TaskState::Executing, "execute")?;
-		}
-		if matches!(mode, RunMode::TimeoutRecovery) {
-			self.record_transition_with_error_class(
-				task,
-				TaskState::TimeoutRecovering,
-				"execution timed out",
-				Some(ErrorClass::Timeout),
-			)?;
-			self.save_task(task.clone())?;
-
-			return Ok(Some(ResponseEnvelope {
-				request_id: task.request_id.clone(),
-				status: ResponseStatus::Failed,
-				message: "task timed out and entered recovery flow".to_string(),
-				artifacts: Vec::new(),
-			}));
-		}
-		let mut result = self.runtime.execute(&spec, node);
-		if let Some(limit_ms) = node_time_budget_limit_ms(&spec, node)
-			&& let Some(elapsed_ms) = result_elapsed_ms(&result)
-			&& elapsed_ms > limit_ms
-		{
-			result = node_budget_timeout_result(&spec, node, elapsed_ms, limit_ms);
-		}
-		let artifact = self.persist_result_artifact(&result)?;
-		if matches!(mode, RunMode::MissingEvidence | RunMode::RetryExhausted) {
-			result.evidence.clear();
-		} else {
-			result.evidence.push(EvidenceItem {
-				kind: "artifact_ref".to_string(),
-				value: artifact.uri.clone(),
-			});
-		}
-
-		self.save_result(result.clone())?;
-		self.attach_artifact_to_experiment(&task.task_id, artifact.artifact_id.clone())?;
-		self.metrics.inc_artifacts();
-
-		if matches!(result.status, ResultStatus::Error) {
-			if let Some(pending_execution_approval) = pending_execution_approval_fact(&result) {
-				return Ok(Some(self.freeze_pending_execution_approval(
-					task,
-					node,
-					pending_execution_approval,
-					&result.payload,
-					&result.schema_version,
-				)?));
-			}
-
-			self.metrics.inc_failures();
-			if matches!(mode, RunMode::RetryExhausted) {
-				task.attempts = self.orchestrator.config.max_attempts.saturating_sub(1);
-			}
-			let reason = result_message(&result);
-			let error_class = classify_result_error(&result);
-			if matches!(error_class, ErrorClass::Timeout) && node.retry_policy.retry_on_timeout {
-				self.record_transition_with_error_class(
-					task,
-					TaskState::TimeoutRecovering,
-					&reason,
-					Some(ErrorClass::Timeout),
-				)?;
-				self.save_task(task.clone())?;
-
-				return Ok(Some(ResponseEnvelope {
-					request_id: task.request_id.clone(),
-					status: ResponseStatus::Failed,
-					message: "task timed out and entered recovery flow".to_string(),
-					artifacts: vec![artifact.uri],
-				}));
-			}
-			let terminal_state = self.fail_task(task, &reason, error_class)?;
-			self.fail_experiment_run(task, &reason)?;
-			self.save_task(task.clone())?;
-
-			return Ok(Some(ResponseEnvelope {
-				request_id: task.request_id.clone(),
-				status: ResponseStatus::Failed,
-				message: failure_message(&reason, terminal_state),
-				artifacts: vec![artifact.uri],
-			}));
-		}
-
-		task.last_result = Some(result);
-		self.mark_node_completed(task, node);
-		self.append_node_event(
-			task,
-			node,
-			TaskEventKind::NodeCompleted,
-			"execution completed",
-		)?;
-		Ok(None)
-	}
-
-	pub(super) fn process_validation_node(
-		&self,
-		task: &mut Task,
-		node: &TaskNode,
-		mode: RunMode,
-	) -> Result<Option<ResponseEnvelope>, RuntimeError> {
-		let evidence_sets = self.collect_validation_evidence(task, node)?;
-		if evidence_sets.is_empty() {
-			return Err(RuntimeError::new(
-				"validation node reached before upstream execution results",
-			));
-		}
-		self.record_transition(task, TaskState::Validating, "validate")?;
-		let mut failures = Vec::new();
-		for evidence_set in &evidence_sets {
-			let report = self.validator.validate_evidence_set(evidence_set);
-			if !report.accepted {
-				failures.extend(report.failures);
-			}
-		}
-		if !failures.is_empty() {
-			self.metrics.inc_failures();
-			self.metrics.inc_validation_failures();
-			if matches!(mode, RunMode::RetryExhausted) {
-				task.attempts = self.orchestrator.config.max_attempts.saturating_sub(1);
-			}
-			let terminal_state =
-				self.fail_task(task, "validation failed", ErrorClass::Validation)?;
-			self.fail_experiment_run(task, &failures.join(", "))?;
-			self.save_task(task.clone())?;
-
-			return Ok(Some(ResponseEnvelope {
-				request_id: task.request_id.clone(),
-				status: ResponseStatus::Failed,
-				message: failure_message(&failures.join(", "), terminal_state),
-				artifacts: Vec::new(),
-			}));
-		}
-
-		for evidence_set in &evidence_sets {
-			self.audit_sink
-				.record(
-					AuditRecord::new(
-						evidence_set.result.producer.clone(),
-						"validate",
-						evidence_set.result.schema_version.clone(),
-						"accepted",
-					)
-					.with_correlation(AuditCorrelation {
-						trace_id: format!("trace-{}", task.request_id.0),
-						span_id: "validation".to_string(),
-						task_id: Some(task.task_id.0.clone()),
-						request_id: Some(task.request_id.0.clone()),
-					})
-					.with_attribute("node_id", evidence_set.result.node_id.0.clone()),
-				)
-				.map_err(|error| RuntimeError::new(error.to_string()))?;
-		}
-		let validated_node_ids = evidence_sets
-			.iter()
-			.map(|evidence_set| evidence_set.result.node_id.0.clone())
-			.collect::<Vec<_>>();
-		let validated_messages = evidence_sets
-			.iter()
-			.map(|evidence_set| result_message(&evidence_set.result))
-			.collect::<Vec<_>>();
-		self.save_result(ResultEnvelope {
-			task_id: task.task_id.clone(),
-			node_id: node.node_id.clone(),
-			producer: format!("validation:{}", node.node_id.0),
-			schema_version: "result.v1".to_string(),
-			status: ResultStatus::Ok,
-			payload: serde_json::json!({
-				"message": format!("validated {} result(s)", validated_node_ids.len()),
-				"node_id": node.node_id.0,
-				"validated_node_ids": validated_node_ids,
-				"validated_messages": validated_messages,
-			})
-			.to_string(),
-			evidence: vec![EvidenceItem {
-				kind: "validation".to_string(),
-				value: format!("accepted={}", evidence_sets.len()),
-			}],
-			confidence: 1.0,
-		})?;
-		self.mark_node_completed(task, node);
-		self.append_node_event(
-			task,
-			node,
-			TaskEventKind::NodeCompleted,
-			"validation completed",
-		)?;
-
-		Ok(None)
-	}
-
-	pub(super) fn process_aggregation_node(
-		&self,
-		task: &mut Task,
-		node: &TaskNode,
-	) -> Result<(), RuntimeError> {
-		let result_set = self.collect_node_result_set(task, node)?;
-		if result_set.results.is_empty() {
-			return Err(RuntimeError::new(format!(
-				"aggregation node {} has no upstream results",
-				node.node_id.0
-			)));
-		}
-		if task.state != TaskState::Aggregating {
-			self.record_transition(task, TaskState::Aggregating, "aggregate")?;
-		}
-		let representative_result =
-			result_set.results.first().cloned().ok_or_else(|| {
-				RuntimeError::new("aggregation node has no representative result")
-			})?;
-		let selected_result_node_ids = result_set
-			.results
-			.iter()
-			.map(|result| result.node_id.0.clone())
-			.collect::<Vec<_>>();
-		let aggregated_confidence = result_set
-			.results
-			.iter()
-			.map(|result| result.confidence)
-			.fold(0.0_f32, f32::max);
-		let mut aggregation_result = ResultEnvelope {
-			task_id: task.task_id.clone(),
-			node_id: node.node_id.clone(),
-			producer: format!("aggregation:{}", node.node_id.0),
-			schema_version: "result.v1".to_string(),
-			status: ResultStatus::Ok,
-			payload: serde_json::json!({
-				"message": result_message(&representative_result),
-				"node_id": node.node_id.0,
-				"source_node_ids": result_set.source_node_ids.iter().map(|node_id| node_id.0.clone()).collect::<Vec<_>>(),
-				"selected_result_node_ids": selected_result_node_ids,
-				"aggregation_mode": format!("{:?}", result_set.aggregation_mode),
-				"result_count": result_set.results.len(),
-			})
-			.to_string(),
-			evidence: vec![EvidenceItem {
-				kind: "aggregation".to_string(),
-				value: format!("sources={}", result_set.source_node_ids.len()),
-			}],
-			confidence: aggregated_confidence,
-		};
-		let artifact = self.persist_result_artifact(&aggregation_result)?;
-		aggregation_result.evidence.push(EvidenceItem {
-			kind: "artifact_ref".to_string(),
-			value: artifact.uri.clone(),
-		});
-		self.save_result(aggregation_result.clone())?;
-		self.attach_artifact_to_experiment(&task.task_id, artifact.artifact_id.clone())?;
-		self.metrics.inc_artifacts();
-		task.last_result = Some(aggregation_result);
-		self.mark_node_completed(task, node);
-		self.append_node_event(
-			task,
-			node,
-			TaskEventKind::NodeCompleted,
-			"aggregation completed",
-		)?;
-		Ok(())
-	}
-
-	fn finalize_task(
-		&self,
-		task: &mut Task,
-		request_id: roku_common_types::RequestId,
-	) -> Result<ResponseEnvelope, RuntimeError> {
-		let results = self.list_results(&task.task_id)?;
-		let completion = assess_graph_completion(task, &results)?;
-		if !completion.completed {
-			return Err(RuntimeError::new(completion.reason));
-		}
-		if let Some(final_node_id) = &completion.final_node_id {
-			task.last_result = results
-				.iter()
-				.find(|result| result.node_id == *final_node_id)
-				.cloned();
-		}
-		if task.state != TaskState::Aggregating {
-			self.record_transition(task, TaskState::Aggregating, "aggregate")?;
-		}
-		self.record_transition(task, TaskState::Succeeded, "done")?;
-		self.complete_experiment_run(task, results.len())?;
-		let artifacts = self
-			.list_artifacts(&task.task_id)?
-			.into_iter()
-			.map(|artifact| artifact.uri)
-			.collect();
-		self.save_task(task.clone())?;
-		self.clear_runtime_memory_layers(&task.task_id);
-
-		Ok(ResponseEnvelope {
-			request_id,
-			status: ResponseStatus::Succeeded,
-			message: completion
-				.final_message
-				.unwrap_or_else(|| "task succeeded".to_string()),
-			artifacts,
-		})
-	}
-
-	fn normalize_task_for_resume(
-		&self,
-		task: &mut Task,
-		target_state: TaskState,
-	) -> Result<(), RuntimeError> {
-		for next_state in resume_transition_path(task.state, target_state)? {
-			self.record_transition(task, next_state, "resume")?;
-		}
-		Ok(())
 	}
 
 	fn plan_compensation_records(&self, task: &Task) -> Vec<CompensationRecord> {
@@ -786,7 +300,7 @@ impl RuntimeService {
 			return Ok(None);
 		};
 
-		let node = validated_execution_resume_node(task, ticket, &pending_execution)?;
+		let node = validated_execution_resume_node(ticket, &pending_execution)?;
 		if node.kind != TaskNodeKind::Execution {
 			return Err(RuntimeError::new(
 				"execution approval ticket must target an execution node",
@@ -954,233 +468,41 @@ impl RuntimeService {
 			});
 		}
 
-		if task.graph.is_none() {
-			let message = result_message(&result);
-			let response = self.complete_direct_runtime_path(
-				task,
-				&resume.node,
-				result,
-				message,
-				artifact,
-				"execution resumed from approved frozen payload",
-			)?;
-			self.clear_runtime_memory_layers(&task.task_id);
-			return Ok(response);
+		if task.graph.is_some() {
+			return Err(legacy_graph_runtime_deauthorized_error(
+				&task.task_id,
+				"approval resume",
+			));
 		}
 
-		task.last_result = Some(result);
-		self.mark_node_completed(task, &resume.node);
-		self.append_node_event(
+		let message = result_message(&result);
+		let response = self.complete_direct_runtime_path(
 			task,
 			&resume.node,
-			TaskEventKind::NodeCompleted,
+			result,
+			message,
+			artifact,
 			"execution resumed from approved frozen payload",
 		)?;
-		self.process_task(task, RunMode::Normal)
+		self.clear_runtime_memory_layers(&task.task_id);
+		Ok(response)
 	}
 }
 
-fn classify_resume_state(ready_nodes: &[TaskNode]) -> TaskState {
-	if ready_nodes
-		.iter()
-		.any(|node| matches!(node.kind, TaskNodeKind::Aggregation))
-	{
-		TaskState::Validating
-	} else {
-		TaskState::Executing
-	}
-}
-
-fn issue_node_capability_tokens(
-	capability_auth: &mut roku_capability_auth::CapabilityAuthority,
-	subject: &str,
-	node: &TaskNode,
-	catalog: &roku_plugin_catalog::ResourceCatalog,
-	allow_invoke: bool,
-) -> Vec<CapabilityToken> {
-	let mut tokens = Vec::new();
-	if node.resources.is_empty() && node.capabilities.is_empty() {
-		return tokens;
-	}
-
-	let actions = if allow_invoke {
-		vec!["invoke".to_string()]
-	} else {
-		vec!["read".to_string()]
-	};
-
-	if node.resources.is_empty() {
-		tokens.push(
-			capability_auth.issue(roku_capability_auth::CapabilityRequest {
-				subject: subject.to_string(),
-				resource: roku_common_types::ResourceSelector::tool("internal.execution"),
-				actions,
-				granted_capabilities: if allow_invoke {
-					node.capabilities.clone()
-				} else {
-					Vec::new()
-				},
-				expires_at_unix: 999_999,
-			}),
-		);
-		return tokens;
-	}
-
-	for resource in &node.resources {
-		let granted_capabilities = catalog
-			.descriptor(resource)
-			.map(|descriptor| descriptor.required_capabilities.clone())
-			.unwrap_or_default();
-		tokens.push(
-			capability_auth.issue(roku_capability_auth::CapabilityRequest {
-				subject: subject.to_string(),
-				resource: resource.clone(),
-				actions: actions.clone(),
-				granted_capabilities: if allow_invoke {
-					granted_capabilities
-				} else {
-					Vec::new()
-				},
-				expires_at_unix: 999_999,
-			}),
-		);
-	}
-
-	tokens
-}
-
-fn verify_node_capabilities(
-	capability_auth: &mut roku_capability_auth::CapabilityAuthority,
-	node: &TaskNode,
-	tokens: &[CapabilityToken],
-) -> bool {
-	node.capabilities.iter().all(|capability| {
-		tokens
-			.iter()
-			.any(|token| capability_auth.verify(token, "invoke", Some(capability), 100))
-	})
-}
-
-fn flatten_granted_capabilities(tokens: &[CapabilityToken]) -> Vec<String> {
-	let mut capabilities = Vec::new();
-	for token in tokens {
-		for capability in &token.granted_capabilities {
-			if !capabilities.contains(capability) {
-				capabilities.push(capability.clone());
-			}
-		}
-	}
-	capabilities
-}
-
-fn node_resource_label(node: &TaskNode) -> String {
-	if node.resources.is_empty() {
-		"internal.execution".to_string()
-	} else {
-		node.resources
-			.iter()
-			.map(|resource| resource.display_key())
-			.collect::<Vec<_>>()
-			.join(",")
-	}
-}
-
-fn resume_transition_path(
-	current_state: TaskState,
-	target_state: TaskState,
-) -> Result<Vec<TaskState>, RuntimeError> {
-	use TaskState::{
-		Aggregating, Delegating, Executing, Failed, GraphBuilding, Planning, TimeoutRecovering,
-		Validating,
-	};
-
-	let path = match (current_state, target_state) {
-		(state, target) if state == target => Vec::new(),
-		(Failed, Executing) => vec![Planning, GraphBuilding, Delegating, Executing],
-		(Failed, Validating) => vec![Planning, GraphBuilding, Delegating, Executing, Validating],
-		(Planning, Executing) => vec![GraphBuilding, Delegating, Executing],
-		(Planning, Validating) => vec![GraphBuilding, Delegating, Executing, Validating],
-		(GraphBuilding, Executing) => vec![Delegating, Executing],
-		(GraphBuilding, Validating) => vec![Delegating, Executing, Validating],
-		(Delegating, Executing) => vec![Executing],
-		(Delegating, Validating) => vec![Executing, Validating],
-		(Executing, Validating) => vec![Validating],
-		(Validating, Executing) => vec![Executing],
-		(TimeoutRecovering, Executing) => vec![Planning, GraphBuilding, Delegating, Executing],
-		(TimeoutRecovering, Validating) => {
-			vec![Planning, GraphBuilding, Delegating, Executing, Validating]
-		}
-		(Aggregating, Aggregating) => Vec::new(),
-		_ => {
-			return Err(RuntimeError::new(format!(
-				"task cannot be resumed from state {:?} toward {:?}",
-				current_state, target_state
-			)));
-		}
-	};
-
-	Ok(path)
+pub(super) fn legacy_graph_runtime_deauthorized_error(
+	task_id: &TaskId,
+	operation: &str,
+) -> RuntimeError {
+	RuntimeError::new(format!(
+		"legacy graph-backed {operation} is de-authorized for task {}; rerun the request through the direct runtime path",
+		task_id.0
+	))
 }
 
 fn compensation_note(action: CompensationAction) -> &'static str {
 	match action {
 		CompensationAction::Noop => "noop compensation recorded",
 		CompensationAction::AuditOnly => "audit-only compensation recorded",
-	}
-}
-
-fn node_time_budget_limit_ms(
-	spec: &roku_common_types::AgentInstanceSpec,
-	node: &TaskNode,
-) -> Option<u64> {
-	let mut limit_ms = spec.policy_bindings.time_budget_ms;
-	if node.budget_snapshot.time_budget_ms > 0 {
-		limit_ms = limit_ms.min(node.budget_snapshot.time_budget_ms);
-	}
-	if node.deadline_ms > 0 {
-		limit_ms = limit_ms.min(node.deadline_ms);
-	}
-	(limit_ms > 0).then_some(limit_ms)
-}
-
-fn result_elapsed_ms(result: &ResultEnvelope) -> Option<u64> {
-	let payload = serde_json::from_str::<serde_json::Value>(&result.payload).ok()?;
-	payload.get("elapsed_ms")?.as_u64()
-}
-
-fn node_budget_timeout_result(
-	spec: &roku_common_types::AgentInstanceSpec,
-	node: &TaskNode,
-	elapsed_ms: u64,
-	limit_ms: u64,
-) -> ResultEnvelope {
-	ResultEnvelope {
-		task_id: spec.context.task_id.clone(),
-		node_id: node.node_id.clone(),
-		producer: spec.instance_id.clone(),
-		schema_version: "result.v1".to_string(),
-		status: ResultStatus::Error,
-		payload: serde_json::json!({
-			"error_code": "node_deadline_exceeded",
-			"message": format!(
-				"node exceeded time budget: elapsed {elapsed_ms}ms > limit {limit_ms}ms"
-			),
-			"node_id": node.node_id.0,
-			"elapsed_ms": elapsed_ms,
-			"time_budget_ms": limit_ms,
-		})
-		.to_string(),
-		evidence: vec![
-			EvidenceItem {
-				kind: "policy".to_string(),
-				value: "deadline-exceeded".to_string(),
-			},
-			EvidenceItem {
-				kind: "elapsed_ms".to_string(),
-				value: elapsed_ms.to_string(),
-			},
-		],
-		confidence: 0.0,
 	}
 }
 
@@ -1209,21 +531,9 @@ pub(super) fn pending_execution_approval_fact(
 }
 
 fn validated_execution_resume_node(
-	task: &Task,
 	ticket: &ApprovalTicket,
 	pending_execution: &PendingExecutionApproval,
 ) -> Result<TaskNode, RuntimeError> {
-	if let Some(graph) = task.graph.as_ref() {
-		return graph
-			.nodes
-			.iter()
-			.find(|node| node.node_id == ticket.node_id)
-			.cloned()
-			.ok_or_else(|| {
-				RuntimeError::new("execution approval ticket points to a missing graph node")
-			});
-	}
-
 	Ok(TaskNode {
 		node_id: ticket.node_id.clone(),
 		kind: TaskNodeKind::Execution,
@@ -1614,32 +924,6 @@ fn approval_reason_text(decision: &PolicyDecision) -> &'static str {
 		PolicyReasonCode::DeniedByUncanonicalizableInput => {
 			"the runtime could not freeze a canonical execution payload"
 		}
-	}
-}
-
-fn classify_result_error(result: &ResultEnvelope) -> ErrorClass {
-	let payload = serde_json::from_str::<serde_json::Value>(&result.payload).ok();
-	let error_code = payload
-		.as_ref()
-		.and_then(|value| value.get("error_code"))
-		.and_then(serde_json::Value::as_str);
-
-	if result
-		.evidence
-		.iter()
-		.any(|item| item.kind == "policy" && item.value == "budget-exhausted")
-		|| matches!(error_code, Some("policy_bindings_rejected"))
-	{
-		ErrorClass::BudgetExhausted
-	} else if result
-		.evidence
-		.iter()
-		.any(|item| item.kind == "tool_error" && item.value == "timeout")
-		|| matches!(error_code, Some("timeout" | "node_deadline_exceeded"))
-	{
-		ErrorClass::Timeout
-	} else {
-		ErrorClass::Dependency
 	}
 }
 

@@ -13,21 +13,17 @@
 // limitations under the License.
 
 use roku_common_types::{
-	AggregationMode, ApprovalStatus, ApprovalTicket, Artifact, ArtifactId, ErrorClass,
-	ExperimentMetric, ExperimentRun, JoinPolicy, NodeId, NodeResultSet, RecoveryEligibility,
-	ReplayConsistencyStatus, ResultEnvelope, ResultStatus, RuntimeError, Task, TaskEvent,
-	TaskEventKind, TaskId, TaskNode, TaskNodeKind, TaskReplayCursor, TaskReplayReport,
-	TaskReplaySnapshot, TaskState, ValidationEvidenceSet,
+	ApprovalStatus, ApprovalTicket, Artifact, ArtifactId, ErrorClass, ExperimentMetric,
+	ExperimentRun, NodeId, RecoveryEligibility, ReplayConsistencyStatus, ResultEnvelope,
+	ResultStatus, ResumeCandidate, RuntimeError, Task, TaskEvent, TaskEventKind, TaskId, TaskNode,
+	TaskNodeKind, TaskReplayCursor, TaskReplayReport, TaskReplaySnapshot, TaskState,
 };
-use roku_memory::{DispatchClaim, DispatchEnvelope, DispatchLease, RetryClaim};
 use roku_orchestrator::{
-	build_idempotency_key, recovery_eligibility_for_state, replay_consistency_status,
-	replay_consistency_status_from, replayed_state, replayed_state_from,
+	replay_consistency_status, replay_consistency_status_from, replayed_state, replayed_state_from,
 };
 use std::collections::{HashMap, HashSet};
 
 use crate::RuntimeService;
-use crate::legacy_graph::LegacyTaskGraphScheduler;
 
 impl RuntimeService {
 	pub fn get_task(&self, task_id: &TaskId) -> Result<Option<Task>, RuntimeError> {
@@ -300,176 +296,6 @@ impl RuntimeService {
 		Ok(())
 	}
 
-	pub(super) fn enqueue_ready_nodes(
-		&self,
-		task: &Task,
-		ready_nodes: &[TaskNode],
-	) -> Result<(), RuntimeError> {
-		let mut state = self.lock_state()?;
-		for node in ready_nodes {
-			state
-				.dispatch_queue
-				.publish(DispatchEnvelope {
-					entry_id: build_idempotency_key(
-						&task.task_id,
-						&node.node_id.0,
-						task.attempts.saturating_add(1),
-					),
-					task_id: task.task_id.clone(),
-					node_id: node.node_id.clone(),
-					attempt: task.attempts.saturating_add(1),
-					payload: node.description.clone(),
-				})
-				.map_err(|error| RuntimeError::new(error.to_string()))?;
-		}
-		Ok(())
-	}
-
-	pub(super) fn claim_dispatched_node(
-		&self,
-		task_id: &TaskId,
-	) -> Result<Option<DispatchClaim>, RuntimeError> {
-		let mut state = self.lock_state()?;
-		let consumer_id = format!("runtime-{}", task_id.0);
-		let queue_depth = state.dispatch_queue.backpressure();
-		let max_attempts = queue_depth.queued.saturating_add(queue_depth.leased).max(1);
-		let mut deferred_claims = Vec::new();
-		let mut matched_claim = None;
-
-		for _ in 0..max_attempts {
-			let Some(claim) = state
-				.dispatch_queue
-				.claim(&consumer_id, 0)
-				.map_err(|error| RuntimeError::new(error.to_string()))?
-			else {
-				break;
-			};
-
-			if claim.envelope.task_id == *task_id {
-				matched_claim = Some(claim);
-				break;
-			}
-
-			deferred_claims.push(claim);
-		}
-
-		for claim in deferred_claims {
-			state
-				.dispatch_queue
-				.nack(
-					&claim.lease,
-					RetryClaim {
-						next_attempt: claim.envelope.attempt,
-						reason: format!(
-							"claimed while processing a different task: requested={} claimed={}",
-							task_id.0, claim.envelope.task_id.0
-						),
-					},
-				)
-				.map_err(|error| RuntimeError::new(error.to_string()))?;
-		}
-
-		Ok(matched_claim)
-	}
-
-	pub(super) fn ack_dispatched_node(&self, lease: &DispatchLease) -> Result<(), RuntimeError> {
-		let mut state = self.lock_state()?;
-		state
-			.dispatch_queue
-			.ack(lease)
-			.map_err(|error| RuntimeError::new(error.to_string()))
-	}
-
-	pub(super) fn collect_node_result_set(
-		&self,
-		task: &Task,
-		node: &TaskNode,
-	) -> Result<NodeResultSet, RuntimeError> {
-		let graph = task
-			.graph
-			.as_ref()
-			.ok_or_else(|| RuntimeError::new("task graph is missing"))?;
-		let branch_sources = graph
-			.edges
-			.iter()
-			.filter(|edge| edge.to == node.node_id)
-			.map(|edge| edge.from.clone())
-			.collect::<Vec<_>>();
-		let mut source_node_ids = Vec::new();
-		let mut missing_source_nodes = Vec::new();
-		let mut results = Vec::new();
-
-		for branch_root in &branch_sources {
-			let branch_results = self.resolve_branch_results(task, branch_root)?;
-			if branch_results.is_empty() {
-				missing_source_nodes.push(branch_root.clone());
-				continue;
-			}
-
-			source_node_ids.push(branch_root.clone());
-			results.extend(branch_results);
-		}
-
-		let results = apply_aggregation_mode(results, node.aggregation_mode);
-		if !join_policy_satisfied(
-			node.join_policy,
-			branch_sources.len(),
-			source_node_ids.len(),
-		) {
-			return Err(RuntimeError::new(format!(
-				"join policy {:?} is not satisfied for node {}",
-				node.join_policy, node.node_id.0
-			)));
-		}
-
-		Ok(NodeResultSet {
-			node_id: node.node_id.clone(),
-			join_policy: node.join_policy,
-			aggregation_mode: node.aggregation_mode,
-			source_node_ids,
-			missing_source_nodes,
-			results,
-		})
-	}
-
-	pub(super) fn load_artifacts_for_result(
-		&self,
-		result: &ResultEnvelope,
-	) -> Result<Vec<Artifact>, RuntimeError> {
-		let state = self.lock_state()?;
-		let mut artifacts = Vec::new();
-
-		for evidence in result
-			.evidence
-			.iter()
-			.filter(|item| item.kind == "artifact_ref")
-		{
-			if let Some(artifact) = state
-				.artifact_store
-				.load_by_uri(&evidence.value)
-				.map_err(|error| RuntimeError::new(error.to_string()))?
-			{
-				artifacts.push(artifact);
-			}
-		}
-
-		Ok(artifacts)
-	}
-
-	pub(super) fn collect_validation_evidence(
-		&self,
-		task: &Task,
-		node: &TaskNode,
-	) -> Result<Vec<ValidationEvidenceSet>, RuntimeError> {
-		let result_set = self.collect_node_result_set(task, node)?;
-		let mut evidence_sets = Vec::with_capacity(result_set.results.len());
-		for result in result_set.results {
-			let artifacts = self.load_artifacts_for_result(&result)?;
-			evidence_sets.push(ValidationEvidenceSet { result, artifacts });
-		}
-		Ok(evidence_sets)
-	}
-
 	pub(super) fn mark_node_completed(&self, task: &mut Task, node: &TaskNode) {
 		self.mark_node_completed_by_id(task, &node.node_id);
 	}
@@ -527,38 +353,16 @@ impl RuntimeService {
 			ReplayConsistencyStatus::SnapshotMismatch
 		);
 
-		let (resume_candidates, ready_nodes, is_complete) =
-			if let Some(graph) = &reconstructed_task.graph {
-				let scheduler = LegacyTaskGraphScheduler;
-				let ready_nodes = scheduler
-					.replay_ready_nodes(graph, &reconstructed_task.completed_nodes)
-					.map_err(|error| RuntimeError::new(error.to_string()))?;
-				let resume_candidates = scheduler
-					.resume_candidates(graph, &reconstructed_task.completed_nodes)
-					.map_err(|error| RuntimeError::new(error.to_string()))?;
-				let is_complete = scheduler
-					.is_complete(graph, &reconstructed_task.completed_nodes)
-					.map_err(|error| RuntimeError::new(error.to_string()))?;
-				(resume_candidates, ready_nodes, is_complete)
-			} else {
-				(Vec::new(), Vec::new(), false)
-			};
+		let graph_backed_compatibility_shell = reconstructed_task.graph.is_some();
+		let resume_candidates: Vec<ResumeCandidate> = Vec::new();
 
-		let mut recovery_eligibility = recovery_eligibility_for_state(task.state);
-		if matches!(recovery_eligibility, RecoveryEligibility::ResumeReady) {
-			recovery_eligibility = if is_complete {
-				RecoveryEligibility::FinalizeReady
-			} else if resume_candidates.is_empty() && ready_nodes.is_empty() {
-				RecoveryEligibility::Blocked
-			} else if resume_candidates
-				.iter()
-				.any(|candidate| candidate.eligibility == RecoveryEligibility::ResumeReady)
-			{
-				RecoveryEligibility::ResumeReady
-			} else {
-				RecoveryEligibility::RequiresManualResume
-			};
-		}
+		let recovery_eligibility = if graph_backed_compatibility_shell {
+			RecoveryEligibility::NotRecoverable
+		} else if task.state == TaskState::WaitingApproval {
+			RecoveryEligibility::PendingApproval
+		} else {
+			RecoveryEligibility::NotRecoverable
+		};
 
 		Ok(TaskRecoveryAnalysis {
 			reconstructed_task,
@@ -571,8 +375,6 @@ impl RuntimeService {
 			consistency_status,
 			recovery_eligibility,
 			resume_candidates,
-			ready_nodes,
-			is_complete,
 		})
 	}
 
@@ -717,79 +519,6 @@ impl RuntimeService {
 			.load_replay_snapshot(task_id)
 			.map_err(|error| RuntimeError::new(error.to_string()))
 	}
-
-	fn resolve_branch_results(
-		&self,
-		task: &Task,
-		node_id: &NodeId,
-	) -> Result<Vec<ResultEnvelope>, RuntimeError> {
-		let graph = task
-			.graph
-			.as_ref()
-			.ok_or_else(|| RuntimeError::new("task graph is missing"))?;
-		let state = self.lock_state()?;
-
-		let node_kind = graph
-			.nodes
-			.iter()
-			.find(|node| node.node_id == *node_id)
-			.map(|node| node.kind)
-			.ok_or_else(|| RuntimeError::new(format!("unknown node in graph: {}", node_id.0)))?;
-
-		if let Some(result) = state
-			.result_repo
-			.load_result(&task.task_id, node_id)
-			.map_err(|error| RuntimeError::new(error.to_string()))?
-			&& !matches!(
-				node_kind,
-				TaskNodeKind::Approval
-					| TaskNodeKind::Validation
-					| TaskNodeKind::Retry
-					| TaskNodeKind::DeadLetter
-			) {
-			return Ok(vec![result]);
-		}
-
-		drop(state);
-
-		let mut results = Vec::new();
-		for parent in graph
-			.edges
-			.iter()
-			.filter(|edge| edge.to == *node_id)
-			.map(|edge| edge.from.clone())
-		{
-			results.extend(self.resolve_branch_results(task, &parent)?);
-		}
-		Ok(results)
-	}
-}
-
-fn join_policy_satisfied(policy: JoinPolicy, branch_count: usize, resolved_count: usize) -> bool {
-	match policy {
-		JoinPolicy::AllParents => resolved_count == branch_count,
-		JoinPolicy::AnyParent => resolved_count >= 1,
-		JoinPolicy::Quorum(required) => resolved_count >= usize::from(required),
-	}
-}
-
-fn apply_aggregation_mode(
-	mut results: Vec<ResultEnvelope>,
-	mode: AggregationMode,
-) -> Vec<ResultEnvelope> {
-	match mode {
-		AggregationMode::CollectAll => results,
-		AggregationMode::HighestConfidence => {
-			if let Some(best) = results
-				.drain(..)
-				.max_by(|left, right| left.confidence.total_cmp(&right.confidence))
-			{
-				vec![best]
-			} else {
-				Vec::new()
-			}
-		}
-	}
 }
 
 fn build_replay_report(task: Task, analysis: TaskRecoveryAnalysis) -> TaskReplayReport {
@@ -826,7 +555,5 @@ pub(super) struct TaskRecoveryAnalysis {
 	pub snapshot_matches_replay: bool,
 	pub consistency_status: ReplayConsistencyStatus,
 	pub recovery_eligibility: RecoveryEligibility,
-	pub resume_candidates: Vec<roku_common_types::ResumeCandidate>,
-	pub ready_nodes: Vec<TaskNode>,
-	pub is_complete: bool,
+	pub resume_candidates: Vec<ResumeCandidate>,
 }

@@ -481,11 +481,28 @@ pub struct AgentContext {
 	/// Legacy short-term continuity carrier; does not transport long-term recall hits.
 	pub conversation_history: Vec<ConversationTurn>,
 	#[serde(default)]
-	/// Provider-neutral runtime memory context (rendered from ContextBundle hits).
+	/// Compatibility-only rendered memory blob.
+	///
+	/// `runtime_memory_sections` is the primary structured authority for runtime memory. This
+	/// field exists for legacy consumers and must be interpreted as a derived projection when
+	/// structured sections are present.
 	pub memory_context: String,
 	#[serde(default)]
-	/// Structured runtime-owned memory sections kept alongside the legacy rendered text.
+	/// Primary structured runtime-owned memory sections.
+	///
+	/// When this field is non-empty, legacy rendered memory text should be derived from these
+	/// sections instead of treated as an independent source of truth.
 	pub runtime_memory_sections: RuntimeMemorySections,
+}
+
+impl AgentContext {
+	pub fn compatibility_memory_context(&self) -> String {
+		if self.runtime_memory_sections.is_empty() {
+			return self.memory_context.clone();
+		}
+
+		self.runtime_memory_sections.named_sections_text()
+	}
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -2309,6 +2309,38 @@ mod tests {
 	}
 
 	#[test]
+	fn user_visible_prompt_renders_legacy_memory_context_when_structured_sections_are_absent() {
+		let request = ToolInvocationRequest {
+			invocation_key: "invoke-legacy-memory".to_string(),
+			input: json!({
+				"task_id": "task-1",
+				"node_id": "node-1",
+				"goal": "继续当前 memory 调研",
+				"summary": "Execute primary action",
+				"conversation_history": "user: 继续",
+				"memory_context": "legacy fallback blob",
+				"granted_capabilities": ["inventory.read"],
+				"budget_tokens": 2048_u64,
+				"time_budget_ms": 45_000_u64
+			}),
+			attempt: 1,
+			sandbox_profile: SandboxProfile::NoIsolation,
+			attachments: Vec::new(),
+			allowed_read_roots: Vec::new(),
+			allowed_write_roots: Vec::new(),
+		};
+
+		let input = request_input(&request).expect("tool input should parse");
+		let prompt =
+			user_visible_prompt(&input, "generic-worker", "invoke-legacy-memory", None, None);
+
+		assert!(prompt.contains("Relevant long-term memory (Roku-owned):\nlegacy fallback blob"));
+		assert!(!prompt.contains("Short-term continuity (Roku-owned):"));
+		assert!(!prompt.contains("Long-term recall (Roku-owned):"));
+		assert!(!prompt.contains("Working memory (Roku-owned):"));
+	}
+
+	#[test]
 	fn sanitize_final_reply_collapses_prompt_leakage() {
 		let output = r#"First, the user's request is: "今天周几？"
 
