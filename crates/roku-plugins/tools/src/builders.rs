@@ -858,34 +858,26 @@ fn user_visible_prompt(
 }
 
 fn runtime_memory_section(input: &ToolInput<'_>) -> String {
-	if !input.runtime_memory_sections.is_empty() {
-		let mut sections = Vec::new();
-		append_runtime_memory_section(
-			&mut sections,
-			"Short-term continuity (Roku-owned)",
-			&input.runtime_memory_sections.short_term_continuity,
-		);
-		append_runtime_memory_section(
-			&mut sections,
-			"Long-term recall (Roku-owned)",
-			&input.runtime_memory_sections.long_term_recall,
-		);
-		append_runtime_memory_section(
-			&mut sections,
-			"Working memory (Roku-owned)",
-			&input.runtime_memory_sections.working_memory,
-		);
-		return sections.join("");
+	if input.runtime_memory_sections.is_empty() {
+		return String::new();
 	}
-
-	if input.memory_context.trim().is_empty() {
-		String::new()
-	} else {
-		format!(
-			"\n\nRelevant long-term memory (Roku-owned):\n{}",
-			input.memory_context
-		)
-	}
+	let mut sections = Vec::new();
+	append_runtime_memory_section(
+		&mut sections,
+		"Short-term continuity (Roku-owned)",
+		&input.runtime_memory_sections.short_term_continuity,
+	);
+	append_runtime_memory_section(
+		&mut sections,
+		"Long-term recall (Roku-owned)",
+		&input.runtime_memory_sections.long_term_recall,
+	);
+	append_runtime_memory_section(
+		&mut sections,
+		"Working memory (Roku-owned)",
+		&input.runtime_memory_sections.working_memory,
+	);
+	sections.join("")
 }
 
 fn append_runtime_memory_section(sections: &mut Vec<String>, title: &str, content: &str) {
@@ -1859,7 +1851,6 @@ struct ToolInput<'a> {
 	goal: &'a str,
 	summary: &'a str,
 	conversation_history: &'a str,
-	memory_context: &'a str,
 	runtime_memory_sections: RuntimeMemorySections,
 	granted_capabilities: Vec<String>,
 	resource_selectors: Vec<String>,
@@ -1891,10 +1882,6 @@ fn request_input(request: &ToolInvocationRequest) -> Result<ToolInput<'_>, ToolF
 			.unwrap_or_default(),
 		conversation_history: input
 			.get("conversation_history")
-			.and_then(Value::as_str)
-			.unwrap_or_default(),
-		memory_context: input
-			.get("memory_context")
 			.and_then(Value::as_str)
 			.unwrap_or_default(),
 		runtime_memory_sections: input
@@ -1957,7 +1944,6 @@ fn tool_descriptor(
 				"goal".to_string(),
 				"summary".to_string(),
 				"conversation_history".to_string(),
-				"memory_context".to_string(),
 				"budget_tokens".to_string(),
 				"time_budget_ms".to_string(),
 			],
@@ -2053,7 +2039,6 @@ fn configured_required_fields(tool: &ConfiguredTool) -> Vec<String> {
 		"goal".to_string(),
 		"summary".to_string(),
 		"conversation_history".to_string(),
-		"memory_context".to_string(),
 		"budget_tokens".to_string(),
 		"time_budget_ms".to_string(),
 	];
@@ -2241,7 +2226,9 @@ mod tests {
 			"goal": "今天是星期几？",
 			"summary": "Execute primary action",
 			"conversation_history": "user: 你好",
-			"memory_context": "memory hit summary",
+			"runtime_memory_sections": {
+				"long_term_recall": "memory hit summary"
+			},
 			"granted_capabilities": ["inventory.read"],
 			"budget_tokens": 2048_u64,
 				"time_budget_ms": 45_000_u64
@@ -2266,7 +2253,7 @@ mod tests {
 		assert!(prompt.contains("Never narrate your reasoning"));
 		assert!(prompt.contains("use the trusted runtime context above"));
 		assert!(prompt.contains("Conversation history"));
-		assert!(prompt.contains("Relevant long-term memory"));
+		assert!(prompt.contains("Long-term recall (Roku-owned):"));
 		assert!(prompt.contains("Authoritative local inventory JSON"));
 		assert!(prompt.contains("Execution authority"));
 		assert!(prompt.contains("side_effects_allowed"));
@@ -2282,7 +2269,6 @@ mod tests {
 				"goal": "继续当前 memory 调研",
 				"summary": "Execute primary action",
 				"conversation_history": "user: 继续",
-				"memory_context": "legacy fallback blob",
 				"runtime_memory_sections": {
 					"short_term_continuity": "- user: 继续",
 					"long_term_recall": "- memory-record-1 | UserPreference | Rust preference",
@@ -2306,38 +2292,6 @@ mod tests {
 		assert!(prompt.contains("Long-term recall (Roku-owned):"));
 		assert!(prompt.contains("Working memory (Roku-owned):"));
 		assert!(!prompt.contains("Relevant long-term memory (Roku-owned):\nlegacy fallback blob"));
-	}
-
-	#[test]
-	fn user_visible_prompt_renders_legacy_memory_context_when_structured_sections_are_absent() {
-		let request = ToolInvocationRequest {
-			invocation_key: "invoke-legacy-memory".to_string(),
-			input: json!({
-				"task_id": "task-1",
-				"node_id": "node-1",
-				"goal": "继续当前 memory 调研",
-				"summary": "Execute primary action",
-				"conversation_history": "user: 继续",
-				"memory_context": "legacy fallback blob",
-				"granted_capabilities": ["inventory.read"],
-				"budget_tokens": 2048_u64,
-				"time_budget_ms": 45_000_u64
-			}),
-			attempt: 1,
-			sandbox_profile: SandboxProfile::NoIsolation,
-			attachments: Vec::new(),
-			allowed_read_roots: Vec::new(),
-			allowed_write_roots: Vec::new(),
-		};
-
-		let input = request_input(&request).expect("tool input should parse");
-		let prompt =
-			user_visible_prompt(&input, "generic-worker", "invoke-legacy-memory", None, None);
-
-		assert!(prompt.contains("Relevant long-term memory (Roku-owned):\nlegacy fallback blob"));
-		assert!(!prompt.contains("Short-term continuity (Roku-owned):"));
-		assert!(!prompt.contains("Long-term recall (Roku-owned):"));
-		assert!(!prompt.contains("Working memory (Roku-owned):"));
 	}
 
 	#[test]
@@ -2850,7 +2804,6 @@ print("ok")
 			goal: "Use skill-creator to create a Python skill and tell me where it was created.",
 			summary: "Execute installed skill `skill-creator` using its local scripts",
 			conversation_history: "",
-			memory_context: "",
 			runtime_memory_sections: RuntimeMemorySections::default(),
 			granted_capabilities: vec!["skill.execute".to_string()],
 			resource_selectors: vec![

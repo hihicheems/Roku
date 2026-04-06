@@ -27,10 +27,9 @@ use roku_common_types::{
 	ApprovalRequirement, ApprovalRequirementScope, ApprovalStatus, ApprovalTicket,
 	ApprovedExecutionRef, CanonicalDigest, CanonicalExecution, ExecutionActionClass,
 	ExecutionEnvPolicy, ExecutionEnvPolicyMode, ExecutionResourceScope, InvocationMode, JoinPolicy,
-	NodeId, PendingExecutionApproval, PlanningModeHint, PolicyBindings, PolicyDecision,
-	PolicyOutcome, PolicyReasonCode, RecoveryEligibility, RequestEnvelope, RequestId,
-	ResponseStatus, ResultEnvelope, ResultStatus, RuntimeError, Task, TaskId, TaskNode,
-	TaskNodeKind, TaskState,
+	NodeId, PendingExecutionApproval, PolicyBindings, PolicyDecision, PolicyOutcome,
+	PolicyReasonCode, RecoveryEligibility, RequestEnvelope, RequestId, ResponseStatus,
+	ResultEnvelope, ResultStatus, RuntimeError, Task, TaskId, TaskNode, TaskNodeKind, TaskState,
 };
 use roku_memory::{
 	ConservativeMemoryLifecyclePolicy, DisabledMemoryLifecyclePolicy,
@@ -758,7 +757,6 @@ fn cached_runtime_memory_layers_project_structured_sections_as_primary_spec_memo
 			summary: "memory-node".to_string(),
 			resources: Vec::new(),
 			conversation_history: task.conversation_history.clone(),
-			memory_context: runtime_memory_sections.named_sections_text(),
 			runtime_memory_sections: runtime_memory_sections.clone(),
 		},
 		capabilities: Vec::new(),
@@ -780,16 +778,6 @@ fn cached_runtime_memory_layers_project_structured_sections_as_primary_spec_memo
 	assert_eq!(
 		spec.context.runtime_memory_sections.working_memory,
 		"WORKING_MEMORY_ONLY::resume from pending runtime summary"
-	);
-	assert_eq!(
-		spec.context.memory_context,
-		runtime_memory_sections.named_sections_text(),
-		"legacy memory_context should be derived from the structured sections snapshot"
-	);
-	assert_eq!(
-		spec.context.compatibility_memory_context(),
-		runtime_memory_sections.named_sections_text(),
-		"structured sections should remain the primary source for compatibility projection"
 	);
 	service.clear_runtime_memory_layers(&task.task_id);
 }
@@ -1006,119 +994,6 @@ fn successful_requests_skip_write_back_when_policy_effectively_disables_it() {
 	assert_eq!(response.status, ResponseStatus::Succeeded);
 	assert!(backend.recorded_writes().is_empty());
 	assert!(backend.stored_records().is_empty());
-}
-
-#[test]
-fn planning_mode_hint_returns_compatibility_fallback_runtime_markers_without_graph() {
-	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
-	store.seed(pending_filesystem_candidate_loop_state());
-	let service = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
-	let mut request = request("Read the first part of Cargo.toml.");
-	request.planning_mode_hint = Some(PlanningModeHint::TreeSearch);
-
-	let response = service
-		.execute(request)
-		.expect("compatibility fallback should succeed");
-
-	assert_eq!(response.status, ResponseStatus::Succeeded);
-	assert!(response.message.contains("planning-heavy"));
-
-	let task_id = TaskId("task-req-1".to_string());
-	let task = service
-		.get_task(&task_id)
-		.expect("task lookup should succeed")
-		.expect("task should be persisted");
-
-	assert_eq!(task.state, TaskState::Succeeded);
-	let last_result = task
-		.last_result
-		.as_ref()
-		.expect("compatibility fallback should persist a terminal result");
-	assert_eq!(last_result.producer, "direct-route:compatibility-fallback");
-	let payload: serde_json::Value =
-		serde_json::from_str(&last_result.payload).expect("payload should be valid json");
-	assert_eq!(payload["direct_route"], true);
-	let shell = &payload["planning_mode_compatibility_shell"];
-	assert_eq!(shell["branch"], "planning_mode_hint:TreeSearch");
-	assert_eq!(shell["compatibility_only"], true);
-	assert_eq!(
-		shell["replacement_path"]["authority_path"],
-		"runtime_loop_owner.classify_route -> dispatch_route"
-	);
-	assert_eq!(shell["replacement_path"]["route_kind"], "direct");
-	assert_eq!(shell["replacement_path"]["strategy"], "direct_route");
-	assert_eq!(
-		shell["replacement_path"]["decision"]["intent_family"],
-		"filesystem_read"
-	);
-	let candidate_tools = shell["replacement_path"]["decision"]["candidate_tools"]
-		.as_array()
-		.expect("replacement path should record route candidate tools");
-	assert!(
-		candidate_tools
-			.iter()
-			.any(|tool| tool.as_str() == Some("fs.read_text")),
-		"replacement path should preserve direct-route candidate markers: {candidate_tools:?}"
-	);
-	assert_eq!(
-		shell["route_markers"]["experiment_strategy"],
-		"compatibility_fallback"
-	);
-	assert_eq!(shell["route_markers"]["replacement_route_kind"], "direct");
-	assert_eq!(
-		shell["route_markers"]["result_producer"],
-		"direct-route:compatibility-fallback"
-	);
-	let blockers = shell["remaining_blockers"]
-		.as_array()
-		.expect("compatibility shell should record remaining blockers");
-	assert!(
-		blockers.iter().any(|blocker| blocker
-			.as_str()
-			.is_some_and(|value| value.contains("PlanningModeHint::TreeSearch"))),
-		"compatibility shell should preserve the remaining removal blockers: {blockers:?}"
-	);
-
-	let experiment = service
-		.get_experiment_run(&task_id)
-		.expect("experiment lookup should succeed")
-		.expect("compatibility fallback should record an experiment run");
-	assert_eq!(experiment.strategy, "compatibility_fallback");
-
-	let events = store.events();
-	assert_eq!(events.first().map(String::as_str), Some("load:session-1"));
-	assert!(
-		events
-			.iter()
-			.skip(1)
-			.all(|event| event == "delete:session-1"),
-		"compatibility shell should clear pending-loop snapshots after default resume intake checks: {events:?}"
-	);
-	assert!(store.is_empty());
-}
-
-#[test]
-fn planning_mode_hints_clear_pending_loop_snapshots_without_resuming() {
-	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
-	store.seed(pending_filesystem_candidate_loop_state());
-	let service = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
-	let mut request = request("Read the first part of Cargo.toml.");
-	request.planning_mode_hint = Some(PlanningModeHint::TreeSearch);
-
-	let response = service
-		.execute(request)
-		.expect("compatibility fallback should bypass pending-loop resume");
-
-	assert_eq!(response.status, ResponseStatus::Succeeded);
-	assert_eq!(
-		store.events(),
-		vec![
-			"load:session-1".to_string(),
-			"delete:session-1".to_string(),
-			"delete:session-1".to_string(),
-		]
-	);
-	assert!(store.is_empty());
 }
 
 #[test]

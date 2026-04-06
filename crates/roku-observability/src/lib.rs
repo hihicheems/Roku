@@ -196,6 +196,7 @@ struct LlmProviderMetrics {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum PlanningModeLabel {
 	ReAct,
 	TaskDecomposition,
@@ -204,6 +205,7 @@ enum PlanningModeLabel {
 	Unknown,
 }
 
+#[allow(dead_code)]
 fn normalize_planning_mode(mode_label: &str) -> PlanningModeLabel {
 	let normalized = mode_label
 		.chars()
@@ -238,6 +240,7 @@ impl Metrics {
 		self.planning_runs_total.fetch_add(1, Ordering::Relaxed);
 	}
 
+	#[allow(dead_code)]
 	pub fn inc_planning_strategy(&self, mode_label: &str) {
 		match normalize_planning_mode(mode_label) {
 			PlanningModeLabel::ReAct => {

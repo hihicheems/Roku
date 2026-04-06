@@ -431,10 +431,7 @@ mod tests {
 			1
 		);
 
-		let state = SessionState {
-			planning_mode: None,
-			..SessionState::default()
-		};
+		let state = SessionState::default();
 		session_state
 			.save_session_state("session-1", state)
 			.expect("session state should save");
@@ -481,13 +478,7 @@ mod tests {
 
 		adapters
 			.session_state
-			.save_session_state(
-				&descriptor.session_id,
-				SessionState {
-					planning_mode: None,
-					pending_loop: None,
-				},
-			)
+			.save_session_state(&descriptor.session_id, SessionState { pending_loop: None })
 			.expect("session state should save");
 		adapters
 			.short_term
@@ -665,7 +656,6 @@ mod tests {
 					run_id: "legacy-run".to_string(),
 					loop_state_json: r#"{"status":"awaiting_user","goal":"legacy"}"#.to_string(),
 				}),
-				..Default::default()
 			};
 			legacy_repo
 				.save_preferences("session-legacy", prefs)

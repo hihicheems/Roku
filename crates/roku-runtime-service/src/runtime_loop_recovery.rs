@@ -54,11 +54,6 @@ impl RuntimeService {
 		let Some(existing) = self.pending_loop_snapshot_store.load(&request.session_id)? else {
 			return Ok(None);
 		};
-		if request.planning_mode_hint.is_some() {
-			self.pending_loop_snapshot_store
-				.delete(&request.session_id)?;
-			return Ok(None);
-		}
 		let assessment = self
 			.runtime
 			.assess_awaiting_user_resume(&existing, &request.goal);

@@ -32,8 +32,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use roku_agent_runtime::{GenericAgentRuntime, PluginRegistrySnapshot, ToolCatalogConfig};
 use roku_api_gateway::{Gateway, RawRequest};
 use roku_common_types::{
-	ApprovalDecision, ApprovalId, ArtifactId, PlanningModeHint, ResponseEnvelope, RuntimeError,
-	TaskId,
+	ApprovalDecision, ApprovalId, ArtifactId, ResponseEnvelope, RuntimeError, TaskId,
 };
 use roku_memory::{
 	ConservativeMemoryLifecyclePolicy, DisabledMemoryLifecyclePolicy, LongTermMemoryBackend,
@@ -69,7 +68,6 @@ use crate::storage::LocalStorageLayout;
 pub(crate) struct ExecutionRequestOptions {
 	pub session_id: String,
 	pub goal: String,
-	pub planning_mode_hint: Option<PlanningModeHint>,
 	pub generated_skill_root: Option<std::path::PathBuf>,
 }
 
@@ -82,7 +80,6 @@ pub fn run_once(goal: &str) -> Result<ResponseEnvelope, RuntimeError> {
 		ExecutionRequestOptions {
 			session_id: "session-1".to_string(),
 			goal: goal.to_string(),
-			planning_mode_hint: None,
 			generated_skill_root: None,
 		},
 		RunMode::Normal,
@@ -98,7 +95,6 @@ pub fn run_with_mode(goal: &str, mode: RunMode) -> Result<ResponseEnvelope, Runt
 		ExecutionRequestOptions {
 			session_id: "session-1".to_string(),
 			goal: goal.to_string(),
-			planning_mode_hint: None,
 			generated_skill_root: None,
 		},
 		mode,
@@ -126,7 +122,6 @@ pub fn run_live_once_from_env(goal: &str) -> Result<ResponseEnvelope, CommandErr
 	run_live_once_with_options_from_env(ExecutionRequestOptions {
 		session_id: "session-1".to_string(),
 		goal: goal.to_string(),
-		planning_mode_hint: None,
 		generated_skill_root: None,
 	})
 }
@@ -943,15 +938,13 @@ fn build_request(
 	options: ExecutionRequestOptions,
 	seq: u64,
 ) -> roku_common_types::RequestEnvelope {
-	let mut request = gateway.normalize(
+	gateway.normalize(
 		RawRequest {
 			session_id: options.session_id,
 			goal: options.goal,
 		},
 		seq,
-	);
-	request.planning_mode_hint = options.planning_mode_hint;
-	request
+	)
 }
 
 fn next_cli_request_sequence() -> u64 {
@@ -1126,7 +1119,6 @@ mod tests {
 			let _guard = apply_request_env_overrides(&ExecutionRequestOptions {
 				session_id: "session-1".to_string(),
 				goal: "test".to_string(),
-				planning_mode_hint: None,
 				generated_skill_root: Some(generated_root.clone()),
 			});
 			assert_eq!(
@@ -1317,7 +1309,6 @@ path = "{}"
 			ExecutionRequestOptions {
 				session_id: session_id.clone(),
 				goal: selected_topic,
-				planning_mode_hint: None,
 				generated_skill_root: None,
 			},
 			RunMode::Normal,
