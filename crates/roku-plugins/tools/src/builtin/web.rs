@@ -17,12 +17,14 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use crate::contract::{
-	contract_input_schema, contract_tool_schema, input_contract, input_field, output_contract,
-	runtime_contract, selection_contract,
+	contract_input_schema, contract_tool_schema, grounding_contract, input_contract, input_field,
+	output_contract, runtime_contract, selection_contract,
 };
 use crate::runtime_config::{HARD_MAX_WEB_TOP_K, WebToolRuntimeConfig};
 use reqwest::blocking::Client;
-use roku_common_types::{ToolContract, ToolOutputEnvelope, ToolRetryPolicy, ToolSideEffectPolicy};
+use roku_common_types::{
+	GroundingStrategy, ToolContract, ToolOutputEnvelope, ToolRetryPolicy, ToolSideEffectPolicy,
+};
 use roku_plugin_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
 use roku_plugin_host::{
 	RuntimeConstraints, SandboxProfile, Tool, ToolDescriptor, ToolFailure, ToolInvocationRequest,
@@ -97,7 +99,15 @@ pub(crate) fn catalog_descriptors_with_config(
 			summary: "Fetch a URL and return its text content.".to_string(),
 			key_commands: Vec::new(),
 			use_cases: Vec::new(),
-			contract: None,
+			contract: Some(ToolContract {
+				grounding: grounding_contract(
+					GroundingStrategy::UrlBased,
+					&["url"],
+					Some("url"),
+					false,
+				),
+				..ToolContract::default()
+			}),
 		},
 	]
 }
@@ -269,14 +279,23 @@ impl Tool for WebFetchTool {
 			allowed_read_roots: Vec::new(),
 			allowed_write_roots: Vec::new(),
 		};
+		let contract = ToolContract {
+			grounding: grounding_contract(
+				GroundingStrategy::UrlBased,
+				&["url"],
+				Some("url"),
+				false,
+			),
+			..ToolContract::default()
+		};
 		ToolDescriptor {
 			name: "web.fetch".to_string(),
 			version: "1.0.0".to_string(),
-			input_schema: contract_tool_schema(None, &["url"]),
+			input_schema: contract_tool_schema(Some(&contract), &["url"]),
 			output_schema: "tool_observation.v1".to_string(),
 			required_capabilities: vec!["web.fetch".to_string()],
 			runtime_constraints,
-			contract: None,
+			contract: Some(contract),
 		}
 	}
 
@@ -533,6 +552,12 @@ fn web_contract() -> ToolContract {
 			&runtime_constraints,
 			ToolSideEffectPolicy::ExternalMutation,
 			ToolRetryPolicy::Never,
+		),
+		grounding: grounding_contract(
+			GroundingStrategy::PatternBased,
+			&["query"],
+			Some("query"),
+			false,
 		),
 	}
 }

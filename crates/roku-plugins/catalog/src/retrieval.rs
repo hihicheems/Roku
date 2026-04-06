@@ -209,6 +209,17 @@ impl ResourceCatalog {
 			.find(|entry| &entry.selector == selector)
 	}
 
+	pub fn lookup_grounding_metadata(
+		&self,
+		tool_name: &str,
+	) -> Option<&roku_common_types::ToolGroundingContract> {
+		self.entries
+			.iter()
+			.find(|entry| entry.kind == ResourceKind::Tool && entry.name == tool_name)
+			.and_then(|entry| entry.contract.as_ref())
+			.map(|contract| &contract.grounding)
+	}
+
 	pub fn descriptors_for_kind(&self, kind: ResourceKind) -> Vec<CatalogDescriptor> {
 		self.entries
 			.iter()
@@ -505,6 +516,7 @@ mod tests {
 					terminal_success: false,
 				},
 				runtime: roku_common_types::ToolRuntimeContract::default(),
+				grounding: roku_common_types::ToolGroundingContract::default(),
 			}),
 		};
 
@@ -516,5 +528,58 @@ mod tests {
 		assert!(!selection_text.contains("Long canonical summary"));
 		assert!(!selection_text.contains("Output-only semantics should stay cold."));
 		assert!(!selection_text.contains("Canonical descriptor with long prose"));
+	}
+
+	#[test]
+	fn lookup_grounding_metadata_returns_metadata_for_known_tool() {
+		let entries = vec![CatalogDescriptor {
+			selector: roku_common_types::ResourceSelector::tool("fs.read_text"),
+			kind: ResourceKind::Tool,
+			name: "fs.read_text".to_string(),
+			role: None,
+			description: String::new(),
+			selection_hint: String::new(),
+			discoverable: true,
+			tags: Vec::new(),
+			examples: Vec::new(),
+			input_schema: Vec::new(),
+			risk: ResourceRisk::Low,
+			cost: ResourceCost::default(),
+			required_capabilities: Vec::new(),
+			summary: String::new(),
+			key_commands: Vec::new(),
+			use_cases: Vec::new(),
+			contract: Some(roku_common_types::ToolContract {
+				grounding: roku_common_types::ToolGroundingContract {
+					required_argument_keys: vec!["file_path".to_string()],
+					grounding_strategy: roku_common_types::GroundingStrategy::PathBased,
+					grounding_argument: Some("file_path".to_string()),
+					requires_grounded_path: true,
+					bootstrap_matchable: true,
+					missing_argument_hint: None,
+				},
+				..roku_common_types::ToolContract::default()
+			}),
+		}];
+		let catalog = ResourceCatalog::new(entries);
+		let grounding = catalog.lookup_grounding_metadata("fs.read_text");
+		assert!(grounding.is_some());
+		let g = grounding.unwrap();
+		assert_eq!(
+			g.grounding_strategy,
+			roku_common_types::GroundingStrategy::PathBased
+		);
+		assert!(g.requires_grounded_path);
+		assert_eq!(g.required_argument_keys, vec!["file_path"]);
+	}
+
+	#[test]
+	fn lookup_grounding_metadata_returns_none_for_unknown_tool() {
+		let catalog = ResourceCatalog::new(Vec::new());
+		assert!(
+			catalog
+				.lookup_grounding_metadata("nonexistent.tool")
+				.is_none()
+		);
 	}
 }

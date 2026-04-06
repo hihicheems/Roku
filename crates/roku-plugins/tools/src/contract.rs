@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use roku_common_types::{
-	ToolContract, ToolInputContract, ToolInputFieldContract, ToolIsolationProfile,
-	ToolOutputContract, ToolRetryPolicy, ToolRuntimeContract, ToolSelectionContract,
-	ToolSideEffectPolicy,
+	GroundingStrategy, ToolContract, ToolGroundingContract, ToolInputContract,
+	ToolInputFieldContract, ToolIsolationProfile, ToolOutputContract, ToolRetryPolicy,
+	ToolRuntimeContract, ToolSelectionContract, ToolSideEffectPolicy,
 };
 use roku_plugin_host::{RuntimeConstraints, SandboxProfile, ToolSchema};
 
@@ -126,6 +126,22 @@ pub(crate) fn contract_input_schema(
 		.map(|contract| contract.input.field_names())
 		.filter(|fields| !fields.is_empty())
 		.unwrap_or_else(|| fallback.to_vec())
+}
+
+pub(crate) fn grounding_contract(
+	strategy: GroundingStrategy,
+	required_keys: &[&str],
+	grounding_arg: Option<&str>,
+	requires_grounded_path: bool,
+) -> ToolGroundingContract {
+	ToolGroundingContract {
+		required_argument_keys: required_keys.iter().map(|k| k.to_string()).collect(),
+		grounding_strategy: strategy,
+		grounding_argument: grounding_arg.map(str::to_string),
+		requires_grounded_path,
+		bootstrap_matchable: strategy != GroundingStrategy::None,
+		missing_argument_hint: None,
+	}
 }
 
 fn isolation_profile(profile: SandboxProfile) -> ToolIsolationProfile {

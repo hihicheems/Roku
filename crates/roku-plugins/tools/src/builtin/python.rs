@@ -19,11 +19,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::contract::{
-	contract_input_schema, contract_tool_schema, input_contract, input_field, output_contract,
-	runtime_contract, selection_contract,
+	contract_input_schema, contract_tool_schema, grounding_contract, input_contract, input_field,
+	output_contract, runtime_contract, selection_contract,
 };
 use crate::runtime_config::{HARD_MAX_TIMEOUT_MS, PythonToolRuntimeConfig};
-use roku_common_types::{ToolContract, ToolOutputEnvelope, ToolRetryPolicy, ToolSideEffectPolicy};
+use roku_common_types::{
+	GroundingStrategy, ToolContract, ToolOutputEnvelope, ToolRetryPolicy, ToolSideEffectPolicy,
+};
 use roku_plugin_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
 use roku_plugin_host::{
 	RuntimeConstraints, SandboxProfile, Tool, ToolDescriptor, ToolFailure, ToolInvocationRequest,
@@ -381,6 +383,12 @@ fn python_contract(timeout_ms: u64) -> ToolContract {
 			&runtime_constraints,
 			ToolSideEffectPolicy::ReadOnly,
 			ToolRetryPolicy::Never,
+		),
+		grounding: grounding_contract(
+			GroundingStrategy::CommandBased,
+			&["code"],
+			Some("code"),
+			false,
 		),
 	}
 }
