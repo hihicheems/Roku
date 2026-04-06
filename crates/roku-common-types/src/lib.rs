@@ -544,6 +544,8 @@ pub struct ToolContract {
 	pub output: ToolOutputContract,
 	#[serde(default)]
 	pub runtime: ToolRuntimeContract,
+	#[serde(default)]
+	pub grounding: ToolGroundingContract,
 }
 
 impl ToolContract {
@@ -737,6 +739,39 @@ impl ToolRuntimeContract {
 			self.side_effects, self.retry_policy, self.timeout_ms, self.isolation_profile
 		)
 	}
+}
+
+/// Declarative grounding requirements for a tool.
+///
+/// Describes how tool_loop.rs should extract arguments from the user goal
+/// and validate preconditions, enabling descriptor-driven grounding instead
+/// of hardcoded match arms.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ToolGroundingContract {
+	#[serde(default)]
+	pub required_argument_keys: Vec<String>,
+	#[serde(default)]
+	pub grounding_strategy: GroundingStrategy,
+	#[serde(default)]
+	pub grounding_argument: Option<String>,
+	#[serde(default)]
+	pub requires_grounded_path: bool,
+	#[serde(default)]
+	pub bootstrap_matchable: bool,
+	#[serde(default)]
+	pub missing_argument_hint: Option<String>,
+}
+
+/// How the tool loop should extract grounding arguments from the user goal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GroundingStrategy {
+	PathBased,
+	PatternBased,
+	UrlBased,
+	CommandBased,
+	#[default]
+	None,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

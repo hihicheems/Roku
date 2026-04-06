@@ -27,7 +27,7 @@ use crate::runtime_config::{ToolWorkerRuntimeConfig, ToolsRuntimeConfig};
 use roku_common_types::{
 	GeneralCompletionKind, GeneralEvidenceStatus, GeneralExecuteCompletion, ResourceSelector,
 	RuntimeMemorySections, SkillExecutionMode, SkillExecutionPlan, SkillExecutionRequest,
-	SkillExecutionResult, ToolOutputEnvelope,
+	SkillExecutionResult, ToolContract, ToolOutputEnvelope,
 };
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_catalog::{CatalogDescriptor, ResourceCatalog, ResourceKind};
@@ -1959,7 +1959,7 @@ fn tool_descriptor(
 			allowed_read_roots: Vec::new(),
 			allowed_write_roots: Vec::new(),
 		},
-		contract: None,
+		contract: Some(ToolContract::default()),
 	}
 }
 
@@ -1968,14 +1968,17 @@ fn configured_tool_descriptor(
 	sandbox_profile: SandboxProfile,
 	timeout_ms: u64,
 ) -> ToolDescriptor {
+	let contract = tool
+		.contract
+		.clone()
+		.or_else(|| Some(ToolContract::default()));
 	ToolDescriptor {
 		name: tool.name.clone(),
 		version: "1.0.0".to_string(),
 		input_schema: ToolSchema {
 			required_fields: configured_required_fields(tool),
 		},
-		output_schema: tool
-			.contract
+		output_schema: contract
 			.as_ref()
 			.map(|contract| contract.output.observation_schema.clone())
 			.unwrap_or_else(|| "result.v1".to_string()),
@@ -1989,12 +1992,16 @@ fn configured_tool_descriptor(
 			allowed_read_roots: Vec::new(),
 			allowed_write_roots: Vec::new(),
 		},
-		contract: tool.contract.clone(),
+		contract,
 	}
 }
 
 fn tool_catalog_descriptor(tool: &ConfiguredTool) -> CatalogDescriptor {
 	let selection_hint = configured_selection_hint(tool);
+	let contract = tool
+		.contract
+		.clone()
+		.or_else(|| Some(ToolContract::default()));
 	CatalogDescriptor {
 		selector: ResourceSelector::tool(&tool.name),
 		kind: ResourceKind::Tool,
@@ -2012,7 +2019,7 @@ fn tool_catalog_descriptor(tool: &ConfiguredTool) -> CatalogDescriptor {
 		summary: selection_hint,
 		key_commands: Vec::new(),
 		use_cases: Vec::new(),
-		contract: tool.contract.clone(),
+		contract,
 	}
 }
 
@@ -2905,5 +2912,140 @@ print("ok")
 			"missing_information": [],
 		})
 		.to_string()
+	}
+
+	#[test]
+	fn all_baseline_tools_have_grounding_metadata() {
+		use crate::builtin;
+
+		let mut all_descriptors = Vec::new();
+		all_descriptors.extend(builtin::fs::catalog_descriptors());
+		all_descriptors.extend(builtin::table::catalog_descriptors());
+		all_descriptors.extend(builtin::web::catalog_descriptors());
+		all_descriptors.extend(builtin::command::catalog_descriptors());
+		all_descriptors.extend(builtin::python::catalog_descriptors());
+
+		let baseline_tools = [
+			"fs.find",
+			"fs.read_text",
+			"fs.list_dir",
+			"fs.inspect",
+			"fs.exists",
+			"fs.glob",
+			"fs.edit",
+			"fs.write",
+			"fs.grep",
+			"table.preview",
+			"table.inspect",
+			"table.list_sheets",
+			"table.schema",
+			"web.search",
+			"web.fetch",
+			"command.run",
+			"python.run",
+		];
+
+		for tool_name in &baseline_tools {
+			let descriptor = all_descriptors.iter().find(|d| d.name == *tool_name);
+			assert!(
+				descriptor.is_some(),
+				"baseline tool {tool_name} should have a catalog descriptor"
+			);
+			let descriptor = descriptor.unwrap();
+			assert!(
+				descriptor.contract.is_some(),
+				"baseline tool {tool_name} should have a contract"
+			);
+			let contract = descriptor.contract.as_ref().unwrap();
+			assert_ne!(
+				contract.grounding,
+				roku_common_types::ToolGroundingContract::default(),
+				"baseline tool {tool_name} should have non-default grounding metadata"
+			);
+		}
+	}
+
+	#[test]
+	fn grounding_metadata_serde_roundtrip() {
+		let contract = roku_common_types::ToolContract {
+			grounding: roku_common_types::ToolGroundingContract {
+				required_argument_keys: vec!["file_path".to_string()],
+				grounding_strategy: roku_common_types::GroundingStrategy::PathBased,
+				grounding_argument: Some("file_path".to_string()),
+				requires_grounded_path: true,
+				bootstrap_matchable: true,
+				missing_argument_hint: None,
+			},
+			..roku_common_types::ToolContract::default()
+		};
+		let json = serde_json::to_string(&contract).unwrap();
+		let deserialized: roku_common_types::ToolContract = serde_json::from_str(&json).unwrap();
+		assert_eq!(deserialized.grounding, contract.grounding);
+	}
+
+	#[test]
+	fn grounding_metadata_absent_deserializes_to_default() {
+		let json = r#"{"selection":{},"input":{},"output":{"observation_schema":"result.v1","success_semantics":"","empty_result_semantics":""},"runtime":{}}"#;
+		let contract: roku_common_types::ToolContract = serde_json::from_str(json).unwrap();
+		assert_eq!(
+			contract.grounding,
+			roku_common_types::ToolGroundingContract::default()
+		);
+	}
+
+	#[test]
+	fn grounding_argument_keys_match_expected_tool_parameters() {
+		use crate::builtin;
+
+		let mut all_descriptors = Vec::new();
+		all_descriptors.extend(builtin::fs::catalog_descriptors());
+		all_descriptors.extend(builtin::table::catalog_descriptors());
+		all_descriptors.extend(builtin::web::catalog_descriptors());
+		all_descriptors.extend(builtin::command::catalog_descriptors());
+		all_descriptors.extend(builtin::python::catalog_descriptors());
+
+		let expected: &[(&str, &str)] = &[
+			("fs.find", "name"),
+			("fs.read_text", "path"),
+			("fs.list_dir", "path"),
+			("fs.inspect", "path"),
+			("fs.exists", "path"),
+			("fs.glob", "pattern"),
+			("fs.edit", "file_path"),
+			("fs.write", "file_path"),
+			("fs.grep", "pattern"),
+			("table.preview", "path"),
+			("table.inspect", "path"),
+			("table.list_sheets", "path"),
+			("table.schema", "path"),
+			("web.search", "query"),
+			("web.fetch", "url"),
+			("command.run", "command"),
+			("python.run", "code"),
+		];
+
+		for (tool_name, expected_primary_key) in expected {
+			let descriptor = all_descriptors
+				.iter()
+				.find(|d| d.name == *tool_name)
+				.unwrap_or_else(|| panic!("missing descriptor for {tool_name}"));
+			let grounding = &descriptor
+				.contract
+				.as_ref()
+				.unwrap_or_else(|| panic!("{tool_name} has no contract"))
+				.grounding;
+			assert!(
+				grounding
+					.required_argument_keys
+					.contains(&expected_primary_key.to_string()),
+				"{tool_name}: grounding keys {:?} should contain \"{expected_primary_key}\"",
+				grounding.required_argument_keys
+			);
+			assert_eq!(
+				grounding.grounding_argument.as_deref(),
+				Some(*expected_primary_key),
+				"{tool_name}: grounding_argument should be \"{expected_primary_key}\""
+			);
+		}
 	}
 }
