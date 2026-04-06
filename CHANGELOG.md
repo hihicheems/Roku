@@ -2,6 +2,43 @@
 
 # Changelog
 
+## [v0.0.9] - 2026-04-06
+
+### Features
+
+- **(roku-agent-runtime)** add post-compact context restoration and memory write-back (by @[itscheems](https://github.com/itscheems)) - ([72858d5](https://github.com/itscheems/Roku/commit/72858d53edee1d29e0fa8f0874509ea634aadf1b))
+- **(roku-agent-runtime)** implement history truncation and compact execution (by @[itscheems](https://github.com/itscheems)) - ([b7ae3d9](https://github.com/itscheems/Roku/commit/b7ae3d99447f8422e64410d879456ea2a7e587e6))
+- **(roku-agent-runtime)** add token estimation and compact trigger for context management (by @[itscheems](https://github.com/itscheems)) - ([fbea742](https://github.com/itscheems/Roku/commit/fbea742867a8db0746f4b9a2e23f7bb46e678615))
+- **(roku-plugin-tools)** add declarative grounding metadata to tool descriptors (by @[itscheems](https://github.com/itscheems)) - ([31ac5f5](https://github.com/itscheems/Roku/commit/31ac5f56940a6d55647f356a9e22d6a36052571d))
+- **(roku-plugin-tools)** implement EPIC-0 core work tools (by @[itscheems](https://github.com/itscheems)) - ([7287664](https://github.com/itscheems/Roku/commit/72876643e5f3d6e8332aa9fbc6dce19f1f0ac18d))
+- **(workspace)** implement PRD-03 memory write-back enablement and PRD-04 pending loop durable store (by @[itscheems](https://github.com/itscheems)) - ([ecf21c0](https://github.com/itscheems/Roku/commit/ecf21c06511678b16a1e5fe3948571451b5fd923))
+
+### Bug Fixes
+
+- **(roku-agent-runtime)** reject NaN and infinite compact_threshold_ratio in validation (by @[itscheems](https://github.com/itscheems)) - ([2849fe6](https://github.com/itscheems/Roku/commit/2849fe6b42010587b55259db9f3bb4f5629d82e3))
+- **(roku-plugin-memory-sqlite)** complete migration safety for pending loop store cutover (by @[itscheems](https://github.com/itscheems)) - ([3643c71](https://github.com/itscheems/Roku/commit/3643c71206f2feaf0fd49f57d5b6b88e4ed88643))
+- **(roku-plugin-memory-sqlite)** add legacy fallback for pending loop migration (by @[itscheems](https://github.com/itscheems)) - ([6a82bb0](https://github.com/itscheems/Roku/commit/6a82bb0e216ba1e282277eb1fbb832b9dac5191c))
+- **(roku-plugin-tools)** adapt digest formatting for sha2 0.11 (by @[itscheems](https://github.com/itscheems)) - ([b038c76](https://github.com/itscheems/Roku/commit/b038c7671efb3f4dbd71e4a0feb9ea0e2c854ff8))
+- **(roku-plugin-tools)** address code review findings from PR #54 (by @[itscheems](https://github.com/itscheems)) - ([2d217ea](https://github.com/itscheems/Roku/commit/2d217ea1ab6e2cd9da044d6f06b337b07e476f83))
+- **(roku-validation-plane)** skip visible_tools check for compact boundary steps in trace validation (by @[itscheems](https://github.com/itscheems)) - ([e044ae0](https://github.com/itscheems/Roku/commit/e044ae05c453f809437d481eaf76bcb1b0021004))
+- **(scripts)** tighten PR Check workflow triggers (by @[itscheems](https://github.com/itscheems)) - ([f371cc3](https://github.com/itscheems/Roku/commit/f371cc3ebf07373db6685f037696f0d3f3ae9b14))
+
+### Refactor
+
+- **(roku-agent-runtime)** eliminate tool_name comparisons with ExtractionHint enum (by @[itscheems](https://github.com/itscheems)) - ([b084aad](https://github.com/itscheems/Roku/commit/b084aadfae65d7b81dd750ece6b4d08f2df4b566))
+- **(roku-agent-runtime)** migrate grounding match arms to descriptor-based lookup (by @[itscheems](https://github.com/itscheems)) - ([e3ec1c9](https://github.com/itscheems/Roku/commit/e3ec1c980093de38bab26a21e3abb2ac88ebf56d))
+- **(roku-agent-runtime)** consolidate EPIC-5 migration comments (by @[itscheems](https://github.com/itscheems)) - ([76cc895](https://github.com/itscheems/Roku/commit/76cc8953a447643b4b527c1b909340a47cd2d3d9))
+- **(roku-common-types)** remove legacy Task.graph, TaskGraph, and Task.planning_mode_hint (by @[itscheems](https://github.com/itscheems)) - ([b89e7c1](https://github.com/itscheems/Roku/commit/b89e7c10687b407262fcd166fc12445cb637177a))
+- **(workspace)** remove AgentContext.memory_context and planning mode compatibility pipeline (by @[itscheems](https://github.com/itscheems)) - ([e81dc3e](https://github.com/itscheems/Roku/commit/e81dc3e492a704eba9391b4c9c563813df1707bf))
+
+### Styling
+
+- **(roku-plugin-tools)** normalize formatting (by @[itscheems](https://github.com/itscheems)) - ([8d6c675](https://github.com/itscheems/Roku/commit/8d6c6759d779ab05400d316e638882260593f8b2))
+
+### Miscellaneous Tasks
+
+- update .gitignore (by @[itscheems](https://github.com/itscheems)) - ([32495b3](https://github.com/itscheems/Roku/commit/32495b3e2d9857f15ca54cec782923f703b23d97))
+
 ## [v0.0.8] - 2026-04-05
 
 ### Features
