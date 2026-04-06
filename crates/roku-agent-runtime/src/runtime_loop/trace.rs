@@ -104,17 +104,16 @@ pub fn check_runtime_loop_trace(trace: &RuntimeLoopTrace) -> RuntimeLoopTraceChe
 	let decisions_captured = trace.steps.iter().all(|step| {
 		let action_known = matches!(
 			step.decision.action.as_str(),
-			"call_tool" | "ask_user" | "final_answer" | "fail" | "stop"
+			"call_tool" | "ask_user" | "final_answer" | "fail" | "stop" | "compact_boundary"
 		);
 		let reason_present = !step.decision.reason.trim().is_empty();
 		let call_tool_has_name =
 			step.decision.action != "call_tool" || step.decision.tool_name.is_some();
 		action_known && reason_present && call_tool_has_name
 	});
-	let visible_tools_captured = trace
-		.steps
-		.iter()
-		.all(|step| !step.visible_tools_before.is_empty());
+	let visible_tools_captured = trace.steps.iter().all(|step| {
+		step.decision.action == "compact_boundary" || !step.visible_tools_before.is_empty()
+	});
 	let visible_resources_captured = trace
 		.steps
 		.iter()
@@ -357,6 +356,7 @@ fn step_action_label(action: StepAction) -> &'static str {
 		StepAction::FinalAnswer => "final_answer",
 		StepAction::Fail => "fail",
 		StepAction::Stop => "stop",
+		StepAction::CompactBoundary => "compact_boundary",
 	}
 }
 

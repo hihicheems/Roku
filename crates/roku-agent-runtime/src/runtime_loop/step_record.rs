@@ -29,6 +29,7 @@ pub enum StepAction {
 	FinalAnswer,
 	Fail,
 	Stop,
+	CompactBoundary,
 }
 
 /// Immutable fact record for one loop step.
@@ -148,6 +149,45 @@ impl StepRecord {
 			tool_latency_ms: None,
 			raw_tool_output: None,
 			observation,
+			interpreted_observation: None,
+			remaining_step_budget_after,
+			remaining_recovery_budget_after,
+			working_directory_after: working_directory_after.into(),
+		}
+	}
+
+	pub fn compact_boundary(
+		step_index: u32,
+		discarded_count: usize,
+		summary_preview: &str,
+		remaining_step_budget_after: u32,
+		remaining_recovery_budget_after: u32,
+		working_directory_after: impl Into<String>,
+	) -> Self {
+		let timestamp = now_rfc3339();
+		let reason = format!("{discarded_count}");
+		Self {
+			step_index,
+			action: StepAction::CompactBoundary,
+			tool_name: None,
+			decision_reason: reason.clone(),
+			decision: NextStepDecision {
+				action: crate::runtime_loop::NextStepAction::CallTool,
+				tool_name: None,
+				arguments: None,
+				reason,
+				final_message: None,
+			},
+			visible_tools_before: Vec::new(),
+			visible_resources_before: Vec::new(),
+			started_at: timestamp.clone(),
+			finished_at: timestamp,
+			tool_latency_ms: None,
+			raw_tool_output: Some(serde_json::json!({
+				"discarded_count": discarded_count,
+				"summary_preview": summary_preview,
+			})),
+			observation: None,
 			interpreted_observation: None,
 			remaining_step_budget_after,
 			remaining_recovery_budget_after,

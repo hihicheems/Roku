@@ -64,6 +64,10 @@ pub struct LoopRuntimeConfig {
 	pub context_window_tokens: u64,
 	/// Ratio of context window at which context compaction is triggered (0.0–1.0).
 	pub compact_threshold_ratio: f64,
+	/// Number of most-recent history steps to retain after compaction.
+	pub retain_tail_steps: usize,
+	/// Maximum character length of working_summary after compaction.
+	pub working_summary_max_chars: usize,
 }
 
 impl LoopRuntimeConfig {
@@ -81,6 +85,8 @@ pub struct LoopRuntimeConfigPatch {
 	pub initial_recovery_budget: Option<u32>,
 	pub context_window_tokens: Option<u64>,
 	pub compact_threshold_ratio: Option<f64>,
+	pub retain_tail_steps: Option<usize>,
+	pub working_summary_max_chars: Option<usize>,
 }
 
 /// Effective route-classifier generation budgets and inventory compaction knobs.
@@ -171,6 +177,10 @@ pub enum AgentRuntimeConfigError {
 	InvalidNextStepBudgetTokensRemaining,
 	#[error("runtime.agent.next_step.budget_cost_remaining_usd must be greater than zero")]
 	InvalidNextStepBudgetCostRemainingUsd,
+	#[error("runtime.agent.loop.retain_tail_steps must be greater than zero")]
+	InvalidRetainTailSteps,
+	#[error("runtime.agent.loop.working_summary_max_chars must be greater than zero")]
+	InvalidWorkingSummaryMaxChars,
 }
 
 /// Final ceiling for `runtime.agent.loop.initial_step_budget`.
@@ -183,6 +193,10 @@ pub const HARD_MAX_INITIAL_STEP_BUDGET: u32 = 64;
 pub const HARD_MAX_INITIAL_RECOVERY_BUDGET: u32 = 32;
 /// Final ceiling for `runtime.agent.loop.context_window_tokens`.
 pub const HARD_MAX_CONTEXT_WINDOW_TOKENS: u64 = 2_000_000;
+/// Final ceiling for `runtime.agent.loop.retain_tail_steps`.
+pub const HARD_MAX_RETAIN_TAIL_STEPS: usize = 32;
+/// Final ceiling for `runtime.agent.loop.working_summary_max_chars`.
+pub const HARD_MAX_WORKING_SUMMARY_MAX_CHARS: usize = 32_000;
 /// Final ceiling for `runtime.agent.router.expected_output_tokens`.
 pub const HARD_MAX_ROUTE_EXPECTED_OUTPUT_TOKENS: u64 = 2_048;
 /// Final ceiling for `runtime.agent.router.budget_tokens_remaining`.
@@ -209,6 +223,8 @@ impl Default for LoopRuntimeConfig {
 			initial_recovery_budget: 2,
 			context_window_tokens: 200_000,
 			compact_threshold_ratio: 0.75,
+			retain_tail_steps: 4,
+			working_summary_max_chars: 4_000,
 		}
 	}
 }
@@ -290,6 +306,12 @@ impl LoopRuntimeConfig {
 		if let Some(value) = patch.compact_threshold_ratio {
 			self.compact_threshold_ratio = value;
 		}
+		if let Some(value) = patch.retain_tail_steps {
+			self.retain_tail_steps = value;
+		}
+		if let Some(value) = patch.working_summary_max_chars {
+			self.working_summary_max_chars = value;
+		}
 	}
 
 	pub fn apply_env_overrides(&mut self) -> Result<(), AgentRuntimeConfigError> {
@@ -306,6 +328,14 @@ impl LoopRuntimeConfig {
 		if let Some(value) = env_override_f64("ROKU_RUNTIME__AGENT__LOOP__COMPACT_THRESHOLD_RATIO")
 		{
 			self.compact_threshold_ratio = value?;
+		}
+		if let Some(value) = env_override_usize("ROKU_RUNTIME__AGENT__LOOP__RETAIN_TAIL_STEPS") {
+			self.retain_tail_steps = value?;
+		}
+		if let Some(value) =
+			env_override_usize("ROKU_RUNTIME__AGENT__LOOP__WORKING_SUMMARY_MAX_CHARS")
+		{
+			self.working_summary_max_chars = value?;
 		}
 		Ok(())
 	}
@@ -333,6 +363,16 @@ impl LoopRuntimeConfig {
 		self.context_window_tokens = self
 			.context_window_tokens
 			.min(HARD_MAX_CONTEXT_WINDOW_TOKENS);
+		if self.retain_tail_steps == 0 {
+			return Err(AgentRuntimeConfigError::InvalidRetainTailSteps);
+		}
+		if self.working_summary_max_chars == 0 {
+			return Err(AgentRuntimeConfigError::InvalidWorkingSummaryMaxChars);
+		}
+		self.retain_tail_steps = self.retain_tail_steps.min(HARD_MAX_RETAIN_TAIL_STEPS);
+		self.working_summary_max_chars = self
+			.working_summary_max_chars
+			.min(HARD_MAX_WORKING_SUMMARY_MAX_CHARS);
 		Ok(())
 	}
 }
@@ -565,6 +605,12 @@ fn invalid_env_key(key: &'static str) -> AgentRuntimeConfigError {
 		"ROKU_RUNTIME__AGENT__NEXT_STEP__BUDGET_COST_REMAINING_USD" => {
 			AgentRuntimeConfigError::InvalidNextStepBudgetCostRemainingUsd
 		}
+		"ROKU_RUNTIME__AGENT__LOOP__RETAIN_TAIL_STEPS" => {
+			AgentRuntimeConfigError::InvalidRetainTailSteps
+		}
+		"ROKU_RUNTIME__AGENT__LOOP__WORKING_SUMMARY_MAX_CHARS" => {
+			AgentRuntimeConfigError::InvalidWorkingSummaryMaxChars
+		}
 		_ => AgentRuntimeConfigError::InvalidVisibleToolHintMaxChars,
 	}
 }
@@ -580,6 +626,8 @@ mod tests {
 		assert_eq!(config.r#loop.context_window_tokens, 200_000);
 		assert_eq!(config.r#loop.compact_threshold_ratio, 0.75);
 		assert_eq!(config.r#loop.compact_threshold_tokens(), 150_000);
+		assert_eq!(config.r#loop.retain_tail_steps, 4);
+		assert_eq!(config.r#loop.working_summary_max_chars, 4_000);
 		assert_eq!(config.router.budget_tokens_remaining, 10_000);
 		assert_eq!(config.prompts.visible_tool_hint_max_chars, 180);
 		assert_eq!(config.next_step.expected_output_tokens, 1_200);
@@ -594,6 +642,8 @@ mod tests {
 				initial_recovery_budget: Some(HARD_MAX_INITIAL_RECOVERY_BUDGET * 4),
 				context_window_tokens: Some(HARD_MAX_CONTEXT_WINDOW_TOKENS * 4),
 				compact_threshold_ratio: Some(0.85),
+				retain_tail_steps: Some(HARD_MAX_RETAIN_TAIL_STEPS * 4),
+				working_summary_max_chars: Some(HARD_MAX_WORKING_SUMMARY_MAX_CHARS * 4),
 			}),
 			router: Some(RouteClassifierRuntimeConfigPatch {
 				expected_output_tokens: Some(HARD_MAX_ROUTE_EXPECTED_OUTPUT_TOKENS * 4),
@@ -635,6 +685,11 @@ mod tests {
 			HARD_MAX_CONTEXT_WINDOW_TOKENS
 		);
 		assert_eq!(config.r#loop.compact_threshold_ratio, 0.85);
+		assert_eq!(config.r#loop.retain_tail_steps, HARD_MAX_RETAIN_TAIL_STEPS);
+		assert_eq!(
+			config.r#loop.working_summary_max_chars,
+			HARD_MAX_WORKING_SUMMARY_MAX_CHARS
+		);
 	}
 
 	#[test]

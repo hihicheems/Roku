@@ -46,6 +46,113 @@ pub fn estimate_context_tokens(state: &LoopState) -> u64 {
 	chars / 4
 }
 
+/// Configuration for history compaction.
+pub struct CompactConfig {
+	pub retain_tail_steps: usize,
+	pub working_summary_max_chars: usize,
+}
+
+impl Default for CompactConfig {
+	fn default() -> Self {
+		Self {
+			retain_tail_steps: 4,
+			working_summary_max_chars: 4_000,
+		}
+	}
+}
+
+/// Generate a deterministic digest of discarded history steps.
+///
+/// Each step is rendered as a one-line summary: tool name, reason, and
+/// observation outcome (truncated to 200 chars). No LLM call — this is
+/// the lightweight first-layer compact.
+pub fn summarize_discarded_steps(steps: &[super::StepRecord]) -> String {
+	let mut lines = vec![format!(
+		"[Compact summary — {} steps discarded]",
+		steps.len()
+	)];
+	for step in steps {
+		let tool = step.tool_name.as_deref().unwrap_or("unknown");
+		let reason = truncate(&step.decision_reason, 80);
+		let outcome = step
+			.observation
+			.as_ref()
+			.map(|obs| match obs {
+				super::StepObservation::Tool(t) => {
+					let status = if t.ok { "ok" } else { "error" };
+					let detail = truncate(&t.message, 100);
+					if detail.is_empty() {
+						status.to_string()
+					} else {
+						format!("{status}: {detail}")
+					}
+				}
+				super::StepObservation::AskUser { final_message } => {
+					format!("ask_user: {}", truncate(final_message, 100))
+				}
+				super::StepObservation::FinalMessage { final_message } => {
+					format!("final: {}", truncate(final_message, 100))
+				}
+			})
+			.unwrap_or_else(|| "no observation".to_string());
+		lines.push(format!(
+			"Step {}: {} — {} — {}",
+			step.step_index, tool, reason, outcome
+		));
+	}
+	lines.join("\n")
+}
+
+/// Compact the loop history by truncating old steps and populating working_summary.
+///
+/// 1. If history is short enough, no-op.
+/// 2. Split into discarded (older) and retained (tail).
+/// 3. Generate deterministic summary from discarded steps.
+/// 4. Prepend a compact boundary record to retained history.
+/// 5. Update working_summary (prepend new summary, cap total length).
+pub fn compact_history(state: &mut LoopState, config: &CompactConfig) {
+	if state.history.len() <= config.retain_tail_steps {
+		return;
+	}
+
+	let split_point = state.history.len() - config.retain_tail_steps;
+	let discarded: Vec<_> = state.history.drain(..split_point).collect();
+	let summary = summarize_discarded_steps(&discarded);
+
+	let summary_preview = truncate(&summary, 200);
+	let boundary = super::StepRecord::compact_boundary(
+		state.step_index,
+		discarded.len(),
+		&summary_preview,
+		state.remaining_step_budget,
+		state.remaining_recovery_budget,
+		&state.working_directory,
+	);
+
+	state.history.insert(0, boundary);
+
+	if state.working_summary.is_empty() {
+		state.working_summary = summary;
+	} else {
+		state.working_summary = format!("{}\n\n{}", summary, state.working_summary);
+	}
+
+	if state.working_summary.len() > config.working_summary_max_chars {
+		let boundary = state
+			.working_summary
+			.floor_char_boundary(config.working_summary_max_chars);
+		state.working_summary.truncate(boundary);
+	}
+}
+
+fn truncate(text: &str, max_chars: usize) -> String {
+	if text.len() <= max_chars {
+		text.to_string()
+	} else {
+		format!("{}…", &text[..text.floor_char_boundary(max_chars)])
+	}
+}
+
 /// Check whether the loop context has exceeded the compact threshold.
 #[cfg(test)]
 fn should_compact(state: &LoopState, config: &crate::runtime_config::LoopRuntimeConfig) -> bool {
@@ -58,10 +165,10 @@ fn should_compact(state: &LoopState, config: &crate::runtime_config::LoopRuntime
 mod tests {
 	use super::*;
 	use crate::router::{IntentFamily, RouteDecision, RouteRisk};
+	use crate::runtime_config::LoopRuntimeConfig;
 	use crate::runtime_loop::observation::ToolObservation;
 	use crate::runtime_loop::state_update::InterpretedObservation;
 	use crate::runtime_loop::step_record::StepRecord;
-	use crate::runtime_config::LoopRuntimeConfig;
 	use crate::runtime_loop::{NextStepAction, NextStepDecision, StepObservation};
 	use serde_json::json;
 
@@ -225,6 +332,195 @@ mod tests {
 		assert!(
 			should_compact(&state, &config),
 			"small window should trigger compact even with moderate content"
+		);
+	}
+
+	// --- US-001: History truncation ---
+
+	#[test]
+	fn compact_truncates_10_step_history_to_tail_plus_boundary() {
+		let mut state = minimal_loop_state();
+		for i in 1..=10 {
+			state.record_step(sample_step(i, 10 - i));
+		}
+		assert_eq!(state.history.len(), 10);
+
+		let config = CompactConfig::default();
+		compact_history(&mut state, &config);
+
+		// 4 retained + 1 boundary = 5
+		assert_eq!(state.history.len(), 5, "expected boundary + 4 retained");
+		assert_eq!(
+			state.history[0].action,
+			crate::runtime_loop::StepAction::CompactBoundary
+		);
+		assert_eq!(state.history[1].step_index, 7);
+		assert_eq!(state.history[4].step_index, 10);
+	}
+
+	#[test]
+	fn compact_is_noop_when_history_within_retain_limit() {
+		let mut state = minimal_loop_state();
+		for i in 1..=3 {
+			state.record_step(sample_step(i, 10 - i));
+		}
+		let before = state.history.len();
+		compact_history(&mut state, &CompactConfig::default());
+		assert_eq!(state.history.len(), before, "should not truncate");
+		assert!(
+			state.working_summary.is_empty(),
+			"working_summary should stay empty"
+		);
+	}
+
+	// --- US-002: Working summary population ---
+
+	#[test]
+	fn summarize_discarded_steps_format() {
+		let steps: Vec<_> = (1..=6).map(|i| sample_step(i, 10 - i)).collect();
+		let summary = summarize_discarded_steps(&steps);
+
+		assert!(summary.starts_with("[Compact summary — 6 steps discarded]"));
+		assert!(summary.contains("Step 1:"));
+		assert!(summary.contains("Step 6:"));
+		assert!(summary.contains("general.execute"));
+		assert!(summary.contains("ok"));
+	}
+
+	#[test]
+	fn compact_populates_working_summary() {
+		let mut state = minimal_loop_state();
+		for i in 1..=10 {
+			state.record_step(sample_step(i, 10 - i));
+		}
+		compact_history(&mut state, &CompactConfig::default());
+
+		assert!(
+			state.working_summary.contains("[Compact summary"),
+			"working_summary should contain compact digest"
+		);
+		assert!(
+			state.working_summary.contains("6 steps discarded"),
+			"should record 6 discarded steps"
+		);
+	}
+
+	#[test]
+	fn compact_prepends_to_existing_working_summary() {
+		let mut state = minimal_loop_state();
+		state.working_summary = "Previous context from earlier compact.".to_string();
+		for i in 1..=10 {
+			state.record_step(sample_step(i, 10 - i));
+		}
+		compact_history(&mut state, &CompactConfig::default());
+
+		assert!(
+			state
+				.working_summary
+				.ends_with("Previous context from earlier compact."),
+			"old summary should be preserved at end"
+		);
+		assert!(
+			state.working_summary.starts_with("[Compact summary"),
+			"new summary should be prepended"
+		);
+	}
+
+	#[test]
+	fn compact_caps_working_summary_length() {
+		let mut state = minimal_loop_state();
+		state.working_summary = "X".repeat(3_900);
+		for i in 1..=10 {
+			state.record_step(sample_step(i, 10 - i));
+		}
+		let config = CompactConfig {
+			retain_tail_steps: 4,
+			working_summary_max_chars: 4_000,
+		};
+		compact_history(&mut state, &config);
+
+		assert!(
+			state.working_summary.len() <= 4_000,
+			"working_summary should be capped at 4000 chars, got {}",
+			state.working_summary.len()
+		);
+	}
+
+	// --- US-003: Compact boundary record ---
+
+	#[test]
+	fn compact_boundary_is_first_in_retained_history() {
+		let mut state = minimal_loop_state();
+		for i in 1..=8 {
+			state.record_step(sample_step(i, 10 - i));
+		}
+		compact_history(&mut state, &CompactConfig::default());
+
+		let boundary = &state.history[0];
+		assert_eq!(
+			boundary.action,
+			crate::runtime_loop::StepAction::CompactBoundary
+		);
+		assert_eq!(
+			boundary.decision_reason, "4",
+			"boundary decision_reason should be the discarded count"
+		);
+		let raw = boundary.raw_tool_output.as_ref().unwrap();
+		assert_eq!(raw["discarded_count"], 4);
+	}
+
+	// --- Integration: compact reduces estimated tokens ---
+
+	#[test]
+	fn compact_reduces_estimated_tokens_below_threshold() {
+		let mut state = minimal_loop_state();
+		// Add steps with large tool output to blow up token count
+		for i in 1..=8 {
+			let observation = sample_observation();
+			let interpreted = InterpretedObservation {
+				raw_observation: observation.clone(),
+				continue_allowed: true,
+				should_ask_user: false,
+				should_emit_final_answer: false,
+				should_fail: false,
+				terminal: false,
+				budget_exhausted: false,
+				recovery_exhausted: false,
+				remaining_step_budget: 10 - i,
+				remaining_recovery_budget: 2,
+				new_working_directory: None,
+				visible_tools: vec!["general.execute".to_string()],
+			};
+			let step = StepRecord::tool_call(
+				i,
+				NextStepDecision {
+					action: NextStepAction::CallTool,
+					tool_name: Some("general.execute".to_string()),
+					arguments: Some(json!({"command": "echo hello"})),
+					reason: "Execute.".to_string(),
+					final_message: None,
+				},
+				vec!["general.execute".to_string()],
+				Vec::new(),
+				json!({"ok": true, "output": "X".repeat(100_000)}),
+				StepObservation::Tool(observation),
+				interpreted,
+				Some(50),
+				10 - i,
+				2,
+				"/workspace",
+			);
+			state.record_step(step);
+		}
+
+		let before = estimate_context_tokens(&state);
+		let config = CompactConfig::default();
+		compact_history(&mut state, &config);
+		let after = estimate_context_tokens(&state);
+
+		assert!(
+			after < before,
+			"compact should reduce token count: {after} < {before}"
 		);
 	}
 }

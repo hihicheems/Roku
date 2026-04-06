@@ -168,12 +168,19 @@ fn history_digest(
 }
 
 fn render_step_digest_line(step: &crate::runtime_loop::StepRecord) -> String {
+	if step.action == StepAction::CompactBoundary {
+		return format!(
+			"- [Compacted: {} prior steps summarized]",
+			step.decision_reason
+		);
+	}
 	let action = match step.action {
 		StepAction::CallTool => "call_tool",
 		StepAction::AskUser => "ask_user",
 		StepAction::FinalAnswer => "final_answer",
 		StepAction::Fail => "fail",
 		StepAction::Stop => "stop",
+		StepAction::CompactBoundary => unreachable!(),
 	};
 	let tool_name = step.tool_name.as_deref().unwrap_or("none");
 	let observation = step
