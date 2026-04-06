@@ -126,6 +126,7 @@ impl RuntimeService {
 		}
 		self.sync_pending_loop(loop_state)?;
 		self.apply_memory_write_back(request, &response, context_bundle);
+		self.write_back_compact_summaries(request, loop_state);
 		self.clear_runtime_memory_layers(&task.task_id);
 		Ok(response)
 	}

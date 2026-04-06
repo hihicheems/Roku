@@ -85,6 +85,8 @@ pub enum MemoryWriteReason {
 	HighValueObservation,
 	/// The operator explicitly requested persistence.
 	OperatorRequested,
+	/// Context compaction produced a summary worth retaining for future recall.
+	CompactSummary,
 }
 
 /// Optional narrowing hints applied to a recall query.

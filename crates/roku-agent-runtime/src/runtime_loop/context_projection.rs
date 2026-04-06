@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 
+use roku_common_types::RuntimeMemorySections;
 use serde::{Deserialize, Serialize};
 
 use crate::runtime_loop::{LoopState, StepAction, StepObservation, ToolObservation};
@@ -70,6 +71,8 @@ pub struct ContextProjection {
 	pub visible_tool_hints: BTreeMap<String, VisibleToolHint>,
 	pub last_observation: Option<ToolObservation>,
 	pub working_summary: String,
+	#[serde(default)]
+	pub runtime_memory_sections: RuntimeMemorySections,
 	pub history_digest: String,
 	pub unresolved_blockers: Vec<String>,
 	pub working_assumptions: Vec<String>,
@@ -91,7 +94,10 @@ pub struct VisibleToolHint {
 	pub required_argument_keys: Vec<String>,
 }
 
-pub(crate) fn build_context_projection(loop_state: &LoopState) -> ContextProjection {
+pub(crate) fn build_context_projection(
+	loop_state: &LoopState,
+	runtime_memory_sections: &RuntimeMemorySections,
+) -> ContextProjection {
 	let unresolved_blockers = unresolved_blockers(loop_state);
 	let working_assumptions = working_assumptions(loop_state);
 	ContextProjection {
@@ -113,6 +119,7 @@ pub(crate) fn build_context_projection(loop_state: &LoopState) -> ContextProject
 		visible_tool_hints: BTreeMap::new(),
 		last_observation: loop_state.last_observation.clone(),
 		working_summary: loop_state.working_summary.clone(),
+		runtime_memory_sections: runtime_memory_sections.clone(),
 		history_digest: history_digest(loop_state, &unresolved_blockers, &working_assumptions),
 		unresolved_blockers,
 		working_assumptions,
@@ -322,7 +329,7 @@ fn compact_text(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-	use roku_common_types::ResourceSelector;
+	use roku_common_types::{ResourceSelector, RuntimeMemorySections};
 
 	use super::build_context_projection;
 	use crate::router::{IntentFamily, RouteDecision, RouteRisk};
@@ -392,7 +399,8 @@ mod tests {
 
 	#[test]
 	fn context_projection_summarizes_recent_history_without_raw_step_log_fields() {
-		let projection = build_context_projection(&sample_loop_state());
+		let projection =
+			build_context_projection(&sample_loop_state(), &RuntimeMemorySections::default());
 
 		assert!(projection.history_digest.contains("step 1"));
 		assert!(projection.history_digest.contains("inventory.describe"));
@@ -406,7 +414,7 @@ mod tests {
 		let mut loop_state = sample_loop_state();
 		loop_state.visible_tools = vec!["fs.glob".to_string()];
 
-		let projection = build_context_projection(&loop_state);
+		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 
 		assert_eq!(projection.visible_tools, vec!["fs.glob".to_string()]);
 		assert!(projection.visible_tool_hints.is_empty());
@@ -417,7 +425,7 @@ mod tests {
 		let mut loop_state = sample_loop_state();
 		loop_state.working_summary = "WORKING_SUMMARY_ONLY::grounded repo layout".to_string();
 
-		let projection = build_context_projection(&loop_state);
+		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 
 		assert_eq!(
 			projection.working_summary,

@@ -332,6 +332,14 @@ fn ungrounded_consumer_path_rejection_reason(
 fn tool_loop_prompt(context_projection: &ContextProjection, user_reply: Option<&str>) -> String {
 	let projection_json =
 		serde_json::to_string_pretty(context_projection).unwrap_or_else(|_| "{}".to_string());
+	let prior_work_section = if context_projection.working_summary.is_empty() {
+		String::new()
+	} else {
+		format!(
+			"\n## Prior Work Summary\n{}\n",
+			context_projection.working_summary
+		)
+	};
 	format!(
 		r#"Return only JSON with exactly these keys:
 {{
@@ -368,15 +376,25 @@ Rules:
 - Use `ask_user` when the current information is still insufficient.
 - Use `final_answer` only when the current context projection already proves the user request is satisfied.
 
-Context projection:
+
+{prior_work_section}Context projection:
 {projection_json}
 
 Current user follow-up:
 {user_reply}
 "#,
+		prior_work_section = prior_work_section,
 		projection_json = projection_json,
 		user_reply = user_reply.unwrap_or("null"),
 	)
+}
+
+#[cfg(test)]
+pub(crate) fn tool_loop_prompt_for_test(
+	context_projection: &ContextProjection,
+	user_reply: Option<&str>,
+) -> String {
+	tool_loop_prompt(context_projection, user_reply)
 }
 
 fn deterministic_next_step(loop_state: &LoopState, user_reply: Option<&str>) -> NextStepDecision {
@@ -917,7 +935,7 @@ mod tests {
 	use std::env;
 	use std::sync::{Arc, Mutex};
 
-	use roku_common_types::ResourceSelector;
+	use roku_common_types::{ResourceSelector, RuntimeMemorySections};
 	use roku_plugin_llm::{
 		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderCallError,
 		ProviderResponse, RiskTier, RoutingPolicy,
@@ -1124,14 +1142,16 @@ mod tests {
 			interpreted.remaining_recovery_budget,
 			"/workspace",
 		));
-		let projection = build_context_projection(&loop_state);
+		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 		let prompt = tool_loop_prompt(&projection, None);
 
-		assert_eq!(
-			prompt
-				.matches("PROMPT_WORKING_SUMMARY_ONLY::pending repo blocker")
-				.count(),
-			1
+		assert!(
+			prompt.contains("## Prior Work Summary"),
+			"non-empty working_summary should produce a Prior Work Summary section"
+		);
+		assert!(
+			prompt.contains("PROMPT_WORKING_SUMMARY_ONLY::pending repo blocker"),
+			"working_summary content should appear in the prompt"
 		);
 		assert!(prompt.contains("\"working_summary\":"));
 		assert!(prompt.contains("\"history_digest\":"));
@@ -1153,7 +1173,8 @@ mod tests {
 			data: json!({ "runtime_mode": "deterministic" }),
 			message: "partial inventory summary".to_string(),
 		});
-		let projection: ContextProjection = build_context_projection(&loop_state);
+		let projection: ContextProjection =
+			build_context_projection(&loop_state, &RuntimeMemorySections::default());
 		let (router, prompts) = router_with_responses(vec![json!({
 			"action": "call_tool",
 			"tool_name": "inventory.describe",
@@ -1199,7 +1220,7 @@ mod tests {
 			}),
 			message: "Found 1 matching candidate for `Cargo.toml`.".to_string(),
 		});
-		let projection = build_context_projection(&loop_state);
+		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 
 		let decision = decide_tool_loop_next_step(
 			&loop_state,
@@ -1241,7 +1262,7 @@ mod tests {
 			}),
 			message: "Found 2 matching candidates for `Cargo.toml`.".to_string(),
 		});
-		let projection = build_context_projection(&loop_state);
+		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 
 		let decision = decide_tool_loop_next_step(
 			&loop_state,
@@ -1298,7 +1319,7 @@ mod tests {
 				.clone(),
 			streak: 2,
 		});
-		let projection = build_context_projection(&loop_state);
+		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 		let (router, _prompts) = router_with_responses(vec![json!({
 			"action": "call_tool",
 			"tool_name": "general.execute",
@@ -1334,7 +1355,7 @@ mod tests {
 			vec!["fs.find", "fs.read_text"],
 			vec!["fs.find", "fs.read_text", "general.execute"],
 		);
-		let projection = build_context_projection(&loop_state);
+		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 
 		let decision = decide_tool_loop_next_step(
 			&loop_state,
@@ -1358,7 +1379,7 @@ mod tests {
 			vec!["python.run"],
 			vec!["python.run", "general.execute"],
 		);
-		let projection = build_context_projection(&loop_state);
+		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 
 		let decision = decide_tool_loop_next_step(
 			&loop_state,
@@ -1387,7 +1408,7 @@ mod tests {
 				"general.execute",
 			],
 		);
-		let projection = build_context_projection(&loop_state);
+		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 
 		let decision = decide_tool_loop_next_step(
 			&loop_state,
@@ -1411,7 +1432,7 @@ mod tests {
 			vec!["fs.find", "fs.glob", "fs.inspect"],
 			vec!["fs.find", "fs.glob", "fs.inspect", "general.execute"],
 		);
-		let projection = build_context_projection(&loop_state);
+		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 
 		let decision = decide_tool_loop_next_step(
 			&loop_state,
@@ -1441,7 +1462,7 @@ mod tests {
 				"general.execute",
 			],
 		);
-		let projection = build_context_projection(&loop_state);
+		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 		let (router, _prompts) = router_with_responses(vec![json!({
 			"action": "call_tool",
 			"tool_name": "fs.find",
@@ -1486,7 +1507,7 @@ mod tests {
 				"general.execute",
 			],
 		);
-		let projection = build_context_projection(&loop_state);
+		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 		let (router, _prompts) = router_with_responses(vec![
 			json!({
 				"action": "call_tool",
@@ -1526,7 +1547,7 @@ mod tests {
 			vec!["python.run"],
 			vec!["python.run", "general.execute"],
 		);
-		let projection = build_context_projection(&loop_state);
+		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 
 		let decision = decide_tool_loop_next_step(
 			&loop_state,
@@ -1550,7 +1571,7 @@ mod tests {
 			vec!["command.run"],
 			vec!["command.run", "general.execute"],
 		);
-		let projection = build_context_projection(&loop_state);
+		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 
 		let decision = decide_tool_loop_next_step(
 			&loop_state,
