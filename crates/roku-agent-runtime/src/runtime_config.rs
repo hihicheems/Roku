@@ -320,7 +320,10 @@ impl LoopRuntimeConfig {
 		if self.context_window_tokens == 0 {
 			return Err(AgentRuntimeConfigError::InvalidContextWindowTokens);
 		}
-		if self.compact_threshold_ratio <= 0.0 || self.compact_threshold_ratio >= 1.0 {
+		if !self.compact_threshold_ratio.is_finite()
+			|| self.compact_threshold_ratio <= 0.0
+			|| self.compact_threshold_ratio >= 1.0
+		{
 			return Err(AgentRuntimeConfigError::InvalidCompactThresholdRatio);
 		}
 		self.initial_step_budget = self.initial_step_budget.min(HARD_MAX_INITIAL_STEP_BUDGET);
@@ -670,6 +673,18 @@ mod tests {
 		);
 
 		config.r#loop.compact_threshold_ratio = -0.5;
+		assert_eq!(
+			config.validate_and_clamp(),
+			Err(AgentRuntimeConfigError::InvalidCompactThresholdRatio)
+		);
+
+		config.r#loop.compact_threshold_ratio = f64::NAN;
+		assert_eq!(
+			config.validate_and_clamp(),
+			Err(AgentRuntimeConfigError::InvalidCompactThresholdRatio)
+		);
+
+		config.r#loop.compact_threshold_ratio = f64::INFINITY;
 		assert_eq!(
 			config.validate_and_clamp(),
 			Err(AgentRuntimeConfigError::InvalidCompactThresholdRatio)
