@@ -2293,7 +2293,6 @@ mod tests {
 			loop_state_json: "{\"status\":\"waiting\"}".to_string(),
 		});
 		let state = SessionState {
-			planning_mode: None,
 			pending_loop: saved_pending_loop.clone(),
 		};
 		session_state
@@ -2395,7 +2394,6 @@ mod tests {
 		} = adapters;
 
 		let first_state = SessionState {
-			planning_mode: None,
 			pending_loop: Some(PendingLoopBinding {
 				run_id: "run-1".to_string(),
 				loop_state_json: "{\"status\":\"waiting\"}".to_string(),
@@ -2412,7 +2410,6 @@ mod tests {
 		);
 
 		let overwritten_state = SessionState {
-			planning_mode: None,
 			pending_loop: Some(PendingLoopBinding {
 				run_id: "run-2".to_string(),
 				loop_state_json: "{\"status\":\"running\"}".to_string(),
@@ -2525,13 +2522,7 @@ mod tests {
 		assert_eq!(selected.session_id, descriptor.session_id);
 
 		session_state
-			.save_session_state(
-				&descriptor.session_id,
-				SessionState {
-					planning_mode: None,
-					pending_loop: None,
-				},
-			)
+			.save_session_state(&descriptor.session_id, SessionState { pending_loop: None })
 			.expect("session state should save");
 		short_term
 			.append_continuity_turn(
@@ -2735,13 +2726,7 @@ mod tests {
 		let root_uri = runtime_session_state_uri("viking://resources/roku-memory", "session-1");
 
 		session_state
-			.save_session_state(
-				"session-1",
-				SessionState {
-					planning_mode: None,
-					pending_loop: None,
-				},
-			)
+			.save_session_state("session-1", SessionState { pending_loop: None })
 			.expect("materialized session state should save");
 		server.remove_materialized_content(&root_uri);
 
@@ -2774,13 +2759,7 @@ mod tests {
 		let root_uri = runtime_session_state_uri("viking://resources/roku-memory", "session-1");
 
 		session_state
-			.save_session_state(
-				"session-1",
-				SessionState {
-					planning_mode: None,
-					pending_loop: None,
-				},
-			)
+			.save_session_state("session-1", SessionState { pending_loop: None })
 			.expect("materialized session state should save");
 		server.set_materialized_content(&root_uri, "");
 
@@ -2814,13 +2793,7 @@ mod tests {
 		let root_uri = runtime_session_state_uri("viking://resources/roku-memory", "session-1");
 
 		session_state
-			.save_session_state(
-				"session-1",
-				SessionState {
-					planning_mode: None,
-					pending_loop: None,
-				},
-			)
+			.save_session_state("session-1", SessionState { pending_loop: None })
 			.expect("materialized session state should save");
 		server.set_materialized_content(&root_uri, "{invalid json");
 

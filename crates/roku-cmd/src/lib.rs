@@ -144,7 +144,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use roku_agent_runtime::ToolCatalogConfigError;
-use roku_common_types::{ApprovalDecision, PlanningModeHint};
+use roku_common_types::ApprovalDecision;
 use roku_memory::{
 	MemoryKind, MemoryQuery, MemoryRecallReason, MemoryScope, MemoryWriteReason, MemoryWriteRequest,
 };
@@ -268,7 +268,7 @@ where
 /// Keeping this in one place prevents subcommand parsers from drifting into slightly different
 /// operator guidance.
 pub fn help_text() -> &'static str {
-	"Usage:\n  roku-cmd once [--session-id <id>] [--planning-mode <mode>] [--generated-skill-root <path>] <goal>\n  roku-cmd live-once [--session-id <id>] [--planning-mode <mode>] [--generated-skill-root <path>] <goal>\n  roku-cmd telegram-once [--session-id <id>] [--planning-mode <mode>] [--generated-skill-root <path>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n  roku-cmd task show <task-id>\n  roku-cmd task replay <task-id>\n  roku-cmd task resume <task-id>\n  roku-cmd approval show <approval-id>\n  roku-cmd approval approve <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd approval reject <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd artifact list <task-id>\n  roku-cmd artifact content <task-id> <artifact-id>\n  roku-cmd artifact download <task-id> <artifact-id> --output <path>\n  roku-cmd experiment show <task-id>\n  roku-cmd memory prepare-config\n  roku-cmd memory health\n  roku-cmd memory search [--scope <scope>] [--session-id <id>] [--user-id <id>] [--project-id <id>] [--workspace-id <id>] [--limit <n>] <query>\n  roku-cmd memory write [--scope <scope>] [--kind <kind>] [--session-id <id>] [--user-id <id>] [--project-id <id>] [--workspace-id <id>] [--summary <text>] [--write-reason <reason>] <content>\n  roku-cmd memory delete <record-id>\n  roku-cmd skill install <source-url>\n  roku-cmd skill list\n  roku-cmd skill show <skill-name>\n\nCommands:\n  once              Run the deterministic in-process pipeline.\n  live-once         Run the OpenRouter-backed live pipeline from environment.\n  telegram-once     Run one live Telegram handler turn and print the outbound bot message.\n  telegram-bot      Start the Telegram polling bot using environment configuration.\n  api-gateway       Start the Actix HTTP gateway using environment configuration.\n  task show         Render a persisted task snapshot with its event timeline.\n  task replay       Rebuild a state-transition report from persisted task events.\n  task resume       Continue a resumable persisted task using the live runtime path.\n  approval          Show or decide an approval ticket from persisted state.\n  artifact          List artifacts, print artifact content, or download an artifact payload.\n  experiment show   Render the persisted experiment run for a task.\n  memory            Prepare generated config or exercise the provider-neutral memory backend commands.\n  skill install     Install a skill package into the local file-backed registry.\n  skill list        List installed skills from the local registry.\n  skill show        Render installed skill metadata and prompt context.\n\nMemory Scopes:\n  session | user | project | workspace | global\n\nMemory Kinds:\n  user_preference | user_fact | project_fact | workspace_fact | historical_case | constraint | workflow_insight\n\nPlanning Modes:\n  react | taskdecomposition | treesearch | iterativerefinement\n\nNote:\n  --planning-mode is a deprecated compatibility hint. New requests stay on the direct-route runtime and produce a compatibility fallback instead of entering a planning-heavy workflow."
+	"Usage:\n  roku-cmd once [--session-id <id>] [--generated-skill-root <path>] <goal>\n  roku-cmd live-once [--session-id <id>] [--generated-skill-root <path>] <goal>\n  roku-cmd telegram-once [--session-id <id>] [--generated-skill-root <path>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n  roku-cmd task show <task-id>\n  roku-cmd task replay <task-id>\n  roku-cmd task resume <task-id>\n  roku-cmd approval show <approval-id>\n  roku-cmd approval approve <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd approval reject <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd artifact list <task-id>\n  roku-cmd artifact content <task-id> <artifact-id>\n  roku-cmd artifact download <task-id> <artifact-id> --output <path>\n  roku-cmd experiment show <task-id>\n  roku-cmd memory prepare-config\n  roku-cmd memory health\n  roku-cmd memory search [--scope <scope>] [--session-id <id>] [--user-id <id>] [--project-id <id>] [--workspace-id <id>] [--limit <n>] <query>\n  roku-cmd memory write [--scope <scope>] [--kind <kind>] [--session-id <id>] [--user-id <id>] [--project-id <id>] [--workspace-id <id>] [--summary <text>] [--write-reason <reason>] <content>\n  roku-cmd memory delete <record-id>\n  roku-cmd skill install <source-url>\n  roku-cmd skill list\n  roku-cmd skill show <skill-name>\n\nCommands:\n  once              Run the deterministic in-process pipeline.\n  live-once         Run the OpenRouter-backed live pipeline from environment.\n  telegram-once     Run one live Telegram handler turn and print the outbound bot message.\n  telegram-bot      Start the Telegram polling bot using environment configuration.\n  api-gateway       Start the Actix HTTP gateway using environment configuration.\n  task show         Render a persisted task snapshot with its event timeline.\n  task replay       Rebuild a state-transition report from persisted task events.\n  task resume       Continue a resumable persisted task using the live runtime path.\n  approval          Show or decide an approval ticket from persisted state.\n  artifact          List artifacts, print artifact content, or download an artifact payload.\n  experiment show   Render the persisted experiment run for a task.\n  memory            Prepare generated config or exercise the provider-neutral memory backend commands.\n  skill install     Install a skill package into the local file-backed registry.\n  skill list        List installed skills from the local registry.\n  skill show        Render installed skill metadata and prompt context.\n\nMemory Scopes:\n  session | user | project | workspace | global\n\nMemory Kinds:\n  user_preference | user_fact | project_fact | workspace_fact | historical_case | constraint | workflow_insight"
 }
 
 fn join_goal(parts: &[String]) -> Result<String, CommandError> {
@@ -283,7 +283,6 @@ fn join_goal(parts: &[String]) -> Result<String, CommandError> {
 
 fn parse_request_options(parts: &[String]) -> Result<ExecutionRequestOptions, CommandError> {
 	let mut session_id = "session-1".to_string();
-	let mut planning_mode_hint = None;
 	let mut generated_skill_root = None;
 	let mut goal_parts = Vec::new();
 	let mut index = 0usize;
@@ -300,19 +299,6 @@ fn parse_request_options(parts: &[String]) -> Result<ExecutionRequestOptions, Co
 				.get(index + 1)
 				.ok_or_else(|| CommandError::Usage("missing value for --session-id".to_string()))?;
 			session_id = parse_non_empty_flag("--session-id", value)?;
-			index += 2;
-			continue;
-		}
-		if let Some(value) = current.strip_prefix("--planning-mode=") {
-			planning_mode_hint = Some(parse_planning_mode_hint(value)?);
-			index += 1;
-			continue;
-		}
-		if current == "--planning-mode" {
-			let value = parts.get(index + 1).ok_or_else(|| {
-				CommandError::Usage("missing value for --planning-mode".to_string())
-			})?;
-			planning_mode_hint = Some(parse_planning_mode_hint(value)?);
 			index += 2;
 			continue;
 		}
@@ -342,7 +328,6 @@ fn parse_request_options(parts: &[String]) -> Result<ExecutionRequestOptions, Co
 	Ok(ExecutionRequestOptions {
 		session_id,
 		goal: join_goal(&goal_parts)?,
-		planning_mode_hint,
 		generated_skill_root,
 	})
 }
@@ -354,26 +339,6 @@ fn parse_non_empty_flag(flag: &str, value: &str) -> Result<String, CommandError>
 	}
 
 	Ok(trimmed.to_string())
-}
-
-fn parse_planning_mode_hint(value: &str) -> Result<PlanningModeHint, CommandError> {
-	let normalized = value
-		.chars()
-		.filter(|character| character.is_ascii_alphanumeric())
-		.collect::<String>()
-		.to_ascii_lowercase();
-	match normalized.as_str() {
-		"react" => Ok(PlanningModeHint::ReAct),
-		"taskdecomposition" | "decomposition" => Ok(PlanningModeHint::TaskDecomposition),
-		"treesearch" | "tree" => Ok(PlanningModeHint::TreeSearch),
-		"iterativerefinement" | "refinement" | "refine" => {
-			Ok(PlanningModeHint::IterativeRefinement)
-		}
-		_ => Err(CommandError::Usage(format!(
-			"unknown planning mode: {value}\n\n{}",
-			help_text()
-		))),
-	}
 }
 
 fn execute_task_command(parts: &[String]) -> Result<String, CommandError> {
@@ -1198,12 +1163,10 @@ mod tests {
 	}
 
 	#[test]
-	fn parse_request_options_supports_session_and_planning_mode_flags() {
+	fn parse_request_options_supports_session_and_skill_root_flags() {
 		let options = parse_request_options(&[
 			"--session-id".to_string(),
 			"chat-42".to_string(),
-			"--planning-mode".to_string(),
-			"TreeSearch".to_string(),
 			"--generated-skill-root".to_string(),
 			"/tmp/generated-skills".to_string(),
 			"investigate".to_string(),
@@ -1213,26 +1176,10 @@ mod tests {
 
 		assert_eq!(options.session_id, "chat-42");
 		assert_eq!(
-			options.planning_mode_hint,
-			Some(PlanningModeHint::TreeSearch)
-		);
-		assert_eq!(
 			options.generated_skill_root,
 			Some(PathBuf::from("/tmp/generated-skills"))
 		);
 		assert_eq!(options.goal, "investigate memory");
-	}
-
-	#[test]
-	fn parse_request_options_rejects_unknown_planning_mode() {
-		let error = parse_request_options(&[
-			"--planning-mode".to_string(),
-			"unknown".to_string(),
-			"hello".to_string(),
-		])
-		.expect_err("unknown mode should fail");
-
-		assert!(error.to_string().contains("unknown planning mode"));
 	}
 
 	#[test]

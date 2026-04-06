@@ -144,7 +144,6 @@ impl RuntimeService {
 		let recall_input = MemoryRecallInput {
 			session_id: request.session_id.clone(),
 			goal: request.goal.clone(),
-			planning_mode_hint_present: request.planning_mode_hint.is_some(),
 			pending_loop_active,
 			short_term_continuity: bundle.short_term_continuity.clone(),
 			user_id: None,

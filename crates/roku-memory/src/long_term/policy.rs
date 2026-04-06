@@ -47,8 +47,6 @@ pub struct MemoryRecallInput {
 	pub session_id: String,
 	/// Current user goal in natural language.
 	pub goal: String,
-	/// Whether request handling is already in a planning-specific compatibility path.
-	pub planning_mode_hint_present: bool,
 	/// Whether runtime is resuming an already-active pending loop.
 	pub pending_loop_active: bool,
 	#[serde(default)]
@@ -121,7 +119,7 @@ impl Default for ConservativeMemoryLifecyclePolicy {
 impl MemoryLifecyclePolicy for ConservativeMemoryLifecyclePolicy {
 	fn build_recall_query(&self, input: &MemoryRecallInput) -> Option<MemoryQuery> {
 		let query_text = input.goal.trim();
-		if query_text.is_empty() || input.planning_mode_hint_present || input.pending_loop_active {
+		if query_text.is_empty() || input.pending_loop_active {
 			return None;
 		}
 
@@ -181,7 +179,6 @@ mod tests {
 		let input = MemoryRecallInput {
 			session_id: "session-1".to_string(),
 			goal: "Remember my preferred coding language".to_string(),
-			planning_mode_hint_present: false,
 			pending_loop_active: false,
 			short_term_continuity: vec![ConversationTurn {
 				role: ConversationRole::User,

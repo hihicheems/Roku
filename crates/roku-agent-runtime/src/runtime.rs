@@ -1032,7 +1032,6 @@ impl GenericAgentRuntime {
 		explicit_source_url: Option<&String>,
 		runtime_memory_sections: &RuntimeMemorySections,
 	) -> DirectRouteExecutionResult {
-		let memory_context = runtime_memory_sections.named_sections_text();
 		let capabilities = route_capabilities(&self.resource_catalog, &resources);
 		let node = TaskNode {
 			node_id: NodeId(node_id.to_string()),
@@ -1061,7 +1060,6 @@ impl GenericAgentRuntime {
 				summary: node.description.clone(),
 				resources,
 				conversation_history: request.conversation_history.clone(),
-				memory_context: memory_context.clone(),
 				runtime_memory_sections: runtime_memory_sections.clone(),
 			},
 			capabilities,
@@ -1212,7 +1210,6 @@ impl GenericAgentRuntime {
 				summary: node.description.clone(),
 				resources: node.resources.clone(),
 				conversation_history: task.conversation_history.clone(),
-				memory_context: String::new(),
 				runtime_memory_sections: RuntimeMemorySections::default(),
 			},
 			capabilities: capabilities.clone(),
@@ -1262,7 +1259,6 @@ impl GenericAgentRuntime {
 		bound_resources: &[ResourceSelector],
 		step_summary: &str,
 	) -> DirectRouteExecutionResult {
-		let memory_context = runtime_memory_sections.named_sections_text();
 		let mut resources = vec![selector.clone()];
 		for resource in bound_resources {
 			if !resources.iter().any(|existing| existing == resource) {
@@ -1297,7 +1293,6 @@ impl GenericAgentRuntime {
 				summary: node.description.clone(),
 				resources,
 				conversation_history: request.conversation_history.clone(),
-				memory_context: memory_context.clone(),
 				runtime_memory_sections: runtime_memory_sections.clone(),
 			},
 			capabilities: capabilities.clone(),
@@ -1320,7 +1315,6 @@ impl GenericAgentRuntime {
 				.map(|resource| resource.display_key())
 				.collect::<Vec<_>>(),
 			"conversation_history": render_conversation_history(&request.conversation_history),
-			"memory_context": memory_context,
 			"runtime_memory_sections": runtime_memory_sections,
 			"budget_tokens": spec.policy_bindings.budget_tokens,
 			"time_budget_ms": spec.policy_bindings.time_budget_ms,
@@ -1941,7 +1935,6 @@ mod tests {
 				summary: "summary".to_string(),
 				resources: Vec::new(),
 				conversation_history: Vec::new(),
-				memory_context: String::new(),
 				runtime_memory_sections: RuntimeMemorySections::default(),
 			},
 			capabilities: capabilities

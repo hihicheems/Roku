@@ -29,10 +29,7 @@ mod tests;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use roku_agent_runtime::{
-	EscalationAction, EscalationReason, GenericAgentRuntime, IntentFamily, RouteDecision,
-	RouteDecisionResult, RouteEscalationPlan, RouteRisk,
-};
+use roku_agent_runtime::{GenericAgentRuntime, RouteDecisionResult};
 use roku_artifact_store::ArtifactStore;
 use roku_common_types::{
 	ApprovalDecision, ApprovalId, ApprovalStatus, ApprovalTicket, ErrorClass, RequestEnvelope,
@@ -609,23 +606,6 @@ fn normalize_goal(goal: &str) -> String {
 		goal.trim().to_string()
 	} else {
 		normalized
-	}
-}
-
-fn compatibility_fallback_plan(reason: &str) -> RouteEscalationPlan {
-	RouteEscalationPlan {
-		decision: RouteDecision::new(
-			IntentFamily::MultiStep,
-			0.0,
-			true,
-			RouteRisk::Medium,
-			Vec::new(),
-			Vec::new(),
-			Vec::new(),
-			reason,
-		),
-		reason: EscalationReason::RequiresMultiStep,
-		action: EscalationAction::EnterLimitedPlanning,
 	}
 }
 

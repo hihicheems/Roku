@@ -130,7 +130,6 @@ pub(crate) fn run_telegram_once_with_options_from_env(
 		} => {
 			request.request_id = RequestId(format!("tg-cli-{}", now_unix_ms()));
 			request.session_id = options.session_id;
-			request.planning_mode_hint = options.planning_mode_hint;
 			render_telegram_preview(chat_id, handler.handle_request(request))
 		}
 		TelegramInteraction::ControlCommand(mut command) => {
@@ -1529,10 +1528,7 @@ mod tests {
 				Box::new(InMemorySessionManagementBackend::default()),
 			));
 		let session_id = "telegram-seam-session";
-		let state = SessionState {
-			planning_mode: Some(roku_common_types::PlanningModeHint::TreeSearch),
-			pending_loop: None,
-		};
+		let state = SessionState { pending_loop: None };
 
 		transport_state
 			.save_session_state(session_id, state.clone())
@@ -1610,12 +1606,6 @@ mod tests {
 		assert_eq!(third.response.message, "你刚才问的是：沙县小吃是什么？");
 
 		let session = active_session(&handler, binding_id);
-
-		let session_state = handler
-			.transport_state
-			.load_session_state_or_default(&session.session_id)
-			.expect("session state should load");
-		assert_eq!(session_state.planning_mode, None);
 
 		let turns = handler
 			.transport_state
@@ -1781,13 +1771,7 @@ mod tests {
 		let session = bootstrap_session(&handler, binding_id);
 		handler
 			.transport_state
-			.save_session_state(
-				&session.session_id,
-				SessionState {
-					planning_mode: None,
-					pending_loop: None,
-				},
-			)
+			.save_session_state(&session.session_id, SessionState { pending_loop: None })
 			.expect("session state should save");
 		handler
 			.transport_state

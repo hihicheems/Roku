@@ -272,7 +272,6 @@ mod tests {
 				summary: "run command".to_string(),
 				resources: Vec::new(),
 				conversation_history: Vec::new(),
-				memory_context: String::new(),
 				runtime_memory_sections: RuntimeMemorySections::default(),
 			},
 			capabilities: Vec::new(),

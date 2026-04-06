@@ -501,7 +501,7 @@ fn now_unix_ms_i64() -> i64 {
 
 #[cfg(test)]
 mod tests {
-	use roku_common_types::{PendingLoopBinding, PlanningModeHint};
+	use roku_common_types::PendingLoopBinding;
 
 	use super::*;
 
@@ -509,7 +509,6 @@ mod tests {
 	fn in_memory_session_state_backend_roundtrips_state() {
 		let mut backend = InMemorySessionStateBackend::default();
 		let state = SessionState {
-			planning_mode: Some(PlanningModeHint::TreeSearch),
 			pending_loop: Some(PendingLoopBinding {
 				run_id: "loop-1".to_string(),
 				loop_state_json: "{\"status\":\"paused\"}".to_string(),

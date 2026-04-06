@@ -440,7 +440,6 @@ mod tests {
 				"goal": "Check whether note.txt exists.",
 				"summary": "Resolve the grounded file path and report whether it exists.",
 				"conversation_history": "",
-				"memory_context": "",
 				"budget_tokens": 2048_u64,
 				"time_budget_ms": 45_000_u64,
 				"path": "note.txt"
@@ -496,7 +495,6 @@ mod tests {
 				"goal": "Run the demo skill now.",
 				"summary": "Execute the installed demo skill script.",
 				"conversation_history": "",
-				"memory_context": "",
 				"granted_capabilities": ["skill.execute"],
 				"resource_selectors": ["skill:demo-skill"],
 				"budget_tokens": 4096_u64,
@@ -602,7 +600,6 @@ mod tests {
 				"goal": "Install the archived demo skill from its source URL.",
 				"summary": "Install the skill so the runtime can confirm its local availability.",
 				"conversation_history": "",
-				"memory_context": "",
 				"budget_tokens": 2048_u64,
 				"time_budget_ms": 120_000_u64,
 				"source_url": "https://github.com/example/skills/tree/main/skills/archived-demo-skill"

@@ -20,6 +20,9 @@ pub struct LoopRequest {
 	pub request_id: RequestId,
 	pub session_id: String,
 	pub goal: String,
+	/// Kept for serde backwards compatibility with serialized loop snapshots.
+	/// No longer populated; always deserialized as None from new snapshots.
+	#[serde(default)]
 	pub planning_mode_hint: Option<PlanningModeHint>,
 }
 
@@ -28,6 +31,6 @@ pub(crate) fn intake_request(request: &RequestEnvelope) -> LoopRequest {
 		request_id: request.request_id.clone(),
 		session_id: request.session_id.clone(),
 		goal: request.goal.clone(),
-		planning_mode_hint: request.planning_mode_hint,
+		planning_mode_hint: None,
 	}
 }
