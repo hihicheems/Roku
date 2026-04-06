@@ -142,7 +142,7 @@ impl GenericAgentRuntime {
 		let runtime_visible_tool_availability_snapshot =
 			build_runtime_visible_tool_availability_snapshot(
 				&resource_catalog,
-				safe_baseline_tool_pool(),
+				&safe_baseline_tool_pool(&agent_runtime_config.r#loop),
 			);
 		let shared_tool_runtime = Arc::new(tool_runtime);
 		let mut runtime = Self {
@@ -676,6 +676,7 @@ impl GenericAgentRuntime {
 				self.route_router.as_deref(),
 				user_reply,
 				&self.agent_runtime_config.next_step,
+				Some(&self.resource_catalog),
 			);
 			match next_step.action {
 				crate::runtime_loop::NextStepAction::CallTool => {
@@ -1031,10 +1032,10 @@ impl GenericAgentRuntime {
 										.prompts
 										.visible_tool_hint_max_chars,
 								),
-								required_argument_keys: tool_required_argument_keys(tool_name)
-									.iter()
-									.map(|key| (*key).to_string())
-									.collect(),
+								required_argument_keys: tool_required_argument_keys(
+									tool_name,
+									Some(&self.resource_catalog),
+								),
 							},
 						)
 					})
@@ -1866,29 +1867,12 @@ fn compact_selection_hint(selection_hint: &str, max_chars: usize) -> String {
 	format!("{truncated}...")
 }
 
-fn safe_baseline_tool_pool() -> &'static [&'static str] {
-	&[
-		"general.execute",
-		"inventory.describe",
-		"fs.find",
-		"fs.read_text",
-		"fs.list_dir",
-		"fs.inspect",
-		"fs.exists",
-		"fs.glob",
-		// EPIC-0 tools — will migrate to descriptor-driven pool under EPIC-5.
-		"fs.edit",
-		"fs.write",
-		"fs.grep",
-		"table.preview",
-		"table.inspect",
-		"table.list_sheets",
-		"table.schema",
-		"web.search",
-		"web.fetch",
-		"command.run",
-		"python.run",
-	]
+fn safe_baseline_tool_pool(config: &crate::runtime_config::LoopRuntimeConfig) -> Vec<&str> {
+	config
+		.baseline_tool_pool
+		.iter()
+		.map(String::as_str)
+		.collect()
 }
 
 fn tool_loop_step_summary(context_projection: &ContextProjection, tool_name: &str) -> String {

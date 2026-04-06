@@ -955,7 +955,7 @@ fn fs_tool_contract(name: &str) -> Option<ToolContract> {
 				GroundingStrategy::PathBased,
 				&["path"],
 				Some("path"),
-				true,
+				false,
 			),
 			..ToolContract::default()
 		}),

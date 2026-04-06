@@ -68,6 +68,10 @@ pub struct LoopRuntimeConfig {
 	pub retain_tail_steps: usize,
 	/// Maximum character length of working_summary after compaction.
 	pub working_summary_max_chars: usize,
+	/// Tool names visible by default in the direct-route tool loop.
+	///
+	/// When empty, falls back to the compiled-in default list.
+	pub baseline_tool_pool: Vec<String>,
 }
 
 impl LoopRuntimeConfig {
@@ -85,6 +89,7 @@ pub struct LoopRuntimeConfigPatch {
 	pub initial_recovery_budget: Option<u32>,
 	pub context_window_tokens: Option<u64>,
 	pub compact_threshold_ratio: Option<f64>,
+	pub baseline_tool_pool: Option<Vec<String>>,
 	pub retain_tail_steps: Option<usize>,
 	pub working_summary_max_chars: Option<usize>,
 }
@@ -225,8 +230,36 @@ impl Default for LoopRuntimeConfig {
 			compact_threshold_ratio: 0.75,
 			retain_tail_steps: 4,
 			working_summary_max_chars: 4_000,
+			baseline_tool_pool: default_baseline_tool_pool(),
 		}
 	}
+}
+
+fn default_baseline_tool_pool() -> Vec<String> {
+	[
+		"general.execute",
+		"inventory.describe",
+		"fs.find",
+		"fs.read_text",
+		"fs.list_dir",
+		"fs.inspect",
+		"fs.exists",
+		"fs.glob",
+		"fs.edit",
+		"fs.write",
+		"fs.grep",
+		"table.preview",
+		"table.inspect",
+		"table.list_sheets",
+		"table.schema",
+		"web.search",
+		"web.fetch",
+		"command.run",
+		"python.run",
+	]
+	.iter()
+	.map(|s| s.to_string())
+	.collect()
 }
 
 impl Default for RouteClassifierRuntimeConfig {
@@ -311,6 +344,11 @@ impl LoopRuntimeConfig {
 		}
 		if let Some(value) = patch.working_summary_max_chars {
 			self.working_summary_max_chars = value;
+		}
+		if let Some(value) = patch.baseline_tool_pool
+			&& !value.is_empty()
+		{
+			self.baseline_tool_pool = value;
 		}
 	}
 
@@ -644,6 +682,7 @@ mod tests {
 				compact_threshold_ratio: Some(0.85),
 				retain_tail_steps: Some(HARD_MAX_RETAIN_TAIL_STEPS * 4),
 				working_summary_max_chars: Some(HARD_MAX_WORKING_SUMMARY_MAX_CHARS * 4),
+				baseline_tool_pool: None,
 			}),
 			router: Some(RouteClassifierRuntimeConfigPatch {
 				expected_output_tokens: Some(HARD_MAX_ROUTE_EXPECTED_OUTPUT_TOKENS * 4),
