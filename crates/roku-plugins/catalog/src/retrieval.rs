@@ -61,7 +61,7 @@ pub struct ResourceCost {
 /// - **Canonical descriptor:** `description`, `summary`, `examples`, `use_cases`, `contract`
 /// - **Hot-path selection hint:** `selection_hint`, `tags`, `key_commands`
 /// - **Routing:** `risk`, `cost`, `discoverable`, `required_capabilities`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CatalogDescriptor {
 	pub selector: ResourceSelector,
 	pub kind: ResourceKind,
@@ -557,6 +557,8 @@ mod tests {
 					requires_grounded_path: true,
 					bootstrap_matchable: true,
 					missing_argument_hint: None,
+					extraction_hint: roku_common_types::ExtractionHint::Default,
+					static_extra_arguments: Default::default(),
 				},
 				..roku_common_types::ToolContract::default()
 			}),

@@ -17,14 +17,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::contract::{
-	contract_input_schema, contract_tool_schema, grounding_contract, input_contract, input_field,
-	output_contract, runtime_contract, selection_contract,
+	contract_input_schema, contract_tool_schema, grounding_contract, grounding_contract_simple,
+	input_contract, input_field, output_contract, runtime_contract, selection_contract,
 };
 use crate::runtime_config::{HARD_MAX_PREVIEW_ROWS, TableToolRuntimeConfig};
 use calamine::{Reader, open_workbook_auto};
 use csv::ReaderBuilder;
 use roku_common_types::{
-	GroundingStrategy, ToolContract, ToolOutputEnvelope, ToolRetryPolicy, ToolSideEffectPolicy,
+	ExtractionHint, GroundingStrategy, ToolContract, ToolOutputEnvelope, ToolRetryPolicy,
+	ToolSideEffectPolicy,
 };
 use roku_plugin_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
 use roku_plugin_host::{
@@ -411,32 +412,37 @@ fn table_tool_contract(name: &str) -> Option<ToolContract> {
 				&["path"],
 				Some("path"),
 				true,
+				ExtractionHint::TablePath,
+				serde_json::Map::from_iter([("rows".to_string(), json!(5))]),
 			),
 		}),
 		"table.inspect" => Some(ToolContract {
-			grounding: grounding_contract(
+			grounding: grounding_contract_simple(
 				GroundingStrategy::PathBased,
 				&["path"],
 				Some("path"),
 				true,
+				ExtractionHint::TablePath,
 			),
 			..ToolContract::default()
 		}),
 		"table.list_sheets" => Some(ToolContract {
-			grounding: grounding_contract(
+			grounding: grounding_contract_simple(
 				GroundingStrategy::PathBased,
 				&["path"],
 				Some("path"),
 				true,
+				ExtractionHint::TablePath,
 			),
 			..ToolContract::default()
 		}),
 		"table.schema" => Some(ToolContract {
-			grounding: grounding_contract(
+			grounding: grounding_contract_simple(
 				GroundingStrategy::PathBased,
 				&["path"],
 				Some("path"),
 				true,
+				ExtractionHint::TablePath,
 			),
 			..ToolContract::default()
 		}),

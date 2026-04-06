@@ -17,14 +17,14 @@ mod policy_bridge;
 mod prepare;
 
 use crate::contract::{
-	contract_input_schema, contract_tool_schema, grounding_contract, input_contract, input_field,
-	output_contract, runtime_contract, selection_contract,
+	contract_input_schema, contract_tool_schema, grounding_contract_simple, input_contract,
+	input_field, output_contract, runtime_contract, selection_contract,
 };
 use crate::runtime_config::CommandToolRuntimeConfig;
 use prepare::{PrepareCommandOutcome, prepare_command};
 use roku_common_types::{
-	CanonicalExecution, GroundingStrategy, PolicyDecision, ToolContract, ToolRetryPolicy,
-	ToolSideEffectPolicy,
+	CanonicalExecution, ExtractionHint, GroundingStrategy, PolicyDecision, ToolContract,
+	ToolRetryPolicy, ToolSideEffectPolicy,
 };
 use roku_plugin_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
 use roku_plugin_host::{
@@ -250,11 +250,12 @@ fn command_contract(timeout_ms: u64) -> ToolContract {
 			ToolSideEffectPolicy::ReadOnly,
 			ToolRetryPolicy::Never,
 		),
-		grounding: grounding_contract(
+		grounding: grounding_contract_simple(
 			GroundingStrategy::CommandBased,
 			&["command"],
 			Some("command"),
 			false,
+			ExtractionHint::ShellCommand,
 		),
 	}
 }

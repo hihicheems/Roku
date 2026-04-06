@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_common_types::GroundingStrategy;
+use roku_common_types::{ExtractionHint, GroundingStrategy};
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_catalog::ResourceCatalog;
 use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier};
@@ -197,53 +197,54 @@ fn uniquely_grounded_arguments(
 	if let Some(grounding) = catalog.and_then(|c| c.lookup_grounding_metadata(tool_name))
 		&& grounding.grounding_strategy != GroundingStrategy::None
 	{
-		let result = match grounding.grounding_strategy {
-			GroundingStrategy::PathBased => {
-				let arg = grounding.grounding_argument.as_deref().unwrap_or("path");
-				if tool_name == "fs.find" {
-					let paths = extract_explicit_path_candidates(grounding_input);
-					(paths.len() == 1).then(|| json!({ arg: paths[0].clone(), "kind": "any" }))
-				} else if tool_name.starts_with("table.") {
-					let path = extract_concrete_table_path(grounding_input)?;
-					let mut arguments = json!({ arg: path });
-					if tool_name == "table.preview" {
-						arguments["rows"] =
-							Value::from(extract_row_limit(grounding_input).unwrap_or(5_u64));
-					}
-					if let Some(sheet) = extract_sheet_name(grounding_input) {
-						arguments["sheet"] = Value::String(sheet);
-					}
-					Some(arguments)
-				} else {
-					let paths = extract_concrete_path_candidates(grounding_input);
-					(paths.len() == 1).then(|| json!({ arg: paths[0].clone() }))
+		let arg = grounding.grounding_argument.as_deref().unwrap_or("path");
+		let hint = resolve_extraction_hint(grounding);
+		let mut result = match hint {
+			ExtractionHint::ExplicitPath => {
+				let paths = extract_explicit_path_candidates(grounding_input);
+				(paths.len() == 1).then(|| json!({ arg: paths[0].clone() }))
+			}
+			ExtractionHint::ConcretePath => {
+				let paths = extract_concrete_path_candidates(grounding_input);
+				(paths.len() == 1).then(|| json!({ arg: paths[0].clone() }))
+			}
+			ExtractionHint::TablePath => {
+				let path = extract_concrete_table_path(grounding_input)?;
+				let mut arguments = json!({ arg: path });
+				if let Some(row_limit) = extract_row_limit(grounding_input) {
+					arguments["rows"] = Value::from(row_limit);
 				}
-			}
-			GroundingStrategy::PatternBased => {
-				let arg = grounding.grounding_argument.as_deref().unwrap_or("pattern");
-				if arg == "query" {
-					extract_web_query(grounding_input).map(|q| json!({ arg: q, "top_k": 5_u64 }))
-				} else if tool_name == "fs.grep" {
-					extract_grep_pattern(grounding_input).map(|p| json!({ arg: p }))
-				} else {
-					extract_glob_pattern(grounding_input).map(|p| json!({ arg: p }))
+				if let Some(sheet) = extract_sheet_name(grounding_input) {
+					arguments["sheet"] = Value::String(sheet);
 				}
+				Some(arguments)
 			}
-			GroundingStrategy::UrlBased => {
-				extract_fetch_url(grounding_input).map(|url| json!({ "url": url }))
+			ExtractionHint::GlobPattern => {
+				extract_glob_pattern(grounding_input).map(|p| json!({ arg: p }))
 			}
-			GroundingStrategy::CommandBased => {
-				let arg = grounding.grounding_argument.as_deref().unwrap_or("command");
-				if arg == "code" {
-					extract_explicit_python_code(grounding_input)
-						.map(|code| json!({ "code": code }))
-				} else {
-					extract_explicit_shell_command(grounding_input)
-						.map(|cmd| json!({ "command": cmd }))
-				}
+			ExtractionHint::GrepPattern => {
+				extract_grep_pattern(grounding_input).map(|p| json!({ arg: p }))
 			}
-			GroundingStrategy::None => unreachable!(),
+			ExtractionHint::WebQuery => {
+				extract_web_query(grounding_input).map(|q| json!({ arg: q }))
+			}
+			ExtractionHint::FetchUrl => {
+				extract_fetch_url(grounding_input).map(|url| json!({ arg: url }))
+			}
+			ExtractionHint::ShellCommand => {
+				extract_explicit_shell_command(grounding_input).map(|cmd| json!({ arg: cmd }))
+			}
+			ExtractionHint::PythonCode => {
+				extract_explicit_python_code(grounding_input).map(|code| json!({ arg: code }))
+			}
+			ExtractionHint::Default => None,
 		};
+		// Merge static_extra_arguments from the contract.
+		if let Some(Value::Object(ref mut map)) = result {
+			for (key, value) in &grounding.static_extra_arguments {
+				map.entry(key.clone()).or_insert_with(|| value.clone());
+			}
+		}
 		return result;
 	}
 	// Fallback for unregistered tools (e.g. skills without grounding metadata).
@@ -251,6 +252,20 @@ fn uniquely_grounded_arguments(
 		"skill.install" | "skill.ensure_installed" => extract_skill_source_url(grounding_input)
 			.map(|source_url| json!({ "source_url": source_url })),
 		_ => None,
+	}
+}
+
+fn resolve_extraction_hint(grounding: &roku_common_types::ToolGroundingContract) -> ExtractionHint {
+	if grounding.extraction_hint != ExtractionHint::Default {
+		return grounding.extraction_hint;
+	}
+	// Infer from strategy for backwards compat.
+	match grounding.grounding_strategy {
+		GroundingStrategy::PathBased => ExtractionHint::ConcretePath,
+		GroundingStrategy::PatternBased => ExtractionHint::GlobPattern,
+		GroundingStrategy::UrlBased => ExtractionHint::FetchUrl,
+		GroundingStrategy::CommandBased => ExtractionHint::ShellCommand,
+		GroundingStrategy::None => ExtractionHint::Default,
 	}
 }
 
@@ -580,37 +595,29 @@ fn bootstrap_tool_matches_request(
 		if !grounding.bootstrap_matchable {
 			return false;
 		}
-		return match grounding.grounding_strategy {
-			GroundingStrategy::PathBased => {
-				if tool_name == "fs.find" {
-					!extract_explicit_path_candidates(grounding_input).is_empty()
-						&& ground_tool_arguments(tool_name, grounding_input).is_some()
-				} else if tool_name.starts_with("table.") {
-					extract_concrete_table_path(grounding_input).is_some()
-						&& ground_tool_arguments(tool_name, grounding_input).is_some()
-				} else {
-					!extract_concrete_path_candidates(grounding_input).is_empty()
-						&& ground_tool_arguments(tool_name, grounding_input).is_some()
-				}
+		let hint = resolve_extraction_hint(grounding);
+		return match hint {
+			ExtractionHint::ExplicitPath => {
+				!extract_explicit_path_candidates(grounding_input).is_empty()
+					&& ground_tool_arguments(tool_name, grounding_input).is_some()
 			}
-			GroundingStrategy::PatternBased => {
-				if tool_name == "fs.grep" {
-					extract_grep_pattern(grounding_input).is_some()
-				} else if tool_name == "web.search" {
-					extract_web_query(grounding_input).is_some()
-				} else {
-					extract_glob_pattern(grounding_input).is_some()
-				}
+			ExtractionHint::ConcretePath => {
+				!extract_concrete_path_candidates(grounding_input).is_empty()
+					&& ground_tool_arguments(tool_name, grounding_input).is_some()
 			}
-			GroundingStrategy::UrlBased => extract_fetch_url(grounding_input).is_some(),
-			GroundingStrategy::CommandBased => {
-				if tool_name == "python.run" {
-					grounded_python_code_allows_execution(grounding_input)
-				} else {
-					grounded_shell_command_allows_execution(grounding_input)
-				}
+			ExtractionHint::TablePath => {
+				extract_concrete_table_path(grounding_input).is_some()
+					&& ground_tool_arguments(tool_name, grounding_input).is_some()
 			}
-			GroundingStrategy::None => {
+			ExtractionHint::GlobPattern => extract_glob_pattern(grounding_input).is_some(),
+			ExtractionHint::GrepPattern => extract_grep_pattern(grounding_input).is_some(),
+			ExtractionHint::WebQuery => extract_web_query(grounding_input).is_some(),
+			ExtractionHint::FetchUrl => extract_fetch_url(grounding_input).is_some(),
+			ExtractionHint::ShellCommand => {
+				grounded_shell_command_allows_execution(grounding_input)
+			}
+			ExtractionHint::PythonCode => grounded_python_code_allows_execution(grounding_input),
+			ExtractionHint::Default => {
 				bootstrap_tool_is_groundable(tool_name, grounding_input, catalog)
 			}
 		};
@@ -625,33 +632,31 @@ fn bootstrap_tool_is_groundable(
 	catalog: Option<&ResourceCatalog>,
 ) -> bool {
 	if let Some(grounding) = catalog.and_then(|c| c.lookup_grounding_metadata(tool_name)) {
-		return match grounding.grounding_strategy {
-			GroundingStrategy::PathBased => {
-				if tool_name == "fs.find" {
-					!extract_explicit_path_candidates(grounding_input).is_empty()
-						&& ground_tool_arguments(tool_name, grounding_input).is_some()
-				} else if tool_name.starts_with("table.") {
-					extract_concrete_table_path(grounding_input).is_some()
-						&& ground_tool_arguments(tool_name, grounding_input).is_some()
-				} else {
-					!extract_concrete_path_candidates(grounding_input).is_empty()
-						&& ground_tool_arguments(tool_name, grounding_input).is_some()
-				}
+		let hint = resolve_extraction_hint(grounding);
+		return match hint {
+			ExtractionHint::ExplicitPath => {
+				!extract_explicit_path_candidates(grounding_input).is_empty()
+					&& ground_tool_arguments(tool_name, grounding_input).is_some()
 			}
-			GroundingStrategy::PatternBased => {
-				if tool_name == "fs.grep" {
-					extract_grep_pattern(grounding_input).is_some()
-				} else if tool_name == "web.search" {
-					extract_web_query(grounding_input).is_some()
-				} else {
-					extract_glob_pattern(grounding_input).is_some()
-				}
+			ExtractionHint::ConcretePath => {
+				!extract_concrete_path_candidates(grounding_input).is_empty()
+					&& ground_tool_arguments(tool_name, grounding_input).is_some()
 			}
-			GroundingStrategy::UrlBased => extract_fetch_url(grounding_input).is_some(),
-			GroundingStrategy::CommandBased => {
+			ExtractionHint::TablePath => {
+				extract_concrete_table_path(grounding_input).is_some()
+					&& ground_tool_arguments(tool_name, grounding_input).is_some()
+			}
+			ExtractionHint::GlobPattern => extract_glob_pattern(grounding_input).is_some(),
+			ExtractionHint::GrepPattern => extract_grep_pattern(grounding_input).is_some(),
+			ExtractionHint::WebQuery => extract_web_query(grounding_input).is_some(),
+			ExtractionHint::FetchUrl => extract_fetch_url(grounding_input).is_some(),
+			ExtractionHint::ShellCommand => {
 				ground_tool_arguments(tool_name, grounding_input).is_some()
 			}
-			GroundingStrategy::None => {
+			ExtractionHint::PythonCode => {
+				ground_tool_arguments(tool_name, grounding_input).is_some()
+			}
+			ExtractionHint::Default => {
 				tool_required_argument_keys(tool_name, catalog).is_empty()
 					|| ground_tool_arguments(tool_name, grounding_input).is_some()
 			}

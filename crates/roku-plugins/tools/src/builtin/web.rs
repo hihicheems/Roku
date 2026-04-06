@@ -17,13 +17,14 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use crate::contract::{
-	contract_input_schema, contract_tool_schema, grounding_contract, input_contract, input_field,
-	output_contract, runtime_contract, selection_contract,
+	contract_input_schema, contract_tool_schema, grounding_contract, grounding_contract_simple,
+	input_contract, input_field, output_contract, runtime_contract, selection_contract,
 };
 use crate::runtime_config::{HARD_MAX_WEB_TOP_K, WebToolRuntimeConfig};
 use reqwest::blocking::Client;
 use roku_common_types::{
-	GroundingStrategy, ToolContract, ToolOutputEnvelope, ToolRetryPolicy, ToolSideEffectPolicy,
+	ExtractionHint, GroundingStrategy, ToolContract, ToolOutputEnvelope, ToolRetryPolicy,
+	ToolSideEffectPolicy,
 };
 use roku_plugin_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
 use roku_plugin_host::{
@@ -100,11 +101,12 @@ pub(crate) fn catalog_descriptors_with_config(
 			key_commands: Vec::new(),
 			use_cases: Vec::new(),
 			contract: Some(ToolContract {
-				grounding: grounding_contract(
+				grounding: grounding_contract_simple(
 					GroundingStrategy::UrlBased,
 					&["url"],
 					Some("url"),
 					false,
+					ExtractionHint::FetchUrl,
 				),
 				..ToolContract::default()
 			}),
@@ -280,11 +282,12 @@ impl Tool for WebFetchTool {
 			allowed_write_roots: Vec::new(),
 		};
 		let contract = ToolContract {
-			grounding: grounding_contract(
+			grounding: grounding_contract_simple(
 				GroundingStrategy::UrlBased,
 				&["url"],
 				Some("url"),
 				false,
+				ExtractionHint::FetchUrl,
 			),
 			..ToolContract::default()
 		};
@@ -558,6 +561,8 @@ fn web_contract() -> ToolContract {
 			&["query"],
 			Some("query"),
 			false,
+			ExtractionHint::WebQuery,
+			serde_json::Map::from_iter([("top_k".to_string(), json!(5))]),
 		),
 	}
 }
