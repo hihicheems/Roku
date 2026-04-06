@@ -724,6 +724,15 @@ impl GenericAgentRuntime {
 							.unwrap_or_else(|| loop_state.working_directory.clone()),
 					);
 					loop_state.record_step(step);
+					{
+						let threshold = self.agent_runtime_config.r#loop.compact_threshold_tokens();
+						let estimated = crate::runtime_loop::estimate_context_tokens(loop_state);
+						if estimated > threshold {
+							eprintln!(
+								"Context compact triggered: estimated {estimated} tokens exceeds threshold {threshold}"
+							);
+						}
+					}
 					if interpreted.should_ask_user {
 						let payload = effective_ask_user_payload(
 							&loop_state.goal,

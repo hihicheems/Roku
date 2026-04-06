@@ -54,20 +54,33 @@ pub struct AgentRuntimeConfigPatch {
 }
 
 /// Effective loop lifecycle budgets for a single ReAct run.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LoopRuntimeConfig {
 	/// Initial maximum number of loop steps allowed before the runtime aborts.
 	pub initial_step_budget: u32,
 	/// Initial maximum number of recovery turns allowed after tool failures.
 	pub initial_recovery_budget: u32,
+	/// Model context window size in tokens used for compact threshold calculation.
+	pub context_window_tokens: u64,
+	/// Ratio of context window at which context compaction is triggered (0.0–1.0).
+	pub compact_threshold_ratio: f64,
+}
+
+impl LoopRuntimeConfig {
+	/// Compute the token threshold at which context compaction should be triggered.
+	pub fn compact_threshold_tokens(&self) -> u64 {
+		(self.context_window_tokens as f64 * self.compact_threshold_ratio) as u64
+	}
 }
 
 /// Partial overrides for [`LoopRuntimeConfig`].
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoopRuntimeConfigPatch {
 	pub initial_step_budget: Option<u32>,
 	pub initial_recovery_budget: Option<u32>,
+	pub context_window_tokens: Option<u64>,
+	pub compact_threshold_ratio: Option<f64>,
 }
 
 /// Effective route-classifier generation budgets and inventory compaction knobs.
@@ -136,6 +149,10 @@ pub enum AgentRuntimeConfigError {
 	InvalidInitialStepBudget,
 	#[error("runtime.agent.loop.initial_recovery_budget must be greater than zero")]
 	InvalidInitialRecoveryBudget,
+	#[error("runtime.agent.loop.context_window_tokens must be greater than zero")]
+	InvalidContextWindowTokens,
+	#[error("runtime.agent.loop.compact_threshold_ratio must be between 0.0 and 1.0 exclusive")]
+	InvalidCompactThresholdRatio,
 	#[error("runtime.agent.router.expected_output_tokens must be greater than zero")]
 	InvalidRouteExpectedOutputTokens,
 	#[error("runtime.agent.router.budget_tokens_remaining must be greater than zero")]
@@ -164,6 +181,8 @@ pub const HARD_MAX_INITIAL_STEP_BUDGET: u32 = 64;
 ///
 /// This is a safety guardrail, not the recommended operating value.
 pub const HARD_MAX_INITIAL_RECOVERY_BUDGET: u32 = 32;
+/// Final ceiling for `runtime.agent.loop.context_window_tokens`.
+pub const HARD_MAX_CONTEXT_WINDOW_TOKENS: u64 = 2_000_000;
 /// Final ceiling for `runtime.agent.router.expected_output_tokens`.
 pub const HARD_MAX_ROUTE_EXPECTED_OUTPUT_TOKENS: u64 = 2_048;
 /// Final ceiling for `runtime.agent.router.budget_tokens_remaining`.
@@ -188,6 +207,8 @@ impl Default for LoopRuntimeConfig {
 		Self {
 			initial_step_budget: 10,
 			initial_recovery_budget: 2,
+			context_window_tokens: 200_000,
+			compact_threshold_ratio: 0.75,
 		}
 	}
 }
@@ -263,6 +284,12 @@ impl LoopRuntimeConfig {
 		if let Some(value) = patch.initial_recovery_budget {
 			self.initial_recovery_budget = value;
 		}
+		if let Some(value) = patch.context_window_tokens {
+			self.context_window_tokens = value;
+		}
+		if let Some(value) = patch.compact_threshold_ratio {
+			self.compact_threshold_ratio = value;
+		}
 	}
 
 	pub fn apply_env_overrides(&mut self) -> Result<(), AgentRuntimeConfigError> {
@@ -272,6 +299,13 @@ impl LoopRuntimeConfig {
 		if let Some(value) = env_override_u32("ROKU_RUNTIME__AGENT__LOOP__INITIAL_RECOVERY_BUDGET")
 		{
 			self.initial_recovery_budget = value?;
+		}
+		if let Some(value) = env_override_u64("ROKU_RUNTIME__AGENT__LOOP__CONTEXT_WINDOW_TOKENS") {
+			self.context_window_tokens = value?;
+		}
+		if let Some(value) = env_override_f64("ROKU_RUNTIME__AGENT__LOOP__COMPACT_THRESHOLD_RATIO")
+		{
+			self.compact_threshold_ratio = value?;
 		}
 		Ok(())
 	}
@@ -283,10 +317,19 @@ impl LoopRuntimeConfig {
 		if self.initial_recovery_budget == 0 {
 			return Err(AgentRuntimeConfigError::InvalidInitialRecoveryBudget);
 		}
+		if self.context_window_tokens == 0 {
+			return Err(AgentRuntimeConfigError::InvalidContextWindowTokens);
+		}
+		if self.compact_threshold_ratio <= 0.0 || self.compact_threshold_ratio >= 1.0 {
+			return Err(AgentRuntimeConfigError::InvalidCompactThresholdRatio);
+		}
 		self.initial_step_budget = self.initial_step_budget.min(HARD_MAX_INITIAL_STEP_BUDGET);
 		self.initial_recovery_budget = self
 			.initial_recovery_budget
 			.min(HARD_MAX_INITIAL_RECOVERY_BUDGET);
+		self.context_window_tokens = self
+			.context_window_tokens
+			.min(HARD_MAX_CONTEXT_WINDOW_TOKENS);
 		Ok(())
 	}
 }
@@ -486,6 +529,12 @@ fn invalid_env_key(key: &'static str) -> AgentRuntimeConfigError {
 		"ROKU_RUNTIME__AGENT__LOOP__INITIAL_RECOVERY_BUDGET" => {
 			AgentRuntimeConfigError::InvalidInitialRecoveryBudget
 		}
+		"ROKU_RUNTIME__AGENT__LOOP__CONTEXT_WINDOW_TOKENS" => {
+			AgentRuntimeConfigError::InvalidContextWindowTokens
+		}
+		"ROKU_RUNTIME__AGENT__LOOP__COMPACT_THRESHOLD_RATIO" => {
+			AgentRuntimeConfigError::InvalidCompactThresholdRatio
+		}
 		"ROKU_RUNTIME__AGENT__ROUTER__EXPECTED_OUTPUT_TOKENS" => {
 			AgentRuntimeConfigError::InvalidRouteExpectedOutputTokens
 		}
@@ -525,6 +574,9 @@ mod tests {
 	fn defaults_are_stable() {
 		let config = AgentRuntimeConfig::default();
 		assert_eq!(config.r#loop.initial_step_budget, 10);
+		assert_eq!(config.r#loop.context_window_tokens, 200_000);
+		assert_eq!(config.r#loop.compact_threshold_ratio, 0.75);
+		assert_eq!(config.r#loop.compact_threshold_tokens(), 150_000);
 		assert_eq!(config.router.budget_tokens_remaining, 10_000);
 		assert_eq!(config.prompts.visible_tool_hint_max_chars, 180);
 		assert_eq!(config.next_step.expected_output_tokens, 1_200);
@@ -537,6 +589,8 @@ mod tests {
 			r#loop: Some(LoopRuntimeConfigPatch {
 				initial_step_budget: Some(HARD_MAX_INITIAL_STEP_BUDGET * 4),
 				initial_recovery_budget: Some(HARD_MAX_INITIAL_RECOVERY_BUDGET * 4),
+				context_window_tokens: Some(HARD_MAX_CONTEXT_WINDOW_TOKENS * 4),
+				compact_threshold_ratio: Some(0.85),
 			}),
 			router: Some(RouteClassifierRuntimeConfigPatch {
 				expected_output_tokens: Some(HARD_MAX_ROUTE_EXPECTED_OUTPUT_TOKENS * 4),
@@ -573,6 +627,11 @@ mod tests {
 			config.next_step.budget_tokens_remaining,
 			HARD_MAX_NEXT_STEP_BUDGET_TOKENS_REMAINING
 		);
+		assert_eq!(
+			config.r#loop.context_window_tokens,
+			HARD_MAX_CONTEXT_WINDOW_TOKENS
+		);
+		assert_eq!(config.r#loop.compact_threshold_ratio, 0.85);
 	}
 
 	#[test]
@@ -582,6 +641,38 @@ mod tests {
 		assert_eq!(
 			config.validate_and_clamp(),
 			Err(AgentRuntimeConfigError::InvalidInitialStepBudget)
+		);
+	}
+
+	#[test]
+	fn reject_zero_context_window_tokens() {
+		let mut config = AgentRuntimeConfig::default();
+		config.r#loop.context_window_tokens = 0;
+		assert_eq!(
+			config.validate_and_clamp(),
+			Err(AgentRuntimeConfigError::InvalidContextWindowTokens)
+		);
+	}
+
+	#[test]
+	fn reject_compact_threshold_ratio_out_of_range() {
+		let mut config = AgentRuntimeConfig::default();
+		config.r#loop.compact_threshold_ratio = 0.0;
+		assert_eq!(
+			config.validate_and_clamp(),
+			Err(AgentRuntimeConfigError::InvalidCompactThresholdRatio)
+		);
+
+		config.r#loop.compact_threshold_ratio = 1.0;
+		assert_eq!(
+			config.validate_and_clamp(),
+			Err(AgentRuntimeConfigError::InvalidCompactThresholdRatio)
+		);
+
+		config.r#loop.compact_threshold_ratio = -0.5;
+		assert_eq!(
+			config.validate_and_clamp(),
+			Err(AgentRuntimeConfigError::InvalidCompactThresholdRatio)
 		);
 	}
 }

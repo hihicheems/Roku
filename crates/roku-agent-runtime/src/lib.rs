@@ -47,8 +47,8 @@ pub use runtime_loop::{
 	LoopStatus, NextStepAction, NextStepDecision, NextStepDecisionSchemaError, RegressionSuiteKind,
 	RuntimeLoopRegressionCaseReport, RuntimeLoopRegressionExpectation, RuntimeLoopTraceCheckReport,
 	StepAction, StepObservation, StepRecord, ToolObservation, ToolProbeCheckReport,
-	check_runtime_loop_trace, check_seed_tool_probe, evaluate_runtime_loop_regression_case,
-	interpret_observation, runtime_loop_trace,
+	check_runtime_loop_trace, check_seed_tool_probe, estimate_context_tokens,
+	evaluate_runtime_loop_regression_case, interpret_observation, runtime_loop_trace,
 };
 pub use tool_config::{
 	BuiltinToolRole, CommandToolRuntimeConfig, CommandToolRuntimeConfigPatch, ConfiguredTool,
