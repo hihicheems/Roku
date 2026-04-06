@@ -574,7 +574,8 @@ impl GenericAgentRuntime {
 			StepAction::FinalAnswer
 			| StepAction::Fail
 			| StepAction::CallTool
-			| StepAction::Stop => StepObservation::FinalMessage {
+			| StepAction::Stop
+			| StepAction::CompactBoundary => StepObservation::FinalMessage {
 				final_message: message,
 			},
 		});
@@ -591,7 +592,7 @@ impl GenericAgentRuntime {
 				StepAction::FinalAnswer | StepAction::Fail | StepAction::CallTool => {
 					loop_state.remaining_step_budget.saturating_sub(1)
 				}
-				StepAction::Stop => loop_state.remaining_step_budget,
+				StepAction::Stop | StepAction::CompactBoundary => loop_state.remaining_step_budget,
 			},
 			loop_state.remaining_recovery_budget,
 			loop_state.working_directory.clone(),
@@ -602,7 +603,9 @@ impl GenericAgentRuntime {
 			StepAction::FinalAnswer => crate::runtime_loop::LoopStatus::Succeeded,
 			StepAction::Fail => crate::runtime_loop::LoopStatus::Failed,
 			StepAction::AskUser => crate::runtime_loop::LoopStatus::AwaitingUser,
-			StepAction::CallTool => crate::runtime_loop::LoopStatus::LoopRunning,
+			StepAction::CallTool | StepAction::CompactBoundary => {
+				crate::runtime_loop::LoopStatus::LoopRunning
+			}
 			StepAction::Stop => crate::runtime_loop::LoopStatus::Stopped,
 		};
 		step
@@ -731,6 +734,17 @@ impl GenericAgentRuntime {
 							eprintln!(
 								"Context compact triggered: estimated {estimated} tokens exceeds threshold {threshold}"
 							);
+							let compact_config = crate::runtime_loop::CompactConfig {
+								retain_tail_steps: self
+									.agent_runtime_config
+									.r#loop
+									.retain_tail_steps,
+								working_summary_max_chars: self
+									.agent_runtime_config
+									.r#loop
+									.working_summary_max_chars,
+							};
+							crate::runtime_loop::compact_history(loop_state, &compact_config);
 						}
 					}
 					if interpreted.should_ask_user {
@@ -1685,7 +1699,9 @@ fn terminal_decision(
 	});
 	crate::runtime_loop::NextStepDecision {
 		action: match action {
-			StepAction::CallTool => crate::runtime_loop::NextStepAction::CallTool,
+			StepAction::CallTool | StepAction::CompactBoundary => {
+				crate::runtime_loop::NextStepAction::CallTool
+			}
 			StepAction::AskUser => crate::runtime_loop::NextStepAction::AskUser,
 			StepAction::FinalAnswer => crate::runtime_loop::NextStepAction::FinalAnswer,
 			StepAction::Fail | StepAction::Stop => crate::runtime_loop::NextStepAction::Fail,

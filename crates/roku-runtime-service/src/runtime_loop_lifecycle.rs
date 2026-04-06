@@ -243,7 +243,7 @@ impl RuntimeService {
 			}
 			StepAction::Fail => loop_state.status == roku_agent_runtime::LoopStatus::Failed,
 			StepAction::Stop => loop_state.status == roku_agent_runtime::LoopStatus::Stopped,
-			StepAction::CallTool => {
+			StepAction::CallTool | StepAction::CompactBoundary => {
 				loop_state.status == roku_agent_runtime::LoopStatus::LoopRunning
 			}
 		};

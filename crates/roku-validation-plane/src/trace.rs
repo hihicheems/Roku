@@ -33,13 +33,14 @@ pub(crate) fn run_trace_checks(trace: &RuntimeLoopTrace, failures: &mut Vec<Stri
 		return;
 	}
 	for step in &trace.steps {
-		if step.visible_tools_before.is_empty() {
+		let is_compact_boundary = step.decision.action == "compact_boundary";
+		if !is_compact_boundary && step.visible_tools_before.is_empty() {
 			failures.push(format!(
 				"runtime loop trace step {} is missing visible_tools_before",
 				step.step_index
 			));
 		}
-		if step.visible_resources_before.is_none() {
+		if !is_compact_boundary && step.visible_resources_before.is_none() {
 			failures.push(format!(
 				"runtime loop trace step {} is missing visible_resources_before",
 				step.step_index
