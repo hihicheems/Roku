@@ -66,7 +66,7 @@ impl Default for RuntimeConstraints {
 	}
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolDescriptor {
 	pub name: String,
 	pub version: String,

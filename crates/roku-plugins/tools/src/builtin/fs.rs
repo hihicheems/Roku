@@ -18,8 +18,8 @@ use std::io::{Read, Write as _};
 use std::path::{Path, PathBuf};
 
 use crate::contract::{
-	contract_input_schema, contract_tool_schema, grounding_contract, input_contract, input_field,
-	output_contract, runtime_contract, selection_contract,
+	contract_input_schema, contract_tool_schema, grounding_contract, grounding_contract_simple,
+	input_contract, input_field, output_contract, runtime_contract, selection_contract,
 };
 use crate::runtime_config::{
 	FsToolRuntimeConfig, HARD_MAX_DESCENDANT_SCAN_ENTRIES, HARD_MAX_READ_BYTES,
@@ -28,8 +28,8 @@ use glob::glob;
 use roku_common_types::{
 	ApprovalRequirement, ApprovalRequirementScope, CanonicalDigest, CanonicalExecution,
 	ExecutionActionClass, ExecutionEnvPolicy, ExecutionEnvPolicyMode, ExecutionResourceScope,
-	GroundingStrategy, InvocationMode, PolicyDecision, PolicyOutcome, PolicyReasonCode,
-	ToolContract, ToolOutputEnvelope, ToolRetryPolicy, ToolSideEffectPolicy,
+	ExtractionHint, GroundingStrategy, InvocationMode, PolicyDecision, PolicyOutcome,
+	PolicyReasonCode, ToolContract, ToolOutputEnvelope, ToolRetryPolicy, ToolSideEffectPolicy,
 };
 use roku_plugin_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
 use roku_plugin_host::{
@@ -879,6 +879,8 @@ fn fs_tool_contract(name: &str) -> Option<ToolContract> {
 				&["name"],
 				Some("name"),
 				true,
+				ExtractionHint::ExplicitPath,
+				serde_json::Map::from_iter([("kind".to_string(), json!("any"))]),
 			),
 		}),
 		"fs.read_text" => Some(ToolContract {
@@ -925,73 +927,81 @@ fn fs_tool_contract(name: &str) -> Option<ToolContract> {
 				false,
 			),
 			runtime,
-			grounding: grounding_contract(
+			grounding: grounding_contract_simple(
 				GroundingStrategy::PathBased,
 				&["path"],
 				Some("path"),
 				true,
+				ExtractionHint::ConcretePath,
 			),
 		}),
 		"fs.list_dir" => Some(ToolContract {
-			grounding: grounding_contract(
+			grounding: grounding_contract_simple(
 				GroundingStrategy::PathBased,
 				&["path"],
 				Some("path"),
 				true,
+				ExtractionHint::ConcretePath,
 			),
 			..ToolContract::default()
 		}),
 		"fs.inspect" => Some(ToolContract {
-			grounding: grounding_contract(
+			grounding: grounding_contract_simple(
 				GroundingStrategy::PathBased,
 				&["path"],
 				Some("path"),
 				true,
+				ExtractionHint::ConcretePath,
 			),
 			..ToolContract::default()
 		}),
 		"fs.exists" => Some(ToolContract {
-			grounding: grounding_contract(
+			grounding: grounding_contract_simple(
 				GroundingStrategy::PathBased,
 				&["path"],
 				Some("path"),
 				false,
+				ExtractionHint::ConcretePath,
 			),
 			..ToolContract::default()
 		}),
 		"fs.glob" => Some(ToolContract {
-			grounding: grounding_contract(
+			grounding: grounding_contract_simple(
 				GroundingStrategy::PatternBased,
 				&["pattern"],
 				Some("pattern"),
 				false,
+				ExtractionHint::GlobPattern,
 			),
 			..ToolContract::default()
 		}),
 		"fs.edit" => Some(ToolContract {
-			grounding: grounding_contract(
+			grounding: grounding_contract_simple(
 				GroundingStrategy::PathBased,
 				&["file_path", "old_string", "new_string"],
 				Some("file_path"),
 				true,
+				ExtractionHint::ConcretePath,
 			),
 			..ToolContract::default()
 		}),
 		"fs.write" => Some(ToolContract {
-			grounding: grounding_contract(
+			grounding: grounding_contract_simple(
 				GroundingStrategy::PathBased,
 				&["file_path", "content"],
 				Some("file_path"),
 				true,
+				ExtractionHint::ConcretePath,
 			),
 			..ToolContract::default()
 		}),
 		"fs.grep" => Some(ToolContract {
-			grounding: grounding_contract(
+			grounding: grounding_contract_simple(
 				GroundingStrategy::PatternBased,
 				&["pattern"],
 				Some("pattern"),
 				false,
+				ExtractionHint::GrepPattern,
 			),
 			..ToolContract::default()
 		}),

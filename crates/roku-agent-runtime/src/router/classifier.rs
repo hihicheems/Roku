@@ -1749,6 +1749,8 @@ mod tests {
 					requires_grounded_path: false,
 					bootstrap_matchable: true,
 					missing_argument_hint: None,
+					extraction_hint: roku_common_types::ExtractionHint::Default,
+					static_extra_arguments: serde_json::Map::new(),
 				},
 				..roku_common_types::ToolContract::default()
 			}),

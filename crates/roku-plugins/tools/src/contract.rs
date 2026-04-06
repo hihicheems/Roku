@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use roku_common_types::{
-	GroundingStrategy, ToolContract, ToolGroundingContract, ToolInputContract,
+	ExtractionHint, GroundingStrategy, ToolContract, ToolGroundingContract, ToolInputContract,
 	ToolInputFieldContract, ToolIsolationProfile, ToolOutputContract, ToolRetryPolicy,
 	ToolRuntimeContract, ToolSelectionContract, ToolSideEffectPolicy,
 };
@@ -133,6 +133,8 @@ pub(crate) fn grounding_contract(
 	required_keys: &[&str],
 	grounding_arg: Option<&str>,
 	requires_grounded_path: bool,
+	extraction_hint: ExtractionHint,
+	static_extra: serde_json::Map<String, serde_json::Value>,
 ) -> ToolGroundingContract {
 	ToolGroundingContract {
 		required_argument_keys: required_keys.iter().map(|k| k.to_string()).collect(),
@@ -141,7 +143,26 @@ pub(crate) fn grounding_contract(
 		requires_grounded_path,
 		bootstrap_matchable: strategy != GroundingStrategy::None,
 		missing_argument_hint: None,
+		extraction_hint,
+		static_extra_arguments: static_extra,
 	}
+}
+
+pub(crate) fn grounding_contract_simple(
+	strategy: GroundingStrategy,
+	required_keys: &[&str],
+	grounding_arg: Option<&str>,
+	requires_grounded_path: bool,
+	extraction_hint: ExtractionHint,
+) -> ToolGroundingContract {
+	grounding_contract(
+		strategy,
+		required_keys,
+		grounding_arg,
+		requires_grounded_path,
+		extraction_hint,
+		serde_json::Map::new(),
+	)
 }
 
 fn isolation_profile(profile: SandboxProfile) -> ToolIsolationProfile {

@@ -534,7 +534,7 @@ impl ResourceSelector {
 	}
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ToolContract {
 	#[serde(default)]
 	pub selection: ToolSelectionContract,
@@ -741,12 +741,32 @@ impl ToolRuntimeContract {
 	}
 }
 
+/// Which specific extraction function to use when grounding tool arguments.
+///
+/// This is more specific than `GroundingStrategy` -- it tells the dispatch code
+/// exactly which extractor to call, eliminating tool_name conditionals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtractionHint {
+	#[default]
+	Default,
+	ExplicitPath,
+	ConcretePath,
+	TablePath,
+	GlobPattern,
+	GrepPattern,
+	WebQuery,
+	FetchUrl,
+	ShellCommand,
+	PythonCode,
+}
+
 /// Declarative grounding requirements for a tool.
 ///
 /// Describes how tool_loop.rs should extract arguments from the user goal
 /// and validate preconditions, enabling descriptor-driven grounding instead
 /// of hardcoded match arms.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ToolGroundingContract {
 	#[serde(default)]
 	pub required_argument_keys: Vec<String>,
@@ -760,6 +780,10 @@ pub struct ToolGroundingContract {
 	pub bootstrap_matchable: bool,
 	#[serde(default)]
 	pub missing_argument_hint: Option<String>,
+	#[serde(default)]
+	pub extraction_hint: ExtractionHint,
+	#[serde(default)]
+	pub static_extra_arguments: serde_json::Map<String, serde_json::Value>,
 }
 
 /// How the tool loop should extract grounding arguments from the user goal.
