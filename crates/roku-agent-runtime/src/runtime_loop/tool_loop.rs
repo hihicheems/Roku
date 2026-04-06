@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use roku_common_types::GroundingStrategy;
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
+use roku_plugin_catalog::ResourceCatalog;
 use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier};
 use serde_json::{Value, json};
 
@@ -36,6 +38,7 @@ pub(crate) fn decide_tool_loop_next_step(
 	router: Option<&LlmRouter>,
 	user_reply: Option<&str>,
 	config: &NextStepRuntimeConfig,
+	catalog: Option<&ResourceCatalog>,
 ) -> NextStepDecision {
 	if should_force_ask_user_for_ambiguous_stagnation(loop_state, user_reply) {
 		return ask_user(
@@ -50,12 +53,17 @@ pub(crate) fn decide_tool_loop_next_step(
 		);
 	}
 	if let Some(router) = router
-		&& let Some(decision) =
-			decide_with_router(loop_state, context_projection, router, user_reply, config)
-	{
+		&& let Some(decision) = decide_with_router(
+			loop_state,
+			context_projection,
+			router,
+			user_reply,
+			config,
+			catalog,
+		) {
 		return decision;
 	}
-	deterministic_next_step(loop_state, user_reply)
+	deterministic_next_step(loop_state, user_reply, catalog)
 }
 
 fn decide_with_router(
@@ -64,6 +72,7 @@ fn decide_with_router(
 	router: &LlmRouter,
 	user_reply: Option<&str>,
 	config: &NextStepRuntimeConfig,
+	catalog: Option<&ResourceCatalog>,
 ) -> Option<NextStepDecision> {
 	let response = match router.generate_json_value(&GenerationRequest {
 		system_prompt: Some(
@@ -126,8 +135,9 @@ fn decide_with_router(
 			return None;
 		}
 	};
-	let decision = align_router_tool_arguments(decision, user_reply.unwrap_or(&loop_state.goal));
-	match validate_router_decision(loop_state, decision) {
+	let decision =
+		align_router_tool_arguments(decision, user_reply.unwrap_or(&loop_state.goal), catalog);
+	match validate_router_decision(loop_state, decision, catalog) {
 		Ok(decision) => Some(decision),
 		Err(reason) => {
 			log_tool_loop_warning(
@@ -153,6 +163,7 @@ fn decide_with_router(
 fn align_router_tool_arguments(
 	mut decision: NextStepDecision,
 	grounding_input: &str,
+	catalog: Option<&ResourceCatalog>,
 ) -> NextStepDecision {
 	if !matches!(decision.action, NextStepAction::CallTool) {
 		return decision;
@@ -160,7 +171,8 @@ fn align_router_tool_arguments(
 	let Some(tool_name) = decision.tool_name.as_deref() else {
 		return decision;
 	};
-	let Some(grounded_arguments) = uniquely_grounded_arguments(tool_name, grounding_input) else {
+	let Some(grounded_arguments) = uniquely_grounded_arguments(tool_name, grounding_input, catalog)
+	else {
 		return decision;
 	};
 	let mut merged_arguments = decision
@@ -177,53 +189,65 @@ fn align_router_tool_arguments(
 	decision
 }
 
-fn uniquely_grounded_arguments(tool_name: &str, grounding_input: &str) -> Option<Value> {
+fn uniquely_grounded_arguments(
+	tool_name: &str,
+	grounding_input: &str,
+	catalog: Option<&ResourceCatalog>,
+) -> Option<Value> {
+	if let Some(grounding) = catalog.and_then(|c| c.lookup_grounding_metadata(tool_name))
+		&& grounding.grounding_strategy != GroundingStrategy::None
+	{
+		let result = match grounding.grounding_strategy {
+			GroundingStrategy::PathBased => {
+				let arg = grounding.grounding_argument.as_deref().unwrap_or("path");
+				if tool_name == "fs.find" {
+					let paths = extract_explicit_path_candidates(grounding_input);
+					(paths.len() == 1).then(|| json!({ arg: paths[0].clone(), "kind": "any" }))
+				} else if tool_name.starts_with("table.") {
+					let path = extract_concrete_table_path(grounding_input)?;
+					let mut arguments = json!({ arg: path });
+					if tool_name == "table.preview" {
+						arguments["rows"] =
+							Value::from(extract_row_limit(grounding_input).unwrap_or(5_u64));
+					}
+					if let Some(sheet) = extract_sheet_name(grounding_input) {
+						arguments["sheet"] = Value::String(sheet);
+					}
+					Some(arguments)
+				} else {
+					let paths = extract_concrete_path_candidates(grounding_input);
+					(paths.len() == 1).then(|| json!({ arg: paths[0].clone() }))
+				}
+			}
+			GroundingStrategy::PatternBased => {
+				let arg = grounding.grounding_argument.as_deref().unwrap_or("pattern");
+				if arg == "query" {
+					extract_web_query(grounding_input).map(|q| json!({ arg: q, "top_k": 5_u64 }))
+				} else if tool_name == "fs.grep" {
+					extract_grep_pattern(grounding_input).map(|p| json!({ arg: p }))
+				} else {
+					extract_glob_pattern(grounding_input).map(|p| json!({ arg: p }))
+				}
+			}
+			GroundingStrategy::UrlBased => {
+				extract_fetch_url(grounding_input).map(|url| json!({ "url": url }))
+			}
+			GroundingStrategy::CommandBased => {
+				let arg = grounding.grounding_argument.as_deref().unwrap_or("command");
+				if arg == "code" {
+					extract_explicit_python_code(grounding_input)
+						.map(|code| json!({ "code": code }))
+				} else {
+					extract_explicit_shell_command(grounding_input)
+						.map(|cmd| json!({ "command": cmd }))
+				}
+			}
+			GroundingStrategy::None => unreachable!(),
+		};
+		return result;
+	}
+	// Fallback for unregistered tools (e.g. skills without grounding metadata).
 	match tool_name {
-		"fs.find" => {
-			let explicit_paths = extract_explicit_path_candidates(grounding_input);
-			(explicit_paths.len() == 1)
-				.then(|| json!({ "name": explicit_paths[0].clone(), "kind": "any" }))
-		}
-		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => {
-			let concrete_paths = extract_concrete_path_candidates(grounding_input);
-			(concrete_paths.len() == 1).then(|| json!({ "path": concrete_paths[0].clone() }))
-		}
-		"fs.glob" => {
-			extract_glob_pattern(grounding_input).map(|pattern| json!({ "pattern": pattern }))
-		}
-		// The following arms are temporary hardcoded integrations added by EPIC-0.
-		// They will be migrated to descriptor-driven grounding under EPIC-5.
-		"fs.grep" => {
-			extract_grep_pattern(grounding_input).map(|pattern| json!({ "pattern": pattern }))
-		}
-		"fs.edit" => {
-			let concrete_paths = extract_concrete_path_candidates(grounding_input);
-			(concrete_paths.len() == 1).then(|| json!({ "file_path": concrete_paths[0].clone() }))
-		}
-		"fs.write" => {
-			let concrete_paths = extract_concrete_path_candidates(grounding_input);
-			(concrete_paths.len() == 1).then(|| json!({ "file_path": concrete_paths[0].clone() }))
-		}
-		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
-			let path = extract_concrete_table_path(grounding_input)?;
-			let mut arguments = json!({ "path": path });
-			if tool_name == "table.preview" {
-				arguments["rows"] =
-					Value::from(extract_row_limit(grounding_input).unwrap_or(5_u64));
-			}
-			if let Some(sheet) = extract_sheet_name(grounding_input) {
-				arguments["sheet"] = Value::String(sheet);
-			}
-			Some(arguments)
-		}
-		"web.search" => extract_web_query(grounding_input)
-			.map(|query| json!({ "query": query, "top_k": 5_u64 })),
-		"web.fetch" => extract_fetch_url(grounding_input).map(|url| json!({ "url": url })),
-		"command.run" => extract_explicit_shell_command(grounding_input)
-			.map(|command| json!({ "command": command })),
-		"python.run" => {
-			extract_explicit_python_code(grounding_input).map(|code| json!({ "code": code }))
-		}
 		"skill.install" | "skill.ensure_installed" => extract_skill_source_url(grounding_input)
 			.map(|source_url| json!({ "source_url": source_url })),
 		_ => None,
@@ -233,6 +257,7 @@ fn uniquely_grounded_arguments(tool_name: &str, grounding_input: &str) -> Option
 fn validate_router_decision(
 	loop_state: &LoopState,
 	decision: NextStepDecision,
+	catalog: Option<&ResourceCatalog>,
 ) -> Result<NextStepDecision, String> {
 	match decision.action {
 		NextStepAction::CallTool => {
@@ -250,10 +275,11 @@ fn validate_router_decision(
 					"call_tool decision for `{tool_name}` omitted an arguments object"
 				));
 			};
-			let missing_keys = tool_required_argument_keys(tool_name)
+			let required_keys = tool_required_argument_keys(tool_name, catalog);
+			let missing_keys = required_keys
 				.iter()
-				.filter(|key| !arguments.contains_key(**key))
-				.copied()
+				.filter(|key| !arguments.contains_key(key.as_str()))
+				.map(String::as_str)
 				.collect::<Vec<_>>();
 			if !missing_keys.is_empty() {
 				return Err(format!(
@@ -262,7 +288,7 @@ fn validate_router_decision(
 				));
 			}
 			if let Some(reason) =
-				ungrounded_consumer_path_rejection_reason(loop_state, tool_name, arguments)
+				ungrounded_consumer_path_rejection_reason(loop_state, tool_name, arguments, catalog)
 			{
 				return Err(reason);
 			}
@@ -277,11 +303,8 @@ fn ungrounded_consumer_path_rejection_reason(
 	loop_state: &LoopState,
 	tool_name: &str,
 	arguments: &serde_json::Map<String, Value>,
+	catalog: Option<&ResourceCatalog>,
 ) -> Option<String> {
-	// The following path-key handling and grounded-path checks are temporary
-	// hardcoded integrations added by EPIC-0.
-	// They will be migrated to descriptor-driven grounding under EPIC-5.
-	// fs.edit and fs.write use "file_path" instead of "path"
 	let path = arguments
 		.get("path")
 		.or_else(|| arguments.get("file_path"))
@@ -308,18 +331,12 @@ fn ungrounded_consumer_path_rejection_reason(
 		return None;
 	}
 
-	let requires_grounded_path = matches!(
-		tool_name,
-		"fs.read_text"
-			| "fs.inspect"
-			| "fs.list_dir"
-			| "fs.edit"
-			| "fs.write"
-			| "table.preview"
-			| "table.inspect"
-			| "table.list_sheets"
-			| "table.schema"
-	);
+	let requires_grounded_path =
+		if let Some(grounding) = catalog.and_then(|c| c.lookup_grounding_metadata(tool_name)) {
+			grounding.requires_grounded_path
+		} else {
+			false
+		};
 	if !requires_grounded_path || !tool_visible(loop_state, "fs.find") {
 		return None;
 	}
@@ -397,18 +414,26 @@ pub(crate) fn tool_loop_prompt_for_test(
 	tool_loop_prompt(context_projection, user_reply)
 }
 
-fn deterministic_next_step(loop_state: &LoopState, user_reply: Option<&str>) -> NextStepDecision {
+fn deterministic_next_step(
+	loop_state: &LoopState,
+	user_reply: Option<&str>,
+	catalog: Option<&ResourceCatalog>,
+) -> NextStepDecision {
 	if let Some(observation) = loop_state.last_observation.as_ref() {
 		return next_step_from_observation(loop_state, observation, user_reply);
 	}
-	initial_next_step(loop_state, user_reply.unwrap_or(&loop_state.goal))
+	initial_next_step(loop_state, user_reply.unwrap_or(&loop_state.goal), catalog)
 }
 
-fn initial_next_step(loop_state: &LoopState, grounding_input: &str) -> NextStepDecision {
-	let Some(tool_name) = bootstrap_tool_name(loop_state, grounding_input) else {
+fn initial_next_step(
+	loop_state: &LoopState,
+	grounding_input: &str,
+	catalog: Option<&ResourceCatalog>,
+) -> NextStepDecision {
+	let Some(tool_name) = bootstrap_tool_name(loop_state, grounding_input, catalog) else {
 		return fail("tool loop cannot start without any visible tool".to_string());
 	};
-	bootstrap_tool_call(loop_state, tool_name, grounding_input)
+	bootstrap_tool_call(loop_state, tool_name, grounding_input, catalog)
 }
 
 fn next_step_from_observation(
@@ -504,7 +529,11 @@ fn recover_path_not_found_with_fs_find(
 	))
 }
 
-fn bootstrap_tool_name<'a>(loop_state: &'a LoopState, grounding_input: &str) -> Option<&'a str> {
+fn bootstrap_tool_name<'a>(
+	loop_state: &'a LoopState,
+	grounding_input: &str,
+	catalog: Option<&ResourceCatalog>,
+) -> Option<&'a str> {
 	let shortlisted_tools = loop_state
 		.route_decision
 		.candidate_tools
@@ -515,7 +544,7 @@ fn bootstrap_tool_name<'a>(loop_state: &'a LoopState, grounding_input: &str) -> 
 	if let Some(tool_name) = shortlisted_tools
 		.iter()
 		.copied()
-		.find(|tool_name| bootstrap_tool_matches_request(tool_name, grounding_input))
+		.find(|tool_name| bootstrap_tool_matches_request(tool_name, grounding_input, catalog))
 	{
 		return Some(tool_name);
 	}
@@ -537,60 +566,100 @@ fn bootstrap_tool_name<'a>(loop_state: &'a LoopState, grounding_input: &str) -> 
 	}
 	shortlisted_tools
 		.into_iter()
-		.find(|tool_name| bootstrap_tool_is_groundable(tool_name, grounding_input))
+		.find(|tool_name| bootstrap_tool_is_groundable(tool_name, grounding_input, catalog))
 		.or_else(|| tool_visible(loop_state, "general.execute").then_some("general.execute"))
 		.or_else(|| loop_state.visible_tools.first().map(String::as_str))
 }
 
-fn bootstrap_tool_matches_request(tool_name: &str, grounding_input: &str) -> bool {
-	match tool_name {
-		"python.run" => grounded_python_code_allows_execution(grounding_input),
-		"command.run" => grounded_shell_command_allows_execution(grounding_input),
-		"fs.glob" => extract_glob_pattern(grounding_input).is_some(),
-		"fs.find" => {
-			!extract_explicit_path_candidates(grounding_input).is_empty()
-				&& ground_tool_arguments(tool_name, grounding_input).is_some()
+fn bootstrap_tool_matches_request(
+	tool_name: &str,
+	grounding_input: &str,
+	catalog: Option<&ResourceCatalog>,
+) -> bool {
+	if let Some(grounding) = catalog.and_then(|c| c.lookup_grounding_metadata(tool_name)) {
+		if !grounding.bootstrap_matchable {
+			return false;
 		}
-		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => {
-			!extract_concrete_path_candidates(grounding_input).is_empty()
-				&& ground_tool_arguments(tool_name, grounding_input).is_some()
-		}
-		// The following arms are temporary hardcoded integrations added by EPIC-0.
-		// They will be migrated to descriptor-driven grounding under EPIC-5.
-		"fs.grep" => extract_grep_pattern(grounding_input).is_some(),
-		"fs.edit" | "fs.write" => {
-			!extract_concrete_path_candidates(grounding_input).is_empty()
-				&& ground_tool_arguments(tool_name, grounding_input).is_some()
-		}
-		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
-			extract_concrete_table_path(grounding_input).is_some()
-				&& ground_tool_arguments(tool_name, grounding_input).is_some()
-		}
-		"web.fetch" => extract_fetch_url(grounding_input).is_some(),
-		_ => bootstrap_tool_is_groundable(tool_name, grounding_input),
+		return match grounding.grounding_strategy {
+			GroundingStrategy::PathBased => {
+				if tool_name == "fs.find" {
+					!extract_explicit_path_candidates(grounding_input).is_empty()
+						&& ground_tool_arguments(tool_name, grounding_input).is_some()
+				} else if tool_name.starts_with("table.") {
+					extract_concrete_table_path(grounding_input).is_some()
+						&& ground_tool_arguments(tool_name, grounding_input).is_some()
+				} else {
+					!extract_concrete_path_candidates(grounding_input).is_empty()
+						&& ground_tool_arguments(tool_name, grounding_input).is_some()
+				}
+			}
+			GroundingStrategy::PatternBased => {
+				if tool_name == "fs.grep" {
+					extract_grep_pattern(grounding_input).is_some()
+				} else if tool_name == "web.search" {
+					extract_web_query(grounding_input).is_some()
+				} else {
+					extract_glob_pattern(grounding_input).is_some()
+				}
+			}
+			GroundingStrategy::UrlBased => extract_fetch_url(grounding_input).is_some(),
+			GroundingStrategy::CommandBased => {
+				if tool_name == "python.run" {
+					grounded_python_code_allows_execution(grounding_input)
+				} else {
+					grounded_shell_command_allows_execution(grounding_input)
+				}
+			}
+			GroundingStrategy::None => {
+				bootstrap_tool_is_groundable(tool_name, grounding_input, catalog)
+			}
+		};
 	}
+	// Fallback for unregistered tools.
+	bootstrap_tool_is_groundable(tool_name, grounding_input, catalog)
 }
 
-fn bootstrap_tool_is_groundable(tool_name: &str, grounding_input: &str) -> bool {
-	match tool_name {
-		"fs.glob" => extract_glob_pattern(grounding_input).is_some(),
-		"fs.find" => {
-			!extract_explicit_path_candidates(grounding_input).is_empty()
-				&& ground_tool_arguments(tool_name, grounding_input).is_some()
-		}
-		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => {
-			!extract_concrete_path_candidates(grounding_input).is_empty()
-				&& ground_tool_arguments(tool_name, grounding_input).is_some()
-		}
-		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
-			extract_concrete_table_path(grounding_input).is_some()
-				&& ground_tool_arguments(tool_name, grounding_input).is_some()
-		}
-		_ => {
-			tool_required_argument_keys(tool_name).is_empty()
-				|| ground_tool_arguments(tool_name, grounding_input).is_some()
-		}
+fn bootstrap_tool_is_groundable(
+	tool_name: &str,
+	grounding_input: &str,
+	catalog: Option<&ResourceCatalog>,
+) -> bool {
+	if let Some(grounding) = catalog.and_then(|c| c.lookup_grounding_metadata(tool_name)) {
+		return match grounding.grounding_strategy {
+			GroundingStrategy::PathBased => {
+				if tool_name == "fs.find" {
+					!extract_explicit_path_candidates(grounding_input).is_empty()
+						&& ground_tool_arguments(tool_name, grounding_input).is_some()
+				} else if tool_name.starts_with("table.") {
+					extract_concrete_table_path(grounding_input).is_some()
+						&& ground_tool_arguments(tool_name, grounding_input).is_some()
+				} else {
+					!extract_concrete_path_candidates(grounding_input).is_empty()
+						&& ground_tool_arguments(tool_name, grounding_input).is_some()
+				}
+			}
+			GroundingStrategy::PatternBased => {
+				if tool_name == "fs.grep" {
+					extract_grep_pattern(grounding_input).is_some()
+				} else if tool_name == "web.search" {
+					extract_web_query(grounding_input).is_some()
+				} else {
+					extract_glob_pattern(grounding_input).is_some()
+				}
+			}
+			GroundingStrategy::UrlBased => extract_fetch_url(grounding_input).is_some(),
+			GroundingStrategy::CommandBased => {
+				ground_tool_arguments(tool_name, grounding_input).is_some()
+			}
+			GroundingStrategy::None => {
+				tool_required_argument_keys(tool_name, catalog).is_empty()
+					|| ground_tool_arguments(tool_name, grounding_input).is_some()
+			}
+		};
 	}
+	// Fallback for unregistered tools.
+	tool_required_argument_keys(tool_name, catalog).is_empty()
+		|| ground_tool_arguments(tool_name, grounding_input).is_some()
 }
 
 fn prefers_advisory_bootstrap(grounding_input: &str) -> bool {
@@ -606,13 +675,14 @@ fn bootstrap_tool_call(
 	loop_state: &LoopState,
 	tool_name: &str,
 	grounding_input: &str,
+	catalog: Option<&ResourceCatalog>,
 ) -> NextStepDecision {
 	if !tool_visible(loop_state, tool_name) {
 		return fail(format!(
 			"tool loop cannot see the shortlisted tool `{tool_name}`"
 		));
 	}
-	if tool_required_argument_keys(tool_name).is_empty() {
+	if tool_required_argument_keys(tool_name, catalog).is_empty() {
 		return call_tool(
 			tool_name,
 			json!({}),
@@ -806,24 +876,22 @@ fn resume_from_awaiting_user_contract(
 	}
 }
 
-pub(crate) fn tool_required_argument_keys(tool_name: &str) -> &'static [&'static str] {
+pub(crate) fn tool_required_argument_keys(
+	tool_name: &str,
+	catalog: Option<&ResourceCatalog>,
+) -> Vec<String> {
+	if let Some(grounding) = catalog.and_then(|c| c.lookup_grounding_metadata(tool_name))
+		&& grounding.grounding_strategy != GroundingStrategy::None
+	{
+		return grounding
+			.grounding_argument
+			.as_ref()
+			.map(|arg| vec![arg.clone()])
+			.unwrap_or_default();
+	}
 	match tool_name {
-		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => &["path"],
-		"fs.find" => &["name"],
-		"fs.glob" => &["pattern"],
-		// The following arms are temporary hardcoded integrations added by EPIC-0.
-		// They will be migrated to descriptor-driven grounding under EPIC-5.
-		"fs.grep" => &["pattern"],
-		"fs.edit" => &["file_path"],
-		"fs.write" => &["file_path"],
-		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => &["path"],
-		"web.search" => &["query"],
-		"web.fetch" => &["url"],
-		"command.run" => &["command"],
-		"python.run" => &["code"],
-		"skill.install" | "skill.ensure_installed" => &["source_url"],
-		"inventory.describe" | "general.execute" | "skill.execute" => &[],
-		_ => &[],
+		"skill.install" | "skill.ensure_installed" => vec!["source_url".to_string()],
+		_ => Vec::new(),
 	}
 }
 
@@ -936,10 +1004,13 @@ mod tests {
 	use std::sync::{Arc, Mutex};
 
 	use roku_common_types::{ResourceSelector, RuntimeMemorySections};
+	use roku_plugin_catalog::ResourceCatalog;
 	use roku_plugin_llm::{
 		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderCallError,
 		ProviderResponse, RiskTier, RoutingPolicy,
 	};
+	use roku_plugin_skills::SkillRegistry;
+	use roku_plugin_tools::{ToolCatalogConfig, build_resource_catalog};
 	use serde_json::{Value, json};
 
 	use super::{decide_tool_loop_next_step, tool_loop_prompt};
@@ -950,6 +1021,10 @@ mod tests {
 		StepObservation, ToolObservation, build_context_projection,
 		loop_state::AmbiguityStagnation, step_record::StepRecord,
 	};
+
+	fn test_catalog() -> ResourceCatalog {
+		build_resource_catalog(&SkillRegistry::disabled(), &ToolCatalogConfig::default())
+	}
 
 	struct PromptRecordingProvider {
 		prompts: Arc<Mutex<Vec<String>>>,
@@ -1189,6 +1264,7 @@ mod tests {
 			Some(&router),
 			None,
 			&NextStepRuntimeConfig::default(),
+			Some(&test_catalog()),
 		);
 
 		assert_eq!(
@@ -1228,6 +1304,7 @@ mod tests {
 			None,
 			None,
 			&NextStepRuntimeConfig::default(),
+			Some(&test_catalog()),
 		);
 
 		assert_eq!(
@@ -1270,6 +1347,7 @@ mod tests {
 			None,
 			None,
 			&NextStepRuntimeConfig::default(),
+			Some(&test_catalog()),
 		);
 
 		assert_eq!(
@@ -1334,6 +1412,7 @@ mod tests {
 			Some(&router),
 			None,
 			&NextStepRuntimeConfig::default(),
+			Some(&test_catalog()),
 		);
 
 		assert_eq!(
@@ -1363,6 +1442,7 @@ mod tests {
 			None,
 			None,
 			&NextStepRuntimeConfig::default(),
+			Some(&test_catalog()),
 		);
 
 		assert_eq!(
@@ -1387,6 +1467,7 @@ mod tests {
 			None,
 			None,
 			&NextStepRuntimeConfig::default(),
+			Some(&test_catalog()),
 		);
 
 		assert_eq!(
@@ -1416,6 +1497,7 @@ mod tests {
 			None,
 			None,
 			&NextStepRuntimeConfig::default(),
+			Some(&test_catalog()),
 		);
 
 		assert_eq!(
@@ -1440,6 +1522,7 @@ mod tests {
 			None,
 			None,
 			&NextStepRuntimeConfig::default(),
+			Some(&test_catalog()),
 		);
 
 		assert_eq!(
@@ -1477,6 +1560,7 @@ mod tests {
 			Some(&router),
 			None,
 			&NextStepRuntimeConfig::default(),
+			Some(&test_catalog()),
 		);
 
 		assert_eq!(
@@ -1531,6 +1615,7 @@ mod tests {
 			Some(&router),
 			None,
 			&NextStepRuntimeConfig::default(),
+			Some(&test_catalog()),
 		);
 
 		assert_eq!(
@@ -1555,6 +1640,7 @@ mod tests {
 			None,
 			None,
 			&NextStepRuntimeConfig::default(),
+			Some(&test_catalog()),
 		);
 
 		assert_eq!(
@@ -1579,6 +1665,7 @@ mod tests {
 			None,
 			None,
 			&NextStepRuntimeConfig::default(),
+			Some(&test_catalog()),
 		);
 
 		assert_eq!(

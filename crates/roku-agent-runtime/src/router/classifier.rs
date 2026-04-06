@@ -736,7 +736,7 @@ fn llm_candidates(
 					entry.effective_selection_hint(),
 					config.prompts.candidate_description_max_chars,
 				),
-				"required_arguments": tool_required_argument_keys(&entry.name),
+				"required_arguments": tool_required_argument_keys(&entry.name, Some(catalog)),
 			})
 		})
 		.collect::<Vec<_>>();
@@ -927,7 +927,12 @@ fn classify_deterministic_contract_tool_match(
 			.retrieve(&request.goal, Some(ResourceKind::Tool), 6),
 		context.availability_snapshot,
 	);
-	let best_match = select_deterministic_contract_tool_match(&tool_matches, &request.goal, None)?;
+	let best_match = select_deterministic_contract_tool_match(
+		&tool_matches,
+		&request.goal,
+		None,
+		context.catalog,
+	)?;
 	if let Some(selector) = explicit_tool_selector(context, &request.goal)
 		&& let Some(descriptor) = context.catalog.descriptor(&selector)
 		&& !explicit_tool_hint_is_grounded(&descriptor.name, &request.goal)
@@ -956,12 +961,13 @@ fn select_deterministic_contract_tool_match<'a>(
 	tool_matches: &'a [CatalogMatch],
 	goal: &str,
 	intent_family: Option<IntentFamily>,
+	catalog: &ResourceCatalog,
 ) -> Option<&'a CatalogMatch> {
 	let grounded_intent = intent_family.or_else(|| deterministic_grounded_intent(goal));
 	let grounded_matches = tool_matches
 		.iter()
 		.filter(|entry| entry.descriptor.contract.is_some())
-		.filter(|entry| deterministic_match_can_start(&entry.descriptor.name, goal))
+		.filter(|entry| deterministic_match_can_start(&entry.descriptor.name, goal, catalog))
 		.filter(|entry| {
 			grounded_intent
 				.is_none_or(|intent| coarse_intent_hint_for_tool(&entry.descriptor.name) == intent)
@@ -976,7 +982,7 @@ fn select_deterministic_contract_tool_match<'a>(
 	(best_match.score >= DETERMINISTIC_TOOL_MATCH_SCORE_FLOOR && margin_ok).then_some(*best_match)
 }
 
-fn deterministic_match_can_start(tool_name: &str, goal: &str) -> bool {
+fn deterministic_match_can_start(tool_name: &str, goal: &str, catalog: &ResourceCatalog) -> bool {
 	match tool_name {
 		"python.run" => {
 			grounded_python_code_allows_execution(goal)
@@ -1025,7 +1031,7 @@ fn deterministic_match_can_start(tool_name: &str, goal: &str) -> bool {
 				&& explicit_table_action_tool(goal) == Some("table.schema")
 		}
 		_ => {
-			tool_required_argument_keys(tool_name).is_empty()
+			tool_required_argument_keys(tool_name, Some(catalog)).is_empty()
 				|| ground_tool_arguments(tool_name, goal).is_some()
 		}
 	}
@@ -1735,7 +1741,17 @@ mod tests {
 			summary: "Compact selection hint.".to_string(),
 			key_commands: Vec::new(),
 			use_cases: Vec::new(),
-			contract: None,
+			contract: Some(roku_common_types::ToolContract {
+				grounding: roku_common_types::ToolGroundingContract {
+					required_argument_keys: vec!["query".to_string()],
+					grounding_strategy: roku_common_types::GroundingStrategy::PatternBased,
+					grounding_argument: Some("query".to_string()),
+					requires_grounded_path: false,
+					bootstrap_matchable: true,
+					missing_argument_hint: None,
+				},
+				..roku_common_types::ToolContract::default()
+			}),
 		}
 	}
 
