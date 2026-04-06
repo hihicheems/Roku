@@ -433,7 +433,8 @@ impl GenericAgentRuntime {
 						.to_string(),
 			};
 		};
-		let context_projection = build_context_projection(loop_state);
+		let context_projection =
+			build_context_projection(loop_state, &RuntimeMemorySections::default());
 		let response = match router.generate_json_value(&GenerationRequest {
 			system_prompt: Some(
 				"You are Roku's paused-loop resume gate. Return only valid JSON.".to_string(),
@@ -667,7 +668,8 @@ impl GenericAgentRuntime {
 		loop_state.note_grounding_input(&grounding_input);
 		loop {
 			self.refresh_tool_loop_visible_tools(loop_state);
-			let context_projection = self.refresh_tool_loop_projection(loop_state);
+			let context_projection =
+				self.refresh_tool_loop_projection(loop_state, runtime_memory_sections);
 			let next_step = decide_tool_loop_next_step(
 				loop_state,
 				&context_projection,
@@ -998,8 +1000,12 @@ impl GenericAgentRuntime {
 		loop_state.visible_tools = visible_tools;
 	}
 
-	fn refresh_tool_loop_projection(&self, loop_state: &LoopState) -> ContextProjection {
-		let mut projection = build_context_projection(loop_state);
+	fn refresh_tool_loop_projection(
+		&self,
+		loop_state: &LoopState,
+		runtime_memory_sections: &RuntimeMemorySections,
+	) -> ContextProjection {
+		let mut projection = build_context_projection(loop_state, runtime_memory_sections);
 		projection.visible_tool_hints = self.visible_tool_hints_for(&projection.visible_tools);
 		projection
 	}
@@ -4220,7 +4226,8 @@ mod tests {
 			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
 		loop_state.visible_tools = vec!["fs.glob".to_string()];
 
-		let projection = runtime.refresh_tool_loop_projection(&loop_state);
+		let projection =
+			runtime.refresh_tool_loop_projection(&loop_state, &RuntimeMemorySections::default());
 
 		assert_eq!(projection.visible_tools, vec!["fs.glob".to_string()]);
 		assert_eq!(loop_state.visible_tools, vec!["fs.glob".to_string()]);

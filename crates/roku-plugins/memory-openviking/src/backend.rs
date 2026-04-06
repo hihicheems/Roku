@@ -1682,6 +1682,7 @@ fn memory_write_reason_segment(reason: MemoryWriteReason) -> &'static str {
 		MemoryWriteReason::TaskSucceeded => "task_succeeded",
 		MemoryWriteReason::HighValueObservation => "high_value_observation",
 		MemoryWriteReason::OperatorRequested => "operator_requested",
+		MemoryWriteReason::CompactSummary => "compact_summary",
 	}
 }
 

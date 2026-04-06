@@ -523,4 +523,117 @@ mod tests {
 			"compact should reduce token count: {after} < {before}"
 		);
 	}
+
+	// --- PRD-08 US-001: RuntimeMemorySections survives compact ---
+
+	#[test]
+	fn context_projection_includes_runtime_memory_sections_after_compact() {
+		use crate::runtime_loop::build_context_projection;
+		use roku_common_types::RuntimeMemorySections;
+
+		let mut state = minimal_loop_state();
+		for i in 1..=10 {
+			state.record_step(sample_step(i, 10 - i));
+		}
+		let sections = RuntimeMemorySections {
+			short_term_continuity: "user: hi".to_string(),
+			long_term_recall: "memory-record-1 | UserPreference".to_string(),
+			working_memory: String::new(),
+		};
+
+		compact_history(&mut state, &CompactConfig::default());
+
+		let projection = build_context_projection(&state, &sections);
+		assert_eq!(
+			projection.runtime_memory_sections.long_term_recall,
+			"memory-record-1 | UserPreference"
+		);
+		assert!(!projection.working_summary.is_empty());
+	}
+
+	// --- PRD-08 US-002: Working summary in model prompt ---
+
+	#[test]
+	fn tool_loop_prompt_includes_prior_work_summary_when_nonempty() {
+		use crate::runtime_loop::build_context_projection;
+		use crate::runtime_loop::tool_loop::tool_loop_prompt_for_test;
+		use roku_common_types::RuntimeMemorySections;
+
+		let mut state = minimal_loop_state();
+		for i in 1..=10 {
+			state.record_step(sample_step(i, 10 - i));
+		}
+		compact_history(&mut state, &CompactConfig::default());
+		let projection = build_context_projection(&state, &RuntimeMemorySections::default());
+		let prompt = tool_loop_prompt_for_test(&projection, None);
+		assert!(
+			prompt.contains("## Prior Work Summary"),
+			"prompt should include Prior Work Summary section"
+		);
+		assert!(
+			prompt.contains("[Compact summary"),
+			"prompt should include compact digest"
+		);
+	}
+
+	#[test]
+	fn tool_loop_prompt_omits_prior_work_summary_when_empty() {
+		use crate::runtime_loop::build_context_projection;
+		use crate::runtime_loop::tool_loop::tool_loop_prompt_for_test;
+		use roku_common_types::RuntimeMemorySections;
+
+		let state = minimal_loop_state();
+		let projection = build_context_projection(&state, &RuntimeMemorySections::default());
+		let prompt = tool_loop_prompt_for_test(&projection, None);
+		assert!(
+			!prompt.contains("## Prior Work Summary"),
+			"prompt should omit Prior Work Summary when empty"
+		);
+	}
+
+	// --- PRD-08 US-004: Multi-compact loop continuity ---
+
+	#[test]
+	fn multi_compact_loop_continuity() {
+		let mut state = minimal_loop_state();
+		state.remaining_step_budget = 20;
+
+		// Use small window so compact triggers easily
+		let config = CompactConfig {
+			retain_tail_steps: 3,
+			working_summary_max_chars: 4_000,
+		};
+
+		// Phase 1: add 6 steps → compact
+		for i in 1..=6 {
+			state.record_step(sample_step(i, 20 - i));
+		}
+		compact_history(&mut state, &config);
+
+		assert_eq!(state.history.len(), 4); // boundary + 3 retained
+		assert!(state.working_summary.contains("3 steps discarded"));
+
+		// Phase 2: add 4 more steps → compact again
+		for i in 7..=10 {
+			state.record_step(sample_step(i, 20 - i));
+		}
+		let budget_before_compact = state.remaining_step_budget;
+		compact_history(&mut state, &config);
+
+		assert_eq!(state.history.len(), 4); // new boundary + 3 retained
+		assert_eq!(
+			state.remaining_step_budget, budget_before_compact,
+			"compact must not alter step budget"
+		);
+
+		// Verify both compacts contributed to working_summary
+		let compact_count = state.working_summary.matches("[Compact summary").count();
+		assert!(
+			compact_count >= 2,
+			"working_summary should contain summaries from both compacts, found {compact_count}"
+		);
+
+		// Verify loop can still continue (step budget > 0)
+		assert!(state.remaining_step_budget > 0);
+	}
 }

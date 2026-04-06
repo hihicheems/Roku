@@ -55,6 +55,7 @@ impl RuntimeService {
 		}
 		self.sync_pending_loop(loop_state)?;
 		self.apply_memory_write_back(request, &response, context_bundle);
+		self.write_back_compact_summaries(request, loop_state);
 		self.clear_runtime_memory_layers(&task.task_id);
 		Ok(response)
 	}
@@ -101,6 +102,35 @@ impl RuntimeService {
 		self.apply_memory_write_back(request, &response, context_bundle);
 		self.clear_runtime_memory_layers(&task.task_id);
 		Ok(response)
+	}
+
+	pub(crate) fn write_back_compact_summaries(
+		&self,
+		request: &RequestEnvelope,
+		loop_state: &LoopState,
+	) {
+		if loop_state.working_summary.is_empty() {
+			return;
+		}
+		let has_compact_boundary = loop_state
+			.history
+			.iter()
+			.any(|step| step.action == roku_agent_runtime::StepAction::CompactBoundary);
+		if !has_compact_boundary {
+			return;
+		}
+		let write_request = roku_memory::MemoryWriteRequest::new(
+			roku_memory::MemoryKind::WorkflowInsight,
+			roku_memory::MemoryScope::Session,
+			&loop_state.working_summary,
+			"Context compact summary",
+			roku_memory::MemoryWriteReason::CompactSummary,
+		);
+		let mut write_request = write_request;
+		write_request.session_id = Some(request.session_id.clone());
+		if let Err(error) = self.memory_backend.write(&write_request) {
+			eprintln!("compact summary write-back failed: {error}");
+		}
 	}
 
 	pub(super) fn finalize_direct_path(

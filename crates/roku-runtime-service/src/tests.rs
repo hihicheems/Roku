@@ -1728,3 +1728,68 @@ fn write_back_failure_does_not_block_response() {
 		"write-back failure must not propagate to the response"
 	);
 }
+
+#[test]
+fn compact_summary_is_written_back_when_compact_boundary_exists() {
+	let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
+	let service = RuntimeService::default().with_long_term_memory_backend(backend.clone());
+
+	let request = RequestEnvelope {
+		request_id: RequestId("req-compact-wb".to_string()),
+		session_id: "session-compact".to_string(),
+		goal: "test compact write-back".to_string(),
+		planning_mode_hint: None,
+		conversation_history: Vec::new(),
+	};
+
+	let mut loop_state = LoopState::with_budgets(
+		"loop-compact-wb".to_string(),
+		&LoopContext {
+			request_id: "req-compact-wb".to_string(),
+			session_id: "session-compact".to_string(),
+			goal: "test compact write-back".to_string(),
+			workspace_root: "/workspace".to_string(),
+			working_directory: "/workspace".to_string(),
+			route_decision: RouteDecision::new(
+				IntentFamily::Chat,
+				0.9,
+				false,
+				RouteRisk::Low,
+				Vec::new(),
+				Vec::new(),
+				Vec::new(),
+				"test",
+			),
+			last_observation: None,
+			visible_tools: vec!["general.execute".to_string()],
+			bound_resources: Vec::new(),
+		},
+		10,
+		2,
+	);
+
+	loop_state.working_summary = "[Compact summary — 4 steps discarded]\nStep 1: fs.read_text — read config — ok\nStep 2: fs.grep — search — ok".to_string();
+	let boundary = roku_agent_runtime::StepRecord::compact_boundary(
+		4,
+		4,
+		"[Compact summary — 4 steps discarded]",
+		8,
+		2,
+		"/workspace",
+	);
+	loop_state.history.push(boundary);
+
+	service.write_back_compact_summaries(&request, &loop_state);
+
+	let writes = backend.recorded_writes();
+	assert_eq!(writes.len(), 1, "one compact summary should be written");
+	assert_eq!(
+		writes[0].write_reason,
+		roku_memory::MemoryWriteReason::CompactSummary
+	);
+	assert!(
+		writes[0].content.contains("[Compact summary"),
+		"written content should include compact summary"
+	);
+	assert_eq!(writes[0].session_id.as_deref(), Some("session-compact"));
+}
