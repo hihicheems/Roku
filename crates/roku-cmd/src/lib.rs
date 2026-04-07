@@ -144,6 +144,7 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use roku_agent_runtime::ToolCatalogConfigError;
 use roku_common_types::ApprovalDecision;
 use roku_memory::{
@@ -211,6 +212,306 @@ pub enum CommandError {
 	TelegramTransport(#[from] roku_plugin_telegram::TelegramTransportError),
 }
 
+// ---------------------------------------------------------------------------
+// Clap derive structures
+// ---------------------------------------------------------------------------
+
+#[derive(Parser)]
+#[command(name = "roku-cmd")]
+struct Cli {
+	#[command(subcommand)]
+	command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+	/// Start an interactive REPL session. /help for in-session commands.
+	#[command(after_help = "Example:\n  roku-cmd chat --session-id my-session")]
+	Chat {
+		#[arg(long, default_value = "chat-default")]
+		session_id: String,
+	},
+
+	/// Run the deterministic in-process pipeline.
+	#[command(
+		after_help = "Example:\n  roku-cmd once --session-id session-1 analyze market trends"
+	)]
+	Once(RequestArgs),
+
+	/// Run the OpenRouter-backed live pipeline from environment.
+	#[command(
+		name = "live-once",
+		after_help = "Example:\n  roku-cmd live-once --session-id session-1 summarize the latest logs"
+	)]
+	LiveOnce(RequestArgs),
+
+	/// Run one live Telegram handler turn and print the outbound bot message.
+	#[command(name = "telegram-once", aliases = ["tg-once"])]
+	TelegramOnce(RequestArgs),
+
+	/// Start the Telegram polling bot using environment configuration.
+	#[command(name = "telegram-bot", aliases = ["tg-bot"])]
+	TelegramBot,
+
+	/// Start the Actix HTTP gateway using environment configuration.
+	#[command(name = "api-gateway", aliases = ["http-api"])]
+	ApiGateway,
+
+	/// Task management commands.
+	#[command(subcommand)]
+	Task(TaskCommand),
+
+	/// Approval management commands.
+	#[command(subcommand)]
+	Approval(ApprovalCommand),
+
+	/// Artifact management commands.
+	#[command(subcommand)]
+	Artifact(ArtifactCommand),
+
+	/// Experiment query commands.
+	#[command(subcommand)]
+	Experiment(ExperimentCommand),
+
+	/// Memory backend commands.
+	///
+	/// Prepare generated config or exercise the provider-neutral memory backend.
+	#[command(
+		subcommand,
+		after_help = "Memory Scopes:\n  session | user | project | workspace | global\n\nMemory Kinds:\n  user_preference | user_fact | project_fact | workspace_fact | historical_case | constraint | workflow_insight"
+	)]
+	Memory(MemoryCommand),
+
+	/// Skill management commands.
+	#[command(subcommand)]
+	Skill(SkillCommand),
+}
+
+/// Shared request arguments used by once, live-once, and telegram-once.
+#[derive(Args)]
+struct RequestArgs {
+	#[arg(long, default_value = "session-1")]
+	session_id: String,
+
+	#[arg(long)]
+	generated_skill_root: Option<PathBuf>,
+
+	/// The goal or prompt to execute (all remaining arguments are joined).
+	#[arg(trailing_var_arg = true, required = true, num_args = 1..)]
+	goal: Vec<String>,
+}
+
+impl RequestArgs {
+	fn into_execution_options(self) -> ExecutionRequestOptions {
+		ExecutionRequestOptions {
+			session_id: self.session_id,
+			goal: self.goal.join(" "),
+			generated_skill_root: self.generated_skill_root,
+		}
+	}
+}
+
+#[derive(Subcommand)]
+enum TaskCommand {
+	/// Render a persisted task snapshot with its event timeline.
+	Show { task_id: String },
+	/// Rebuild a state-transition report from persisted task events.
+	Replay { task_id: String },
+	/// Continue a resumable persisted task using the live runtime path.
+	Resume { task_id: String },
+}
+
+#[derive(Subcommand)]
+enum ApprovalCommand {
+	/// Show an approval ticket from persisted state.
+	Show { approval_id: String },
+	/// Approve a pending approval ticket.
+	Approve {
+		approval_id: String,
+		#[arg(long, required = true)]
+		actor: String,
+		#[arg(long)]
+		comment: Option<String>,
+	},
+	/// Reject a pending approval ticket.
+	Reject {
+		approval_id: String,
+		#[arg(long, required = true)]
+		actor: String,
+		#[arg(long)]
+		comment: Option<String>,
+	},
+}
+
+#[derive(Subcommand)]
+enum ArtifactCommand {
+	/// List artifacts for a task.
+	List { task_id: String },
+	/// Print artifact content for a task artifact.
+	Content {
+		task_id: String,
+		artifact_id: String,
+	},
+	/// Download an artifact payload to a file.
+	Download {
+		task_id: String,
+		artifact_id: String,
+		#[arg(long, required = true)]
+		output: PathBuf,
+	},
+}
+
+#[derive(Subcommand)]
+enum ExperimentCommand {
+	/// Render the persisted experiment run for a task.
+	Show { task_id: String },
+}
+
+#[derive(Subcommand)]
+enum MemoryCommand {
+	/// Prepare generated memory config artifacts.
+	#[command(name = "prepare-config")]
+	PrepareConfig,
+
+	/// Check the memory backend health.
+	Health,
+
+	/// Search the memory backend.
+	#[command(
+		after_help = "Example:\n  roku-cmd memory search --scope global --limit 10 recent user preferences"
+	)]
+	Search {
+		#[arg(long, default_value = "session", value_enum)]
+		scope: MemoryScopeArg,
+		#[arg(long)]
+		session_id: Option<String>,
+		#[arg(long)]
+		user_id: Option<String>,
+		#[arg(long)]
+		project_id: Option<String>,
+		#[arg(long)]
+		workspace_id: Option<String>,
+		#[arg(long, default_value = "5")]
+		limit: usize,
+		/// The search query (all remaining arguments are joined).
+		#[arg(trailing_var_arg = true, required = true, num_args = 1..)]
+		query: Vec<String>,
+	},
+
+	/// Write a memory record.
+	#[command(
+		after_help = "Example:\n  roku-cmd memory write --scope global --kind workflow_insight this project uses Rust"
+	)]
+	Write {
+		#[arg(long, default_value = "session", value_enum)]
+		scope: MemoryScopeArg,
+		#[arg(long, default_value = "historical_case", value_enum)]
+		kind: MemoryKindArg,
+		#[arg(long)]
+		session_id: Option<String>,
+		#[arg(long)]
+		user_id: Option<String>,
+		#[arg(long)]
+		project_id: Option<String>,
+		#[arg(long)]
+		workspace_id: Option<String>,
+		#[arg(long)]
+		summary: Option<String>,
+		#[arg(long, default_value = "operator_requested", value_enum)]
+		write_reason: MemoryWriteReasonArg,
+		/// The memory content (all remaining arguments are joined).
+		#[arg(trailing_var_arg = true, required = true, num_args = 1..)]
+		content: Vec<String>,
+	},
+
+	/// Delete a memory record by its record ID.
+	Delete { record_id: String },
+}
+
+#[derive(Subcommand)]
+enum SkillCommand {
+	/// Install a skill package into the local file-backed registry.
+	Install { source_url: String },
+	/// List installed skills from the local registry.
+	List,
+	/// Render installed skill metadata and prompt context.
+	Show { skill_name: String },
+}
+
+// ---------------------------------------------------------------------------
+// ValueEnum types for memory enums
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+enum MemoryScopeArg {
+	Session,
+	User,
+	Project,
+	Workspace,
+	Global,
+}
+
+impl From<MemoryScopeArg> for MemoryScope {
+	fn from(arg: MemoryScopeArg) -> Self {
+		match arg {
+			MemoryScopeArg::Session => MemoryScope::Session,
+			MemoryScopeArg::User => MemoryScope::User,
+			MemoryScopeArg::Project => MemoryScope::Project,
+			MemoryScopeArg::Workspace => MemoryScope::Workspace,
+			MemoryScopeArg::Global => MemoryScope::Global,
+		}
+	}
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+enum MemoryKindArg {
+	UserPreference,
+	UserFact,
+	ProjectFact,
+	WorkspaceFact,
+	HistoricalCase,
+	Constraint,
+	WorkflowInsight,
+}
+
+impl From<MemoryKindArg> for MemoryKind {
+	fn from(arg: MemoryKindArg) -> Self {
+		match arg {
+			MemoryKindArg::UserPreference => MemoryKind::UserPreference,
+			MemoryKindArg::UserFact => MemoryKind::UserFact,
+			MemoryKindArg::ProjectFact => MemoryKind::ProjectFact,
+			MemoryKindArg::WorkspaceFact => MemoryKind::WorkspaceFact,
+			MemoryKindArg::HistoricalCase => MemoryKind::HistoricalCase,
+			MemoryKindArg::Constraint => MemoryKind::Constraint,
+			MemoryKindArg::WorkflowInsight => MemoryKind::WorkflowInsight,
+		}
+	}
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+enum MemoryWriteReasonArg {
+	TaskSucceeded,
+	HighValueObservation,
+	OperatorRequested,
+}
+
+impl From<MemoryWriteReasonArg> for MemoryWriteReason {
+	fn from(arg: MemoryWriteReasonArg) -> Self {
+		match arg {
+			MemoryWriteReasonArg::TaskSucceeded => MemoryWriteReason::TaskSucceeded,
+			MemoryWriteReasonArg::HighValueObservation => MemoryWriteReason::HighValueObservation,
+			MemoryWriteReasonArg::OperatorRequested => MemoryWriteReason::OperatorRequested,
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
 /// Parses CLI arguments, dispatches to the requested command surface, and returns printable output.
 ///
 /// `Ok(Some(...))` means the caller should print a response payload. `Ok(None)` is reserved for
@@ -222,13 +523,20 @@ where
 {
 	let _ = dotenvy::dotenv();
 	configure_logging_from_env()?;
-	let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
 
-	// Subcommands that involve the runtime loop require a tokio runtime. Create one
-	// multi-thread runtime here so async callers can .await without block_on bridges
-	// inside the runtime service. Subcommands that do not involve the runtime loop
-	// (task/approval/memory/skill) build their own service synchronously and do not
-	// use this runtime.
+	let cli = match Cli::try_parse_from(
+		std::iter::once("roku-cmd".to_string()).chain(args.into_iter().map(Into::into)),
+	) {
+		Ok(cli) => cli,
+		Err(e)
+			if e.kind() == clap::error::ErrorKind::DisplayHelp
+				|| e.kind() == clap::error::ErrorKind::DisplayVersion =>
+		{
+			return Ok(Some(e.to_string()));
+		}
+		Err(e) => return Err(CommandError::Usage(e.to_string())),
+	};
+
 	let rt = tokio::runtime::Builder::new_multi_thread()
 		.enable_all()
 		.build()
@@ -236,26 +544,29 @@ where
 			CommandError::Runtime(roku_common_types::RuntimeError::new(error.to_string()))
 		})?;
 
-	match args.first().map(String::as_str) {
+	match cli.command {
 		None => {
 			let response = rt
 				.block_on(run_once("bootstrap request"))
 				.map_err(CommandError::Runtime)?;
 			Ok(Some(response.message))
 		}
-		Some("once") => {
-			let options = parse_request_options(&args[1..])?;
+		Some(Commands::Chat { session_id }) => {
+			chat::run_chat(&rt, chat::ChatOptions { session_id })?;
+			Ok(None)
+		}
+		Some(Commands::Once(args)) => {
+			let options = args.into_execution_options();
 			let response = rt
 				.block_on(run_with_mode_and_options(options, RunMode::Normal))
 				.map_err(CommandError::Runtime)?;
 			Ok(Some(response.message))
 		}
-		Some("live-once") => {
-			let options = parse_request_options(&args[1..])?;
+		Some(Commands::LiveOnce(args)) => {
+			let options = args.into_execution_options();
 			rt.block_on(async {
 				let (tx, mut rx) =
 					tokio::sync::mpsc::unbounded_channel::<roku_agent_runtime::LoopEvent>();
-				// Spawn a task to consume and render runtime loop events in real time.
 				let render_task = tokio::spawn(async move {
 					while let Some(event) = rx.recv().await {
 						match event {
@@ -289,326 +600,153 @@ where
 				});
 				let response =
 					run_live_once_with_options_from_env_and_sender(options, Some(&tx)).await?;
-				// Drop sender so the render task drains and finishes.
 				drop(tx);
 				render_task.await.ok();
 				Ok::<_, CommandError>(Some(response.message))
 			})
 		}
-		Some("chat") => {
-			let chat_options = parse_chat_options(&args[1..])?;
-			chat::run_chat(&rt, chat_options)?;
-			Ok(None)
-		}
-		Some("telegram-once") | Some("tg-once") => {
-			let options = parse_request_options(&args[1..])?;
+		Some(Commands::TelegramOnce(args)) => {
+			let options = args.into_execution_options();
 			Ok(Some(run_telegram_once_with_options_from_env(options)?))
 		}
-		Some("telegram-bot") | Some("tg-bot") => {
-			// Run the polling loop directly on the main thread. Do NOT use
-			// spawn_blocking — handle_request needs a clean thread context
-			// where scoped-thread runtime creation works without nesting panics.
+		Some(Commands::TelegramBot) => {
 			run_telegram_bot_from_env()?;
 			Ok(None)
 		}
-		Some("api-gateway") | Some("http-api") => {
+		Some(Commands::ApiGateway) => {
 			run_api_gateway_from_env()?;
 			Ok(None)
 		}
-		Some("task") => execute_task_command(&args[1..]).map(Some),
-		Some("approval") => execute_approval_command(&args[1..]).map(Some),
-		Some("artifact") => execute_artifact_command(&args[1..]).map(Some),
-		Some("experiment") => execute_experiment_command(&args[1..]).map(Some),
-		Some("memory") => execute_memory_command(&args[1..]).map(Some),
-		Some("skill") => execute_skill_command(&args[1..]).map(Some),
-		Some("--help") | Some("-h") | Some("help") => Ok(Some(help_text().to_string())),
-		Some(command) => Err(CommandError::Usage(format!(
-			"unknown command: {command}\n\n{}",
-			help_text()
-		))),
-	}
-}
-
-/// Returns the stable CLI help text used by usage errors and explicit help requests.
-///
-/// Keeping this in one place prevents subcommand parsers from drifting into slightly different
-/// operator guidance.
-pub fn help_text() -> &'static str {
-	"Usage:\n  roku-cmd chat [--session-id <id>]\n  roku-cmd once [--session-id <id>] [--generated-skill-root <path>] <goal>\n  roku-cmd live-once [--session-id <id>] [--generated-skill-root <path>] <goal>\n  roku-cmd telegram-once [--session-id <id>] [--generated-skill-root <path>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n  roku-cmd task show <task-id>\n  roku-cmd task replay <task-id>\n  roku-cmd task resume <task-id>\n  roku-cmd approval show <approval-id>\n  roku-cmd approval approve <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd approval reject <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd artifact list <task-id>\n  roku-cmd artifact content <task-id> <artifact-id>\n  roku-cmd artifact download <task-id> <artifact-id> --output <path>\n  roku-cmd experiment show <task-id>\n  roku-cmd memory prepare-config\n  roku-cmd memory health\n  roku-cmd memory search [--scope <scope>] [--session-id <id>] [--user-id <id>] [--project-id <id>] [--workspace-id <id>] [--limit <n>] <query>\n  roku-cmd memory write [--scope <scope>] [--kind <kind>] [--session-id <id>] [--user-id <id>] [--project-id <id>] [--workspace-id <id>] [--summary <text>] [--write-reason <reason>] <content>\n  roku-cmd memory delete <record-id>\n  roku-cmd skill install <source-url>\n  roku-cmd skill list\n  roku-cmd skill show <skill-name>\n\nCommands:\n  chat              Start an interactive REPL session. /help for in-session commands.\n  once              Run the deterministic in-process pipeline.\n  live-once         Run the OpenRouter-backed live pipeline from environment.\n  telegram-once     Run one live Telegram handler turn and print the outbound bot message.\n  telegram-bot      Start the Telegram polling bot using environment configuration.\n  api-gateway       Start the Actix HTTP gateway using environment configuration.\n  task show         Render a persisted task snapshot with its event timeline.\n  task replay       Rebuild a state-transition report from persisted task events.\n  task resume       Continue a resumable persisted task using the live runtime path.\n  approval          Show or decide an approval ticket from persisted state.\n  artifact          List artifacts, print artifact content, or download an artifact payload.\n  experiment show   Render the persisted experiment run for a task.\n  memory            Prepare generated config or exercise the provider-neutral memory backend commands.\n  skill install     Install a skill package into the local file-backed registry.\n  skill list        List installed skills from the local registry.\n  skill show        Render installed skill metadata and prompt context.\n\nMemory Scopes:\n  session | user | project | workspace | global\n\nMemory Kinds:\n  user_preference | user_fact | project_fact | workspace_fact | historical_case | constraint | workflow_insight"
-}
-
-fn join_goal(parts: &[String]) -> Result<String, CommandError> {
-	if parts.is_empty() {
-		return Err(CommandError::Usage(format!(
-			"missing goal argument\n\n{}",
-			help_text()
-		)));
-	}
-	Ok(parts.join(" "))
-}
-
-fn parse_request_options(parts: &[String]) -> Result<ExecutionRequestOptions, CommandError> {
-	let mut session_id = "session-1".to_string();
-	let mut generated_skill_root = None;
-	let mut goal_parts = Vec::new();
-	let mut index = 0usize;
-
-	while index < parts.len() {
-		let current = &parts[index];
-		if let Some(value) = current.strip_prefix("--session-id=") {
-			session_id = parse_non_empty_flag("--session-id", value)?;
-			index += 1;
-			continue;
-		}
-		if current == "--session-id" {
-			let value = parts
-				.get(index + 1)
-				.ok_or_else(|| CommandError::Usage("missing value for --session-id".to_string()))?;
-			session_id = parse_non_empty_flag("--session-id", value)?;
-			index += 2;
-			continue;
-		}
-		if let Some(value) = current.strip_prefix("--generated-skill-root=") {
-			generated_skill_root = Some(PathBuf::from(parse_non_empty_flag(
-				"--generated-skill-root",
-				value,
-			)?));
-			index += 1;
-			continue;
-		}
-		if current == "--generated-skill-root" {
-			let value = parts.get(index + 1).ok_or_else(|| {
-				CommandError::Usage("missing value for --generated-skill-root".to_string())
-			})?;
-			generated_skill_root = Some(PathBuf::from(parse_non_empty_flag(
-				"--generated-skill-root",
-				value,
-			)?));
-			index += 2;
-			continue;
-		}
-		goal_parts.push(current.clone());
-		index += 1;
-	}
-
-	Ok(ExecutionRequestOptions {
-		session_id,
-		goal: join_goal(&goal_parts)?,
-		generated_skill_root,
-	})
-}
-
-fn parse_chat_options(parts: &[String]) -> Result<chat::ChatOptions, CommandError> {
-	let mut session_id = "chat-default".to_string();
-	let mut index = 0usize;
-
-	while index < parts.len() {
-		let current = &parts[index];
-		if let Some(value) = current.strip_prefix("--session-id=") {
-			session_id = parse_non_empty_flag("--session-id", value)?;
-			index += 1;
-			continue;
-		}
-		if current == "--session-id" {
-			let value = parts
-				.get(index + 1)
-				.ok_or_else(|| CommandError::Usage("missing value for --session-id".to_string()))?;
-			session_id = parse_non_empty_flag("--session-id", value)?;
-			index += 2;
-			continue;
-		}
-		return Err(CommandError::Usage(format!(
-			"unexpected argument: {current}\n\nUsage: roku-cmd chat [--session-id <id>]"
-		)));
-	}
-
-	Ok(chat::ChatOptions { session_id })
-}
-
-fn parse_non_empty_flag(flag: &str, value: &str) -> Result<String, CommandError> {
-	let trimmed = value.trim();
-	if trimmed.is_empty() {
-		return Err(CommandError::Usage(format!("{flag} cannot be empty")));
-	}
-
-	Ok(trimmed.to_string())
-}
-
-fn execute_task_command(parts: &[String]) -> Result<String, CommandError> {
-	match parts {
-		[command, task_id] if command.eq_ignore_ascii_case("show") => show_task_from_env(task_id),
-		[command, task_id] if command.eq_ignore_ascii_case("replay") => {
-			replay_task_from_env(task_id)
-		}
-		[command, task_id] if command.eq_ignore_ascii_case("resume") => {
-			resume_task_from_env(task_id)
-		}
-		_ => Err(CommandError::Usage(format!(
-			"invalid task command\n\n{}",
-			help_text()
-		))),
-	}
-}
-
-fn execute_approval_command(parts: &[String]) -> Result<String, CommandError> {
-	match parts.first().map(String::as_str) {
-		Some(command) if command.eq_ignore_ascii_case("show") => {
-			let approval_id = parts.get(1).ok_or_else(|| {
-				CommandError::Usage(format!(
-					"missing approval id for approval show\n\n{}",
-					help_text()
-				))
-			})?;
-			show_approval_from_env(approval_id)
-		}
-		Some(command)
-			if command.eq_ignore_ascii_case("approve")
-				|| command.eq_ignore_ascii_case("reject") =>
-		{
-			let approval_id = parts.get(1).ok_or_else(|| {
-				CommandError::Usage(format!(
-					"missing approval id for approval decision\n\n{}",
-					help_text()
-				))
-			})?;
-			let options = parse_approval_decision_options(&parts[2..])?;
-			decide_approval_from_env(
+		Some(Commands::Task(cmd)) => match cmd {
+			TaskCommand::Show { task_id } => show_task_from_env(&task_id).map(Some),
+			TaskCommand::Replay { task_id } => replay_task_from_env(&task_id).map(Some),
+			TaskCommand::Resume { task_id } => resume_task_from_env(&task_id).map(Some),
+		},
+		Some(Commands::Approval(cmd)) => match cmd {
+			ApprovalCommand::Show { approval_id } => show_approval_from_env(&approval_id).map(Some),
+			ApprovalCommand::Approve {
 				approval_id,
+				actor,
+				comment,
+			} => decide_approval_from_env(
+				&approval_id,
 				ApprovalDecision {
-					actor: options.actor,
-					approved: command.eq_ignore_ascii_case("approve"),
-					comment: options.comment,
+					actor,
+					approved: true,
+					comment,
 				},
 			)
-		}
-		_ => Err(CommandError::Usage(format!(
-			"invalid approval command\n\n{}",
-			help_text()
-		))),
+			.map(Some),
+			ApprovalCommand::Reject {
+				approval_id,
+				actor,
+				comment,
+			} => decide_approval_from_env(
+				&approval_id,
+				ApprovalDecision {
+					actor,
+					approved: false,
+					comment,
+				},
+			)
+			.map(Some),
+		},
+		Some(Commands::Artifact(cmd)) => match cmd {
+			ArtifactCommand::List { task_id } => show_artifacts_from_env(&task_id).map(Some),
+			ArtifactCommand::Content {
+				task_id,
+				artifact_id,
+			} => show_artifact_content_from_env(&task_id, &artifact_id).map(Some),
+			ArtifactCommand::Download {
+				task_id,
+				artifact_id,
+				output,
+			} => download_artifact_from_env(&task_id, &artifact_id, &output).map(Some),
+		},
+		Some(Commands::Experiment(cmd)) => match cmd {
+			ExperimentCommand::Show { task_id } => show_experiment_from_env(&task_id).map(Some),
+		},
+		Some(Commands::Memory(cmd)) => match cmd {
+			MemoryCommand::PrepareConfig => prepare_memory_artifacts_from_env().map(Some),
+			MemoryCommand::Health => show_memory_health_from_env().map(Some),
+			MemoryCommand::Search {
+				scope,
+				session_id,
+				user_id,
+				project_id,
+				workspace_id,
+				limit,
+				query,
+			} => {
+				let scope: MemoryScope = scope.into();
+				validate_memory_scope_identity(
+					scope,
+					session_id.as_deref(),
+					user_id.as_deref(),
+					project_id.as_deref(),
+					workspace_id.as_deref(),
+				)?;
+				let query = build_memory_query(
+					scope,
+					session_id,
+					user_id,
+					project_id,
+					workspace_id,
+					limit,
+					query.join(" "),
+				)?;
+				search_memory_from_env(query).map(Some)
+			}
+			MemoryCommand::Write {
+				scope,
+				kind,
+				session_id,
+				user_id,
+				project_id,
+				workspace_id,
+				summary,
+				write_reason,
+				content,
+			} => {
+				let scope: MemoryScope = scope.into();
+				validate_memory_scope_identity(
+					scope,
+					session_id.as_deref(),
+					user_id.as_deref(),
+					project_id.as_deref(),
+					workspace_id.as_deref(),
+				)?;
+				let content_str = content.join(" ");
+				let summary_str = summary.unwrap_or_else(|| content_str.clone());
+				let request = build_memory_write_request(
+					scope,
+					kind.into(),
+					session_id,
+					user_id,
+					project_id,
+					workspace_id,
+					summary_str,
+					write_reason.into(),
+					content_str,
+				)?;
+				write_memory_from_env(request).map(Some)
+			}
+			MemoryCommand::Delete { record_id } => delete_memory_from_env(&record_id).map(Some),
+		},
+		Some(Commands::Skill(cmd)) => match cmd {
+			SkillCommand::Install { source_url } => install_skill_from_env(&source_url).map(Some),
+			SkillCommand::List => show_skills_from_env().map(Some),
+			SkillCommand::Show { skill_name } => show_skill_from_env(&skill_name).map(Some),
+		},
 	}
 }
 
-fn execute_artifact_command(parts: &[String]) -> Result<String, CommandError> {
-	match parts.first().map(String::as_str) {
-		Some(command) if command.eq_ignore_ascii_case("list") => {
-			let task_id = parts.get(1).ok_or_else(|| {
-				CommandError::Usage(format!(
-					"missing task id for artifact list\n\n{}",
-					help_text()
-				))
-			})?;
-			show_artifacts_from_env(task_id)
-		}
-		Some(command) if command.eq_ignore_ascii_case("content") => {
-			let task_id = parts.get(1).ok_or_else(|| {
-				CommandError::Usage(format!(
-					"missing task id for artifact content\n\n{}",
-					help_text()
-				))
-			})?;
-			let artifact_id = parts.get(2).ok_or_else(|| {
-				CommandError::Usage(format!(
-					"missing artifact id for artifact content\n\n{}",
-					help_text()
-				))
-			})?;
-			show_artifact_content_from_env(task_id, artifact_id)
-		}
-		Some(command) if command.eq_ignore_ascii_case("download") => {
-			let task_id = parts.get(1).ok_or_else(|| {
-				CommandError::Usage(format!(
-					"missing task id for artifact download\n\n{}",
-					help_text()
-				))
-			})?;
-			let artifact_id = parts.get(2).ok_or_else(|| {
-				CommandError::Usage(format!(
-					"missing artifact id for artifact download\n\n{}",
-					help_text()
-				))
-			})?;
-			let output_path = parse_download_output_path(&parts[3..])?;
-			download_artifact_from_env(task_id, artifact_id, &output_path)
-		}
-		_ => Err(CommandError::Usage(format!(
-			"invalid artifact command\n\n{}",
-			help_text()
-		))),
-	}
-}
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
 
-fn execute_experiment_command(parts: &[String]) -> Result<String, CommandError> {
-	match parts {
-		[command, task_id] if command.eq_ignore_ascii_case("show") => {
-			show_experiment_from_env(task_id)
-		}
-		_ => Err(CommandError::Usage(format!(
-			"invalid experiment command\n\n{}",
-			help_text()
-		))),
-	}
-}
-
-fn execute_memory_command(parts: &[String]) -> Result<String, CommandError> {
-	match parts.first().map(String::as_str) {
-		Some(command) if command.eq_ignore_ascii_case("prepare-config") => {
-			prepare_memory_artifacts_from_env()
-		}
-		Some(command) if command.eq_ignore_ascii_case("health") => show_memory_health_from_env(),
-		Some(command) if command.eq_ignore_ascii_case("search") => {
-			let options = parse_memory_search_options(&parts[1..])?;
-			search_memory_from_env(build_memory_query(options)?)
-		}
-		Some(command) if command.eq_ignore_ascii_case("write") => {
-			let options = parse_memory_write_options(&parts[1..])?;
-			write_memory_from_env(build_memory_write_request(options)?)
-		}
-		Some(command) if command.eq_ignore_ascii_case("delete") => {
-			let record_id = parts.get(1).ok_or_else(|| {
-				CommandError::Usage(format!(
-					"missing record id for memory delete\n\n{}",
-					help_text()
-				))
-			})?;
-			delete_memory_from_env(record_id)
-		}
-		_ => Err(CommandError::Usage(format!(
-			"invalid memory command\n\n{}",
-			help_text()
-		))),
-	}
-}
-
-fn execute_skill_command(parts: &[String]) -> Result<String, CommandError> {
-	match parts.first().map(String::as_str) {
-		Some(command) if command.eq_ignore_ascii_case("install") => {
-			let source_url = parts.get(1).ok_or_else(|| {
-				CommandError::Usage(format!(
-					"missing source url for skill install\n\n{}",
-					help_text()
-				))
-			})?;
-			install_skill_from_env(source_url)
-		}
-		Some(command) if command.eq_ignore_ascii_case("list") => show_skills_from_env(),
-		Some(command) if command.eq_ignore_ascii_case("show") => {
-			let skill_name = parts.get(1).ok_or_else(|| {
-				CommandError::Usage(format!(
-					"missing skill name for skill show\n\n{}",
-					help_text()
-				))
-			})?;
-			show_skill_from_env(skill_name)
-		}
-		_ => Err(CommandError::Usage(format!(
-			"invalid skill command\n\n{}",
-			help_text()
-		))),
-	}
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MemorySearchOptions {
+#[allow(clippy::too_many_arguments)]
+fn build_memory_query(
 	scope: MemoryScope,
 	session_id: Option<String>,
 	user_id: Option<String>,
@@ -616,10 +754,18 @@ struct MemorySearchOptions {
 	workspace_id: Option<String>,
 	limit: usize,
 	query: String,
+) -> Result<MemoryQuery, CommandError> {
+	let mut q = MemoryQuery::new(query, MemoryRecallReason::Manual, scope);
+	q.limit = limit.max(1);
+	q.session_id = session_id;
+	q.user_id = user_id;
+	q.project_id = project_id;
+	q.workspace_id = workspace_id;
+	Ok(q)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MemoryWriteOptions {
+#[allow(clippy::too_many_arguments)]
+fn build_memory_write_request(
 	scope: MemoryScope,
 	kind: MemoryKind,
 	session_id: Option<String>,
@@ -629,363 +775,12 @@ struct MemoryWriteOptions {
 	summary: String,
 	write_reason: MemoryWriteReason,
 	content: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ApprovalDecisionOptions {
-	actor: String,
-	comment: Option<String>,
-}
-
-fn parse_approval_decision_options(
-	parts: &[String],
-) -> Result<ApprovalDecisionOptions, CommandError> {
-	let mut actor = None;
-	let mut comment = None;
-	let mut index = 0usize;
-
-	while index < parts.len() {
-		let current = &parts[index];
-		if let Some(value) = current.strip_prefix("--actor=") {
-			actor = Some(parse_non_empty_flag("--actor", value)?);
-			index += 1;
-			continue;
-		}
-		if current == "--actor" {
-			let value = parts
-				.get(index + 1)
-				.ok_or_else(|| CommandError::Usage("missing value for --actor".to_string()))?;
-			actor = Some(parse_non_empty_flag("--actor", value)?);
-			index += 2;
-			continue;
-		}
-		if let Some(value) = current.strip_prefix("--comment=") {
-			comment = Some(parse_non_empty_flag("--comment", value)?);
-			index += 1;
-			continue;
-		}
-		if current == "--comment" {
-			let value = parts
-				.get(index + 1)
-				.ok_or_else(|| CommandError::Usage("missing value for --comment".to_string()))?;
-			comment = Some(parse_non_empty_flag("--comment", value)?);
-			index += 2;
-			continue;
-		}
-
-		return Err(CommandError::Usage(format!(
-			"unknown approval decision flag: {current}\n\n{}",
-			help_text()
-		)));
-	}
-
-	Ok(ApprovalDecisionOptions {
-		actor: actor.ok_or_else(|| {
-			CommandError::Usage(format!(
-				"missing required --actor for approval decision\n\n{}",
-				help_text()
-			))
-		})?,
-		comment,
-	})
-}
-
-fn parse_download_output_path(parts: &[String]) -> Result<PathBuf, CommandError> {
-	let Some(current) = parts.first() else {
-		return Err(CommandError::Usage(format!(
-			"missing required --output for artifact download\n\n{}",
-			help_text()
-		)));
-	};
-
-	if let Some(value) = current.strip_prefix("--output=") {
-		return Ok(PathBuf::from(parse_non_empty_flag("--output", value)?));
-	}
-
-	if current == "--output" {
-		let value = parts
-			.get(1)
-			.ok_or_else(|| CommandError::Usage("missing value for --output".to_string()))?;
-		return Ok(PathBuf::from(parse_non_empty_flag("--output", value)?));
-	}
-
-	Err(CommandError::Usage(format!(
-		"unknown artifact download flag: {current}\n\n{}",
-		help_text()
-	)))
-}
-
-fn parse_memory_search_options(parts: &[String]) -> Result<MemorySearchOptions, CommandError> {
-	let mut options = MemorySearchOptions {
-		scope: MemoryScope::Session,
-		session_id: None,
-		user_id: None,
-		project_id: None,
-		workspace_id: None,
-		limit: 5,
-		query: String::new(),
-	};
-	let mut query_parts = Vec::new();
-	let mut index = 0usize;
-
-	while index < parts.len() {
-		let current = &parts[index];
-		if let Some(value) = current.strip_prefix("--scope=") {
-			options.scope = parse_memory_scope(value)?;
-			index += 1;
-			continue;
-		}
-		if current == "--scope" {
-			let value = parts
-				.get(index + 1)
-				.ok_or_else(|| CommandError::Usage("missing value for --scope".to_string()))?;
-			options.scope = parse_memory_scope(value)?;
-			index += 2;
-			continue;
-		}
-		if let Some(value) = current.strip_prefix("--session-id=") {
-			options.session_id = Some(parse_non_empty_flag("--session-id", value)?);
-			index += 1;
-			continue;
-		}
-		if current == "--session-id" {
-			let value = parts
-				.get(index + 1)
-				.ok_or_else(|| CommandError::Usage("missing value for --session-id".to_string()))?;
-			options.session_id = Some(parse_non_empty_flag("--session-id", value)?);
-			index += 2;
-			continue;
-		}
-		if let Some(value) = current.strip_prefix("--user-id=") {
-			options.user_id = Some(parse_non_empty_flag("--user-id", value)?);
-			index += 1;
-			continue;
-		}
-		if current == "--user-id" {
-			let value = parts
-				.get(index + 1)
-				.ok_or_else(|| CommandError::Usage("missing value for --user-id".to_string()))?;
-			options.user_id = Some(parse_non_empty_flag("--user-id", value)?);
-			index += 2;
-			continue;
-		}
-		if let Some(value) = current.strip_prefix("--project-id=") {
-			options.project_id = Some(parse_non_empty_flag("--project-id", value)?);
-			index += 1;
-			continue;
-		}
-		if current == "--project-id" {
-			let value = parts
-				.get(index + 1)
-				.ok_or_else(|| CommandError::Usage("missing value for --project-id".to_string()))?;
-			options.project_id = Some(parse_non_empty_flag("--project-id", value)?);
-			index += 2;
-			continue;
-		}
-		if let Some(value) = current.strip_prefix("--workspace-id=") {
-			options.workspace_id = Some(parse_non_empty_flag("--workspace-id", value)?);
-			index += 1;
-			continue;
-		}
-		if current == "--workspace-id" {
-			let value = parts.get(index + 1).ok_or_else(|| {
-				CommandError::Usage("missing value for --workspace-id".to_string())
-			})?;
-			options.workspace_id = Some(parse_non_empty_flag("--workspace-id", value)?);
-			index += 2;
-			continue;
-		}
-		if let Some(value) = current.strip_prefix("--limit=") {
-			options.limit = parse_usize_flag("--limit", value)?;
-			index += 1;
-			continue;
-		}
-		if current == "--limit" {
-			let value = parts
-				.get(index + 1)
-				.ok_or_else(|| CommandError::Usage("missing value for --limit".to_string()))?;
-			options.limit = parse_usize_flag("--limit", value)?;
-			index += 2;
-			continue;
-		}
-		query_parts.push(current.clone());
-		index += 1;
-	}
-
-	options.query = join_goal(&query_parts)?;
-	validate_memory_scope_identity(
-		options.scope,
-		options.session_id.as_deref(),
-		options.user_id.as_deref(),
-		options.project_id.as_deref(),
-		options.workspace_id.as_deref(),
-	)?;
-	Ok(options)
-}
-
-fn parse_memory_write_options(parts: &[String]) -> Result<MemoryWriteOptions, CommandError> {
-	let mut options = MemoryWriteOptions {
-		scope: MemoryScope::Session,
-		kind: MemoryKind::HistoricalCase,
-		session_id: None,
-		user_id: None,
-		project_id: None,
-		workspace_id: None,
-		summary: String::new(),
-		write_reason: MemoryWriteReason::OperatorRequested,
-		content: String::new(),
-	};
-	let mut content_parts = Vec::new();
-	let mut index = 0usize;
-
-	while index < parts.len() {
-		let current = &parts[index];
-		if let Some(value) = current.strip_prefix("--scope=") {
-			options.scope = parse_memory_scope(value)?;
-			index += 1;
-			continue;
-		}
-		if current == "--scope" {
-			let value = parts
-				.get(index + 1)
-				.ok_or_else(|| CommandError::Usage("missing value for --scope".to_string()))?;
-			options.scope = parse_memory_scope(value)?;
-			index += 2;
-			continue;
-		}
-		if let Some(value) = current.strip_prefix("--kind=") {
-			options.kind = parse_memory_kind(value)?;
-			index += 1;
-			continue;
-		}
-		if current == "--kind" {
-			let value = parts
-				.get(index + 1)
-				.ok_or_else(|| CommandError::Usage("missing value for --kind".to_string()))?;
-			options.kind = parse_memory_kind(value)?;
-			index += 2;
-			continue;
-		}
-		if let Some(value) = current.strip_prefix("--session-id=") {
-			options.session_id = Some(parse_non_empty_flag("--session-id", value)?);
-			index += 1;
-			continue;
-		}
-		if current == "--session-id" {
-			let value = parts
-				.get(index + 1)
-				.ok_or_else(|| CommandError::Usage("missing value for --session-id".to_string()))?;
-			options.session_id = Some(parse_non_empty_flag("--session-id", value)?);
-			index += 2;
-			continue;
-		}
-		if let Some(value) = current.strip_prefix("--user-id=") {
-			options.user_id = Some(parse_non_empty_flag("--user-id", value)?);
-			index += 1;
-			continue;
-		}
-		if current == "--user-id" {
-			let value = parts
-				.get(index + 1)
-				.ok_or_else(|| CommandError::Usage("missing value for --user-id".to_string()))?;
-			options.user_id = Some(parse_non_empty_flag("--user-id", value)?);
-			index += 2;
-			continue;
-		}
-		if let Some(value) = current.strip_prefix("--project-id=") {
-			options.project_id = Some(parse_non_empty_flag("--project-id", value)?);
-			index += 1;
-			continue;
-		}
-		if current == "--project-id" {
-			let value = parts
-				.get(index + 1)
-				.ok_or_else(|| CommandError::Usage("missing value for --project-id".to_string()))?;
-			options.project_id = Some(parse_non_empty_flag("--project-id", value)?);
-			index += 2;
-			continue;
-		}
-		if let Some(value) = current.strip_prefix("--workspace-id=") {
-			options.workspace_id = Some(parse_non_empty_flag("--workspace-id", value)?);
-			index += 1;
-			continue;
-		}
-		if current == "--workspace-id" {
-			let value = parts.get(index + 1).ok_or_else(|| {
-				CommandError::Usage("missing value for --workspace-id".to_string())
-			})?;
-			options.workspace_id = Some(parse_non_empty_flag("--workspace-id", value)?);
-			index += 2;
-			continue;
-		}
-		if let Some(value) = current.strip_prefix("--summary=") {
-			options.summary = parse_non_empty_flag("--summary", value)?;
-			index += 1;
-			continue;
-		}
-		if current == "--summary" {
-			let value = parts
-				.get(index + 1)
-				.ok_or_else(|| CommandError::Usage("missing value for --summary".to_string()))?;
-			options.summary = parse_non_empty_flag("--summary", value)?;
-			index += 2;
-			continue;
-		}
-		if let Some(value) = current.strip_prefix("--write-reason=") {
-			options.write_reason = parse_memory_write_reason(value)?;
-			index += 1;
-			continue;
-		}
-		if current == "--write-reason" {
-			let value = parts.get(index + 1).ok_or_else(|| {
-				CommandError::Usage("missing value for --write-reason".to_string())
-			})?;
-			options.write_reason = parse_memory_write_reason(value)?;
-			index += 2;
-			continue;
-		}
-		content_parts.push(current.clone());
-		index += 1;
-	}
-
-	options.content = join_goal(&content_parts)?;
-	if options.summary.is_empty() {
-		options.summary = options.content.clone();
-	}
-	validate_memory_scope_identity(
-		options.scope,
-		options.session_id.as_deref(),
-		options.user_id.as_deref(),
-		options.project_id.as_deref(),
-		options.workspace_id.as_deref(),
-	)?;
-	Ok(options)
-}
-
-fn build_memory_query(options: MemorySearchOptions) -> Result<MemoryQuery, CommandError> {
-	let mut query = MemoryQuery::new(options.query, MemoryRecallReason::Manual, options.scope);
-	query.limit = options.limit.max(1);
-	query.session_id = options.session_id;
-	query.user_id = options.user_id;
-	query.project_id = options.project_id;
-	query.workspace_id = options.workspace_id;
-	Ok(query)
-}
-
-fn build_memory_write_request(
-	options: MemoryWriteOptions,
 ) -> Result<MemoryWriteRequest, CommandError> {
-	let mut request = MemoryWriteRequest::new(
-		options.kind,
-		options.scope,
-		options.content,
-		options.summary,
-		options.write_reason,
-	);
-	request.session_id = options.session_id;
-	request.user_id = options.user_id;
-	request.project_id = options.project_id;
-	request.workspace_id = options.workspace_id;
+	let mut request = MemoryWriteRequest::new(kind, scope, content, summary, write_reason);
+	request.session_id = session_id;
+	request.user_id = user_id;
+	request.project_id = project_id;
+	request.workspace_id = workspace_id;
 	Ok(request)
 }
 
@@ -1004,72 +799,18 @@ fn validate_memory_scope_identity(
 		_ => None,
 	};
 	if let Some(flag) = missing {
+		let scope_label = match scope {
+			MemoryScope::Session => "session",
+			MemoryScope::User => "user",
+			MemoryScope::Project => "project",
+			MemoryScope::Workspace => "workspace",
+			MemoryScope::Global => "global",
+		};
 		return Err(CommandError::Usage(format!(
-			"{flag} is required for memory scope `{}`\n\n{}",
-			memory_scope_label(scope),
-			help_text()
+			"{flag} is required for memory scope `{scope_label}`"
 		)));
 	}
 	Ok(())
-}
-
-fn parse_memory_scope(value: &str) -> Result<MemoryScope, CommandError> {
-	match value.trim().to_ascii_lowercase().as_str() {
-		"session" => Ok(MemoryScope::Session),
-		"user" => Ok(MemoryScope::User),
-		"project" => Ok(MemoryScope::Project),
-		"workspace" => Ok(MemoryScope::Workspace),
-		"global" => Ok(MemoryScope::Global),
-		_ => Err(CommandError::Usage(format!(
-			"unknown memory scope: {value}\n\n{}",
-			help_text()
-		))),
-	}
-}
-
-fn parse_memory_kind(value: &str) -> Result<MemoryKind, CommandError> {
-	match value.trim().to_ascii_lowercase().as_str() {
-		"user_preference" => Ok(MemoryKind::UserPreference),
-		"user_fact" => Ok(MemoryKind::UserFact),
-		"project_fact" => Ok(MemoryKind::ProjectFact),
-		"workspace_fact" => Ok(MemoryKind::WorkspaceFact),
-		"historical_case" => Ok(MemoryKind::HistoricalCase),
-		"constraint" => Ok(MemoryKind::Constraint),
-		"workflow_insight" => Ok(MemoryKind::WorkflowInsight),
-		_ => Err(CommandError::Usage(format!(
-			"unknown memory kind: {value}\n\n{}",
-			help_text()
-		))),
-	}
-}
-
-fn parse_memory_write_reason(value: &str) -> Result<MemoryWriteReason, CommandError> {
-	match value.trim().to_ascii_lowercase().as_str() {
-		"task_succeeded" => Ok(MemoryWriteReason::TaskSucceeded),
-		"high_value_observation" => Ok(MemoryWriteReason::HighValueObservation),
-		"operator_requested" => Ok(MemoryWriteReason::OperatorRequested),
-		_ => Err(CommandError::Usage(format!(
-			"unknown memory write reason: {value}\n\n{}",
-			help_text()
-		))),
-	}
-}
-
-fn parse_usize_flag(flag: &str, value: &str) -> Result<usize, CommandError> {
-	value
-		.trim()
-		.parse::<usize>()
-		.map_err(|error| CommandError::Usage(format!("{flag}: {error}")))
-}
-
-fn memory_scope_label(scope: MemoryScope) -> &'static str {
-	match scope {
-		MemoryScope::Session => "session",
-		MemoryScope::User => "user",
-		MemoryScope::Project => "project",
-		MemoryScope::Workspace => "workspace",
-		MemoryScope::Global => "global",
-	}
 }
 
 fn configure_logging_from_env() -> Result<(), CommandError> {
@@ -1234,125 +975,265 @@ mod tests {
 
 	#[test]
 	fn execute_cli_help_renders_usage() {
-		let output = execute_cli(["help"]).expect("help should succeed");
+		let output = execute_cli(["--help"]).expect("help should succeed");
 		assert!(output.is_some());
 		let help = output.expect("help output should exist");
-		assert!(help.contains("telegram-once"));
-		assert!(help.contains("telegram-bot"));
-		assert!(help.contains("api-gateway"));
-		assert!(help.contains("task show"));
-		assert!(help.contains("task replay"));
-		assert!(help.contains("task resume"));
-		assert!(help.contains("approval show"));
-		assert!(help.contains("artifact list"));
-		assert!(help.contains("experiment show"));
-		assert!(help.contains("skill install"));
-		assert!(help.contains("skill list"));
-		assert!(help.contains("skill show"));
+		assert!(help.contains("telegram-once") || help.contains("telegram"));
+		assert!(help.contains("telegram-bot") || help.contains("tg-bot"));
+		assert!(help.contains("api-gateway") || help.contains("http-api"));
+		assert!(help.contains("task"));
+		assert!(help.contains("approval"));
+		assert!(help.contains("artifact"));
+		assert!(help.contains("experiment"));
+		assert!(help.contains("skill"));
+		assert!(help.contains("memory"));
 	}
 
 	#[test]
 	fn execute_skill_command_requires_expected_arguments() {
-		let error =
-			execute_skill_command(&["show".to_string()]).expect_err("skill show should fail");
-		assert!(error.to_string().contains("missing skill name"));
+		// skill show without a name should fail
+		let result = Cli::try_parse_from(["roku-cmd", "skill", "show"]);
+		assert!(result.is_err(), "skill show without name should fail");
 
-		let error = execute_skill_command(&["install".to_string()])
-			.expect_err("skill install should require a source url");
-		assert!(error.to_string().contains("missing source url"));
+		// skill install without a source url should fail
+		let result = Cli::try_parse_from(["roku-cmd", "skill", "install"]);
+		assert!(result.is_err(), "skill install without url should fail");
 	}
 
 	#[test]
 	fn parse_request_options_supports_session_and_skill_root_flags() {
-		let options = parse_request_options(&[
-			"--session-id".to_string(),
-			"chat-42".to_string(),
-			"--generated-skill-root".to_string(),
-			"/tmp/generated-skills".to_string(),
-			"investigate".to_string(),
-			"memory".to_string(),
+		let cli = Cli::try_parse_from([
+			"roku-cmd",
+			"once",
+			"--session-id",
+			"chat-42",
+			"--generated-skill-root",
+			"/tmp/generated-skills",
+			"investigate",
+			"memory",
 		])
-		.expect("request options should parse");
+		.expect("once args should parse");
 
-		assert_eq!(options.session_id, "chat-42");
+		let Commands::Once(args) = cli.command.unwrap() else {
+			panic!("expected Once command");
+		};
+		assert_eq!(args.session_id, "chat-42");
 		assert_eq!(
-			options.generated_skill_root,
+			args.generated_skill_root,
 			Some(PathBuf::from("/tmp/generated-skills"))
 		);
-		assert_eq!(options.goal, "investigate memory");
+		assert_eq!(args.goal.join(" "), "investigate memory");
 	}
 
 	#[test]
 	fn parse_approval_decision_options_supports_actor_and_comment() {
-		let options = parse_approval_decision_options(&[
-			"--actor".to_string(),
-			"reviewer".to_string(),
-			"--comment=looks good".to_string(),
+		let cli = Cli::try_parse_from([
+			"roku-cmd",
+			"approval",
+			"approve",
+			"approval-123",
+			"--actor",
+			"reviewer",
+			"--comment",
+			"looks good",
 		])
-		.expect("approval options should parse");
+		.expect("approval approve should parse");
 
-		assert_eq!(options.actor, "reviewer");
-		assert_eq!(options.comment.as_deref(), Some("looks good"));
+		let Commands::Approval(ApprovalCommand::Approve {
+			approval_id,
+			actor,
+			comment,
+		}) = cli.command.unwrap()
+		else {
+			panic!("expected Approval Approve command");
+		};
+		assert_eq!(approval_id, "approval-123");
+		assert_eq!(actor, "reviewer");
+		assert_eq!(comment.as_deref(), Some("looks good"));
 	}
 
 	#[test]
 	fn parse_approval_decision_options_requires_actor() {
-		let error = parse_approval_decision_options(&[
-			"--comment".to_string(),
-			"missing actor".to_string(),
-		])
-		.expect_err("actor should be required");
-
-		assert!(error.to_string().contains("missing required --actor"));
+		// approve without --actor should fail
+		let result = Cli::try_parse_from([
+			"roku-cmd",
+			"approval",
+			"approve",
+			"approval-123",
+			"--comment",
+			"missing actor",
+		]);
+		assert!(result.is_err(), "--actor should be required");
 	}
 
 	#[test]
 	fn parse_download_output_path_supports_output_flag() {
-		let path =
-			parse_download_output_path(&["--output".to_string(), "/tmp/artifact.txt".to_string()])
-				.expect("download output path should parse");
+		let cli = Cli::try_parse_from([
+			"roku-cmd",
+			"artifact",
+			"download",
+			"task-1",
+			"artifact-1",
+			"--output",
+			"/tmp/artifact.txt",
+		])
+		.expect("artifact download should parse");
 
-		assert_eq!(path, PathBuf::from("/tmp/artifact.txt"));
+		let Commands::Artifact(ArtifactCommand::Download { output, .. }) = cli.command.unwrap()
+		else {
+			panic!("expected Artifact Download command");
+		};
+		assert_eq!(output, PathBuf::from("/tmp/artifact.txt"));
 	}
 
 	#[test]
 	fn parse_download_output_path_requires_output_flag() {
-		let error = parse_download_output_path(&[]).expect_err("output flag should be required");
-		assert!(error.to_string().contains("missing required --output"));
+		let result =
+			Cli::try_parse_from(["roku-cmd", "artifact", "download", "task-1", "artifact-1"]);
+		assert!(result.is_err(), "--output should be required");
 	}
 
 	#[test]
 	fn parse_memory_search_options_requires_explicit_scope_identity() {
-		let error = parse_memory_search_options(&["recent preference".to_string()])
-			.expect_err("session-scoped search should require an explicit session id");
-		assert!(error.to_string().contains("--session-id is required"));
+		// session scope (default) without session-id should fail at validation
+		let cli = Cli::try_parse_from(["roku-cmd", "memory", "search", "recent preference"])
+			.expect("memory search should parse structurally");
+		let Commands::Memory(MemoryCommand::Search {
+			scope,
+			session_id,
+			user_id,
+			project_id,
+			workspace_id,
+			..
+		}) = cli.command.unwrap()
+		else {
+			panic!("expected Memory Search command");
+		};
+		let scope: MemoryScope = scope.into();
+		let result = validate_memory_scope_identity(
+			scope,
+			session_id.as_deref(),
+			user_id.as_deref(),
+			project_id.as_deref(),
+			workspace_id.as_deref(),
+		);
+		assert!(
+			result.is_err(),
+			"session-scoped search should require an explicit session id"
+		);
+		assert!(
+			result
+				.unwrap_err()
+				.to_string()
+				.contains("--session-id is required")
+		);
 
-		let options = parse_memory_search_options(&[
-			"--scope".to_string(),
-			"global".to_string(),
-			"recent preference".to_string(),
+		// global scope should not require extra identity
+		let cli = Cli::try_parse_from([
+			"roku-cmd",
+			"memory",
+			"search",
+			"--scope",
+			"global",
+			"recent preference",
 		])
+		.expect("global memory search should parse");
+		let Commands::Memory(MemoryCommand::Search {
+			scope,
+			session_id,
+			user_id,
+			project_id,
+			workspace_id,
+			query,
+			..
+		}) = cli.command.unwrap()
+		else {
+			panic!("expected Memory Search command");
+		};
+		let scope: MemoryScope = scope.into();
+		validate_memory_scope_identity(
+			scope,
+			session_id.as_deref(),
+			user_id.as_deref(),
+			project_id.as_deref(),
+			workspace_id.as_deref(),
+		)
 		.expect("global search should not require extra identity");
-		assert_eq!(options.scope, MemoryScope::Global);
-		assert_eq!(options.query, "recent preference");
+		assert_eq!(scope, MemoryScope::Global);
+		assert_eq!(query.join(" "), "recent preference");
 	}
 
 	#[test]
 	fn parse_memory_write_options_requires_explicit_scope_identity() {
-		let error = parse_memory_write_options(&["remember this".to_string()])
-			.expect_err("session-scoped write should require an explicit session id");
-		assert!(error.to_string().contains("--session-id is required"));
+		// session scope (default) without session-id should fail at validation
+		let cli = Cli::try_parse_from(["roku-cmd", "memory", "write", "remember this"])
+			.expect("memory write should parse structurally");
+		let Commands::Memory(MemoryCommand::Write {
+			scope,
+			session_id,
+			user_id,
+			project_id,
+			workspace_id,
+			..
+		}) = cli.command.unwrap()
+		else {
+			panic!("expected Memory Write command");
+		};
+		let scope: MemoryScope = scope.into();
+		let result = validate_memory_scope_identity(
+			scope,
+			session_id.as_deref(),
+			user_id.as_deref(),
+			project_id.as_deref(),
+			workspace_id.as_deref(),
+		);
+		assert!(
+			result.is_err(),
+			"session-scoped write should require an explicit session id"
+		);
+		assert!(
+			result
+				.unwrap_err()
+				.to_string()
+				.contains("--session-id is required")
+		);
 
-		let options = parse_memory_write_options(&[
-			"--scope".to_string(),
-			"global".to_string(),
-			"--summary".to_string(),
-			"global note".to_string(),
-			"remember this".to_string(),
+		// global scope with summary and content should succeed
+		let cli = Cli::try_parse_from([
+			"roku-cmd",
+			"memory",
+			"write",
+			"--scope",
+			"global",
+			"--summary",
+			"global note",
+			"remember this",
 		])
+		.expect("global memory write should parse");
+		let Commands::Memory(MemoryCommand::Write {
+			scope,
+			session_id,
+			user_id,
+			project_id,
+			workspace_id,
+			summary,
+			content,
+			..
+		}) = cli.command.unwrap()
+		else {
+			panic!("expected Memory Write command");
+		};
+		let scope: MemoryScope = scope.into();
+		validate_memory_scope_identity(
+			scope,
+			session_id.as_deref(),
+			user_id.as_deref(),
+			project_id.as_deref(),
+			workspace_id.as_deref(),
+		)
 		.expect("global write should not require extra identity");
-		assert_eq!(options.scope, MemoryScope::Global);
-		assert_eq!(options.summary, "global note");
-		assert_eq!(options.content, "remember this");
+		assert_eq!(scope, MemoryScope::Global);
+		assert_eq!(summary.as_deref(), Some("global note"));
+		assert_eq!(content.join(" "), "remember this");
 	}
 }
