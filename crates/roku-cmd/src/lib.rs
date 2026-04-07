@@ -163,7 +163,7 @@ use crate::bot::{run_telegram_bot_from_env, run_telegram_once_with_options_from_
 use crate::runtime::{
 	ExecutionRequestOptions, decide_approval_from_env, delete_memory_from_env,
 	download_artifact_from_env, install_skill_from_env, prepare_memory_artifacts_from_env,
-	replay_task_from_env, resume_task_from_env, run_live_once_with_options_from_env,
+	replay_task_from_env, resume_task_from_env, run_live_once_with_options_from_env_and_sender,
 	run_with_mode_and_options, search_memory_from_env, show_approval_from_env,
 	show_artifact_content_from_env, show_artifacts_from_env, show_experiment_from_env,
 	show_memory_health_from_env, show_skill_from_env, show_skills_from_env, show_task_from_env,
@@ -222,27 +222,100 @@ where
 	let _ = dotenvy::dotenv();
 	configure_logging_from_env()?;
 	let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
+
+	// Subcommands that involve the runtime loop require a tokio runtime. Create one
+	// multi-thread runtime here so async callers can .await without block_on bridges
+	// inside the runtime service. Subcommands that do not involve the runtime loop
+	// (task/approval/memory/skill) build their own service synchronously and do not
+	// use this runtime.
+	let rt = tokio::runtime::Builder::new_multi_thread()
+		.enable_all()
+		.build()
+		.map_err(|error| {
+			CommandError::Runtime(roku_common_types::RuntimeError::new(error.to_string()))
+		})?;
+
 	match args.first().map(String::as_str) {
 		None => {
-			let response = run_once("bootstrap request")?;
+			let response = rt
+				.block_on(run_once("bootstrap request"))
+				.map_err(CommandError::Runtime)?;
 			Ok(Some(response.message))
 		}
 		Some("once") => {
 			let options = parse_request_options(&args[1..])?;
-			let response = run_with_mode_and_options(options, RunMode::Normal)?;
+			let response = rt
+				.block_on(run_with_mode_and_options(options, RunMode::Normal))
+				.map_err(CommandError::Runtime)?;
 			Ok(Some(response.message))
 		}
 		Some("live-once") => {
 			let options = parse_request_options(&args[1..])?;
-			let response = run_live_once_with_options_from_env(options)?;
-			Ok(Some(response.message))
+			rt.block_on(async {
+				let (tx, mut rx) =
+					tokio::sync::mpsc::unbounded_channel::<roku_agent_runtime::LoopEvent>();
+				// Spawn a task to consume and render runtime loop events in real time.
+				let render_task = tokio::spawn(async move {
+					while let Some(event) = rx.recv().await {
+						match event {
+							roku_agent_runtime::LoopEvent::ToolStart { step, tool_name } => {
+								eprintln!("[tool] step {step} starting: {tool_name}");
+							}
+							roku_agent_runtime::LoopEvent::ToolEnd {
+								step,
+								tool_name,
+								elapsed_ms,
+							} => {
+								if let Some(ms) = elapsed_ms {
+									eprintln!("[tool] step {step} done: {tool_name} ({ms}ms)");
+								} else {
+									eprintln!("[tool] step {step} done: {tool_name}");
+								}
+							}
+							roku_agent_runtime::LoopEvent::CompactTriggered {
+								step,
+								estimated_tokens,
+							} => {
+								eprintln!(
+									"[compact] step {step} triggered (~{estimated_tokens} tokens)"
+								);
+							}
+							roku_agent_runtime::LoopEvent::StepComplete { step } => {
+								eprintln!("[step] {step} complete");
+							}
+						}
+					}
+				});
+				let response =
+					run_live_once_with_options_from_env_and_sender(options, Some(&tx)).await?;
+				// Drop sender so the render task drains and finishes.
+				drop(tx);
+				render_task.await.ok();
+				Ok::<_, CommandError>(Some(response.message))
+			})
 		}
 		Some("telegram-once") | Some("tg-once") => {
 			let options = parse_request_options(&args[1..])?;
-			Ok(Some(run_telegram_once_with_options_from_env(options)?))
+			Ok(Some(rt.block_on(async {
+				tokio::task::spawn_blocking(move || {
+					run_telegram_once_with_options_from_env(options)
+				})
+				.await
+				.map_err(|error| {
+					CommandError::Runtime(roku_common_types::RuntimeError::new(error.to_string()))
+				})?
+			})?))
 		}
 		Some("telegram-bot") | Some("tg-bot") => {
-			run_telegram_bot_from_env()?;
+			rt.block_on(async {
+				tokio::task::spawn_blocking(run_telegram_bot_from_env)
+					.await
+					.map_err(|error| {
+						CommandError::Runtime(roku_common_types::RuntimeError::new(
+							error.to_string(),
+						))
+					})?
+			})?;
 			Ok(None)
 		}
 		Some("api-gateway") | Some("http-api") => {
@@ -1089,13 +1162,16 @@ mod tests {
 		)
 	}
 
-	#[test]
-	fn run_once_returns_success() {
+	#[tokio::test(flavor = "multi_thread")]
+	#[allow(clippy::await_holding_lock)]
+	async fn run_once_returns_success() {
 		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
 		let tempdir = tempfile::tempdir().expect("temp root should exist");
 		let (_home_guard, _config_guard) = set_temp_runtime_env(tempdir.path());
 
-		let response = run_once("analyze market").expect("pipeline should succeed");
+		let response = run_once("analyze market")
+			.await
+			.expect("pipeline should succeed");
 		assert!(matches!(response.status, ResponseStatus::Failed));
 		assert!(
 			response
@@ -1104,8 +1180,9 @@ mod tests {
 		);
 	}
 
-	#[test]
-	fn run_with_missing_evidence_keeps_new_requests_on_direct_runtime() {
+	#[tokio::test(flavor = "multi_thread")]
+	#[allow(clippy::await_holding_lock)]
+	async fn run_with_missing_evidence_keeps_new_requests_on_direct_runtime() {
 		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
 		let tempdir = tempfile::tempdir().expect("temp root should exist");
 		let (_home_guard, _config_guard) = set_temp_runtime_env(tempdir.path());
@@ -1114,12 +1191,14 @@ mod tests {
 			"Read the first part of Cargo.toml.",
 			RunMode::MissingEvidence,
 		)
+		.await
 		.expect("pipeline should execute through the direct runtime");
 		assert!(matches!(response.status, ResponseStatus::Failed));
 	}
 
-	#[test]
-	fn run_with_capability_denied_keeps_new_requests_on_direct_runtime() {
+	#[tokio::test(flavor = "multi_thread")]
+	#[allow(clippy::await_holding_lock)]
+	async fn run_with_capability_denied_keeps_new_requests_on_direct_runtime() {
 		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
 		let tempdir = tempfile::tempdir().expect("temp root should exist");
 		let (_home_guard, _config_guard) = set_temp_runtime_env(tempdir.path());
@@ -1128,6 +1207,7 @@ mod tests {
 			"Read the first part of Cargo.toml.",
 			RunMode::CapabilityDenied,
 		)
+		.await
 		.expect("pipeline should execute through the direct runtime");
 		assert!(matches!(response.status, ResponseStatus::Failed));
 	}

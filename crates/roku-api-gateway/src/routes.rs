@@ -75,7 +75,7 @@ pub async fn submit_handler(
 		seq,
 	);
 
-	match state.executor.execute(envelope) {
+	match state.executor.execute(envelope).await {
 		Ok(response) => HttpResponse::Ok().json(SubmitResponse {
 			request_id: response.request_id.0,
 			status: response_status_label(response.status).to_string(),
@@ -340,8 +340,8 @@ mod tests {
 		let _: Option<ExperimentResponse> = None;
 	}
 
-	#[::core::prelude::v1::test]
-	fn task_replay_route_returns_runtime_report() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn task_replay_route_returns_runtime_report() {
 		let service = RuntimeService::default();
 		service
 			.execute(RequestEnvelope {
@@ -351,29 +351,28 @@ mod tests {
 				planning_mode_hint: None,
 				conversation_history: Vec::new(),
 			})
+			.await
 			.expect("runtime execution should succeed");
 
-		actix_web::rt::System::new().block_on(async move {
-			let state = web::Data::new(GatewayAppState::new(Arc::new(
-				RuntimeServiceExecutor::new(Arc::new(service)),
-			)));
-			let app = test::init_service(
-				App::new()
-					.app_data(state)
-					.app_data(web::JsonConfig::default().limit(8 * 1024))
-					.configure(configure_routes),
-			)
-			.await;
+		let state = web::Data::new(GatewayAppState::new(Arc::new(RuntimeServiceExecutor::new(
+			Arc::new(service),
+		))));
+		let app = test::init_service(
+			App::new()
+				.app_data(state)
+				.app_data(web::JsonConfig::default().limit(8 * 1024))
+				.configure(configure_routes),
+		)
+		.await;
 
-			let request = test::TestRequest::get()
-				.uri("/v1/tasks/task-req-1/replay")
-				.to_request();
-			let response: TaskReplayReport = test::call_and_read_body_json(&app, request).await;
+		let request = test::TestRequest::get()
+			.uri("/v1/tasks/task-req-1/replay")
+			.to_request();
+		let response: TaskReplayReport = test::call_and_read_body_json(&app, request).await;
 
-			assert_eq!(response.task_id.0, "task-req-1");
-			assert_eq!(response.persisted_state, TaskState::Succeeded);
-			assert!(response.transitions_valid);
-			assert!(response.snapshot_matches_replay);
-		});
+		assert_eq!(response.task_id.0, "task-req-1");
+		assert_eq!(response.persisted_state, TaskState::Succeeded);
+		assert!(response.transitions_valid);
+		assert!(response.snapshot_matches_replay);
 	}
 }

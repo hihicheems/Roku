@@ -75,7 +75,7 @@ pub(crate) struct ExecutionRequestOptions {
 ///
 /// This is the thinnest command-facing entrypoint and is used by tests and the default `once`
 /// command path.
-pub fn run_once(goal: &str) -> Result<ResponseEnvelope, RuntimeError> {
+pub async fn run_once(goal: &str) -> Result<ResponseEnvelope, RuntimeError> {
 	run_with_mode_and_options(
 		ExecutionRequestOptions {
 			session_id: "session-1".to_string(),
@@ -84,13 +84,14 @@ pub fn run_once(goal: &str) -> Result<ResponseEnvelope, RuntimeError> {
 		},
 		RunMode::Normal,
 	)
+	.await
 }
 
 /// Runs a single deterministic request while allowing the caller to choose the runtime mode.
 ///
 /// The mode only affects service execution semantics after bootstrap; request normalization and
 /// env-derived overrides remain the same as `run_once`.
-pub fn run_with_mode(goal: &str, mode: RunMode) -> Result<ResponseEnvelope, RuntimeError> {
+pub async fn run_with_mode(goal: &str, mode: RunMode) -> Result<ResponseEnvelope, RuntimeError> {
 	run_with_mode_and_options(
 		ExecutionRequestOptions {
 			session_id: "session-1".to_string(),
@@ -99,41 +100,63 @@ pub fn run_with_mode(goal: &str, mode: RunMode) -> Result<ResponseEnvelope, Runt
 		},
 		mode,
 	)
+	.await
 }
 
 /// Applies CLI-specific overrides, builds the deterministic service, and executes one request.
-pub(crate) fn run_with_mode_and_options(
+pub(crate) async fn run_with_mode_and_options(
 	options: ExecutionRequestOptions,
 	mode: RunMode,
 ) -> Result<ResponseEnvelope, RuntimeError> {
 	let _env_override_guard = apply_request_env_overrides(&options);
 	let gateway = Gateway;
-	let service = build_deterministic_runtime_service_from_env()
-		.map_err(|error| RuntimeError::new(error.to_string()))?;
+	// build_deterministic_runtime_service_from_env creates a reqwest::blocking::Client (via
+	// SkillRegistry::file_backed) which internally constructs and drops a tokio current-thread
+	// runtime. That drop panics when it occurs inside an async context. block_in_place provides
+	// a blocking-allowed scope so both the construction and the internal runtime drop complete
+	// without hitting that check.
+	let service = tokio::task::block_in_place(|| {
+		build_deterministic_runtime_service_from_env()
+			.map_err(|error| RuntimeError::new(error.to_string()))
+	})?;
 	let request = build_request(&gateway, options, next_cli_request_sequence());
-	execute_with_service_and_mode(service, request, mode)
+	execute_with_service_and_mode(service, request, mode, None).await
 }
 
 /// Runs one live request using env-backed plugin/runtime bootstrap.
 ///
 /// Unlike `run_once`, this path will attempt to boot the live OpenRouter-backed runtime and only
 /// falls back according to runtime bootstrap policy.
-pub fn run_live_once_from_env(goal: &str) -> Result<ResponseEnvelope, CommandError> {
+pub async fn run_live_once_from_env(goal: &str) -> Result<ResponseEnvelope, CommandError> {
 	run_live_once_with_options_from_env(ExecutionRequestOptions {
 		session_id: "session-1".to_string(),
 		goal: goal.to_string(),
 		generated_skill_root: None,
 	})
+	.await
 }
 
-pub(crate) fn run_live_once_with_options_from_env(
+pub(crate) async fn run_live_once_with_options_from_env(
 	options: ExecutionRequestOptions,
+) -> Result<ResponseEnvelope, CommandError> {
+	run_live_once_with_options_from_env_and_sender(options, None).await
+}
+
+pub(crate) async fn run_live_once_with_options_from_env_and_sender(
+	options: ExecutionRequestOptions,
+	event_sender: Option<&roku_agent_runtime::LoopEventSender>,
 ) -> Result<ResponseEnvelope, CommandError> {
 	let _env_override_guard = apply_request_env_overrides(&options);
 	let gateway = Gateway;
-	let service = build_live_runtime_service_from_env()?;
+	// build_live_runtime_service_from_env creates a reqwest::blocking::Client (via
+	// SkillRegistry::file_backed) which internally constructs and drops a tokio current-thread
+	// runtime. Use block_in_place so both the construction and the internal runtime drop complete
+	// in a blocking-allowed scope rather than inside the async executor.
+	let service = tokio::task::block_in_place(build_live_runtime_service_from_env)?;
 	let request = build_request(&gateway, options, next_cli_request_sequence());
-	execute_with_service_and_mode(service, request, RunMode::Normal).map_err(CommandError::Runtime)
+	execute_with_service_and_mode(service, request, RunMode::Normal, event_sender)
+		.await
+		.map_err(CommandError::Runtime)
 }
 
 /// Builds the live runtime service using the process-local layout, plugin inventory, and configs.
@@ -873,13 +896,16 @@ fn log_runtime_bootstrap_mode(runtime_mode: &RuntimeModeReport) {
 	let _ = emit_global_log(record);
 }
 
-fn execute_with_service_and_mode(
+async fn execute_with_service_and_mode(
 	service: RuntimeService,
 	request: roku_common_types::RequestEnvelope,
 	mode: RunMode,
+	event_sender: Option<&roku_agent_runtime::LoopEventSender>,
 ) -> Result<ResponseEnvelope, RuntimeError> {
 	let runtime_mode = service.runtime_mode_report();
-	let response = service.execute_with_mode(request, mode)?;
+	let response = service
+		.execute_with_mode(request, mode, event_sender)
+		.await?;
 	Ok(annotate_cli_response_with_runtime_mode(
 		response,
 		&runtime_mode,
@@ -1182,8 +1208,8 @@ enabled = true
 		);
 	}
 
-	#[test]
-	fn config_enabled_recall_and_write_enable_effective_write_back_behavior() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn config_enabled_recall_and_write_enable_effective_write_back_behavior() {
 		let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
 		let service = service_with_memory_config(
 			MemoryRuntimeConfig {
@@ -1208,14 +1234,15 @@ enabled = true
 			.execute(memory_write_request(
 				"What skills and tools do you have right now?",
 			))
+			.await
 			.expect("configured runtime request should succeed");
 
 		assert_eq!(response.status, ResponseStatus::Succeeded);
 		assert_eq!(backend.recorded_writes().len(), 1);
 	}
 
-	#[test]
-	fn config_disabled_recall_keeps_write_back_effectively_off() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn config_disabled_recall_keeps_write_back_effectively_off() {
 		let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
 		let service = service_with_memory_config(
 			MemoryRuntimeConfig {
@@ -1240,14 +1267,16 @@ enabled = true
 			.execute(memory_write_request(
 				"What skills and tools do you have right now?",
 			))
+			.await
 			.expect("configured runtime request should succeed");
 
 		assert_eq!(response.status, ResponseStatus::Succeeded);
 		assert!(backend.recorded_writes().is_empty());
 	}
 
-	#[test]
-	fn once_flow_resumes_pending_loop_snapshots_from_shared_memory_substrate() {
+	#[tokio::test(flavor = "multi_thread")]
+	#[allow(clippy::await_holding_lock)]
+	async fn once_flow_resumes_pending_loop_snapshots_from_shared_memory_substrate() {
 		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
 		let tempdir = tempfile::tempdir().expect("temp root should exist");
 		let config_dir = tempdir.path().join("config");
@@ -1313,6 +1342,7 @@ path = "{}"
 			},
 			RunMode::Normal,
 		)
+		.await
 		.expect("once flow should resume the shared pending loop snapshot");
 
 		assert_eq!(response.status, ResponseStatus::Succeeded);

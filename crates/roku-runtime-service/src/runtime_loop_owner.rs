@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_agent_runtime::{EscalationAction, EscalationReason, RouteDecisionResult};
+use roku_agent_runtime::{
+	EscalationAction, EscalationReason, LoopEventSender, RouteDecisionResult,
+};
 use roku_common_types::{
 	RequestEnvelope, ResponseEnvelope, RuntimeError, RuntimeMemorySections, Task,
 };
 
-use crate::helpers::bridge_async_to_sync;
 use crate::{ContextBundle, RuntimeMemoryLayers, RuntimeService, log_route_decision};
 
 pub(super) struct RuntimeLoopOwner<'a> {
@@ -40,12 +41,13 @@ impl<'a> RuntimeLoopOwner<'a> {
 		Self { service }
 	}
 
-	pub(super) fn execute_request(
+	pub(super) async fn execute_request(
 		&self,
 		task: &mut Task,
 		request: &RequestEnvelope,
+		event_sender: Option<&LoopEventSender>,
 	) -> Result<ResponseEnvelope, RuntimeError> {
-		let mut resumable_loop = self.service.take_resumable_pending_loop(request)?;
+		let mut resumable_loop = self.service.take_resumable_pending_loop(request).await?;
 		let mut prepared = self.prepare_request_context(
 			task,
 			request,
@@ -61,29 +63,39 @@ impl<'a> RuntimeLoopOwner<'a> {
 			self.service
 				.start_experiment_run(task, &request.goal, "runtime_loop_resume")?;
 			let runtime_memory_sections = prepared.runtime_memory_sections();
-			return self.service.resume_pending_loop(
-				task,
-				request,
-				&mut loop_state,
-				&prepared.context_bundle,
-				&runtime_memory_sections,
-			);
+			return self
+				.service
+				.resume_pending_loop(
+					task,
+					request,
+					&mut loop_state,
+					&prepared.context_bundle,
+					&runtime_memory_sections,
+					event_sender,
+				)
+				.await;
 		}
 
-		// Unit 3 bridge: classify_route is now async; bridge via the shared async-to-sync
-		// helper until the full call chain is converted to async.
-		let route = bridge_async_to_sync(
-			self.service
-				.runtime
-				.classify_route(request, &request.session_id),
-		);
+		let route = self
+			.service
+			.runtime
+			.classify_route(request, &request.session_id)
+			.await;
 		log_route_decision(request, &route);
 		self.service
 			.attach_visible_resources(&mut prepared.context_bundle, &route);
 		let mut loop_state = self
 			.service
 			.initialize_runtime_loop_for_route(request, &route);
-		self.dispatch_route(task, request, &route, &mut loop_state, &prepared)
+		self.dispatch_route(
+			task,
+			request,
+			&route,
+			&mut loop_state,
+			&prepared,
+			event_sender,
+		)
+		.await
 	}
 
 	fn prepare_request_context(
@@ -106,13 +118,14 @@ impl<'a> RuntimeLoopOwner<'a> {
 		})
 	}
 
-	fn dispatch_route(
+	async fn dispatch_route(
 		&self,
 		task: &mut Task,
 		request: &RequestEnvelope,
 		route: &RouteDecisionResult,
 		loop_state: &mut roku_agent_runtime::LoopState,
 		prepared: &PreparedRuntimeLoopRequest,
+		event_sender: Option<&LoopEventSender>,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let runtime_memory_sections = prepared.runtime_memory_sections();
 		match route {
@@ -120,14 +133,17 @@ impl<'a> RuntimeLoopOwner<'a> {
 				self.service.metrics.inc_direct_route_hits();
 				self.service
 					.start_experiment_run(task, &request.goal, "direct_route")?;
-				self.service.process_direct_route(
-					task,
-					request,
-					plan,
-					loop_state,
-					&prepared.context_bundle,
-					&runtime_memory_sections,
-				)
+				self.service
+					.process_direct_route(
+						task,
+						request,
+						plan,
+						loop_state,
+						&prepared.context_bundle,
+						&runtime_memory_sections,
+						event_sender,
+					)
+					.await
 			}
 			RouteDecisionResult::Escalate(plan) => {
 				self.service.metrics.inc_route_escalations();

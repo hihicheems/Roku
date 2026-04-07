@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_agent_runtime::LoopState;
+use roku_agent_runtime::{LoopEventSender, LoopState};
 use roku_common_types::{
 	RequestEnvelope, ResponseEnvelope, RuntimeError, RuntimeMemorySections, Task, TaskId,
 };
 use roku_observability::LogLevel;
 
-use crate::helpers::bridge_async_to_sync;
 use crate::{ContextBundle, RuntimeMemoryLayers, RuntimeService};
 use crate::{log_runtime, truncate_for_log};
 
@@ -48,19 +47,17 @@ impl RuntimeService {
 		Ok(())
 	}
 
-	pub(super) fn take_resumable_pending_loop(
+	pub(super) async fn take_resumable_pending_loop(
 		&self,
 		request: &RequestEnvelope,
 	) -> Result<Option<LoopState>, RuntimeError> {
 		let Some(existing) = self.pending_loop_snapshot_store.load(&request.session_id)? else {
 			return Ok(None);
 		};
-		// Unit 3 bridge: assess_awaiting_user_resume is now async; bridge via the shared
-		// async-to-sync helper until the full call chain is converted to async.
-		let assessment = bridge_async_to_sync(
-			self.runtime
-				.assess_awaiting_user_resume(&existing, &request.goal),
-		);
+		let assessment = self
+			.runtime
+			.assess_awaiting_user_resume(&existing, &request.goal)
+			.await;
 		if assessment.should_resume {
 			self.pending_loop_snapshot_store
 				.delete(&request.session_id)?;
@@ -99,25 +96,27 @@ impl RuntimeService {
 		Ok(None)
 	}
 
-	pub(super) fn resume_pending_loop(
+	pub(super) async fn resume_pending_loop(
 		&self,
 		task: &mut Task,
 		request: &RequestEnvelope,
 		loop_state: &mut LoopState,
 		context_bundle: &ContextBundle,
 		runtime_memory_sections: &RuntimeMemorySections,
+		event_sender: Option<&LoopEventSender>,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let initial_history_len = loop_state.history.len();
-		// Unit 3 bridge: execute_tool_loop is now async; bridge via the shared async-to-sync
-		// helper until the full call chain is converted to async.
-		let execution = bridge_async_to_sync(self.runtime.execute_tool_loop(
-			&task.task_id,
-			request,
-			loop_state,
-			runtime_memory_sections,
-			Some(&request.goal),
-			None,
-		));
+		let execution = self
+			.runtime
+			.execute_tool_loop(
+				&task.task_id,
+				request,
+				loop_state,
+				runtime_memory_sections,
+				Some(&request.goal),
+				event_sender,
+			)
+			.await;
 		self.record_runtime_loop_history(loop_state, initial_history_len);
 		let response =
 			self.finalize_direct_path(task, execution.node, execution.result, execution.message)?;
