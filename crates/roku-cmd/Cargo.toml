@@ -12,7 +12,7 @@ memory-openviking = []
 [dependencies]
 async-trait = "0.1"
 actix-web = "4"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "signal"] }
 dotenvy = "0.15"
 roku-agent-runtime = { path = "../roku-agent-runtime" }
 roku-artifact-store = { path = "../roku-artifact-store" }
@@ -30,7 +30,9 @@ roku-plugin-memory-openviking = { path = "../roku-plugins/memory-openviking" }
 roku-plugin-memory-sqlite = { path = "../roku-plugins/memory-sqlite" }
 roku-plugin-telegram = { path = "../roku-plugins/telegram" }
 roku-runtime-service = { path = "../roku-runtime-service" }
+clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
+rustyline = "15"
 serde_json = "1"
 toml = "1.1"
 thiserror = "2"
