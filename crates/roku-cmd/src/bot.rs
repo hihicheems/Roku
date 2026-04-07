@@ -37,14 +37,14 @@ use roku_memory::{
 };
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_telegram::{
-	TelegramBotConfig, TelegramChat, TelegramConnector, TelegramControlCommand,
+	TelegramBotClient, TelegramBotConfig, TelegramChat, TelegramConnector, TelegramControlCommand,
 	TelegramControlCommandRequest, TelegramHandlerResponse, TelegramInlineKeyboardButton,
 	TelegramInteraction, TelegramInteractionHandler, TelegramMessage, TelegramOutboundMessage,
 	TelegramParseMode, TelegramReplyMarkup, TelegramRuntimeConfig, TelegramSessionCallbackAction,
 	TelegramSessionCallbackKind, TelegramUpdate, TelegramUser, session_delete_cancel_callback_data,
 	session_delete_confirm_callback_data, session_page_callback_data, session_select_callback_data,
 };
-use roku_runtime_service::{RuntimeExecutionMode, RuntimeModeReport};
+use roku_runtime_service::{RunMode, RuntimeExecutionMode, RuntimeModeReport};
 use serde_json::json;
 
 use crate::CommandError;
@@ -70,9 +70,12 @@ pub fn run_telegram_bot_from_env() -> Result<(), CommandError> {
 		"telegram",
 		"telegram-once/telegram-bot",
 	)?;
-	let runner = roku_plugin_telegram::TelegramPollingRunner::new(telegram_bot_config_from_env(
-		bootstrap.runtime_configs.telegram.clone(),
-	)?)?;
+	let bot_config = telegram_bot_config_from_env(bootstrap.runtime_configs.telegram.clone())?;
+	let progress_notices_enabled = bot_config.progress_notices_enabled;
+	let bot_client = Arc::new(
+		TelegramBotClient::new(bot_config.clone()).map_err(CommandError::TelegramTransport)?,
+	);
+	let runner = roku_plugin_telegram::TelegramPollingRunner::new(bot_config)?;
 	let handler = RuntimeServiceTelegramHandler {
 		service: Arc::new(build_live_runtime_service_from_layout_and_bootstrap(
 			&layout, bootstrap,
@@ -80,6 +83,8 @@ pub fn run_telegram_bot_from_env() -> Result<(), CommandError> {
 		transport_state: Arc::new(TelegramTransportState::from_env()?),
 		session_ux_config: TelegramSessionUxConfig::default(),
 		pending_session_rename_by_chat: Mutex::new(HashMap::new()),
+		bot_client: Some(bot_client),
+		progress_notices_enabled,
 	};
 	let _ = emit_global_log(LogRecord::new(
 		"roku-cmd",
@@ -160,6 +165,8 @@ fn build_live_telegram_handler_from_env() -> Result<RuntimeServiceTelegramHandle
 		transport_state: Arc::new(TelegramTransportState::from_env()?),
 		session_ux_config: TelegramSessionUxConfig::default(),
 		pending_session_rename_by_chat: Mutex::new(HashMap::new()),
+		bot_client: None,
+		progress_notices_enabled: false,
 	})
 }
 
@@ -190,6 +197,11 @@ struct RuntimeServiceTelegramHandler {
 	transport_state: Arc<TelegramTransportState>,
 	session_ux_config: TelegramSessionUxConfig,
 	pending_session_rename_by_chat: Mutex<HashMap<i64, PendingRenameState>>,
+	/// Shared bot client used to send tool-progress messages during execution.
+	/// `None` when no real Telegram connection is available (e.g. `telegram-once`).
+	bot_client: Option<Arc<TelegramBotClient>>,
+	/// Mirror of `TelegramPollingRunner::progress_notices_enabled`; gates tool streaming.
+	progress_notices_enabled: bool,
 }
 
 /// Stable snapshot for Telegram session management commands.
@@ -245,8 +257,75 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 		// The TelegramInteractionHandler trait is sync. Bridge the async RuntimeService here
 		// so callers remain runtime-agnostic. block_in_place is safe because execute_cli
 		// always drives this handler from within a multi-thread tokio runtime.
+		//
+		// When progress_notices_enabled and a bot client is available, wire a LoopEvent channel
+		// so the user sees tool start/end messages in real time while the agent works.
 		let execution = tokio::task::block_in_place(|| {
-			tokio::runtime::Handle::current().block_on(self.service.execute(request))
+			tokio::runtime::Handle::current().block_on(async {
+				if self.progress_notices_enabled
+					&& let Some(bot_client) = self.bot_client.as_ref().map(Arc::clone)
+				{
+					let chat_id = binding_chat_id(&binding_id);
+					let (tx, mut rx) =
+						tokio::sync::mpsc::unbounded_channel::<roku_agent_runtime::LoopEvent>();
+					// Spawn a task that consumes loop events and sends Telegram progress messages.
+					let render_task = tokio::spawn(async move {
+						while let Some(event) = rx.recv().await {
+							let text = match &event {
+								roku_agent_runtime::LoopEvent::ToolStart { step, tool_name } => {
+									Some(format!("⚙️ Step {step}: starting `{tool_name}`"))
+								}
+								roku_agent_runtime::LoopEvent::ToolEnd {
+									step,
+									tool_name,
+									elapsed_ms,
+								} => {
+									if let Some(ms) = elapsed_ms {
+										Some(format!("✅ Step {step}: `{tool_name}` done ({ms}ms)"))
+									} else {
+										Some(format!("✅ Step {step}: `{tool_name}` done"))
+									}
+								}
+								roku_agent_runtime::LoopEvent::CompactTriggered { .. }
+								| roku_agent_runtime::LoopEvent::StepComplete { .. } => None,
+							};
+							if let (Some(chat_id), Some(text)) = (chat_id, text) {
+								let msg = TelegramOutboundMessage {
+									chat_id,
+									text,
+									parse_mode: TelegramParseMode::PlainText,
+									disable_web_page_preview: true,
+									reply_markup: None,
+								};
+								let client = Arc::clone(&bot_client);
+								let _ = tokio::task::spawn_blocking(move || {
+									if let Err(error) = client.send_message(&msg) {
+										let _ = emit_global_log(
+											LogRecord::new(
+												"roku-cmd",
+												LogLevel::Warn,
+												"failed to send tool progress message",
+											)
+											.with_field("error", error.to_string()),
+										);
+									}
+								})
+								.await;
+							}
+						}
+					});
+					let result = self
+						.service
+						.execute_with_mode(request, RunMode::Normal, Some(&tx))
+						.await;
+					// Drop sender so the render task drains and finishes.
+					drop(tx);
+					render_task.await.ok();
+					result
+				} else {
+					self.service.execute(request).await
+				}
+			})
 		});
 		self.transport_state
 			.clear_pending_loop_session_mirror(&session_id)?;
@@ -1591,6 +1670,8 @@ mod tests {
 			transport_state: Arc::new(TelegramTransportState::default()),
 			session_ux_config: TelegramSessionUxConfig::default(),
 			pending_session_rename_by_chat: Mutex::new(HashMap::new()),
+			bot_client: None,
+			progress_notices_enabled: false,
 		};
 		let binding_id = "telegram-session-1";
 
@@ -2233,6 +2314,8 @@ mod tests {
 			transport_state: Arc::new(TelegramTransportState::default()),
 			session_ux_config: TelegramSessionUxConfig::default(),
 			pending_session_rename_by_chat: Mutex::new(HashMap::new()),
+			bot_client: None,
+			progress_notices_enabled: false,
 		};
 
 		let response = handler
@@ -2292,6 +2375,8 @@ mod tests {
 			transport_state: Arc::new(TelegramTransportState::default()),
 			session_ux_config: TelegramSessionUxConfig::default(),
 			pending_session_rename_by_chat: Mutex::new(HashMap::new()),
+			bot_client: None,
+			progress_notices_enabled: false,
 		}
 	}
 

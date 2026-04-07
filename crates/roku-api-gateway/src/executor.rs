@@ -182,7 +182,7 @@ impl RequestExecutor for RuntimeServiceExecutor {
 			self.get_or_create_fallback_runtime()
 				.spawn(async move { service.execute(request).await })
 				.await
-				.map_err(|join_error| RuntimeError::new(&join_error.to_string()))?
+				.map_err(|join_error| RuntimeError::new(join_error.to_string()))?
 		}
 	}
 }
