@@ -125,8 +125,11 @@ impl OpenVikingLongTermMemoryBackend {
 	where
 		T: DeserializeOwned,
 	{
-		let response = run_blocking(|| request.send()).map_err(map_transport_error)?;
-		parse_json_response(response)
+		let (status, body) = send_and_read(request)?;
+		if !status.is_success() {
+			return Err(map_status_error(status, body));
+		}
+		parse_provider_result(&body)
 	}
 
 	/// Computes the OpenViking root URI to search for a recall query.
@@ -203,17 +206,11 @@ impl OpenVikingLongTermMemoryBackend {
 
 	/// Reads one text resource, returning `None` when the provider reports `NOT_FOUND`.
 	pub(crate) fn read_text_resource(&self, uri: &str) -> Result<Option<String>, MemoryError> {
-		let response = run_blocking(|| {
+		let (status, body) = send_and_read(
 			self.client
 				.get(self.endpoint("/api/v1/content/read"))
-				.query(&[("uri", uri), ("offset", "0"), ("limit", "-1")])
-				.send()
-		})
-		.map_err(map_transport_error)?;
-		let status = response.status();
-		let body = response
-			.text()
-			.map_err(|error| MemoryError::Internal(error.to_string()))?;
+				.query(&[("uri", uri), ("offset", "0"), ("limit", "-1")]),
+		)?;
 		if status == StatusCode::NOT_FOUND {
 			return Ok(None);
 		}
@@ -225,24 +222,15 @@ impl OpenVikingLongTermMemoryBackend {
 
 	/// Lists one directory using OpenViking's simple listing mode.
 	pub(crate) fn list_simple_entries(&self, uri: &str) -> Result<Vec<String>, MemoryError> {
-		let response = run_blocking(|| {
-			self.client
-				.get(self.endpoint("/api/v1/fs/ls"))
-				.query(&[
-					("uri", uri),
-					("simple", "true"),
-					("recursive", "false"),
-					("output", "original"),
-					("show_all_hidden", "false"),
-					("node_limit", "1000"),
-				])
-				.send()
-		})
-		.map_err(map_transport_error)?;
-		let status = response.status();
-		let body = response
-			.text()
-			.map_err(|error| MemoryError::Internal(error.to_string()))?;
+		let (status, body) =
+			send_and_read(self.client.get(self.endpoint("/api/v1/fs/ls")).query(&[
+				("uri", uri),
+				("simple", "true"),
+				("recursive", "false"),
+				("output", "original"),
+				("show_all_hidden", "false"),
+				("node_limit", "1000"),
+			]))?;
 		if status == StatusCode::NOT_FOUND {
 			return Ok(Vec::new());
 		}
@@ -254,17 +242,11 @@ impl OpenVikingLongTermMemoryBackend {
 
 	/// Returns whether a provider URI currently exists.
 	pub(crate) fn resource_exists(&self, uri: &str) -> Result<bool, MemoryError> {
-		let response = run_blocking(|| {
+		let (status, body) = send_and_read(
 			self.client
 				.get(self.endpoint("/api/v1/fs/stat"))
-				.query(&[("uri", uri)])
-				.send()
-		})
-		.map_err(map_transport_error)?;
-		let status = response.status();
-		let body = response
-			.text()
-			.map_err(|error| MemoryError::Internal(error.to_string()))?;
+				.query(&[("uri", uri)]),
+		)?;
 		if status == StatusCode::NOT_FOUND {
 			return Ok(false);
 		}
@@ -281,20 +263,11 @@ impl OpenVikingLongTermMemoryBackend {
 		uri: &str,
 		recursive: bool,
 	) -> Result<(), MemoryError> {
-		let response = run_blocking(|| {
-			self.client
-				.delete(self.endpoint("/api/v1/fs"))
-				.query(&[
-					("uri", uri),
-					("recursive", if recursive { "true" } else { "false" }),
-				])
-				.send()
-		})
-		.map_err(map_transport_error)?;
-		let status = response.status();
-		let body = response
-			.text()
-			.map_err(|error| MemoryError::Internal(error.to_string()))?;
+		let (status, body) =
+			send_and_read(self.client.delete(self.endpoint("/api/v1/fs")).query(&[
+				("uri", uri),
+				("recursive", if recursive { "true" } else { "false" }),
+			]))?;
 		if status == StatusCode::NOT_FOUND {
 			return Ok(());
 		}
@@ -448,23 +421,22 @@ impl LongTermMemoryBackend for OpenVikingLongTermMemoryBackend {
 	}
 
 	fn delete(&self, selector: &MemoryDeleteSelector) -> Result<(), MemoryError> {
-		let response = run_blocking(|| {
+		let (status, body) = send_and_read(
 			self.client
 				.delete(self.endpoint("/api/v1/fs"))
-				.query(&[("uri", selector.record_id.as_str()), ("recursive", "true")])
-				.send()
-		})
-		.map_err(map_transport_error)?;
-		parse_empty_response(response)
+				.query(&[("uri", selector.record_id.as_str()), ("recursive", "true")]),
+		)?;
+		if !status.is_success() {
+			return Err(map_status_error(status, body));
+		}
+		if body.trim().is_empty() {
+			return Ok(());
+		}
+		parse_empty_provider_result(&body)
 	}
 
 	fn health(&self) -> Result<MemoryBackendHealth, MemoryError> {
-		let response = run_blocking(|| self.client.get(self.endpoint("/health")).send())
-			.map_err(map_transport_error)?;
-		let status = response.status();
-		let body = response
-			.text()
-			.map_err(|error| MemoryError::Internal(error.to_string()))?;
+		let (status, body) = send_and_read(self.client.get(self.endpoint("/health")))?;
 		if !status.is_success() {
 			return Err(map_status_error(status, body));
 		}
@@ -1083,35 +1055,6 @@ struct HealthPayload {
 }
 
 /// Parses a successful JSON response that uses OpenViking's common envelope shape.
-fn parse_json_response<T>(response: reqwest::blocking::Response) -> Result<T, MemoryError>
-where
-	T: DeserializeOwned,
-{
-	let status = response.status();
-	let body = response
-		.text()
-		.map_err(|error| MemoryError::Internal(error.to_string()))?;
-	if !status.is_success() {
-		return Err(map_status_error(status, body));
-	}
-	parse_provider_result(&body)
-}
-
-/// Parses provider responses whose success case does not carry a JSON `result`.
-fn parse_empty_response(response: reqwest::blocking::Response) -> Result<(), MemoryError> {
-	let status = response.status();
-	let body = response
-		.text()
-		.map_err(|error| MemoryError::Internal(error.to_string()))?;
-	if !status.is_success() {
-		return Err(map_status_error(status, body));
-	}
-	if body.trim().is_empty() {
-		return Ok(());
-	}
-	parse_empty_provider_result(&body)
-}
-
 /// Parses a successful provider envelope body into the expected result payload.
 fn parse_provider_result<T>(body: &str) -> Result<T, MemoryError>
 where
@@ -1203,6 +1146,24 @@ where
 		Ok(_) => tokio::task::block_in_place(f),
 		Err(_) => f(),
 	}
+}
+
+/// Sends a blocking HTTP request and reads the response body text, all inside
+/// `run_blocking`. Both `reqwest::blocking::RequestBuilder::send()` and
+/// `reqwest::blocking::Response::text()` internally create a temporary tokio
+/// Runtime that panics on drop in an async context — wrapping them together
+/// in `run_blocking` ensures both execute in a blocking-safe context.
+pub(crate) fn send_and_read(
+	request: reqwest::blocking::RequestBuilder,
+) -> Result<(StatusCode, String), MemoryError> {
+	run_blocking(|| {
+		let response = request.send().map_err(map_transport_error)?;
+		let status = response.status();
+		let body = response
+			.text()
+			.map_err(|error| MemoryError::Internal(error.to_string()))?;
+		Ok((status, body))
+	})
 }
 
 /// Converts reqwest transport failures into backend-neutral errors.
