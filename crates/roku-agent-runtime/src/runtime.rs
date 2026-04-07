@@ -399,7 +399,7 @@ impl GenericAgentRuntime {
 		&self.plugin_snapshot
 	}
 
-	pub fn classify_route(
+	pub async fn classify_route(
 		&self,
 		request: &RequestEnvelope,
 		_session_id: &str,
@@ -416,9 +416,10 @@ impl GenericAgentRuntime {
 			},
 			request,
 		)
+		.await
 	}
 
-	fn assess_missing_required_input_resume(
+	async fn assess_missing_required_input_resume(
 		&self,
 		loop_state: &LoopState,
 		payload: &AskUserPayload,
@@ -435,22 +436,28 @@ impl GenericAgentRuntime {
 		};
 		let context_projection =
 			build_context_projection(loop_state, &RuntimeMemorySections::default());
-		let response = match router.generate_json_value_blocking(&GenerationRequest {
-			system_prompt: Some(
-				"You are Roku's paused-loop resume gate. Return only valid JSON.".to_string(),
-			),
-			prompt: awaiting_user_resume_prompt(
-				&context_projection,
-				&payload.final_message,
-				fields,
-				user_input,
-			),
-			expected_output_tokens: 96,
-			risk_tier: RiskTier::Low,
-			preferred_provider: None,
-			budget_tokens_remaining: self.agent_runtime_config.router.budget_tokens_remaining,
-			budget_cost_remaining_usd: self.agent_runtime_config.router.budget_cost_remaining_usd,
-		}) {
+		let response = match router
+			.generate_json_value(&GenerationRequest {
+				system_prompt: Some(
+					"You are Roku's paused-loop resume gate. Return only valid JSON.".to_string(),
+				),
+				prompt: awaiting_user_resume_prompt(
+					&context_projection,
+					&payload.final_message,
+					fields,
+					user_input,
+				),
+				expected_output_tokens: 96,
+				risk_tier: RiskTier::Low,
+				preferred_provider: None,
+				budget_tokens_remaining: self.agent_runtime_config.router.budget_tokens_remaining,
+				budget_cost_remaining_usd: self
+					.agent_runtime_config
+					.router
+					.budget_cost_remaining_usd,
+			})
+			.await
+		{
 			Ok(response) => response,
 			Err(error) => {
 				return AwaitingUserResumeAssessment {
@@ -506,7 +513,7 @@ impl GenericAgentRuntime {
 		)
 	}
 
-	pub fn assess_awaiting_user_resume(
+	pub async fn assess_awaiting_user_resume(
 		&self,
 		loop_state: &LoopState,
 		user_input: &str,
@@ -552,6 +559,7 @@ impl GenericAgentRuntime {
 			},
 			AskUserResumeContract::MissingRequiredInput { fields } => {
 				self.assess_missing_required_input_resume(loop_state, payload, trimmed, fields)
+					.await
 			}
 		}
 	}
@@ -656,13 +664,14 @@ impl GenericAgentRuntime {
 		ToolObservation::from_runtime_error(tool_name, error)
 	}
 
-	pub fn execute_tool_loop(
+	pub async fn execute_tool_loop(
 		&self,
 		task_id: &TaskId,
 		request: &RequestEnvelope,
 		loop_state: &mut LoopState,
 		runtime_memory_sections: &RuntimeMemorySections,
 		user_reply: Option<&str>,
+		event_sender: Option<&crate::runtime_loop::LoopEventSender>,
 	) -> DirectRouteExecutionResult {
 		let grounding_input = user_reply.unwrap_or(&loop_state.goal).to_string();
 		loop_state.note_grounding_input(&grounding_input);
@@ -677,7 +686,9 @@ impl GenericAgentRuntime {
 				user_reply,
 				&self.agent_runtime_config.next_step,
 				Some(&self.resource_catalog),
-			);
+			)
+			.await;
+			let current_step_index = loop_state.step_index + 1;
 			match next_step.action {
 				crate::runtime_loop::NextStepAction::CallTool => {
 					let Some(tool_name) = next_step.tool_name.as_deref() else {
@@ -690,21 +701,43 @@ impl GenericAgentRuntime {
 							Some(loop_state),
 						);
 					};
+					// Notify: tool start
+					if let Some(sender) = event_sender {
+						let _ = sender.send(crate::runtime_loop::LoopEvent::ToolStart {
+							step: current_step_index,
+							tool_name: tool_name.to_string(),
+						});
+					}
 					let attachments =
 						attachments_for_tool(tool_name, user_reply.unwrap_or(&loop_state.goal));
-					let execution = self.execute_loop_tool_invocation(
-						task_id,
-						request,
-						loop_state,
-						&context_projection,
-						runtime_memory_sections,
-						tool_name,
-						next_step.arguments.clone().unwrap_or_else(|| json!({})),
-						&attachments,
-					);
+					// Tool::invoke is synchronous blocking I/O; use block_in_place so we do not
+					// stall the async executor thread while still holding &self references.
+					let tool_name_owned = tool_name.to_string();
+					let arguments = next_step.arguments.clone().unwrap_or_else(|| json!({}));
+					let execution = tokio::task::block_in_place(|| {
+						self.execute_loop_tool_invocation(
+							task_id,
+							request,
+							loop_state,
+							&context_projection,
+							runtime_memory_sections,
+							&tool_name_owned,
+							arguments,
+							&attachments,
+						)
+					});
+					let elapsed = execution_elapsed_ms(&execution.result);
+					// Notify: tool end
+					if let Some(sender) = event_sender {
+						let _ = sender.send(crate::runtime_loop::LoopEvent::ToolEnd {
+							step: current_step_index,
+							tool_name: tool_name_owned.clone(),
+							elapsed_ms: elapsed,
+						});
+					}
 					let raw_tool_output = raw_tool_output_from_result(&execution.result);
 					let observation =
-						self.loop_observation_from_execution(tool_name, &execution.result);
+						self.loop_observation_from_execution(&tool_name_owned, &execution.result);
 					let interpreted = interpret_observation(
 						loop_state,
 						observation.clone(),
@@ -714,14 +747,14 @@ impl GenericAgentRuntime {
 						),
 					);
 					let step = StepRecord::tool_call(
-						loop_state.step_index + 1,
+						current_step_index,
 						next_step.clone(),
 						loop_state.visible_tools.clone(),
 						loop_state.bound_resources.clone(),
 						raw_tool_output,
 						StepObservation::Tool(observation.clone()),
 						interpreted.clone(),
-						execution_elapsed_ms(&execution.result),
+						elapsed,
 						interpreted.remaining_step_budget,
 						interpreted.remaining_recovery_budget,
 						interpreted
@@ -737,6 +770,14 @@ impl GenericAgentRuntime {
 							eprintln!(
 								"Context compact triggered: estimated {estimated} tokens exceeds threshold {threshold}"
 							);
+							// Notify: compact triggered
+							if let Some(sender) = event_sender {
+								let _ =
+									sender.send(crate::runtime_loop::LoopEvent::CompactTriggered {
+										step: current_step_index,
+										estimated_tokens: estimated,
+									});
+							}
 							let compact_config = crate::runtime_loop::CompactConfig {
 								retain_tail_steps: self
 									.agent_runtime_config
@@ -749,6 +790,12 @@ impl GenericAgentRuntime {
 							};
 							crate::runtime_loop::compact_history(loop_state, &compact_config);
 						}
+					}
+					// Notify: step complete
+					if let Some(sender) = event_sender {
+						let _ = sender.send(crate::runtime_loop::LoopEvent::StepComplete {
+							step: current_step_index,
+						});
 					}
 					if interpreted.should_ask_user {
 						let payload = effective_ask_user_payload(
@@ -1998,7 +2045,10 @@ mod tests {
 		)
 	}
 
-	fn runtime_loop_trace_for_goal(runtime: &GenericAgentRuntime, goal: &str) -> RuntimeLoopTrace {
+	async fn runtime_loop_trace_for_goal(
+		runtime: &GenericAgentRuntime,
+		goal: &str,
+	) -> RuntimeLoopTrace {
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId(format!(
 				"req-{}",
@@ -2012,7 +2062,7 @@ mod tests {
 			planning_mode_hint: None,
 			conversation_history: Vec::new(),
 		};
-		let route = runtime.classify_route(&request, &request.session_id);
+		let route = runtime.classify_route(&request, &request.session_id).await;
 		let crate::router::RouteDecisionResult::Direct(plan) = route else {
 			panic!("expected direct route for regression goal `{goal}`");
 		};
@@ -2023,13 +2073,16 @@ mod tests {
 			plan.bound_resources.clone(),
 		);
 		let task_id = TaskId(format!("task-{}", request.request_id.0));
-		let _ = runtime.execute_tool_loop(
-			&task_id,
-			&request,
-			&mut loop_state,
-			&RuntimeMemorySections::default(),
-			None,
-		);
+		let _ = runtime
+			.execute_tool_loop(
+				&task_id,
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				None,
+			)
+			.await;
 		crate::runtime_loop::runtime_loop_trace(&loop_state)
 	}
 
@@ -2065,8 +2118,8 @@ mod tests {
 		loop_state
 	}
 
-	#[test]
-	fn freeform_ask_user_resume_contract_requires_fresh_intake() {
+	#[tokio::test]
+	async fn freeform_ask_user_resume_contract_requires_fresh_intake() {
 		let runtime = GenericAgentRuntime::with_skill_registry(SkillRegistry::disabled());
 		let loop_state = awaiting_user_loop_state(
 			"继续之前的任务",
@@ -2082,7 +2135,9 @@ mod tests {
 			AskUserResumeContract::NoAutomaticResume
 		);
 
-		let assessment = runtime.assess_awaiting_user_resume(&loop_state, "项目里有几行代码？");
+		let assessment = runtime
+			.assess_awaiting_user_resume(&loop_state, "项目里有几行代码？")
+			.await;
 
 		assert_eq!(
 			assessment,
@@ -2095,8 +2150,8 @@ mod tests {
 		);
 	}
 
-	#[test]
-	fn candidate_selection_ask_user_resume_contract_requires_grounded_choice() {
+	#[tokio::test]
+	async fn candidate_selection_ask_user_resume_contract_requires_grounded_choice() {
 		let runtime = GenericAgentRuntime::with_skill_registry(SkillRegistry::disabled());
 		let candidates = vec![
 			"/Users/jojo/cjj_project/Roku/Cargo.toml".to_string(),
@@ -2120,10 +2175,12 @@ mod tests {
 			AskUserResumeContract::CandidateSelection { candidates }
 		);
 
-		let assessment = runtime.assess_awaiting_user_resume(
-			&loop_state,
-			"/Users/jojo/cjj_project/Roku/crates/roku-agent-runtime/Cargo.toml",
-		);
+		let assessment = runtime
+			.assess_awaiting_user_resume(
+				&loop_state,
+				"/Users/jojo/cjj_project/Roku/crates/roku-agent-runtime/Cargo.toml",
+			)
+			.await;
 
 		assert_eq!(
 			assessment,
@@ -2161,8 +2218,15 @@ mod tests {
 			}
 		);
 
-		let assessment =
-			runtime.assess_awaiting_user_resume(&loop_state, "/Users/jojo/cjj_project/Roku");
+		// assess_awaiting_user_resume is async; bridge via block_on so that the LlmRouter
+		// (which holds a blocking_runtime) is dropped in sync scope rather than async scope.
+		let assessment = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for assess-awaiting bridge should build")
+			.block_on(
+				runtime.assess_awaiting_user_resume(&loop_state, "/Users/jojo/cjj_project/Roku"),
+			);
 
 		assert_eq!(
 			assessment,
@@ -2680,13 +2744,21 @@ mod tests {
 		let mut loop_state =
 			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
 
-		let execution = runtime.execute_tool_loop(
-			&TaskId("task-loop".to_string()),
-			&request,
-			&mut loop_state,
-			&RuntimeMemorySections::default(),
-			None,
-		);
+		// execute_tool_loop is async; bridge via block_on with a multi-thread runtime so that
+		// (a) block_in_place inside execute_tool_loop can run blocking tool invocations, and
+		// (b) LlmRouter (which holds a blocking_runtime) is dropped in sync scope, not async.
+		let execution = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-loop".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				None,
+			));
 
 		assert_eq!(execution.result.status, ResultStatus::Ok);
 		assert_eq!(
@@ -2779,13 +2851,21 @@ mod tests {
 		let mut loop_state =
 			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
 
-		let execution = runtime.execute_tool_loop(
-			&TaskId("task-ask-user".to_string()),
-			&request,
-			&mut loop_state,
-			&RuntimeMemorySections::default(),
-			None,
-		);
+		// execute_tool_loop is async; bridge via block_on with a multi-thread runtime so that
+		// (a) block_in_place inside execute_tool_loop can run blocking tool invocations, and
+		// (b) LlmRouter (which holds a blocking_runtime) is dropped in sync scope, not async.
+		let execution = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-ask-user".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				None,
+			));
 
 		assert_eq!(execution.result.status, ResultStatus::Ok);
 		assert_eq!(execution.terminal_step_action, Some(StepAction::AskUser));
@@ -2839,13 +2919,21 @@ mod tests {
 		let mut loop_state =
 			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
 
-		let execution = runtime.execute_tool_loop(
-			&TaskId("task-command-approval".to_string()),
-			&request,
-			&mut loop_state,
-			&RuntimeMemorySections::default(),
-			None,
-		);
+		// execute_tool_loop is async; bridge via block_on with a multi-thread runtime so that
+		// (a) block_in_place inside execute_tool_loop can run blocking tool invocations, and
+		// (b) LlmRouter (which holds a blocking_runtime) is dropped in sync scope, not async.
+		let execution = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-command-approval".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				None,
+			));
 
 		let payload = payload_value(&execution.result);
 		assert_eq!(execution.result.status, ResultStatus::Error);
@@ -2905,7 +2993,14 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		// classify_route is async; bridge via block_on. The local tokio runtime is dropped
+		// in the sync test scope, avoiding the "cannot drop runtime in async context" panic
+		// that would occur if the test itself were async.
+		let route = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for classify-route bridge should build")
+			.block_on(runtime.classify_route(&request, &request.session_id));
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
@@ -2947,7 +3042,14 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		// classify_route is async; bridge via block_on. The local tokio runtime is dropped
+		// in the sync test scope, avoiding the "cannot drop runtime in async context" panic
+		// that would occur if the test itself were async.
+		let route = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for classify-route bridge should build")
+			.block_on(runtime.classify_route(&request, &request.session_id));
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
@@ -3055,8 +3157,8 @@ mod tests {
 		);
 	}
 
-	#[test]
-	fn classify_route_and_loop_initialization_agree_on_snapshot_visibility() {
+	#[tokio::test]
+	async fn classify_route_and_loop_initialization_agree_on_snapshot_visibility() {
 		// Ownership proof surface:
 		// - Contract owner: `RuntimeVisibleToolAvailabilitySnapshot` is the single shared
 		//   availability contract consumed by both `classify_route` and `initialize_runtime_loop`.
@@ -3087,7 +3189,7 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		let route = runtime.classify_route(&request, &request.session_id).await;
 		let crate::router::RouteDecisionResult::Direct(plan) = route else {
 			panic!("expected direct tool-loop route for explicit table request");
 		};
@@ -3156,8 +3258,8 @@ mod tests {
 		);
 	}
 
-	#[test]
-	fn classify_route_starts_fs_read_text_for_grounded_filesystem_reads() {
+	#[tokio::test]
+	async fn classify_route_starts_fs_read_text_for_grounded_filesystem_reads() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-fs-tool-loop".to_string()),
@@ -3167,7 +3269,7 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		let route = runtime.classify_route(&request, &request.session_id).await;
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
@@ -3185,8 +3287,8 @@ mod tests {
 		}
 	}
 
-	#[test]
-	fn classify_route_prefers_fs_read_text_for_explicit_relative_file_paths() {
+	#[tokio::test]
+	async fn classify_route_prefers_fs_read_text_for_explicit_relative_file_paths() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-fs-explicit-path".to_string()),
@@ -3196,7 +3298,7 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		let route = runtime.classify_route(&request, &request.session_id).await;
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
@@ -3214,8 +3316,8 @@ mod tests {
 		}
 	}
 
-	#[test]
-	fn classify_route_uses_controlled_family_seed_for_explicit_paths_without_action() {
+	#[tokio::test]
+	async fn classify_route_uses_controlled_family_seed_for_explicit_paths_without_action() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-fs-broad-explicit-path".to_string()),
@@ -3225,7 +3327,7 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		let route = runtime.classify_route(&request, &request.session_id).await;
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
@@ -3245,8 +3347,8 @@ mod tests {
 		}
 	}
 
-	#[test]
-	fn classify_route_uses_lookup_first_family_seed_for_non_concrete_basenames() {
+	#[tokio::test]
+	async fn classify_route_uses_lookup_first_family_seed_for_non_concrete_basenames() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-fs-non-concrete-basename".to_string()),
@@ -3257,7 +3359,7 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		let route = runtime.classify_route(&request, &request.session_id).await;
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
@@ -3277,8 +3379,8 @@ mod tests {
 		}
 	}
 
-	#[test]
-	fn classify_route_starts_fs_inspect_for_explicit_inspect_actions() {
+	#[tokio::test]
+	async fn classify_route_starts_fs_inspect_for_explicit_inspect_actions() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-fs-inspect".to_string()),
@@ -3288,7 +3390,7 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		let route = runtime.classify_route(&request, &request.session_id).await;
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
@@ -3304,8 +3406,8 @@ mod tests {
 		}
 	}
 
-	#[test]
-	fn classify_route_shortlists_inventory_describe_for_inventory_questions() {
+	#[tokio::test]
+	async fn classify_route_shortlists_inventory_describe_for_inventory_questions() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-inventory-tool-loop".to_string()),
@@ -3315,7 +3417,7 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		let route = runtime.classify_route(&request, &request.session_id).await;
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
@@ -3331,8 +3433,8 @@ mod tests {
 		}
 	}
 
-	#[test]
-	fn explanatory_shell_command_requests_do_not_shortlist_command_run() {
+	#[tokio::test]
+	async fn explanatory_shell_command_requests_do_not_shortlist_command_run() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-command-explain".to_string()),
@@ -3342,7 +3444,7 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		let route = runtime.classify_route(&request, &request.session_id).await;
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
@@ -3360,8 +3462,8 @@ mod tests {
 		}
 	}
 
-	#[test]
-	fn executable_shell_command_requests_can_shortlist_command_run() {
+	#[tokio::test]
+	async fn executable_shell_command_requests_can_shortlist_command_run() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-command-run".to_string()),
@@ -3371,7 +3473,7 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		let route = runtime.classify_route(&request, &request.session_id).await;
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
@@ -3400,7 +3502,14 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		// Both classify_route and execute_tool_loop are async; bridge via block_on with a
+		// multi-thread runtime so that block_in_place inside execute_tool_loop works correctly.
+		let rt = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for classify+execute bridge should build");
+
+		let route = rt.block_on(runtime.classify_route(&request, &request.session_id));
 		let crate::router::RouteDecisionResult::Direct(plan) = route else {
 			panic!("expected direct route for explicit command.run approval boundary");
 		};
@@ -3423,13 +3532,17 @@ mod tests {
 			"enabled command.run should stay visible before invocation-time policy runs"
 		);
 
-		let execution = runtime.execute_tool_loop(
+		let execution = rt.block_on(runtime.execute_tool_loop(
 			&TaskId("task-command-run-visibility-boundary".to_string()),
 			&request,
 			&mut loop_state,
 			&RuntimeMemorySections::default(),
 			None,
-		);
+			None,
+		));
+		// Drop rt here (before runtime) to ensure the runtime handle is released in sync scope
+		// before GenericAgentRuntime drops.
+		drop(rt);
 		let payload = payload_value(&execution.result);
 
 		assert_eq!(execution.result.status, ResultStatus::Error);
@@ -3461,8 +3574,8 @@ mod tests {
 		assert_eq!(loop_state.history[1].action, StepAction::Fail);
 	}
 
-	#[test]
-	fn explanatory_python_code_requests_do_not_shortlist_python_run() {
+	#[tokio::test]
+	async fn explanatory_python_code_requests_do_not_shortlist_python_run() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-python-explain".to_string()),
@@ -3472,7 +3585,7 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		let route = runtime.classify_route(&request, &request.session_id).await;
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
@@ -3490,8 +3603,8 @@ mod tests {
 		}
 	}
 
-	#[test]
-	fn executable_python_code_requests_can_shortlist_python_run() {
+	#[tokio::test]
+	async fn executable_python_code_requests_can_shortlist_python_run() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-python-run".to_string()),
@@ -3501,7 +3614,7 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		let route = runtime.classify_route(&request, &request.session_id).await;
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
@@ -3517,8 +3630,8 @@ mod tests {
 		}
 	}
 
-	#[test]
-	fn explicit_web_queries_can_shortlist_web_search() {
+	#[tokio::test]
+	async fn explicit_web_queries_can_shortlist_web_search() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-web-search".to_string()),
@@ -3528,7 +3641,7 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		let route = runtime.classify_route(&request, &request.session_id).await;
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
@@ -3542,8 +3655,8 @@ mod tests {
 		}
 	}
 
-	#[test]
-	fn incomplete_python_execution_requests_ask_for_code() {
+	#[tokio::test]
+	async fn incomplete_python_execution_requests_ask_for_code() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-python-missing-code".to_string()),
@@ -3553,7 +3666,7 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		let route = runtime.classify_route(&request, &request.session_id).await;
 
 		match route {
 			crate::router::RouteDecisionResult::Escalate(plan) => {
@@ -3569,8 +3682,8 @@ mod tests {
 		}
 	}
 
-	#[test]
-	fn incomplete_web_lookup_requests_ask_for_query() {
+	#[tokio::test]
+	async fn incomplete_web_lookup_requests_ask_for_query() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-web-missing-query".to_string()),
@@ -3580,7 +3693,7 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		let route = runtime.classify_route(&request, &request.session_id).await;
 
 		match route {
 			crate::router::RouteDecisionResult::Escalate(plan) => {
@@ -3594,8 +3707,8 @@ mod tests {
 		}
 	}
 
-	#[test]
-	fn classify_route_shortlists_table_preview_for_grounded_table_requests() {
+	#[tokio::test]
+	async fn classify_route_shortlists_table_preview_for_grounded_table_requests() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-table-tool-loop".to_string()),
@@ -3605,7 +3718,7 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		let route = runtime.classify_route(&request, &request.session_id).await;
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
@@ -3621,8 +3734,8 @@ mod tests {
 		}
 	}
 
-	#[test]
-	fn classify_route_uses_controlled_family_seed_for_explicit_tables_without_action() {
+	#[tokio::test]
+	async fn classify_route_uses_controlled_family_seed_for_explicit_tables_without_action() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-table-broad-explicit-path".to_string()),
@@ -3632,7 +3745,7 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		let route = runtime.classify_route(&request, &request.session_id).await;
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
@@ -3652,8 +3765,8 @@ mod tests {
 		}
 	}
 
-	#[test]
-	fn classify_route_shortlists_fs_glob_for_explicit_glob_requests() {
+	#[tokio::test]
+	async fn classify_route_shortlists_fs_glob_for_explicit_glob_requests() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-glob-tool-loop".to_string()),
@@ -3663,7 +3776,7 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		let route = runtime.classify_route(&request, &request.session_id).await;
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
@@ -3680,10 +3793,18 @@ mod tests {
 		let deterministic_runtime = GenericAgentRuntime::default();
 		let csv_path = regression_fixture_path(".csv", "name,count\nalpha,1\nbeta,2\n");
 
-		let inventory_trace = runtime_loop_trace_for_goal(
+		// runtime_loop_trace_for_goal calls execute_tool_loop (async, uses block_in_place).
+		// Bridge via block_on with a multi-thread runtime so block_in_place works, and so
+		// LlmRouter (which holds a blocking_runtime) is dropped in sync scope, not async.
+		let rt = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for regression suite bridge should build");
+
+		let inventory_trace = rt.block_on(runtime_loop_trace_for_goal(
 			&deterministic_runtime,
 			"What skills and tools do you have right now?",
-		);
+		));
 		assert_regression_case(
 			"inventory-question",
 			crate::runtime_loop::RegressionSuiteKind::Confusion,
@@ -3700,10 +3821,10 @@ mod tests {
 			},
 		);
 
-		let quoted_trace = runtime_loop_trace_for_goal(
+		let quoted_trace = rt.block_on(runtime_loop_trace_for_goal(
 			&runtime,
 			"你说的这个是什么意思？ task failed: The runtime loop needs an explicit next-step decision after the non-terminal fs.list_dir observation.",
-		);
+		));
 		let quoted_trace_ref = &quoted_trace;
 		assert_regression_case(
 			"quoted-tool-name",
@@ -3717,10 +3838,10 @@ mod tests {
 				interpreted_flags: Vec::new(),
 			},
 		);
-		let do_not_run_trace = runtime_loop_trace_for_goal(
+		let do_not_run_trace = rt.block_on(runtime_loop_trace_for_goal(
 			&runtime,
 			"Explain what the shell command `pwd` does, but do not run it.",
-		);
+		));
 		assert_regression_case(
 			"quoted-shell-command-explanation",
 			crate::runtime_loop::RegressionSuiteKind::Confusion,
@@ -3736,8 +3857,10 @@ mod tests {
 				}],
 			},
 		);
-		let python_explanation_trace =
-			runtime_loop_trace_for_goal(&runtime, "Explain what this Python code does: `print(1)`");
+		let python_explanation_trace = rt.block_on(runtime_loop_trace_for_goal(
+			&runtime,
+			"Explain what this Python code does: `print(1)`",
+		));
 		assert_regression_case(
 			"quoted-python-code-explanation",
 			crate::runtime_loop::RegressionSuiteKind::Confusion,
@@ -3753,8 +3876,10 @@ mod tests {
 				}],
 			},
 		);
-		let web_tool_explanation_trace =
-			runtime_loop_trace_for_goal(&runtime, "Explain what the tool web.search does.");
+		let web_tool_explanation_trace = rt.block_on(runtime_loop_trace_for_goal(
+			&runtime,
+			"Explain what the tool web.search does.",
+		));
 		assert_regression_case(
 			"web-tool-explanation",
 			crate::runtime_loop::RegressionSuiteKind::Confusion,
@@ -3771,10 +3896,10 @@ mod tests {
 			},
 		);
 
-		let table_trace = runtime_loop_trace_for_goal(
+		let table_trace = rt.block_on(runtime_loop_trace_for_goal(
 			&runtime,
 			&format!("Preview the first rows of {csv_path}."),
-		);
+		));
 		assert_regression_case(
 			"grounded-table-preview",
 			crate::runtime_loop::RegressionSuiteKind::Confusion,
@@ -3797,6 +3922,12 @@ mod tests {
 	#[test]
 	fn runtime_loop_boundary_suite_covers_contract_edges() {
 		let runtime = GenericAgentRuntime::default();
+		// runtime_loop_trace_for_goal calls execute_tool_loop (async, uses block_in_place).
+		// Bridge via block_on with a multi-thread runtime so block_in_place works.
+		let rt = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for regression suite bridge should build");
 		let duplicate_root = env::current_dir()
 			.expect("cwd should resolve for regression fixtures")
 			.join("tmp");
@@ -3822,7 +3953,10 @@ mod tests {
 		fs::write(&duplicate_a_path, "duplicate a\n").expect("duplicate fixture A should write");
 		fs::write(&duplicate_b_path, "duplicate b\n").expect("duplicate fixture B should write");
 
-		let command_trace = runtime_loop_trace_for_goal(&runtime, "Run this command: `nc -l 1234`");
+		let command_trace = rt.block_on(runtime_loop_trace_for_goal(
+			&runtime,
+			"Run this command: `nc -l 1234`",
+		));
 		assert_regression_case(
 			"command-deny-boundary",
 			crate::runtime_loop::RegressionSuiteKind::Boundary,
@@ -3839,10 +3973,10 @@ mod tests {
 			},
 		);
 
-		let ambiguous_find_trace = runtime_loop_trace_for_goal(
+		let ambiguous_find_trace = rt.block_on(runtime_loop_trace_for_goal(
 			&runtime,
 			&format!("Find {duplicate_name} in this workspace."),
-		);
+		));
 		assert_regression_case(
 			"ambiguous-fs-find",
 			crate::runtime_loop::RegressionSuiteKind::Boundary,
@@ -3923,10 +4057,10 @@ mod tests {
 				.is_some_and(|message| message.contains(&duplicate_b_display))
 		);
 
-		let missing_find_trace = runtime_loop_trace_for_goal(
+		let missing_find_trace = rt.block_on(runtime_loop_trace_for_goal(
 			&runtime,
 			"Find definitely-no-such-file-42.txt in this workspace.",
-		);
+		));
 		assert_regression_case(
 			"missing-fs-find",
 			crate::runtime_loop::RegressionSuiteKind::Boundary,
@@ -3942,8 +4076,10 @@ mod tests {
 				}],
 			},
 		);
-		let python_non_zero_trace =
-			runtime_loop_trace_for_goal(&runtime, "Run this Python code: `raise SystemExit(3)`");
+		let python_non_zero_trace = rt.block_on(runtime_loop_trace_for_goal(
+			&runtime,
+			"Run this Python code: `raise SystemExit(3)`",
+		));
 		assert_regression_case(
 			"python-non-zero-exit",
 			crate::runtime_loop::RegressionSuiteKind::Boundary,
@@ -3959,8 +4095,10 @@ mod tests {
 				}],
 			},
 		);
-		let web_missing_endpoint_trace =
-			runtime_loop_trace_for_goal(&runtime, "Search the web for the latest Rust edition.");
+		let web_missing_endpoint_trace = rt.block_on(runtime_loop_trace_for_goal(
+			&runtime,
+			"Search the web for the latest Rust edition.",
+		));
 		assert_regression_case(
 			"web-search-endpoint-missing",
 			crate::runtime_loop::RegressionSuiteKind::Boundary,
@@ -3987,7 +4125,18 @@ mod tests {
 		let deterministic_runtime = GenericAgentRuntime::default();
 		let text_path = regression_fixture_path(".txt", "phase3 interpretation smoke\n");
 
-		let command_trace = runtime_loop_trace_for_goal(&runtime, "Run this command: `pwd`");
+		// runtime_loop_trace_for_goal calls execute_tool_loop (async, uses block_in_place).
+		// Bridge via block_on with a multi-thread runtime so block_in_place works.
+		// LlmRouter (from runtime_with_fixed_general_llm) drops in sync scope after block_on.
+		let rt = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for regression suite bridge should build");
+
+		let command_trace = rt.block_on(runtime_loop_trace_for_goal(
+			&runtime,
+			"Run this command: `pwd`",
+		));
 		assert_regression_case(
 			"command-non-terminal-success",
 			crate::runtime_loop::RegressionSuiteKind::OutputInterpretation,
@@ -4009,10 +4158,10 @@ mod tests {
 				],
 			},
 		);
-		let python_trace = runtime_loop_trace_for_goal(
+		let python_trace = rt.block_on(runtime_loop_trace_for_goal(
 			&runtime,
 			"Run this Python code: `print(sum(range(1, 6)))`",
-		);
+		));
 		assert_regression_case(
 			"python-run-non-terminal-success",
 			crate::runtime_loop::RegressionSuiteKind::OutputInterpretation,
@@ -4035,10 +4184,10 @@ mod tests {
 			},
 		);
 
-		let inventory_trace = runtime_loop_trace_for_goal(
+		let inventory_trace = rt.block_on(runtime_loop_trace_for_goal(
 			&deterministic_runtime,
 			"What skills and tools do you have right now?",
-		);
+		));
 		assert_regression_case(
 			"inventory-terminal-success",
 			crate::runtime_loop::RegressionSuiteKind::OutputInterpretation,
@@ -4066,10 +4215,10 @@ mod tests {
 		let mut tools_runtime_config = ToolsRuntimeConfig::default();
 		tools_runtime_config.web.endpoint = Some(endpoint);
 		let web_runtime = runtime_with_fixed_general_llm_and_tools_config(tools_runtime_config);
-		let web_trace = runtime_loop_trace_for_goal(
+		let web_trace = rt.block_on(runtime_loop_trace_for_goal(
 			&web_runtime,
 			"Search the web for the latest Rust edition.",
-		);
+		));
 		assert_regression_case(
 			"web-search-non-terminal-success",
 			crate::runtime_loop::RegressionSuiteKind::OutputInterpretation,
@@ -4092,8 +4241,10 @@ mod tests {
 			},
 		);
 
-		let read_trace =
-			runtime_loop_trace_for_goal(&runtime, &format!("Read the first part of {text_path}."));
+		let read_trace = rt.block_on(runtime_loop_trace_for_goal(
+			&runtime,
+			&format!("Read the first part of {text_path}."),
+		));
 		assert_regression_case(
 			"fs-read-text-non-terminal-success",
 			crate::runtime_loop::RegressionSuiteKind::OutputInterpretation,
@@ -4115,7 +4266,10 @@ mod tests {
 				],
 			},
 		);
-		let plain_read_trace = runtime_loop_trace_for_goal(&runtime, &format!("Read {text_path}."));
+		let plain_read_trace = rt.block_on(runtime_loop_trace_for_goal(
+			&runtime,
+			&format!("Read {text_path}."),
+		));
 		assert_regression_case(
 			"plain-read-text",
 			crate::runtime_loop::RegressionSuiteKind::OutputInterpretation,
@@ -4164,13 +4318,22 @@ mod tests {
 		let mut loop_state =
 			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
 		let task_id = TaskId("task-react-recovery".to_string());
-		let result = runtime.execute_tool_loop(
-			&task_id,
-			&request,
-			&mut loop_state,
-			&RuntimeMemorySections::default(),
-			None,
-		);
+
+		// execute_tool_loop is async; bridge via block_on with a multi-thread runtime so that
+		// block_in_place inside execute_tool_loop can run blocking tool invocations.
+		// LlmRouter (from runtime_with_fixed_general_llm) drops in sync scope after block_on.
+		let result = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&task_id,
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				None,
+			));
 
 		let tool_sequence = loop_state
 			.history
@@ -4240,8 +4403,8 @@ mod tests {
 		assert!(glob_hint.selection_hint.chars().count() <= 180);
 	}
 
-	#[test]
-	fn quoted_tool_names_do_not_force_a_contract_hint_without_grounded_arguments() {
+	#[tokio::test]
+	async fn quoted_tool_names_do_not_force_a_contract_hint_without_grounded_arguments() {
 		let runtime = GenericAgentRuntime::default();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-tool-quote".to_string()),
@@ -4251,7 +4414,7 @@ mod tests {
 			conversation_history: Vec::new(),
 		};
 
-		let route = runtime.classify_route(&request, &request.session_id);
+		let route = runtime.classify_route(&request, &request.session_id).await;
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {

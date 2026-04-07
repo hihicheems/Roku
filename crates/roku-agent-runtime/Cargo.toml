@@ -19,8 +19,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "local-offset"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync"] }
 url = "2"
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }

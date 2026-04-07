@@ -1717,6 +1717,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "time",
+ "tokio",
  "url",
  "zip 8.5.0",
 ]
@@ -1993,6 +1994,7 @@ dependencies = [
  "roku-validation-plane",
  "serde_json",
  "tempfile",
+ "tokio",
  "zip 8.5.0",
 ]
 

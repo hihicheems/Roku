@@ -131,7 +131,7 @@ pub(crate) struct RouteClassifierContext<'a> {
 	pub(crate) skill_execution_available: bool,
 }
 
-pub(crate) fn classify_request(
+pub(crate) async fn classify_request(
 	context: RouteClassifierContext<'_>,
 	request: &RequestEnvelope,
 ) -> RouteDecisionResult {
@@ -140,7 +140,7 @@ pub(crate) fn classify_request(
 	}
 
 	match context.route_router {
-		Some(router) => classify_with_llm(&context, request, router),
+		Some(router) => classify_with_llm(&context, request, router).await,
 		None => unresolved_without_route_model(),
 	}
 }
@@ -588,7 +588,7 @@ fn explicit_tool_hint_is_grounded(tool_name: &str, goal: &str) -> bool {
 	}
 }
 
-fn classify_with_llm(
+async fn classify_with_llm(
 	context: &RouteClassifierContext<'_>,
 	request: &RequestEnvelope,
 	router: &LlmRouter,
@@ -607,21 +607,23 @@ fn classify_with_llm(
 		context.availability_snapshot,
 		context.agent_runtime_config,
 	);
-	let response = router.generate_json_value_blocking(&GenerationRequest {
-		system_prompt: Some(
-			"You are Roku's route classifier. Return only valid JSON matching the requested schema."
-				.to_string(),
-		),
-		prompt: route_classifier_prompt(request, &candidates),
-		expected_output_tokens: context.agent_runtime_config.router.expected_output_tokens,
-		risk_tier: RiskTier::Low,
-		preferred_provider: None,
-		budget_tokens_remaining: context.agent_runtime_config.router.budget_tokens_remaining,
-		budget_cost_remaining_usd: context
-			.agent_runtime_config
-			.router
-			.budget_cost_remaining_usd,
-	});
+	let response = router
+		.generate_json_value(&GenerationRequest {
+			system_prompt: Some(
+				"You are Roku's route classifier. Return only valid JSON matching the requested schema."
+					.to_string(),
+			),
+			prompt: route_classifier_prompt(request, &candidates),
+			expected_output_tokens: context.agent_runtime_config.router.expected_output_tokens,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: context.agent_runtime_config.router.budget_tokens_remaining,
+			budget_cost_remaining_usd: context
+				.agent_runtime_config
+				.router
+				.budget_cost_remaining_usd,
+		})
+		.await;
 	let value = match response {
 		Ok(response) => response.value,
 		Err(error) => {

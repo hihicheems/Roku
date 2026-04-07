@@ -43,8 +43,8 @@ pub use runtime_config::{
 };
 pub use runtime_loop::{
 	AskUserPayload, AskUserResumeContract, AskUserResumeDirective, CompactConfig,
-	FinalAnswerPayload, InterpretedFlagExpectation, InterpretedObservation, LoopContext,
-	LoopRequest, LoopState, LoopStatus, NextStepAction, NextStepDecision,
+	FinalAnswerPayload, InterpretedFlagExpectation, InterpretedObservation, LoopContext, LoopEvent,
+	LoopEventSender, LoopRequest, LoopState, LoopStatus, NextStepAction, NextStepDecision,
 	NextStepDecisionSchemaError, RegressionSuiteKind, RuntimeLoopRegressionCaseReport,
 	RuntimeLoopRegressionExpectation, RuntimeLoopTraceCheckReport, StepAction, StepObservation,
 	StepRecord, ToolObservation, ToolProbeCheckReport, check_runtime_loop_trace,

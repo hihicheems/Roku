@@ -16,9 +16,9 @@ use roku_common_types::RequestEnvelope;
 
 use crate::router::{RouteClassifierContext, RouteDecisionResult, classify_request};
 
-pub(crate) fn classify_existing_route(
+pub(crate) async fn classify_existing_route(
 	context: RouteClassifierContext<'_>,
 	request: &RequestEnvelope,
 ) -> RouteDecisionResult {
-	classify_request(context, request)
+	classify_request(context, request).await
 }
