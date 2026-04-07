@@ -17,6 +17,7 @@ roku-orchestrator = { path = "../roku-orchestrator" }
 roku-plugin-catalog = { path = "../roku-plugins/catalog" }
 roku-validation-plane = { path = "../roku-validation-plane" }
 serde_json = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 
 [dev-dependencies]
 roku-plugin-skills = { path = "../roku-plugins/skills" }

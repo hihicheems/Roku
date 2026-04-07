@@ -1244,9 +1244,11 @@ fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
 		freeform_pause.resume_contract,
 		AskUserResumeContract::NoAutomaticResume
 	);
-	let assessment = service
-		.runtime
-		.assess_awaiting_user_resume(&loop_state, "What skills and tools do you have right now?");
+	let assessment =
+		crate::helpers::bridge_async_to_sync(service.runtime.assess_awaiting_user_resume(
+			&loop_state,
+			"What skills and tools do you have right now?",
+		));
 	assert!(!assessment.should_resume);
 	assert!(
 		assessment.reason.contains("fresh intake"),

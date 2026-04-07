@@ -17,6 +17,7 @@ use roku_common_types::{
 	RequestEnvelope, ResponseEnvelope, RuntimeError, RuntimeMemorySections, Task,
 };
 
+use crate::helpers::bridge_async_to_sync;
 use crate::{ContextBundle, RuntimeMemoryLayers, RuntimeService, log_route_decision};
 
 pub(super) struct RuntimeLoopOwner<'a> {
@@ -69,10 +70,13 @@ impl<'a> RuntimeLoopOwner<'a> {
 			);
 		}
 
-		let route = self
-			.service
-			.runtime
-			.classify_route(request, &request.session_id);
+		// Unit 3 bridge: classify_route is now async; bridge via the shared async-to-sync
+		// helper until the full call chain is converted to async.
+		let route = bridge_async_to_sync(
+			self.service
+				.runtime
+				.classify_route(request, &request.session_id),
+		);
 		log_route_decision(request, &route);
 		self.service
 			.attach_visible_resources(&mut prepared.context_bundle, &route);
