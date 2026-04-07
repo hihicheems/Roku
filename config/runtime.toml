@@ -17,9 +17,9 @@
 
 [runtime.agent.loop]
 # Initial maximum number of tool-loop steps before the runtime forces termination.
-initial_step_budget = 10
+initial_step_budget = 30
 # Initial maximum number of recovery attempts after non-terminal tool failures.
-initial_recovery_budget = 2
+initial_recovery_budget = 5
 
 [runtime.agent.router]
 # Target size of the JSON route-classifier response.
@@ -47,7 +47,8 @@ budget_cost_remaining_usd = 0.05
 
 [runtime.tools.fs]
 # Default byte cap for one fs.read_text call when the request does not provide `max_bytes`.
-default_max_bytes = 4096
+# Raised from 4096 to support typical source files without truncation.
+default_max_bytes = 65536
 # Maximum directory entries returned by one fs.list_dir call before truncation.
 max_dir_entries = 200
 # Maximum glob matches returned by one fs.glob call before truncation.
@@ -56,10 +57,12 @@ max_glob_matches = 200
 max_descendant_scan_entries = 8000
 
 [runtime.tools.command]
-# Default subprocess timeout for command.run.
-default_timeout_ms = 1500
-# Maximum stdout/stderr bytes retained from one command.run invocation.
-max_output_bytes = 8192
+# Default subprocess timeout for command.run (was 1500 ms).
+# Build commands (cargo, just, npm, make) get a longer timeout via TimeoutProfile
+# in code; this value applies to quick/read-only commands.
+default_timeout_ms = 30000
+# Maximum stdout/stderr bytes retained from one command.run invocation (was 8192).
+max_output_bytes = 65536
 
 [runtime.tools.python]
 # Default subprocess timeout for python.run.
