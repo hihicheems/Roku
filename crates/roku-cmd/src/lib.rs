@@ -296,26 +296,13 @@ where
 		}
 		Some("telegram-once") | Some("tg-once") => {
 			let options = parse_request_options(&args[1..])?;
-			Ok(Some(rt.block_on(async {
-				tokio::task::spawn_blocking(move || {
-					run_telegram_once_with_options_from_env(options)
-				})
-				.await
-				.map_err(|error| {
-					CommandError::Runtime(roku_common_types::RuntimeError::new(error.to_string()))
-				})?
-			})?))
+			Ok(Some(run_telegram_once_with_options_from_env(options)?))
 		}
 		Some("telegram-bot") | Some("tg-bot") => {
-			rt.block_on(async {
-				tokio::task::spawn_blocking(run_telegram_bot_from_env)
-					.await
-					.map_err(|error| {
-						CommandError::Runtime(roku_common_types::RuntimeError::new(
-							error.to_string(),
-						))
-					})?
-			})?;
+			// Run the polling loop directly on the main thread. Do NOT use
+			// spawn_blocking — handle_request needs a clean thread context
+			// where scoped-thread runtime creation works without nesting panics.
+			run_telegram_bot_from_env()?;
 			Ok(None)
 		}
 		Some("api-gateway") | Some("http-api") => {

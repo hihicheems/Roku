@@ -254,78 +254,94 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 			},
 		)?;
 
-		// The TelegramInteractionHandler trait is sync. Bridge the async RuntimeService here
-		// so callers remain runtime-agnostic. block_in_place is safe because execute_cli
-		// always drives this handler from within a multi-thread tokio runtime.
-		//
-		// When progress_notices_enabled and a bot client is available, wire a LoopEvent channel
-		// so the user sees tool start/end messages in real time while the agent works.
-		let execution = tokio::task::block_in_place(|| {
-			tokio::runtime::Handle::current().block_on(async {
-				if self.progress_notices_enabled
-					&& let Some(bot_client) = self.bot_client.as_ref().map(Arc::clone)
-				{
-					let chat_id = binding_chat_id(&binding_id);
-					let (tx, mut rx) =
-						tokio::sync::mpsc::unbounded_channel::<roku_agent_runtime::LoopEvent>();
-					// Spawn a task that consumes loop events and sends Telegram progress messages.
-					let render_task = tokio::spawn(async move {
-						while let Some(event) = rx.recv().await {
-							let text = match &event {
-								roku_agent_runtime::LoopEvent::ToolStart { step, tool_name } => {
-									Some(format!("⚙️ Step {step}: starting `{tool_name}`"))
-								}
-								roku_agent_runtime::LoopEvent::ToolEnd {
-									step,
-									tool_name,
-									elapsed_ms,
-								} => {
-									if let Some(ms) = elapsed_ms {
-										Some(format!("✅ Step {step}: `{tool_name}` done ({ms}ms)"))
-									} else {
-										Some(format!("✅ Step {step}: `{tool_name}` done"))
+		// The TelegramInteractionHandler trait is sync but RuntimeService is async.
+		// Bridge with a scoped thread + fresh multi-thread runtime to avoid nested
+		// runtime context panics (the polling loop runs on the main thread, NOT
+		// inside a tokio worker).
+		let progress = self.progress_notices_enabled && self.bot_client.is_some();
+		let bot_client = self.bot_client.as_ref().map(Arc::clone);
+		let service = &self.service;
+		let execution = std::thread::scope(|s| {
+			s.spawn(|| {
+				let rt = tokio::runtime::Builder::new_multi_thread()
+					.enable_all()
+					.build()
+					.expect("telegram request runtime");
+				rt.block_on(async {
+					if progress {
+						let bot_client =
+							bot_client.expect("bot_client checked above");
+						let chat_id = binding_chat_id(&binding_id);
+						let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<
+							roku_agent_runtime::LoopEvent,
+						>();
+						let render_task = tokio::spawn(async move {
+							while let Some(event) = rx.recv().await {
+								let text = match &event {
+									roku_agent_runtime::LoopEvent::ToolStart {
+										step,
+										tool_name,
+									} => Some(format!(
+										"⚙️ Step {step}: starting `{tool_name}`"
+									)),
+									roku_agent_runtime::LoopEvent::ToolEnd {
+										step,
+										tool_name,
+										elapsed_ms,
+									} => {
+										if let Some(ms) = elapsed_ms {
+											Some(format!(
+												"✅ Step {step}: `{tool_name}` done ({ms}ms)"
+											))
+										} else {
+											Some(format!(
+												"✅ Step {step}: `{tool_name}` done"
+											))
+										}
 									}
-								}
-								roku_agent_runtime::LoopEvent::CompactTriggered { .. }
-								| roku_agent_runtime::LoopEvent::StepComplete { .. } => None,
-							};
-							if let (Some(chat_id), Some(text)) = (chat_id, text) {
-								let msg = TelegramOutboundMessage {
-									chat_id,
-									text,
-									parse_mode: TelegramParseMode::PlainText,
-									disable_web_page_preview: true,
-									reply_markup: None,
+									roku_agent_runtime::LoopEvent::CompactTriggered { .. }
+									| roku_agent_runtime::LoopEvent::StepComplete { .. } => {
+										None
+									}
 								};
-								let client = Arc::clone(&bot_client);
-								let _ = tokio::task::spawn_blocking(move || {
-									if let Err(error) = client.send_message(&msg) {
-										let _ = emit_global_log(
-											LogRecord::new(
-												"roku-cmd",
-												LogLevel::Warn,
-												"failed to send tool progress message",
-											)
-											.with_field("error", error.to_string()),
-										);
-									}
-								})
-								.await;
+								if let (Some(chat_id), Some(text)) = (chat_id, text) {
+									let msg = TelegramOutboundMessage {
+										chat_id,
+										text,
+										parse_mode: TelegramParseMode::PlainText,
+										disable_web_page_preview: true,
+										reply_markup: None,
+									};
+									let client = Arc::clone(&bot_client);
+									let _ = tokio::task::spawn_blocking(move || {
+										if let Err(error) = client.send_message(&msg) {
+											let _ = emit_global_log(
+												LogRecord::new(
+													"roku-cmd",
+													LogLevel::Warn,
+													"failed to send tool progress message",
+												)
+												.with_field("error", error.to_string()),
+											);
+										}
+									})
+									.await;
+								}
 							}
-						}
-					});
-					let result = self
-						.service
-						.execute_with_mode(request, RunMode::Normal, Some(&tx))
-						.await;
-					// Drop sender so the render task drains and finishes.
-					drop(tx);
-					render_task.await.ok();
-					result
-				} else {
-					self.service.execute(request).await
-				}
+						});
+						let result = service
+							.execute_with_mode(request, RunMode::Normal, Some(&tx))
+							.await;
+						drop(tx);
+						render_task.await.ok();
+						result
+					} else {
+						service.execute(request).await
+					}
+				})
 			})
+			.join()
+			.expect("telegram request thread should not panic")
 		});
 		self.transport_state
 			.clear_pending_loop_session_mirror(&session_id)?;
