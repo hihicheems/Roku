@@ -260,30 +260,31 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 		// inside a tokio worker).
 		let progress = self.progress_notices_enabled && self.bot_client.is_some();
 		let bot_client = self.bot_client.as_ref().map(Arc::clone);
-		let service = &self.service;
+		// Bridge: scoped thread + fresh multi-thread runtime. The future must
+		// run on an actual worker thread (via rt.spawn) so that block_in_place
+		// inside execute_tool_loop works correctly. rt.block_on alone would run
+		// the future on the driver thread where block_in_place panics.
+		let service_clone = self.service.clone();
 		let execution = std::thread::scope(|s| {
 			s.spawn(|| {
 				let rt = tokio::runtime::Builder::new_multi_thread()
 					.enable_all()
 					.build()
 					.expect("telegram request runtime");
-				rt.block_on(async {
-					if progress {
-						let bot_client =
-							bot_client.expect("bot_client checked above");
-						let chat_id = binding_chat_id(&binding_id);
-						let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<
-							roku_agent_runtime::LoopEvent,
-						>();
+				let handle = if progress {
+					let bot_client = bot_client.expect("bot_client checked above");
+					let chat_id = binding_chat_id(&binding_id);
+					let service = service_clone;
+					rt.spawn(async move {
+						let (tx, mut rx) =
+							tokio::sync::mpsc::unbounded_channel::<roku_agent_runtime::LoopEvent>();
 						let render_task = tokio::spawn(async move {
 							while let Some(event) = rx.recv().await {
 								let text = match &event {
 									roku_agent_runtime::LoopEvent::ToolStart {
 										step,
 										tool_name,
-									} => Some(format!(
-										"⚙️ Step {step}: starting `{tool_name}`"
-									)),
+									} => Some(format!("⚙️ Step {step}: starting `{tool_name}`")),
 									roku_agent_runtime::LoopEvent::ToolEnd {
 										step,
 										tool_name,
@@ -294,15 +295,11 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 												"✅ Step {step}: `{tool_name}` done ({ms}ms)"
 											))
 										} else {
-											Some(format!(
-												"✅ Step {step}: `{tool_name}` done"
-											))
+											Some(format!("✅ Step {step}: `{tool_name}` done"))
 										}
 									}
 									roku_agent_runtime::LoopEvent::CompactTriggered { .. }
-									| roku_agent_runtime::LoopEvent::StepComplete { .. } => {
-										None
-									}
+									| roku_agent_runtime::LoopEvent::StepComplete { .. } => None,
 								};
 								if let (Some(chat_id), Some(text)) = (chat_id, text) {
 									let msg = TelegramOutboundMessage {
@@ -335,10 +332,13 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 						drop(tx);
 						render_task.await.ok();
 						result
-					} else {
-						service.execute(request).await
-					}
-				})
+					})
+				} else {
+					let service = service_clone;
+					rt.spawn(async move { service.execute(request).await })
+				};
+				rt.block_on(handle)
+					.expect("telegram request task should not panic")
 			})
 			.join()
 			.expect("telegram request thread should not panic")
