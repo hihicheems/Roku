@@ -114,7 +114,7 @@ idle_backoff_ms = 500
 # Number of consecutive poll failures before noisy logging starts.
 poll_error_log_threshold = 5
 # Whether to emit progress notices back to Telegram chats.
-progress_notices_enabled = false
+progress_notices_enabled = true
 # Whether outbound Telegram messages should include request metadata.
 include_request_metadata = false
 # Whether outbound Telegram messages should include attachment details.
