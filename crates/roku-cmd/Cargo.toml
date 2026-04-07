@@ -12,7 +12,7 @@ memory-openviking = []
 [dependencies]
 async-trait = "0.1"
 actix-web = "4"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "signal"] }
 dotenvy = "0.15"
 roku-agent-runtime = { path = "../roku-agent-runtime" }
 roku-artifact-store = { path = "../roku-artifact-store" }
