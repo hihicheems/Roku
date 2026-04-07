@@ -20,12 +20,12 @@
 //! OpenViking adapter crate.
 
 use std::path::Path;
-use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use roku_memory::MemoryError;
 
 use super::OpenVikingLongTermMemoryBackend;
+use super::backend::run_blocking;
 
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -166,7 +166,7 @@ fn wait_until_runtime_state_document_matches(
 			)));
 		}
 
-		sleep(poll_interval);
+		run_blocking(|| std::thread::sleep(poll_interval));
 	}
 }
 
@@ -188,7 +188,7 @@ fn wait_until_runtime_state_document_absent(
 			)));
 		}
 
-		sleep(poll_interval);
+		run_blocking(|| std::thread::sleep(poll_interval));
 	}
 }
 

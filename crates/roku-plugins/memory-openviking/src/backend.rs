@@ -125,7 +125,7 @@ impl OpenVikingLongTermMemoryBackend {
 	where
 		T: DeserializeOwned,
 	{
-		let response = request.send().map_err(map_transport_error)?;
+		let response = run_blocking(|| request.send()).map_err(map_transport_error)?;
 		parse_json_response(response)
 	}
 
@@ -203,12 +203,13 @@ impl OpenVikingLongTermMemoryBackend {
 
 	/// Reads one text resource, returning `None` when the provider reports `NOT_FOUND`.
 	pub(crate) fn read_text_resource(&self, uri: &str) -> Result<Option<String>, MemoryError> {
-		let response = self
-			.client
-			.get(self.endpoint("/api/v1/content/read"))
-			.query(&[("uri", uri), ("offset", "0"), ("limit", "-1")])
-			.send()
-			.map_err(map_transport_error)?;
+		let response = run_blocking(|| {
+			self.client
+				.get(self.endpoint("/api/v1/content/read"))
+				.query(&[("uri", uri), ("offset", "0"), ("limit", "-1")])
+				.send()
+		})
+		.map_err(map_transport_error)?;
 		let status = response.status();
 		let body = response
 			.text()
@@ -224,19 +225,20 @@ impl OpenVikingLongTermMemoryBackend {
 
 	/// Lists one directory using OpenViking's simple listing mode.
 	pub(crate) fn list_simple_entries(&self, uri: &str) -> Result<Vec<String>, MemoryError> {
-		let response = self
-			.client
-			.get(self.endpoint("/api/v1/fs/ls"))
-			.query(&[
-				("uri", uri),
-				("simple", "true"),
-				("recursive", "false"),
-				("output", "original"),
-				("show_all_hidden", "false"),
-				("node_limit", "1000"),
-			])
-			.send()
-			.map_err(map_transport_error)?;
+		let response = run_blocking(|| {
+			self.client
+				.get(self.endpoint("/api/v1/fs/ls"))
+				.query(&[
+					("uri", uri),
+					("simple", "true"),
+					("recursive", "false"),
+					("output", "original"),
+					("show_all_hidden", "false"),
+					("node_limit", "1000"),
+				])
+				.send()
+		})
+		.map_err(map_transport_error)?;
 		let status = response.status();
 		let body = response
 			.text()
@@ -252,12 +254,13 @@ impl OpenVikingLongTermMemoryBackend {
 
 	/// Returns whether a provider URI currently exists.
 	pub(crate) fn resource_exists(&self, uri: &str) -> Result<bool, MemoryError> {
-		let response = self
-			.client
-			.get(self.endpoint("/api/v1/fs/stat"))
-			.query(&[("uri", uri)])
-			.send()
-			.map_err(map_transport_error)?;
+		let response = run_blocking(|| {
+			self.client
+				.get(self.endpoint("/api/v1/fs/stat"))
+				.query(&[("uri", uri)])
+				.send()
+		})
+		.map_err(map_transport_error)?;
 		let status = response.status();
 		let body = response
 			.text()
@@ -278,15 +281,16 @@ impl OpenVikingLongTermMemoryBackend {
 		uri: &str,
 		recursive: bool,
 	) -> Result<(), MemoryError> {
-		let response = self
-			.client
-			.delete(self.endpoint("/api/v1/fs"))
-			.query(&[
-				("uri", uri),
-				("recursive", if recursive { "true" } else { "false" }),
-			])
-			.send()
-			.map_err(map_transport_error)?;
+		let response = run_blocking(|| {
+			self.client
+				.delete(self.endpoint("/api/v1/fs"))
+				.query(&[
+					("uri", uri),
+					("recursive", if recursive { "true" } else { "false" }),
+				])
+				.send()
+		})
+		.map_err(map_transport_error)?;
 		let status = response.status();
 		let body = response
 			.text()
@@ -361,7 +365,7 @@ impl OpenVikingLongTermMemoryBackend {
 					"timed out waiting for OpenViking resource to disappear uri={uri}"
 				)));
 			}
-			std::thread::sleep(poll_interval);
+			run_blocking(|| std::thread::sleep(poll_interval));
 		}
 	}
 
@@ -444,20 +448,18 @@ impl LongTermMemoryBackend for OpenVikingLongTermMemoryBackend {
 	}
 
 	fn delete(&self, selector: &MemoryDeleteSelector) -> Result<(), MemoryError> {
-		let response = self
-			.client
-			.delete(self.endpoint("/api/v1/fs"))
-			.query(&[("uri", selector.record_id.as_str()), ("recursive", "true")])
-			.send()
-			.map_err(map_transport_error)?;
+		let response = run_blocking(|| {
+			self.client
+				.delete(self.endpoint("/api/v1/fs"))
+				.query(&[("uri", selector.record_id.as_str()), ("recursive", "true")])
+				.send()
+		})
+		.map_err(map_transport_error)?;
 		parse_empty_response(response)
 	}
 
 	fn health(&self) -> Result<MemoryBackendHealth, MemoryError> {
-		let response = self
-			.client
-			.get(self.endpoint("/health"))
-			.send()
+		let response = run_blocking(|| self.client.get(self.endpoint("/health")).send())
 			.map_err(map_transport_error)?;
 		let status = response.status();
 		let body = response
@@ -1182,6 +1184,24 @@ fn map_status_error(status: StatusCode, body: String) -> MemoryError {
 		| StatusCode::SERVICE_UNAVAILABLE
 		| StatusCode::GATEWAY_TIMEOUT => MemoryError::Unavailable(detail),
 		_ => MemoryError::Internal(detail),
+	}
+}
+
+/// Runs a blocking closure safely from either a tokio worker thread or a plain thread.
+///
+/// `reqwest::blocking` internally creates a `tokio::runtime::Runtime` that panics on
+/// drop when a tokio runtime is already active on the current thread.  Wrapping every
+/// blocking call site with this helper delegates control back to the tokio scheduler
+/// for the duration of the blocking work, preventing the nested-runtime panic.
+///
+/// When no tokio runtime is active (plain thread), the closure executes directly.
+pub(crate) fn run_blocking<F, T>(f: F) -> T
+where
+	F: FnOnce() -> T,
+{
+	match tokio::runtime::Handle::try_current() {
+		Ok(_) => tokio::task::block_in_place(f),
+		Err(_) => f(),
 	}
 }
 
