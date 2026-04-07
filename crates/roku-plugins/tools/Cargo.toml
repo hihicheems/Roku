@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+async-trait = "0.1"
 calamine = "0.34"
 csv = "1"
 glob = "0.3"

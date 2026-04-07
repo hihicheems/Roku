@@ -25,6 +25,6 @@ pub use providers::openrouter::{
 pub use router::{LlmProvider, LlmRouter};
 pub use types::{
 	GenerationRequest, LlmAdapterError, LlmResponse, ModelProfile, ProviderCallError,
-	ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy, StructuredGenerationError,
-	StructuredJsonResponse, StructuredOutputError,
+	ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy, StreamChunk,
+	StructuredGenerationError, StructuredJsonResponse, StructuredOutputError,
 };

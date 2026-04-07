@@ -15,9 +15,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::thread;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use roku_observability::{LlmInvocationOutcome, Metrics};
 use serde_json::Value;
 
@@ -27,9 +27,10 @@ use crate::types::{
 	StructuredJsonResponse, StructuredOutputError, estimate_cost_usd,
 };
 
+#[async_trait]
 pub trait LlmProvider: Send + Sync {
 	fn provider_name(&self) -> &'static str;
-	fn complete(
+	async fn complete(
 		&self,
 		model: &ModelProfile,
 		request: &GenerationRequest,
@@ -42,6 +43,9 @@ pub struct LlmRouter {
 	providers: HashMap<String, RegisteredProvider>,
 	metrics: Option<Arc<Metrics>>,
 	resilience_policy: ProviderResiliencePolicy,
+	/// Single-threaded tokio runtime used by the `_blocking()` bridge methods.
+	/// Kept behind an `Arc` so `LlmRouter` can be cheaply cloned if needed.
+	blocking_runtime: Arc<tokio::runtime::Runtime>,
 }
 
 impl Default for LlmRouter {
@@ -52,12 +56,17 @@ impl Default for LlmRouter {
 
 impl LlmRouter {
 	pub fn new(policy: RoutingPolicy) -> Self {
+		let blocking_runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.expect("LlmRouter blocking runtime must be constructible");
 		Self {
 			policy,
 			models: Vec::new(),
 			providers: HashMap::new(),
 			metrics: None,
 			resilience_policy: ProviderResiliencePolicy::default(),
+			blocking_runtime: Arc::new(blocking_runtime),
 		}
 	}
 
@@ -88,7 +97,11 @@ impl LlmRouter {
 		);
 	}
 
-	pub fn generate(&self, request: &GenerationRequest) -> Result<LlmResponse, LlmAdapterError> {
+	/// Async entrypoint: route a request and return the full response.
+	pub async fn generate(
+		&self,
+		request: &GenerationRequest,
+	) -> Result<LlmResponse, LlmAdapterError> {
 		let selected_model = match self.select_model(request) {
 			Ok(selected_model) => selected_model,
 			Err(error) => {
@@ -110,7 +123,9 @@ impl LlmRouter {
 			}
 		};
 
-		let provider_response = self.complete_with_resilience(provider, selected_model, request);
+		let provider_response = self
+			.complete_with_resilience(provider, selected_model, request)
+			.await;
 		let provider_response = match provider_response {
 			Ok(provider_response) => provider_response,
 			Err(error) => {
@@ -193,11 +208,12 @@ impl LlmRouter {
 		})
 	}
 
-	pub fn generate_json_value(
+	/// Async entrypoint: generate and parse a structured JSON response.
+	pub async fn generate_json_value(
 		&self,
 		request: &GenerationRequest,
 	) -> Result<StructuredJsonResponse, StructuredGenerationError> {
-		let response = match self.generate(request) {
+		let response = match self.generate(request).await {
 			Ok(response) => response,
 			Err(error) => return Err(map_structured_generation_error(error)),
 		};
@@ -210,7 +226,48 @@ impl LlmRouter {
 		Ok(StructuredJsonResponse { response, value })
 	}
 
-	fn complete_with_resilience(
+	/// Synchronous bridge: blocks until `generate` completes.
+	///
+	/// Used by callers that are not yet async (Unit 1 bridge; removed in Unit
+	/// 3 when the full call chain is async).
+	pub fn generate_blocking(
+		&self,
+		request: &GenerationRequest,
+	) -> Result<LlmResponse, LlmAdapterError> {
+		// When called from inside an existing tokio runtime (e.g. actix-web
+		// handlers), block_on panics with "Cannot start a runtime from within a
+		// runtime". Spawn a scoped helper thread to avoid this.
+		if tokio::runtime::Handle::try_current().is_ok() {
+			let rt = self.blocking_runtime.clone();
+			std::thread::scope(|s| {
+				s.spawn(|| rt.block_on(self.generate(request)))
+					.join()
+					.unwrap()
+			})
+		} else {
+			self.blocking_runtime.block_on(self.generate(request))
+		}
+	}
+
+	/// Synchronous bridge: blocks until `generate_json_value` completes.
+	pub fn generate_json_value_blocking(
+		&self,
+		request: &GenerationRequest,
+	) -> Result<StructuredJsonResponse, StructuredGenerationError> {
+		if tokio::runtime::Handle::try_current().is_ok() {
+			let rt = self.blocking_runtime.clone();
+			std::thread::scope(|s| {
+				s.spawn(|| rt.block_on(self.generate_json_value(request)))
+					.join()
+					.unwrap()
+			})
+		} else {
+			self.blocking_runtime
+				.block_on(self.generate_json_value(request))
+		}
+	}
+
+	async fn complete_with_resilience(
 		&self,
 		provider: &RegisteredProvider,
 		model: &ModelProfile,
@@ -225,7 +282,7 @@ impl LlmRouter {
 
 		let total_attempts = usize::from(self.resilience_policy.max_retries).saturating_add(1);
 		for attempt_index in 0..total_attempts {
-			match provider.provider.complete(model, request) {
+			match provider.provider.complete(model, request).await {
 				Ok(response) => {
 					provider.record_success();
 					return Ok(response);
@@ -257,7 +314,7 @@ impl LlmRouter {
 
 					let backoff_ms = backoff_for_attempt(attempt_index, &self.resilience_policy);
 					if backoff_ms > 0 {
-						thread::sleep(Duration::from_millis(backoff_ms));
+						tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
 					}
 				}
 			}
@@ -499,6 +556,7 @@ mod tests {
 	use std::sync::Mutex;
 	use std::sync::atomic::{AtomicUsize, Ordering};
 
+	use async_trait::async_trait;
 	use roku_observability::Metrics;
 
 	use crate::types::{
@@ -516,12 +574,13 @@ mod tests {
 		latency_ms: u64,
 	}
 
+	#[async_trait]
 	impl LlmProvider for StaticProvider {
 		fn provider_name(&self) -> &'static str {
 			self.name
 		}
 
-		fn complete(
+		async fn complete(
 			&self,
 			_model: &ModelProfile,
 			_request: &GenerationRequest,
@@ -610,12 +669,13 @@ mod tests {
 		}
 	}
 
+	#[async_trait]
 	impl LlmProvider for Arc<SequenceProvider> {
 		fn provider_name(&self) -> &'static str {
 			self.name
 		}
 
-		fn complete(
+		async fn complete(
 			&self,
 			_model: &ModelProfile,
 			_request: &GenerationRequest,
@@ -650,7 +710,7 @@ mod tests {
 		let request = sample_request(RiskTier::High);
 
 		let response = router
-			.generate(&request)
+			.generate_blocking(&request)
 			.expect("generation should succeed");
 		assert_eq!(response.provider, "provider-b");
 		assert_eq!(response.model_id, "b-pro");
@@ -662,7 +722,7 @@ mod tests {
 		let request = sample_request(RiskTier::Low);
 
 		let response = router
-			.generate(&request)
+			.generate_blocking(&request)
 			.expect("generation should succeed");
 		assert_eq!(response.provider, "provider-a");
 		assert_eq!(response.model_id, "a-lite");
@@ -675,7 +735,7 @@ mod tests {
 		request.preferred_provider = Some("provider-b".to_string());
 
 		let response = router
-			.generate(&request)
+			.generate_blocking(&request)
 			.expect("generation should succeed");
 		assert_eq!(response.provider, "provider-b");
 	}
@@ -687,7 +747,7 @@ mod tests {
 		request.budget_cost_remaining_usd = 0.0001;
 
 		let error = router
-			.generate(&request)
+			.generate_blocking(&request)
 			.expect_err("request should fail due to budget");
 		assert!(matches!(error, LlmAdapterError::NoEligibleModel));
 	}
@@ -715,7 +775,7 @@ mod tests {
 		});
 
 		let error = router
-			.generate(&sample_request(RiskTier::Medium))
+			.generate_blocking(&sample_request(RiskTier::Medium))
 			.expect_err("request should fail due to latency");
 		assert!(matches!(
 			error,
@@ -732,7 +792,7 @@ mod tests {
 		let router = router_with_models().with_metrics(metrics.clone());
 
 		router
-			.generate(&sample_request(RiskTier::Low))
+			.generate_blocking(&sample_request(RiskTier::Low))
 			.expect("generation should succeed");
 
 		let snapshot = metrics.snapshot();
@@ -756,7 +816,7 @@ mod tests {
 		request.budget_cost_remaining_usd = 0.00001;
 
 		let error = router
-			.generate(&request)
+			.generate_blocking(&request)
 			.expect_err("request should fail without an eligible model");
 		assert!(matches!(error, LlmAdapterError::NoEligibleModel));
 
@@ -795,7 +855,7 @@ mod tests {
 		router.register_model(model_profile("retrying-provider"));
 
 		let response = router
-			.generate(&sample_request(RiskTier::Low))
+			.generate_blocking(&sample_request(RiskTier::Low))
 			.expect("request should recover after retry");
 		assert_eq!(response.output, "recovered");
 		assert_eq!(provider.invocations(), 2);
@@ -822,7 +882,7 @@ mod tests {
 		router.register_model(model_profile("non-retrying-provider"));
 
 		let error = router
-			.generate(&sample_request(RiskTier::Low))
+			.generate_blocking(&sample_request(RiskTier::Low))
 			.expect_err("request should fail immediately");
 		assert!(matches!(error, LlmAdapterError::ProviderCallFailed { .. }));
 		assert_eq!(provider.invocations(), 1);
@@ -850,10 +910,10 @@ mod tests {
 		router.register_model(model_profile("breaker-provider"));
 
 		router
-			.generate(&sample_request(RiskTier::Low))
+			.generate_blocking(&sample_request(RiskTier::Low))
 			.expect_err("first request should fail");
 		let second_error = router
-			.generate(&sample_request(RiskTier::Low))
+			.generate_blocking(&sample_request(RiskTier::Low))
 			.expect_err("second request should open the circuit");
 		assert!(matches!(
 			second_error,
@@ -861,7 +921,7 @@ mod tests {
 		));
 
 		let third_error = router
-			.generate(&sample_request(RiskTier::Low))
+			.generate_blocking(&sample_request(RiskTier::Low))
 			.expect_err("third request should be short-circuited");
 		assert!(matches!(
 			third_error,
@@ -898,10 +958,10 @@ mod tests {
 		router.register_model(model_profile("recovering-provider"));
 
 		router
-			.generate(&sample_request(RiskTier::Low))
+			.generate_blocking(&sample_request(RiskTier::Low))
 			.expect_err("first request should open the circuit");
 		let response = router
-			.generate(&sample_request(RiskTier::Low))
+			.generate_blocking(&sample_request(RiskTier::Low))
 			.expect("second request should probe and close the circuit");
 		assert_eq!(response.output, "healthy-again");
 		assert_eq!(provider.invocations(), 2);
@@ -927,7 +987,7 @@ mod tests {
 		});
 
 		let response = router
-			.generate_json_value(&sample_request(RiskTier::Low))
+			.generate_json_value_blocking(&sample_request(RiskTier::Low))
 			.expect("structured json should parse");
 		assert_eq!(response.value["intent_family"], "chat");
 	}
@@ -936,12 +996,13 @@ mod tests {
 	fn generate_json_value_rejects_truncated_finish_reason() {
 		struct TruncatedProvider;
 
+		#[async_trait]
 		impl LlmProvider for TruncatedProvider {
 			fn provider_name(&self) -> &'static str {
 				"truncated-provider"
 			}
 
-			fn complete(
+			async fn complete(
 				&self,
 				_model: &ModelProfile,
 				_request: &GenerationRequest,
@@ -968,7 +1029,7 @@ mod tests {
 		});
 
 		let error = router
-			.generate_json_value(&sample_request(RiskTier::Low))
+			.generate_json_value_blocking(&sample_request(RiskTier::Low))
 			.expect_err("finish_reason=length must be rejected");
 		assert!(matches!(
 			error,

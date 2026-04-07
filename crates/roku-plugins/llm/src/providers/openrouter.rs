@@ -16,17 +16,21 @@ use std::env;
 use std::sync::Arc;
 use std::time::Instant;
 
-use reqwest::blocking::Client;
+use async_trait::async_trait;
+use eventsource_stream::Eventsource;
+use futures::StreamExt;
+use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use roku_observability::{LogLevel, LogRecord, Metrics, emit_global_log};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+use tokio::sync::mpsc;
 
 use crate::router::{LlmProvider, LlmRouter};
 use crate::types::{
 	GenerationRequest, ModelProfile, ProviderCallError, ProviderResponse, RiskTier, RoutingPolicy,
-	estimate_prompt_tokens,
+	StreamChunk, estimate_prompt_tokens,
 };
 
 const OPENROUTER_PROVIDER: &str = "openrouter";
@@ -306,50 +310,204 @@ impl OpenRouterProvider {
 		let client = Client::builder().build()?;
 		Ok(Self { client, config })
 	}
+
+	/// Stream a generation request, sending [`StreamChunk`] events through
+	/// `tx`.  A [`StreamChunk::Done`] is always sent as the final event.
+	pub async fn stream(
+		&self,
+		model: &ModelProfile,
+		request: &GenerationRequest,
+		tx: mpsc::Sender<StreamChunk>,
+	) -> Result<ProviderResponse, ProviderCallError> {
+		let attempt_models = attempt_model_sequence(&self.config, &model.model_id);
+		let headers = build_headers(&self.config)?;
+
+		// Use the first model only for streaming (no explicit fallback loop in
+		// the streaming path; the router handles provider-level retries).
+		let requested_model = attempt_models
+			.first()
+			.ok_or_else(|| ProviderCallError::non_retryable("no models available for streaming"))?
+			.clone();
+
+		self.stream_once(&headers, &requested_model, request, tx)
+			.await
+	}
+
+	async fn stream_once(
+		&self,
+		headers: &HeaderMap,
+		requested_model: &str,
+		request: &GenerationRequest,
+		tx: mpsc::Sender<StreamChunk>,
+	) -> Result<ProviderResponse, ProviderCallError> {
+		let body = build_streaming_request_body(requested_model, &[], request);
+		let started_at = Instant::now();
+
+		let http_response = self
+			.client
+			.post(&self.config.base_url)
+			.headers(headers.clone())
+			.json(&body)
+			.send()
+			.await
+			.map_err(classify_request_error)?;
+
+		let status = http_response.status();
+		if !status.is_success() {
+			let response_body = http_response.text().await.unwrap_or_default();
+			log_openrouter(
+				LogLevel::Warn,
+				"provider returned non-success status on streaming request",
+				[
+					("provider", OPENROUTER_PROVIDER.to_string()),
+					("model", requested_model.to_string()),
+					("status", status.to_string()),
+					("body", truncate_for_log(&response_body, 800)),
+				],
+			);
+			return Err(classify_status_error(status.as_u16(), response_body));
+		}
+
+		let mut stream = http_response.bytes_stream().eventsource();
+		let mut full_text = String::new();
+		let mut finish_reason: Option<String> = None;
+		let mut prompt_tokens: u64 = 0;
+		let mut output_tokens: u64 = 0;
+
+			// Track stream errors to report after sending Done.
+		let mut stream_error: Option<ProviderCallError> = None;
+
+		while let Some(event_result) = stream.next().await {
+			let event = match event_result {
+				Ok(event) => event,
+				Err(error) => {
+					stream_error =
+						Some(ProviderCallError::retryable(format!("SSE stream error: {error}")));
+					break;
+				}
+			};
+
+			if event.data == "[DONE]" {
+				break;
+			}
+
+			let chunk: Value = match serde_json::from_str(&event.data) {
+				Ok(value) => value,
+				Err(error) => {
+					stream_error = Some(ProviderCallError::retryable(format!(
+						"failed to parse SSE chunk: {error}"
+					)));
+					break;
+				}
+			};
+
+			// Extract usage from chunks that carry it (last chunk or usage chunk).
+			if let Some(usage) = chunk.get("usage") {
+				prompt_tokens = usage
+					.get("prompt_tokens")
+					.and_then(Value::as_u64)
+					.unwrap_or(prompt_tokens);
+				output_tokens = usage
+					.get("completion_tokens")
+					.and_then(Value::as_u64)
+					.unwrap_or(output_tokens);
+			}
+
+			let choice = chunk
+				.get("choices")
+				.and_then(Value::as_array)
+				.and_then(|choices| choices.first());
+
+			if let Some(choice) = choice {
+				if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str)
+					&& !reason.is_empty()
+				{
+					finish_reason = Some(reason.to_string());
+				}
+
+				let delta_text = choice
+					.get("delta")
+					.and_then(|delta| delta.get("content"))
+					.and_then(Value::as_str)
+					.unwrap_or("");
+
+				if !delta_text.is_empty() {
+					full_text.push_str(delta_text);
+					// Best-effort send — if the receiver is dropped we stop streaming.
+					if tx
+						.send(StreamChunk::TextDelta {
+							text: delta_text.to_string(),
+						})
+						.await
+						.is_err()
+					{
+						break;
+					}
+				}
+			}
+		}
+
+		let latency_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+		// Populate token counts from estimates when the provider did not send usage.
+		if prompt_tokens == 0 {
+			prompt_tokens = estimate_prompt_tokens(&full_text);
+		}
+		if output_tokens == 0 {
+			output_tokens = estimate_prompt_tokens(&full_text);
+		}
+
+		// Done is always sent, even on error, so consumers can rely on it as
+		// a stream termination signal.
+		let _ = tx
+			.send(StreamChunk::Done {
+				finish_reason: finish_reason.clone(),
+				prompt_tokens,
+				output_tokens,
+			})
+			.await;
+
+		// Propagate stream error after sending Done.
+		if let Some(error) = stream_error {
+			return Err(error);
+		}
+
+		log_openrouter(
+			LogLevel::Info,
+			"provider streaming request completed",
+			[
+				("provider", OPENROUTER_PROVIDER.to_string()),
+				("requested_model", requested_model.to_string()),
+				("status", "ok".to_string()),
+				("latency_ms", latency_ms.to_string()),
+				("prompt_tokens", prompt_tokens.to_string()),
+				("output_tokens", output_tokens.to_string()),
+			],
+		);
+
+		Ok(ProviderResponse {
+			output: full_text,
+			finish_reason,
+			prompt_tokens,
+			output_tokens,
+			latency_ms,
+		})
+	}
 }
 
+#[async_trait]
 impl LlmProvider for OpenRouterProvider {
 	fn provider_name(&self) -> &'static str {
 		OPENROUTER_PROVIDER
 	}
 
-	fn complete(
+	async fn complete(
 		&self,
 		model: &ModelProfile,
 		request: &GenerationRequest,
 	) -> Result<ProviderResponse, ProviderCallError> {
 		let attempt_models = attempt_model_sequence(&self.config, &model.model_id);
-		let mut headers = HeaderMap::new();
-		headers.insert(
-			reqwest::header::AUTHORIZATION,
-			HeaderValue::from_str(&format!("Bearer {}", self.config.api_key)).map_err(|error| {
-				ProviderCallError::non_retryable(format!("invalid authorization header: {error}"))
-			})?,
-		);
-		headers.insert(
-			reqwest::header::CONTENT_TYPE,
-			HeaderValue::from_static("application/json"),
-		);
-		if let Some(site_url) = &self.config.site_url {
-			headers.insert(
-				HeaderName::from_static("http-referer"),
-				HeaderValue::from_str(site_url).map_err(|error| {
-					ProviderCallError::non_retryable(format!(
-						"invalid HTTP-Referer header: {error}"
-					))
-				})?,
-			);
-		}
-		if let Some(app_name) = &self.config.app_name {
-			headers.insert(
-				HeaderName::from_static("x-openrouter-title"),
-				HeaderValue::from_str(app_name).map_err(|error| {
-					ProviderCallError::non_retryable(format!(
-						"invalid X-OpenRouter-Title header: {error}"
-					))
-				})?,
-			);
-		}
+		let headers = build_headers(&self.config)?;
 
 		let mut last_error = None;
 		for (index, requested_model) in attempt_models.iter().enumerate() {
@@ -358,7 +516,10 @@ impl LlmProvider for OpenRouterProvider {
 				.skip(index + 1)
 				.cloned()
 				.collect::<Vec<_>>();
-			match self.complete_once(&headers, requested_model, &fallback_models, request) {
+			match self
+				.complete_once(&headers, requested_model, &fallback_models, request)
+				.await
+			{
 				Ok(response) => return Ok(response),
 				Err(error) => {
 					let has_next_candidate = index + 1 < attempt_models.len();
@@ -388,7 +549,7 @@ impl LlmProvider for OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
-	fn complete_once(
+	async fn complete_once(
 		&self,
 		headers: &HeaderMap,
 		requested_model: &str,
@@ -403,9 +564,10 @@ impl OpenRouterProvider {
 			.headers(headers.clone())
 			.json(&body)
 			.send()
+			.await
 			.map_err(classify_request_error)?;
 		let status = response.status();
-		let response_body = response.text().map_err(|error| {
+		let response_body = response.text().await.map_err(|error| {
 			if error.is_timeout() || error.is_connect() {
 				ProviderCallError::retryable(format!("failed to read response body: {error}"))
 			} else {
@@ -467,6 +629,40 @@ impl OpenRouterProvider {
 			latency_ms,
 		})
 	}
+}
+
+/// Build the shared HTTP headers for OpenRouter requests.
+fn build_headers(config: &OpenRouterConfig) -> Result<HeaderMap, ProviderCallError> {
+	let mut headers = HeaderMap::new();
+	headers.insert(
+		reqwest::header::AUTHORIZATION,
+		HeaderValue::from_str(&format!("Bearer {}", config.api_key)).map_err(|error| {
+			ProviderCallError::non_retryable(format!("invalid authorization header: {error}"))
+		})?,
+	);
+	headers.insert(
+		reqwest::header::CONTENT_TYPE,
+		HeaderValue::from_static("application/json"),
+	);
+	if let Some(site_url) = &config.site_url {
+		headers.insert(
+			HeaderName::from_static("http-referer"),
+			HeaderValue::from_str(site_url).map_err(|error| {
+				ProviderCallError::non_retryable(format!("invalid HTTP-Referer header: {error}"))
+			})?,
+		);
+	}
+	if let Some(app_name) = &config.app_name {
+		headers.insert(
+			HeaderName::from_static("x-openrouter-title"),
+			HeaderValue::from_str(app_name).map_err(|error| {
+				ProviderCallError::non_retryable(format!(
+					"invalid X-OpenRouter-Title header: {error}"
+				))
+			})?,
+		);
+	}
+	Ok(headers)
 }
 
 fn classify_request_error(error: reqwest::Error) -> ProviderCallError {
@@ -539,6 +735,23 @@ fn build_request_body<'a>(
 	fallback_models: &'a [String],
 	request: &'a GenerationRequest,
 ) -> OpenAiChatCompletionRequest<'a> {
+	build_request_body_inner(model_id, fallback_models, request, false)
+}
+
+fn build_streaming_request_body<'a>(
+	model_id: &'a str,
+	fallback_models: &'a [String],
+	request: &'a GenerationRequest,
+) -> OpenAiChatCompletionRequest<'a> {
+	build_request_body_inner(model_id, fallback_models, request, true)
+}
+
+fn build_request_body_inner<'a>(
+	model_id: &'a str,
+	fallback_models: &'a [String],
+	request: &'a GenerationRequest,
+	stream: bool,
+) -> OpenAiChatCompletionRequest<'a> {
 	let mut messages = Vec::with_capacity(2);
 	if let Some(system_prompt) = request.system_prompt.as_deref() {
 		messages.push(OpenAiChatCompletionMessage {
@@ -557,6 +770,7 @@ fn build_request_body<'a>(
 		messages,
 		max_tokens: request.expected_output_tokens,
 		reasoning: reasoning_config_for_model(model_id),
+		stream,
 	}
 }
 
@@ -643,6 +857,9 @@ struct OpenAiChatCompletionRequest<'a> {
 	messages: Vec<OpenAiChatCompletionMessage<'a>>,
 	max_tokens: u64,
 	reasoning: OpenRouterReasoningConfig,
+	/// When `true` the provider returns a server-sent event stream.
+	#[serde(skip_serializing_if = "std::ops::Not::not")]
+	stream: bool,
 }
 
 #[derive(Debug, Serialize)]
