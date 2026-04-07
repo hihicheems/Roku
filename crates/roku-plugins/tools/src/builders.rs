@@ -759,7 +759,7 @@ impl Tool for PromptedLlmTool {
 
 		let response = self
 			.router
-			.generate(&GenerationRequest {
+			.generate_blocking(&GenerationRequest {
 				system_prompt: Some(self.system_prompt.to_string()),
 				prompt,
 				expected_output_tokens: input.budget_tokens.min(512),
@@ -1226,7 +1226,7 @@ fn plan_skill_creator(
 		execution_request.allowed_script_paths.join(", "),
 	);
 	let response = router
-		.generate(&GenerationRequest {
+		.generate_blocking(&GenerationRequest {
 			system_prompt: Some(
 				"You generate structured plans for local skill creation. Return JSON only."
 					.to_string(),
@@ -1261,7 +1261,7 @@ fn plan_script_execution(
 			.unwrap_or("(unknown)"),
 	);
 	let response = router
-		.generate(&GenerationRequest {
+		.generate_blocking(&GenerationRequest {
 			system_prompt: Some(
 				"You plan safe local script execution for installed skills. Return JSON only."
 					.to_string(),
@@ -2205,6 +2205,7 @@ mod tests {
 	};
 	use crate::config::{BuiltinToolRole, ToolCatalogConfig};
 	use crate::runtime_config::ToolWorkerRuntimeConfig;
+	use async_trait::async_trait;
 	use roku_common_types::RuntimeMemorySections;
 	use roku_plugin_host::{SandboxProfile, Tool, ToolInvocationRequest};
 	use roku_plugin_llm::{
@@ -2433,12 +2434,13 @@ So, I'll output: "星期日""#;
 		prompt: Arc<Mutex<Option<String>>>,
 	}
 
+	#[async_trait]
 	impl LlmProvider for CapturingProvider {
 		fn provider_name(&self) -> &'static str {
 			"capturing-provider"
 		}
 
-		fn complete(
+		async fn complete(
 			&self,
 			_model: &ModelProfile,
 			request: &GenerationRequest,
@@ -2458,12 +2460,13 @@ So, I'll output: "星期日""#;
 		output: String,
 	}
 
+	#[async_trait]
 	impl LlmProvider for StaticOutputProvider {
 		fn provider_name(&self) -> &'static str {
 			"static-output-provider"
 		}
 
-		fn complete(
+		async fn complete(
 			&self,
 			_model: &ModelProfile,
 			_request: &GenerationRequest,

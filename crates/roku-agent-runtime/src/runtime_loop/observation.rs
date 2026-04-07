@@ -243,6 +243,7 @@ mod tests {
 	use std::path::Path;
 	use std::sync::{Arc, LazyLock, Mutex};
 
+	use async_trait::async_trait;
 	use roku_common_types::{ExecutionResourceScope, ToolOutputEnvelope};
 	use roku_plugin_host::{ToolExecutionResult, ToolInvocation, ToolRuntime};
 	use roku_plugin_llm::{
@@ -296,12 +297,13 @@ mod tests {
 		output: String,
 	}
 
+	#[async_trait]
 	impl LlmProvider for StaticJsonProvider {
 		fn provider_name(&self) -> &'static str {
 			"static-json-provider"
 		}
 
-		fn complete(
+		async fn complete(
 			&self,
 			_model: &ModelProfile,
 			_request: &GenerationRequest,

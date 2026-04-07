@@ -209,6 +209,25 @@ pub enum StructuredGenerationError {
 	ParseGuard(#[from] StructuredOutputError),
 }
 
+/// A single chunk emitted during a streaming LLM completion.
+///
+/// Callers receive a sequence of these via an `mpsc::Receiver<StreamChunk>`
+/// and reassemble the full response from `TextDelta` events, then confirm
+/// completion via `Done`.
+#[derive(Debug, Clone)]
+pub enum StreamChunk {
+	/// Incremental text content from the assistant.
+	TextDelta { text: String },
+	/// The stream has finished. `prompt_tokens` and `output_tokens` come
+	/// from the final usage block in the SSE stream; they are zero when the
+	/// provider does not include a usage event.
+	Done {
+		finish_reason: Option<String>,
+		prompt_tokens: u64,
+		output_tokens: u64,
+	},
+}
+
 pub(crate) fn estimate_prompt_tokens(prompt: &str) -> u64 {
 	u64::try_from(prompt.split_whitespace().count())
 		.unwrap_or(u64::MAX)

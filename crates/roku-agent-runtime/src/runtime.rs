@@ -435,7 +435,7 @@ impl GenericAgentRuntime {
 		};
 		let context_projection =
 			build_context_projection(loop_state, &RuntimeMemorySections::default());
-		let response = match router.generate_json_value(&GenerationRequest {
+		let response = match router.generate_json_value_blocking(&GenerationRequest {
 			system_prompt: Some(
 				"You are Roku's paused-loop resume gate. Return only valid JSON.".to_string(),
 			),
@@ -1907,6 +1907,7 @@ fn tool_name_for_role(
 
 #[cfg(test)]
 mod tests {
+	use async_trait::async_trait;
 	use roku_common_types::{
 		AgentContext, AggregationMode, EvidenceItem, JoinPolicy, NodeId, PolicyBindings,
 		ResultStatus, RuntimeLoopTrace, TaskId, TaskNode, TaskNodeKind,
@@ -2399,12 +2400,13 @@ mod tests {
 
 	struct FixedLlmProvider;
 
+	#[async_trait]
 	impl LlmProvider for FixedLlmProvider {
 		fn provider_name(&self) -> &'static str {
 			"test-provider"
 		}
 
-		fn complete(
+		async fn complete(
 			&self,
 			_model: &ModelProfile,
 			_request: &GenerationRequest,
@@ -2459,12 +2461,13 @@ mod tests {
 
 	struct MetaLlmProvider;
 
+	#[async_trait]
 	impl LlmProvider for MetaLlmProvider {
 		fn provider_name(&self) -> &'static str {
 			"meta-provider"
 		}
 
-		fn complete(
+		async fn complete(
 			&self,
 			_model: &ModelProfile,
 			_request: &GenerationRequest,
@@ -2521,12 +2524,13 @@ mod tests {
 		responses: Arc<Mutex<VecDeque<String>>>,
 	}
 
+	#[async_trait]
 	impl LlmProvider for SequenceJsonProvider {
 		fn provider_name(&self) -> &'static str {
 			"sequence-json-provider"
 		}
 
-		fn complete(
+		async fn complete(
 			&self,
 			_model: &ModelProfile,
 			request: &GenerationRequest,
@@ -2584,12 +2588,13 @@ mod tests {
 		output: &'static str,
 	}
 
+	#[async_trait]
 	impl LlmProvider for StaticTextProvider {
 		fn provider_name(&self) -> &'static str {
 			self.name
 		}
 
-		fn complete(
+		async fn complete(
 			&self,
 			_model: &ModelProfile,
 			_request: &GenerationRequest,

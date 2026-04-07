@@ -74,7 +74,7 @@ fn decide_with_router(
 	config: &NextStepRuntimeConfig,
 	catalog: Option<&ResourceCatalog>,
 ) -> Option<NextStepDecision> {
-	let response = match router.generate_json_value(&GenerationRequest {
+	let response = match router.generate_json_value_blocking(&GenerationRequest {
 		system_prompt: Some(
 			"You are Roku's runtime loop next-step decision model. Return only valid JSON."
 				.to_string(),
@@ -1008,6 +1008,7 @@ mod tests {
 	use std::env;
 	use std::sync::{Arc, Mutex};
 
+	use async_trait::async_trait;
 	use roku_common_types::{ResourceSelector, RuntimeMemorySections};
 	use roku_plugin_catalog::ResourceCatalog;
 	use roku_plugin_llm::{
@@ -1036,12 +1037,13 @@ mod tests {
 		responses: Arc<Mutex<VecDeque<String>>>,
 	}
 
+	#[async_trait]
 	impl LlmProvider for PromptRecordingProvider {
 		fn provider_name(&self) -> &'static str {
 			"tool-loop-test-provider"
 		}
 
-		fn complete(
+		async fn complete(
 			&self,
 			_model: &ModelProfile,
 			request: &GenerationRequest,

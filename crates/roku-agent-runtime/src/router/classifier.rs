@@ -607,7 +607,7 @@ fn classify_with_llm(
 		context.availability_snapshot,
 		context.agent_runtime_config,
 	);
-	let response = router.generate_json_value(&GenerationRequest {
+	let response = router.generate_json_value_blocking(&GenerationRequest {
 		system_prompt: Some(
 			"You are Roku's route classifier. Return only valid JSON matching the requested schema."
 				.to_string(),

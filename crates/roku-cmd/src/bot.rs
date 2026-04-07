@@ -1343,6 +1343,7 @@ mod tests {
 	use std::io::{Cursor, Write};
 	use std::sync::{Arc, Mutex};
 
+	use async_trait::async_trait;
 	use roku_agent_runtime::{
 		AskUserPayload, GenericAgentRuntime, IntentFamily, LoopContext, LoopState, LoopStatus,
 		RouteDecision, RouteRisk,
@@ -1448,12 +1449,13 @@ mod tests {
 		}
 	}
 
+	#[async_trait]
 	impl LlmProvider for SessionAwareLlmProvider {
 		fn provider_name(&self) -> &'static str {
 			"session-test-provider"
 		}
 
-		fn complete(
+		async fn complete(
 			&self,
 			_model: &ModelProfile,
 			request: &GenerationRequest,
