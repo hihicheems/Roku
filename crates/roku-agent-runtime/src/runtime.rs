@@ -2798,7 +2798,7 @@ mod tests {
 			"action": "call_tool",
 			"tool_name": "command.run",
 			"arguments": {
-				"command": "just lint"
+				"command": "dd if=/dev/zero of=/dev/null"
 			},
 			"reason": "Run the requested command directly.",
 			"final_message": null
@@ -2817,7 +2817,7 @@ mod tests {
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-command-approval".to_string()),
 			session_id: "session-command-approval".to_string(),
-			goal: "执行下 just lint".to_string(),
+			goal: "run dd if=/dev/zero of=/dev/null".to_string(),
 			planning_mode_hint: None,
 			conversation_history: Vec::new(),
 		};
@@ -3390,7 +3390,7 @@ mod tests {
 				"req-command-run-visibility-boundary".to_string(),
 			),
 			session_id: "session-command-run-visibility-boundary".to_string(),
-			goal: "Run this command: `touch phase3-visibility-boundary.tmp`".to_string(),
+			goal: "Run this command: `nc -l 1234`".to_string(),
 			planning_mode_hint: None,
 			conversation_history: Vec::new(),
 		};
@@ -3817,10 +3817,9 @@ mod tests {
 		fs::write(&duplicate_a_path, "duplicate a\n").expect("duplicate fixture A should write");
 		fs::write(&duplicate_b_path, "duplicate b\n").expect("duplicate fixture B should write");
 
-		let command_trace =
-			runtime_loop_trace_for_goal(&runtime, "Run this command: `touch phase3-boundary.tmp`");
+		let command_trace = runtime_loop_trace_for_goal(&runtime, "Run this command: `nc -l 1234`");
 		assert_regression_case(
-			"command-write-boundary",
+			"command-deny-boundary",
 			crate::runtime_loop::RegressionSuiteKind::Boundary,
 			&command_trace,
 			crate::runtime_loop::RuntimeLoopRegressionExpectation {

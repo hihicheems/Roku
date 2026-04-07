@@ -19,7 +19,7 @@ use roku_common_types::{
 	InvocationMode, PolicyDecision, PolicyOutcome, PolicyReasonCode,
 };
 
-use super::prepare::validate_allowed_command;
+use super::prepare::evaluate_command_policy as evaluate_command_execution_policy;
 
 pub(super) fn evaluate_command_policy(execution: &CanonicalExecution) -> PolicyDecision {
 	if execution.invocation_mode != InvocationMode::DirectExec || execution.shell_context.is_some()
@@ -56,7 +56,7 @@ pub(super) fn evaluate_command_policy(execution: &CanonicalExecution) -> PolicyD
 	}
 
 	let arguments = execution.argv.get(1..).unwrap_or(&[]);
-	if validate_allowed_command(&execution.program, arguments).is_err() {
+	if evaluate_command_execution_policy(&execution.program, arguments).is_err() {
 		return require_approval(PolicyReasonCode::ApprovalRequiredByUntrustedProgram);
 	}
 
