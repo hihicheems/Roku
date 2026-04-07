@@ -32,7 +32,7 @@ use crate::runtime_loop::{
 	ask_user::ask_user_from_observation, file_name_from_path, summarize_observation,
 };
 
-pub(crate) fn decide_tool_loop_next_step(
+pub(crate) async fn decide_tool_loop_next_step(
 	loop_state: &LoopState,
 	context_projection: &ContextProjection,
 	router: Option<&LlmRouter>,
@@ -53,20 +53,16 @@ pub(crate) fn decide_tool_loop_next_step(
 		);
 	}
 	if let Some(router) = router
-		&& let Some(decision) = decide_with_router(
-			loop_state,
-			context_projection,
-			router,
-			user_reply,
-			config,
-			catalog,
-		) {
+		&& let Some(decision) =
+			decide_with_router(loop_state, context_projection, router, user_reply, config, catalog)
+				.await
+	{
 		return decision;
 	}
 	deterministic_next_step(loop_state, user_reply, catalog)
 }
 
-fn decide_with_router(
+async fn decide_with_router(
 	loop_state: &LoopState,
 	context_projection: &ContextProjection,
 	router: &LlmRouter,
@@ -74,18 +70,21 @@ fn decide_with_router(
 	config: &NextStepRuntimeConfig,
 	catalog: Option<&ResourceCatalog>,
 ) -> Option<NextStepDecision> {
-	let response = match router.generate_json_value_blocking(&GenerationRequest {
-		system_prompt: Some(
-			"You are Roku's runtime loop next-step decision model. Return only valid JSON."
-				.to_string(),
-		),
-		prompt: tool_loop_prompt(context_projection, user_reply),
-		expected_output_tokens: config.expected_output_tokens,
-		risk_tier: RiskTier::Low,
-		preferred_provider: None,
-		budget_tokens_remaining: config.budget_tokens_remaining,
-		budget_cost_remaining_usd: config.budget_cost_remaining_usd,
-	}) {
+	let response = match router
+		.generate_json_value(&GenerationRequest {
+			system_prompt: Some(
+				"You are Roku's runtime loop next-step decision model. Return only valid JSON."
+					.to_string(),
+			),
+			prompt: tool_loop_prompt(context_projection, user_reply),
+			expected_output_tokens: config.expected_output_tokens,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: config.budget_tokens_remaining,
+			budget_cost_remaining_usd: config.budget_cost_remaining_usd,
+		})
+		.await
+	{
 		Ok(response) => response,
 		Err(error) => {
 			log_tool_loop_warning(
@@ -1265,14 +1264,20 @@ mod tests {
 			"final_message": null
 		})]);
 
-		let decision = decide_tool_loop_next_step(
-			&loop_state,
-			&projection,
-			Some(&router),
-			None,
-			&NextStepRuntimeConfig::default(),
-			Some(&test_catalog()),
-		);
+		// decide_tool_loop_next_step is async; bridge via block_on so that the LlmRouter
+		// (which holds a blocking_runtime) is dropped in sync scope rather than async scope.
+		let decision = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for decide-next-step bridge should build")
+			.block_on(decide_tool_loop_next_step(
+				&loop_state,
+				&projection,
+				Some(&router),
+				None,
+				&NextStepRuntimeConfig::default(),
+				Some(&test_catalog()),
+			));
 
 		assert_eq!(
 			decision.action,
@@ -1284,8 +1289,8 @@ mod tests {
 		assert!(prompts[0].contains("partial inventory summary"));
 	}
 
-	#[test]
-	fn resolved_filesystem_find_can_continue_into_the_consumer_tool() {
+	#[tokio::test]
+	async fn resolved_filesystem_find_can_continue_into_the_consumer_tool() {
 		let mut loop_state = sample_filesystem_loop_state();
 		let resolved_path = env::current_dir()
 			.expect("cwd should resolve for tests")
@@ -1312,7 +1317,8 @@ mod tests {
 			None,
 			&NextStepRuntimeConfig::default(),
 			Some(&test_catalog()),
-		);
+		)
+		.await;
 
 		assert_eq!(
 			decision.action,
@@ -1326,8 +1332,8 @@ mod tests {
 		);
 	}
 
-	#[test]
-	fn multiple_candidate_filesystem_match_asks_user_without_a_live_router() {
+	#[tokio::test]
+	async fn multiple_candidate_filesystem_match_asks_user_without_a_live_router() {
 		let mut loop_state = sample_filesystem_loop_state();
 		let cwd = env::current_dir().expect("cwd should resolve for tests");
 		let root_manifest = cwd.join("Cargo.toml").display().to_string();
@@ -1355,7 +1361,8 @@ mod tests {
 			None,
 			&NextStepRuntimeConfig::default(),
 			Some(&test_catalog()),
-		);
+		)
+		.await;
 
 		assert_eq!(
 			decision.action,
@@ -1413,14 +1420,20 @@ mod tests {
 			"final_message": null
 		})]);
 
-		let decision = decide_tool_loop_next_step(
-			&loop_state,
-			&projection,
-			Some(&router),
-			None,
-			&NextStepRuntimeConfig::default(),
-			Some(&test_catalog()),
-		);
+		// decide_tool_loop_next_step is async; bridge via block_on so that the LlmRouter
+		// (which holds a blocking_runtime) is dropped in sync scope rather than async scope.
+		let decision = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for decide-next-step bridge should build")
+			.block_on(decide_tool_loop_next_step(
+				&loop_state,
+				&projection,
+				Some(&router),
+				None,
+				&NextStepRuntimeConfig::default(),
+				Some(&test_catalog()),
+			));
 
 		assert_eq!(
 			decision.action,
@@ -1434,8 +1447,8 @@ mod tests {
 		);
 	}
 
-	#[test]
-	fn bootstrap_respects_seed_order_without_natural_language_tool_override() {
+	#[tokio::test]
+	async fn bootstrap_respects_seed_order_without_natural_language_tool_override() {
 		let loop_state = sample_bootstrap_loop_state(
 			"Read Cargo.toml and summarize the workspace layout.",
 			vec!["fs.find", "fs.read_text"],
@@ -1450,7 +1463,8 @@ mod tests {
 			None,
 			&NextStepRuntimeConfig::default(),
 			Some(&test_catalog()),
-		);
+		)
+		.await;
 
 		assert_eq!(
 			decision.action,
@@ -1459,8 +1473,8 @@ mod tests {
 		assert_eq!(decision.tool_name.as_deref(), Some("fs.find"));
 	}
 
-	#[test]
-	fn bootstrap_does_not_amplify_explanatory_python_seed_into_execution() {
+	#[tokio::test]
+	async fn bootstrap_does_not_amplify_explanatory_python_seed_into_execution() {
 		let loop_state = sample_bootstrap_loop_state(
 			"Explain what this Python code does: `print(1)`",
 			vec!["python.run"],
@@ -1475,7 +1489,8 @@ mod tests {
 			None,
 			&NextStepRuntimeConfig::default(),
 			Some(&test_catalog()),
-		);
+		)
+		.await;
 
 		assert_eq!(
 			decision.action,
@@ -1484,8 +1499,8 @@ mod tests {
 		assert_eq!(decision.tool_name.as_deref(), Some("general.execute"));
 	}
 
-	#[test]
-	fn bootstrap_prefers_inspect_for_explicit_paths_without_a_clear_action() {
+	#[tokio::test]
+	async fn bootstrap_prefers_inspect_for_explicit_paths_without_a_clear_action() {
 		let loop_state = sample_bootstrap_loop_state(
 			"Cargo.toml 这个文件帮我看看情况。",
 			vec!["fs.inspect", "fs.read_text", "fs.list_dir"],
@@ -1505,7 +1520,8 @@ mod tests {
 			None,
 			&NextStepRuntimeConfig::default(),
 			Some(&test_catalog()),
-		);
+		)
+		.await;
 
 		assert_eq!(
 			decision.action,
@@ -1514,8 +1530,8 @@ mod tests {
 		assert_eq!(decision.tool_name.as_deref(), Some("fs.inspect"));
 	}
 
-	#[test]
-	fn bootstrap_uses_lookup_first_seed_for_non_concrete_basenames() {
+	#[tokio::test]
+	async fn bootstrap_uses_lookup_first_seed_for_non_concrete_basenames() {
 		let loop_state = sample_bootstrap_loop_state(
 			"我是说，帮我看看cmd那个crate下的runtime.rs，里面的第100行是什么内容？输出出来",
 			vec!["fs.find", "fs.glob", "fs.inspect"],
@@ -1530,7 +1546,8 @@ mod tests {
 			None,
 			&NextStepRuntimeConfig::default(),
 			Some(&test_catalog()),
-		);
+		)
+		.await;
 
 		assert_eq!(
 			decision.action,
@@ -1561,14 +1578,20 @@ mod tests {
 			"final_message": null
 		})]);
 
-		let decision = decide_tool_loop_next_step(
-			&loop_state,
-			&projection,
-			Some(&router),
-			None,
-			&NextStepRuntimeConfig::default(),
-			Some(&test_catalog()),
-		);
+		// decide_tool_loop_next_step is async; bridge via block_on so that the LlmRouter
+		// (which holds a blocking_runtime) is dropped in sync scope rather than async scope.
+		let decision = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for decide-next-step bridge should build")
+			.block_on(decide_tool_loop_next_step(
+				&loop_state,
+				&projection,
+				Some(&router),
+				None,
+				&NextStepRuntimeConfig::default(),
+				Some(&test_catalog()),
+			));
 
 		assert_eq!(
 			decision.action,
@@ -1616,14 +1639,20 @@ mod tests {
 			}),
 		]);
 
-		let decision = decide_tool_loop_next_step(
-			&loop_state,
-			&projection,
-			Some(&router),
-			None,
-			&NextStepRuntimeConfig::default(),
-			Some(&test_catalog()),
-		);
+		// decide_tool_loop_next_step is async; bridge via block_on so that the LlmRouter
+		// (which holds a blocking_runtime) is dropped in sync scope rather than async scope.
+		let decision = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for decide-next-step bridge should build")
+			.block_on(decide_tool_loop_next_step(
+				&loop_state,
+				&projection,
+				Some(&router),
+				None,
+				&NextStepRuntimeConfig::default(),
+				Some(&test_catalog()),
+			));
 
 		assert_eq!(
 			decision.action,
@@ -1632,8 +1661,8 @@ mod tests {
 		assert_eq!(decision.tool_name.as_deref(), Some("fs.find"));
 	}
 
-	#[test]
-	fn bootstrap_keeps_python_run_for_explicit_execution_requests() {
+	#[tokio::test]
+	async fn bootstrap_keeps_python_run_for_explicit_execution_requests() {
 		let loop_state = sample_bootstrap_loop_state(
 			"Run this Python code: `print(1)`",
 			vec!["python.run"],
@@ -1648,7 +1677,8 @@ mod tests {
 			None,
 			&NextStepRuntimeConfig::default(),
 			Some(&test_catalog()),
-		);
+		)
+		.await;
 
 		assert_eq!(
 			decision.action,
@@ -1657,8 +1687,8 @@ mod tests {
 		assert_eq!(decision.tool_name.as_deref(), Some("python.run"));
 	}
 
-	#[test]
-	fn bootstrap_does_not_amplify_explanatory_shell_seed_into_execution() {
+	#[tokio::test]
+	async fn bootstrap_does_not_amplify_explanatory_shell_seed_into_execution() {
 		let loop_state = sample_bootstrap_loop_state(
 			"Explain what the shell command `pwd` does, but do not run it.",
 			vec!["command.run"],
@@ -1673,7 +1703,8 @@ mod tests {
 			None,
 			&NextStepRuntimeConfig::default(),
 			Some(&test_catalog()),
-		);
+		)
+		.await;
 
 		assert_eq!(
 			decision.action,

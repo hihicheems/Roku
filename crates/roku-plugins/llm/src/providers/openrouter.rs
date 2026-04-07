@@ -374,15 +374,16 @@ impl OpenRouterProvider {
 		let mut prompt_tokens: u64 = 0;
 		let mut output_tokens: u64 = 0;
 
-			// Track stream errors to report after sending Done.
+		// Track stream errors to report after sending Done.
 		let mut stream_error: Option<ProviderCallError> = None;
 
 		while let Some(event_result) = stream.next().await {
 			let event = match event_result {
 				Ok(event) => event,
 				Err(error) => {
-					stream_error =
-						Some(ProviderCallError::retryable(format!("SSE stream error: {error}")));
+					stream_error = Some(ProviderCallError::retryable(format!(
+						"SSE stream error: {error}"
+					)));
 					break;
 				}
 			};
