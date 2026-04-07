@@ -7,6 +7,11 @@ authors.workspace = true
 
 [dependencies]
 actix-web = "4"
+async-trait = "0.1"
 roku-common-types = { path = "../roku-common-types" }
 roku-runtime-service = { path = "../roku-runtime-service" }
 serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }

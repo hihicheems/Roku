@@ -53,9 +53,15 @@ pub(crate) async fn decide_tool_loop_next_step(
 		);
 	}
 	if let Some(router) = router
-		&& let Some(decision) =
-			decide_with_router(loop_state, context_projection, router, user_reply, config, catalog)
-				.await
+		&& let Some(decision) = decide_with_router(
+			loop_state,
+			context_projection,
+			router,
+			user_reply,
+			config,
+			catalog,
+		)
+		.await
 	{
 		return decision;
 	}

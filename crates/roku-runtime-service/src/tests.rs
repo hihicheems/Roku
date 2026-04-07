@@ -866,11 +866,12 @@ fn compact_approval_id_stays_short_for_telegram_callbacks() {
 	assert!(format!("ap:a:{approval_id}").len() <= 64);
 }
 
-#[test]
-fn new_requests_execute_without_graph_compilation_and_expose_direct_runtime_markers() {
+#[tokio::test(flavor = "multi_thread")]
+async fn new_requests_execute_without_graph_compilation_and_expose_direct_runtime_markers() {
 	let service = RuntimeService::default();
 	let response = service
 		.execute(request("What skills and tools do you have right now?"))
+		.await
 		.expect("direct request should succeed");
 
 	assert_eq!(
@@ -952,20 +953,21 @@ fn runtime_service_can_expose_live_fallback_mode_report() {
 	);
 }
 
-#[test]
-fn recall_failures_do_not_block_direct_execution() {
+#[tokio::test(flavor = "multi_thread")]
+async fn recall_failures_do_not_block_direct_execution() {
 	let service =
 		RuntimeService::default().with_long_term_memory_backend(Arc::new(FailingRecallBackend));
 
 	let response = service
 		.execute(request("What skills and tools do you have right now?"))
+		.await
 		.expect("direct request should still succeed");
 
 	assert_eq!(response.status, ResponseStatus::Succeeded);
 }
 
-#[test]
-fn successful_requests_write_back_when_policy_effectively_enables_it() {
+#[tokio::test(flavor = "multi_thread")]
+async fn successful_requests_write_back_when_policy_effectively_enables_it() {
 	let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
 	let service = RuntimeService::default()
 		.with_long_term_memory_backend(backend.clone())
@@ -973,6 +975,7 @@ fn successful_requests_write_back_when_policy_effectively_enables_it() {
 
 	let response = service
 		.execute(request("What skills and tools do you have right now?"))
+		.await
 		.expect("direct request should succeed");
 
 	assert_eq!(response.status, ResponseStatus::Succeeded);
@@ -980,8 +983,8 @@ fn successful_requests_write_back_when_policy_effectively_enables_it() {
 	assert_eq!(backend.stored_records().len(), 1);
 }
 
-#[test]
-fn successful_requests_skip_write_back_when_policy_effectively_disables_it() {
+#[tokio::test(flavor = "multi_thread")]
+async fn successful_requests_skip_write_back_when_policy_effectively_disables_it() {
 	let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
 	let service = RuntimeService::default()
 		.with_long_term_memory_backend(backend.clone())
@@ -989,6 +992,7 @@ fn successful_requests_skip_write_back_when_policy_effectively_disables_it() {
 
 	let response = service
 		.execute(request("What skills and tools do you have right now?"))
+		.await
 		.expect("direct request should succeed");
 
 	assert_eq!(response.status, ResponseStatus::Succeeded);
@@ -996,13 +1000,14 @@ fn successful_requests_skip_write_back_when_policy_effectively_disables_it() {
 	assert!(backend.stored_records().is_empty());
 }
 
-#[test]
-fn multistep_requests_enter_the_generic_loop_for_new_requests() {
+#[tokio::test(flavor = "multi_thread")]
+async fn multistep_requests_enter_the_generic_loop_for_new_requests() {
 	let service = RuntimeService::default();
 	let response = service
 		.execute(request(
 			"Compare two migration strategies and then execute the better one.",
 		))
+		.await
 		.expect("multistep request should still execute through the direct runtime");
 
 	assert_eq!(response.status, ResponseStatus::Succeeded);
@@ -1022,8 +1027,9 @@ fn multistep_requests_enter_the_generic_loop_for_new_requests() {
 	assert_eq!(payload["runtime_loop"], "tool");
 }
 
-#[test]
-fn pending_filesystem_tool_loops_survive_resume_through_the_generic_loop_driver_when_work_fails() {
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_filesystem_tool_loops_survive_resume_through_the_generic_loop_driver_when_work_fails()
+ {
 	let service = RuntimeService::default();
 	let loop_state = pending_filesystem_candidate_loop_state();
 	service
@@ -1032,6 +1038,7 @@ fn pending_filesystem_tool_loops_survive_resume_through_the_generic_loop_driver_
 
 	let response = service
 		.execute(request("Cargo.toml"))
+		.await
 		.expect("pending loop should resume");
 
 	assert_eq!(response.status, ResponseStatus::Failed);
@@ -1056,14 +1063,15 @@ fn pending_filesystem_tool_loops_survive_resume_through_the_generic_loop_driver_
 	assert!(!response.artifacts.is_empty());
 }
 
-#[test]
-fn configured_pending_loop_snapshot_store_survives_generic_loop_resume_failures() {
+#[tokio::test(flavor = "multi_thread")]
+async fn configured_pending_loop_snapshot_store_survives_generic_loop_resume_failures() {
 	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
 	store.seed(pending_filesystem_candidate_loop_state());
 	let service = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
 
 	let response = service
 		.execute(request("Cargo.toml"))
+		.await
 		.expect("pending loop should resume from the configured snapshot store");
 
 	assert_eq!(response.status, ResponseStatus::Failed);
@@ -1078,8 +1086,8 @@ fn configured_pending_loop_snapshot_store_survives_generic_loop_resume_failures(
 	assert!(store.is_empty());
 }
 
-#[test]
-fn reconstructed_service_instances_survive_generic_pending_loop_failures_from_shared_snapshot_store()
+#[tokio::test(flavor = "multi_thread")]
+async fn reconstructed_service_instances_survive_generic_pending_loop_failures_from_shared_snapshot_store()
  {
 	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
 	let writer = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
@@ -1091,6 +1099,7 @@ fn reconstructed_service_instances_survive_generic_pending_loop_failures_from_sh
 	let service = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
 	let response = service
 		.execute(request("Cargo.toml"))
+		.await
 		.expect("reconstructed service should resume the stored pending loop");
 
 	assert_eq!(response.status, ResponseStatus::Failed);
@@ -1126,8 +1135,8 @@ fn reconstructed_service_instances_survive_generic_pending_loop_failures_from_sh
 	assert!(store.is_empty());
 }
 
-#[test]
-fn reconstructed_service_instances_resume_generic_pending_loops_to_success_from_shared_snapshot_store()
+#[tokio::test(flavor = "multi_thread")]
+async fn reconstructed_service_instances_resume_generic_pending_loops_to_success_from_shared_snapshot_store()
  {
 	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
 	let (pending_loop, selected_manifest) = pending_filesystem_resume_success_loop_state();
@@ -1140,6 +1149,7 @@ fn reconstructed_service_instances_resume_generic_pending_loops_to_success_from_
 	let service = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
 	let response = service
 		.execute(request(&selected_manifest))
+		.await
 		.expect("reconstructed service should resume the stored pending loop to success");
 
 	assert_eq!(
@@ -1192,8 +1202,8 @@ fn reconstructed_service_instances_resume_generic_pending_loops_to_success_from_
 	assert!(store.is_empty());
 }
 
-#[test]
-fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
 	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
 	let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
 	let mut memory = MemoryWriteRequest::new(
@@ -1244,11 +1254,10 @@ fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
 		freeform_pause.resume_contract,
 		AskUserResumeContract::NoAutomaticResume
 	);
-	let assessment =
-		crate::helpers::bridge_async_to_sync(service.runtime.assess_awaiting_user_resume(
-			&loop_state,
-			"What skills and tools do you have right now?",
-		));
+	let assessment = service
+		.runtime
+		.assess_awaiting_user_resume(&loop_state, "What skills and tools do you have right now?")
+		.await;
 	assert!(!assessment.should_resume);
 	assert!(
 		assessment.reason.contains("fresh intake"),
@@ -1261,6 +1270,7 @@ fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
 
 	let response = service
 		.execute(request("What skills and tools do you have right now?"))
+		.await
 		.expect("fresh intake should succeed");
 
 	assert_eq!(response.status, ResponseStatus::Succeeded);
@@ -1645,8 +1655,8 @@ fn execution_approval_tickets_reject_mismatched_frozen_digest() {
 	assert!(error.message.contains("digest"));
 }
 
-#[test]
-fn write_back_roundtrip_persists_and_recalls_via_in_memory_backend() {
+#[tokio::test(flavor = "multi_thread")]
+async fn write_back_roundtrip_persists_and_recalls_via_in_memory_backend() {
 	let backend = Arc::new(InMemoryLongTermMemoryBackend::default());
 	let policy = ConservativeMemoryLifecyclePolicy {
 		recall_limit: 8,
@@ -1659,6 +1669,7 @@ fn write_back_roundtrip_persists_and_recalls_via_in_memory_backend() {
 	let goal = "What skills and tools do you have right now?";
 	let response = service
 		.execute(request(goal))
+		.await
 		.expect("request with conservative write-back should succeed");
 
 	assert_eq!(response.status, ResponseStatus::Succeeded);
@@ -1710,8 +1721,8 @@ fn write_back_roundtrip_persists_and_recalls_via_in_memory_backend() {
 	// 5. Verify recall includes the written memory.
 }
 
-#[test]
-fn write_back_failure_does_not_block_response() {
+#[tokio::test(flavor = "multi_thread")]
+async fn write_back_failure_does_not_block_response() {
 	let policy = ConservativeMemoryLifecyclePolicy {
 		recall_limit: 8,
 		automatic_write_back: true,
@@ -1722,6 +1733,7 @@ fn write_back_failure_does_not_block_response() {
 
 	let response = service
 		.execute(request("What skills and tools do you have right now?"))
+		.await
 		.expect("request should succeed even when write-back fails");
 
 	assert_eq!(

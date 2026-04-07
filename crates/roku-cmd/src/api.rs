@@ -190,7 +190,7 @@ mod tests {
 		assert_eq!(config.json_limit_bytes, 8 * 1024);
 	}
 
-	#[actix_web::test]
+	#[tokio::test(flavor = "multi_thread")]
 	async fn submit_route_resumes_pending_loop_snapshots_from_shared_memory_substrate() {
 		let backend = RecordingPendingLoopSnapshotBackend::default();
 		let (pending_loop, selected_topic) = pending_inventory_resume_success_loop_state();

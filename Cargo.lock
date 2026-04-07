@@ -1727,9 +1727,11 @@ name = "roku-api-gateway"
 version = "0.1.0"
 dependencies = [
  "actix-web",
+ "async-trait",
  "roku-common-types",
  "roku-runtime-service",
  "serde",
+ "tokio",
 ]
 
 [[package]]
@@ -1776,6 +1778,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tokio",
  "toml",
  "zip 8.5.0",
 ]

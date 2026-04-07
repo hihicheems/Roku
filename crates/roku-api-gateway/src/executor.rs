@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
+use async_trait::async_trait;
 use roku_common_types::{
 	ApprovalDecision, ApprovalId, ApprovalTicket, Artifact, ArtifactId, ExperimentRun,
 	RequestEnvelope, RequestId, ResponseEnvelope, ResponseStatus, RuntimeError, TaskId,
@@ -43,8 +44,9 @@ impl Gateway {
 	}
 }
 
+#[async_trait]
 pub trait RequestExecutor: Send + Sync {
-	fn execute(&self, request: RequestEnvelope) -> Result<ResponseEnvelope, RuntimeError>;
+	async fn execute(&self, request: RequestEnvelope) -> Result<ResponseEnvelope, RuntimeError>;
 }
 
 pub trait ApprovalExecutor: Send + Sync {
@@ -80,8 +82,9 @@ impl<T> GatewayExecutor for T where T: RequestExecutor + ApprovalExecutor + Task
 #[derive(Debug, Default)]
 pub struct NoopExecutor;
 
+#[async_trait]
 impl RequestExecutor for NoopExecutor {
-	fn execute(&self, request: RequestEnvelope) -> Result<ResponseEnvelope, RuntimeError> {
+	async fn execute(&self, request: RequestEnvelope) -> Result<ResponseEnvelope, RuntimeError> {
 		Ok(ResponseEnvelope {
 			request_id: request.request_id,
 			status: ResponseStatus::Succeeded,
@@ -135,17 +138,52 @@ impl TaskDataExecutor for NoopExecutor {
 
 pub struct RuntimeServiceExecutor {
 	service: Arc<RuntimeService>,
+	/// Lazily created multi-thread runtime. Only initialized when running
+	/// under actix's current-thread runtime (where `block_in_place` panics).
+	/// In multi-thread contexts (roku-cmd, tests), requests run directly on
+	/// the current runtime and this is never created — avoiding the
+	/// "Cannot drop a runtime in async context" panic on cleanup.
+	fallback_runtime: std::sync::OnceLock<Arc<tokio::runtime::Runtime>>,
 }
 
 impl RuntimeServiceExecutor {
 	pub fn new(service: Arc<RuntimeService>) -> Self {
-		Self { service }
+		Self {
+			service,
+			fallback_runtime: std::sync::OnceLock::new(),
+		}
+	}
+
+	fn get_or_create_fallback_runtime(&self) -> &Arc<tokio::runtime::Runtime> {
+		self.fallback_runtime.get_or_init(|| {
+			Arc::new(
+				tokio::runtime::Builder::new_multi_thread()
+					.enable_all()
+					.build()
+					.expect("fallback multi-thread runtime for gateway executor"),
+			)
+		})
 	}
 }
 
+#[async_trait]
 impl RequestExecutor for RuntimeServiceExecutor {
-	fn execute(&self, request: RequestEnvelope) -> Result<ResponseEnvelope, RuntimeError> {
-		self.service.execute(request)
+	async fn execute(&self, request: RequestEnvelope) -> Result<ResponseEnvelope, RuntimeError> {
+		let service = self.service.clone();
+		// In a multi-thread runtime (roku-cmd, tests), block_in_place works
+		// natively — run directly. Under actix's current-thread runtime,
+		// delegate to a dedicated multi-thread runtime.
+		if matches!(
+			tokio::runtime::Handle::current().runtime_flavor(),
+			tokio::runtime::RuntimeFlavor::MultiThread
+		) {
+			service.execute(request).await
+		} else {
+			self.get_or_create_fallback_runtime()
+				.spawn(async move { service.execute(request).await })
+				.await
+				.map_err(|join_error| RuntimeError::new(&join_error.to_string()))?
+		}
 	}
 }
 

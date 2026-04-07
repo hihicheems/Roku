@@ -12,18 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_agent_runtime::{DirectRoutePlan, LoopState, RouteEscalationPlan};
+use roku_agent_runtime::{DirectRoutePlan, LoopEventSender, LoopState, RouteEscalationPlan};
 use roku_common_types::{
 	ErrorClass, EvidenceItem, RequestEnvelope, ResponseEnvelope, ResponseStatus, ResultEnvelope,
 	ResultStatus, RuntimeError, RuntimeMemorySections, Task, TaskEventKind, TaskNode, TaskState,
 };
 
 use crate::execution::pending_execution_approval_fact;
-use crate::helpers::{bridge_async_to_sync, failure_message, result_message};
+use crate::helpers::{failure_message, result_message};
 use crate::{ContextBundle, RuntimeService};
 
 impl RuntimeService {
-	pub(super) fn process_direct_route(
+	pub(super) async fn process_direct_route(
 		&self,
 		task: &mut Task,
 		request: &RequestEnvelope,
@@ -31,20 +31,20 @@ impl RuntimeService {
 		loop_state: &mut LoopState,
 		context_bundle: &ContextBundle,
 		runtime_memory_sections: &RuntimeMemorySections,
+		event_sender: Option<&LoopEventSender>,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let initial_history_len = loop_state.history.len();
-		// Unit 3 bridge: execute_tool_loop is now async. Bridge via block_in_place when
-		// already inside a runtime (e.g., actix integration tests) or via a fresh multi-thread
-		// runtime otherwise. A multi-thread runtime is required because execute_tool_loop uses
-		// tokio::task::block_in_place internally for synchronous tool invocations.
-		let execution = bridge_async_to_sync(self.runtime.execute_tool_loop(
-			&task.task_id,
-			request,
-			loop_state,
-			runtime_memory_sections,
-			None,
-			None,
-		));
+		let execution = self
+			.runtime
+			.execute_tool_loop(
+				&task.task_id,
+				request,
+				loop_state,
+				runtime_memory_sections,
+				None,
+				event_sender,
+			)
+			.await;
 		self.record_runtime_loop_history(loop_state, initial_history_len);
 		let response =
 			self.finalize_direct_path(task, execution.node, execution.result, execution.message)?;

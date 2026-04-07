@@ -393,14 +393,18 @@ impl RuntimeService {
 		)
 	}
 
-	pub fn execute(&self, request: RequestEnvelope) -> Result<ResponseEnvelope, RuntimeError> {
-		self.execute_with_mode(request, RunMode::Normal)
+	pub async fn execute(
+		&self,
+		request: RequestEnvelope,
+	) -> Result<ResponseEnvelope, RuntimeError> {
+		self.execute_with_mode(request, RunMode::Normal, None).await
 	}
 
-	pub fn execute_with_mode(
+	pub async fn execute_with_mode(
 		&self,
 		request: RequestEnvelope,
 		mode: RunMode,
+		event_sender: Option<&roku_agent_runtime::LoopEventSender>,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		self.metrics.inc_requests();
 		let normalized_request = normalize_request(&request);
@@ -446,7 +450,9 @@ impl RuntimeService {
 
 		self.record_transition(&mut task, TaskState::Planning, "classify direct route")?;
 
-		RuntimeLoopOwner::new(self).execute_request(&mut task, &normalized_request)
+		RuntimeLoopOwner::new(self)
+			.execute_request(&mut task, &normalized_request, event_sender)
+			.await
 	}
 
 	pub fn get_approval(

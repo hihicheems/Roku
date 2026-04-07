@@ -242,7 +242,12 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 			},
 		)?;
 
-		let execution = self.service.execute(request);
+		// The TelegramInteractionHandler trait is sync. Bridge the async RuntimeService here
+		// so callers remain runtime-agnostic. block_in_place is safe because execute_cli
+		// always drives this handler from within a multi-thread tokio runtime.
+		let execution = tokio::task::block_in_place(|| {
+			tokio::runtime::Handle::current().block_on(self.service.execute(request))
+		});
 		self.transport_state
 			.clear_pending_loop_session_mirror(&session_id)?;
 
@@ -1564,8 +1569,8 @@ mod tests {
 		);
 	}
 
-	#[test]
-	fn telegram_handler_keeps_short_term_continuity_across_regular_requests() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn telegram_handler_keeps_short_term_continuity_across_regular_requests() {
 		let mut router = LlmRouter::new(RoutingPolicy {
 			max_request_cost_usd: 1.0,
 			max_latency_ms: 5_000,
@@ -1617,10 +1622,15 @@ mod tests {
 		assert_eq!(turns[0].content, "今天周几？");
 		assert_eq!(turns[2].content, "沙县小吃是什么？");
 		assert_eq!(turns[4].content, "我刚问了你什么？");
+
+		// LlmRouter holds a blocking tokio runtime. Dropping it inside an async context panics
+		// ("Cannot drop a runtime in a context where blocking is not allowed"). Use block_in_place
+		// to drop it in a blocking-allowed scope.
+		tokio::task::block_in_place(|| drop(handler));
 	}
 
-	#[test]
-	fn telegram_request_flow_resumes_pending_loop_snapshots_from_shared_memory_substrate() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn telegram_request_flow_resumes_pending_loop_snapshots_from_shared_memory_substrate() {
 		let backend = RecordingPendingLoopSnapshotBackend::default();
 		let handler = test_handler_with_service(
 			RuntimeService::default().with_pending_loop_snapshot_store(Arc::new(
@@ -1976,8 +1986,8 @@ mod tests {
 		assert_eq!(active.name, active.session_id);
 	}
 
-	#[test]
-	fn telegram_session_setting_waits_for_valid_text_and_renames_session() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn telegram_session_setting_waits_for_valid_text_and_renames_session() {
 		let handler = test_handler();
 		let binding_id = "1";
 		let session = bootstrap_session(&handler, binding_id);
@@ -2154,8 +2164,8 @@ mod tests {
 		assert!(response.reply_markup.is_none());
 	}
 
-	#[test]
-	fn recognized_control_commands_do_not_pollute_continuity() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn recognized_control_commands_do_not_pollute_continuity() {
 		let handler = test_handler();
 		let binding_id = "telegram-control-memory";
 		handler
@@ -2198,18 +2208,24 @@ mod tests {
 		);
 	}
 
-	#[test]
-	fn telegram_handler_surfaces_skill_install_message() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn telegram_handler_surfaces_skill_install_message() {
 		let root = tempfile::tempdir().expect("temp root should exist");
-		let registry = SkillRegistry::file_backed(root.path().join("skills")).with_fetcher(
-			Arc::new(StaticArchiveFetcher {
-				archive: DownloadedArchive {
-					archive_url: "https://example.com/archive.zip".to_string(),
-					bytes: test_skill_archive_bytes(),
-					resolved_reference: Some("main".to_string()),
+		// SkillRegistry::file_backed builds a reqwest::blocking::Client internally, which creates
+		// and immediately drops an internal tokio current-thread runtime. That drop panics when it
+		// occurs inside an async context. block_in_place provides a blocking-allowed scope so the
+		// client construction and its internal runtime drop can complete without hitting that check.
+		let registry = tokio::task::block_in_place(|| {
+			SkillRegistry::file_backed(root.path().join("skills")).with_fetcher(Arc::new(
+				StaticArchiveFetcher {
+					archive: DownloadedArchive {
+						archive_url: "https://example.com/archive.zip".to_string(),
+						bytes: test_skill_archive_bytes(),
+						resolved_reference: Some("main".to_string()),
+					},
 				},
-			}),
-		);
+			))
+		});
 		let handler = RuntimeServiceTelegramHandler {
 			service: Arc::new(RuntimeService::in_memory_with_agent_runtime(
 				GenericAgentRuntime::with_skill_registry(registry),
