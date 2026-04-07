@@ -26,6 +26,7 @@
 
 mod api;
 mod bot;
+mod chat;
 mod entry_registry;
 mod memory_runtime_config;
 mod pending_loop_substrate;
@@ -294,6 +295,11 @@ where
 				Ok::<_, CommandError>(Some(response.message))
 			})
 		}
+		Some("chat") => {
+			let chat_options = parse_chat_options(&args[1..])?;
+			chat::run_chat(&rt, chat_options)?;
+			Ok(None)
+		}
 		Some("telegram-once") | Some("tg-once") => {
 			let options = parse_request_options(&args[1..])?;
 			Ok(Some(run_telegram_once_with_options_from_env(options)?))
@@ -328,7 +334,7 @@ where
 /// Keeping this in one place prevents subcommand parsers from drifting into slightly different
 /// operator guidance.
 pub fn help_text() -> &'static str {
-	"Usage:\n  roku-cmd once [--session-id <id>] [--generated-skill-root <path>] <goal>\n  roku-cmd live-once [--session-id <id>] [--generated-skill-root <path>] <goal>\n  roku-cmd telegram-once [--session-id <id>] [--generated-skill-root <path>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n  roku-cmd task show <task-id>\n  roku-cmd task replay <task-id>\n  roku-cmd task resume <task-id>\n  roku-cmd approval show <approval-id>\n  roku-cmd approval approve <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd approval reject <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd artifact list <task-id>\n  roku-cmd artifact content <task-id> <artifact-id>\n  roku-cmd artifact download <task-id> <artifact-id> --output <path>\n  roku-cmd experiment show <task-id>\n  roku-cmd memory prepare-config\n  roku-cmd memory health\n  roku-cmd memory search [--scope <scope>] [--session-id <id>] [--user-id <id>] [--project-id <id>] [--workspace-id <id>] [--limit <n>] <query>\n  roku-cmd memory write [--scope <scope>] [--kind <kind>] [--session-id <id>] [--user-id <id>] [--project-id <id>] [--workspace-id <id>] [--summary <text>] [--write-reason <reason>] <content>\n  roku-cmd memory delete <record-id>\n  roku-cmd skill install <source-url>\n  roku-cmd skill list\n  roku-cmd skill show <skill-name>\n\nCommands:\n  once              Run the deterministic in-process pipeline.\n  live-once         Run the OpenRouter-backed live pipeline from environment.\n  telegram-once     Run one live Telegram handler turn and print the outbound bot message.\n  telegram-bot      Start the Telegram polling bot using environment configuration.\n  api-gateway       Start the Actix HTTP gateway using environment configuration.\n  task show         Render a persisted task snapshot with its event timeline.\n  task replay       Rebuild a state-transition report from persisted task events.\n  task resume       Continue a resumable persisted task using the live runtime path.\n  approval          Show or decide an approval ticket from persisted state.\n  artifact          List artifacts, print artifact content, or download an artifact payload.\n  experiment show   Render the persisted experiment run for a task.\n  memory            Prepare generated config or exercise the provider-neutral memory backend commands.\n  skill install     Install a skill package into the local file-backed registry.\n  skill list        List installed skills from the local registry.\n  skill show        Render installed skill metadata and prompt context.\n\nMemory Scopes:\n  session | user | project | workspace | global\n\nMemory Kinds:\n  user_preference | user_fact | project_fact | workspace_fact | historical_case | constraint | workflow_insight"
+	"Usage:\n  roku-cmd chat [--session-id <id>]\n  roku-cmd once [--session-id <id>] [--generated-skill-root <path>] <goal>\n  roku-cmd live-once [--session-id <id>] [--generated-skill-root <path>] <goal>\n  roku-cmd telegram-once [--session-id <id>] [--generated-skill-root <path>] <goal>\n  roku-cmd telegram-bot\n  roku-cmd api-gateway\n  roku-cmd task show <task-id>\n  roku-cmd task replay <task-id>\n  roku-cmd task resume <task-id>\n  roku-cmd approval show <approval-id>\n  roku-cmd approval approve <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd approval reject <approval-id> --actor <actor> [--comment <text>]\n  roku-cmd artifact list <task-id>\n  roku-cmd artifact content <task-id> <artifact-id>\n  roku-cmd artifact download <task-id> <artifact-id> --output <path>\n  roku-cmd experiment show <task-id>\n  roku-cmd memory prepare-config\n  roku-cmd memory health\n  roku-cmd memory search [--scope <scope>] [--session-id <id>] [--user-id <id>] [--project-id <id>] [--workspace-id <id>] [--limit <n>] <query>\n  roku-cmd memory write [--scope <scope>] [--kind <kind>] [--session-id <id>] [--user-id <id>] [--project-id <id>] [--workspace-id <id>] [--summary <text>] [--write-reason <reason>] <content>\n  roku-cmd memory delete <record-id>\n  roku-cmd skill install <source-url>\n  roku-cmd skill list\n  roku-cmd skill show <skill-name>\n\nCommands:\n  chat              Start an interactive REPL session. /help for in-session commands.\n  once              Run the deterministic in-process pipeline.\n  live-once         Run the OpenRouter-backed live pipeline from environment.\n  telegram-once     Run one live Telegram handler turn and print the outbound bot message.\n  telegram-bot      Start the Telegram polling bot using environment configuration.\n  api-gateway       Start the Actix HTTP gateway using environment configuration.\n  task show         Render a persisted task snapshot with its event timeline.\n  task replay       Rebuild a state-transition report from persisted task events.\n  task resume       Continue a resumable persisted task using the live runtime path.\n  approval          Show or decide an approval ticket from persisted state.\n  artifact          List artifacts, print artifact content, or download an artifact payload.\n  experiment show   Render the persisted experiment run for a task.\n  memory            Prepare generated config or exercise the provider-neutral memory backend commands.\n  skill install     Install a skill package into the local file-backed registry.\n  skill list        List installed skills from the local registry.\n  skill show        Render installed skill metadata and prompt context.\n\nMemory Scopes:\n  session | user | project | workspace | global\n\nMemory Kinds:\n  user_preference | user_fact | project_fact | workspace_fact | historical_case | constraint | workflow_insight"
 }
 
 fn join_goal(parts: &[String]) -> Result<String, CommandError> {
@@ -390,6 +396,33 @@ fn parse_request_options(parts: &[String]) -> Result<ExecutionRequestOptions, Co
 		goal: join_goal(&goal_parts)?,
 		generated_skill_root,
 	})
+}
+
+fn parse_chat_options(parts: &[String]) -> Result<chat::ChatOptions, CommandError> {
+	let mut session_id = "chat-default".to_string();
+	let mut index = 0usize;
+
+	while index < parts.len() {
+		let current = &parts[index];
+		if let Some(value) = current.strip_prefix("--session-id=") {
+			session_id = parse_non_empty_flag("--session-id", value)?;
+			index += 1;
+			continue;
+		}
+		if current == "--session-id" {
+			let value = parts
+				.get(index + 1)
+				.ok_or_else(|| CommandError::Usage("missing value for --session-id".to_string()))?;
+			session_id = parse_non_empty_flag("--session-id", value)?;
+			index += 2;
+			continue;
+		}
+		return Err(CommandError::Usage(format!(
+			"unexpected argument: {current}\n\nUsage: roku-cmd chat [--session-id <id>]"
+		)));
+	}
+
+	Ok(chat::ChatOptions { session_id })
 }
 
 fn parse_non_empty_flag(flag: &str, value: &str) -> Result<String, CommandError> {

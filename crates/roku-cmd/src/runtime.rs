@@ -973,7 +973,7 @@ fn build_request(
 	)
 }
 
-fn next_cli_request_sequence() -> u64 {
+pub(crate) fn next_cli_request_sequence() -> u64 {
 	SystemTime::now()
 		.duration_since(UNIX_EPOCH)
 		.map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
