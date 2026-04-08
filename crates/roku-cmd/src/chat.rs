@@ -276,6 +276,12 @@ fn execute_turn(
 					} => {
 						eprintln!("[compact] step {step} triggered (~{estimated_tokens} tokens)");
 					}
+					LoopEvent::LlmTextDelta { text, .. } => {
+						eprint!("{text}");
+					}
+					LoopEvent::LlmDecisionComplete { .. } => {
+						eprintln!();
+					}
 					LoopEvent::StepComplete { step } => {
 						eprintln!("[step] {step} complete");
 					}
