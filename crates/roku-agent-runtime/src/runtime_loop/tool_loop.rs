@@ -314,6 +314,21 @@ fn validate_router_decision(
 			}
 			Ok(decision)
 		}
+		NextStepAction::CallTools => {
+			let Some(tool_calls) = decision.tool_calls.as_ref() else {
+				return Err("call_tools decision omitted tool_calls array".to_string());
+			};
+			for entry in tool_calls {
+				if !tool_visible(loop_state, &entry.tool_name) {
+					return Err(format!(
+						"tool `{}` is not visible in this round ({})",
+						entry.tool_name,
+						loop_state.visible_tools.join(", ")
+					));
+				}
+			}
+			Ok(decision)
+		}
 		NextStepAction::FinalAnswer => Ok(decision),
 		NextStepAction::AskUser | NextStepAction::Fail => Ok(decision),
 	}
@@ -917,6 +932,7 @@ fn call_tool(tool_name: &str, arguments: Value, reason: impl Into<String>) -> Ne
 		action: NextStepAction::CallTool,
 		tool_name: Some(tool_name.to_string()),
 		arguments: Some(arguments),
+		tool_calls: None,
 		reason: reason.into(),
 		final_message: None,
 	}
@@ -927,6 +943,7 @@ fn ask_user(final_message: String) -> NextStepDecision {
 		action: NextStepAction::AskUser,
 		tool_name: None,
 		arguments: None,
+		tool_calls: None,
 		reason: "The loop needs more concrete user input before the next tool step.".to_string(),
 		final_message: Some(final_message),
 	}
@@ -937,6 +954,7 @@ fn final_answer(final_message: String) -> NextStepDecision {
 		action: NextStepAction::FinalAnswer,
 		tool_name: None,
 		arguments: None,
+		tool_calls: None,
 		reason: "The latest observation is sufficient to answer the user.".to_string(),
 		final_message: Some(final_message),
 	}
@@ -947,6 +965,7 @@ fn fail(message: String) -> NextStepDecision {
 		action: NextStepAction::Fail,
 		tool_name: None,
 		arguments: None,
+		tool_calls: None,
 		reason: "The loop could not find a valid next step.".to_string(),
 		final_message: Some(message),
 	}
@@ -1211,6 +1230,7 @@ mod tests {
 				action: NextStepAction::CallTool,
 				tool_name: Some("inventory.describe".to_string()),
 				arguments: Some(json!({})),
+				tool_calls: None,
 				reason: "Use the inventory tool first.".to_string(),
 				final_message: None,
 			},

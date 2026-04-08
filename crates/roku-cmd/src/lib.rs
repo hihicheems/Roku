@@ -88,6 +88,7 @@ pub(crate) mod test_support {
 				action: roku_agent_runtime::NextStepAction::CallTool,
 				tool_name: Some("inventory.describe".to_string()),
 				arguments: Some(serde_json::json!({})),
+				tool_calls: None,
 				reason: "Inspect the runtime inventory before answering.".to_string(),
 				final_message: None,
 			},
@@ -114,6 +115,7 @@ pub(crate) mod test_support {
 				action: roku_agent_runtime::NextStepAction::AskUser,
 				tool_name: None,
 				arguments: None,
+				tool_calls: None,
 				reason: "Runtime paused for user clarification after the latest tool observation."
 					.to_string(),
 				final_message: Some("你想继续看 `tools` 还是 `skills`？".to_string()),

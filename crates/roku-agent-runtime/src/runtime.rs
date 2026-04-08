@@ -863,6 +863,137 @@ impl GenericAgentRuntime {
 						);
 					}
 				}
+				crate::runtime_loop::NextStepAction::CallTools => {
+					// Execute batch tool calls sequentially.
+					// TODO: partition by concurrency_safe and run safe batches in parallel.
+					let tool_calls = next_step.tool_calls.unwrap_or_default();
+					for entry in &tool_calls {
+						let tool_name = &entry.tool_name;
+						if let Some(sender) = event_sender {
+							let _ = sender.send(crate::runtime_loop::LoopEvent::ToolStart {
+								step: current_step_index,
+								tool_name: tool_name.clone(),
+							});
+						}
+						let arguments = entry.arguments.clone().unwrap_or_else(|| json!({}));
+						let execution = tokio::task::block_in_place(|| {
+							self.execute_loop_tool_invocation(
+								task_id,
+								request,
+								loop_state,
+								&context_projection,
+								runtime_memory_sections,
+								tool_name,
+								arguments,
+								&attachments_for_tool(
+									tool_name,
+									user_reply.unwrap_or(&loop_state.goal),
+								),
+							)
+						});
+						let elapsed = execution_elapsed_ms(&execution.result);
+						if let Some(sender) = event_sender {
+							let _ = sender.send(crate::runtime_loop::LoopEvent::ToolEnd {
+								step: current_step_index,
+								tool_name: tool_name.clone(),
+								elapsed_ms: elapsed,
+							});
+						}
+						let raw_tool_output = raw_tool_output_from_result(&execution.result);
+						let observation =
+							self.loop_observation_from_execution(tool_name, &execution.result);
+						let interpreted = interpret_observation(
+							loop_state,
+							observation.clone(),
+							next_working_directory_from_observation(
+								&observation,
+								&loop_state.working_directory,
+							),
+						);
+						let batch_decision = crate::runtime_loop::NextStepDecision {
+							action: crate::runtime_loop::NextStepAction::CallTool,
+							tool_name: Some(tool_name.clone()),
+							arguments: entry.arguments.clone(),
+							tool_calls: None,
+							reason: next_step.reason.clone(),
+							final_message: None,
+						};
+						let step = StepRecord::tool_call(
+							current_step_index,
+							batch_decision,
+							loop_state.visible_tools.clone(),
+							loop_state.bound_resources.clone(),
+							raw_tool_output,
+							StepObservation::Tool(observation.clone()),
+							interpreted.clone(),
+							elapsed,
+							interpreted.remaining_step_budget,
+							interpreted.remaining_recovery_budget,
+							interpreted
+								.new_working_directory
+								.clone()
+								.unwrap_or_else(|| loop_state.working_directory.clone()),
+						);
+						loop_state.record_step(step);
+						// If a tool in the batch triggers a terminal condition, stop.
+						if interpreted.terminal
+							|| interpreted.should_ask_user
+							|| interpreted.should_emit_final_answer
+							|| interpreted.should_fail
+							|| interpreted.budget_exhausted
+						{
+							break;
+						}
+					}
+					// Compact check after batch (same as single-tool path).
+					{
+						let threshold = self.agent_runtime_config.r#loop.compact_threshold_tokens();
+						let estimated = crate::runtime_loop::estimate_context_tokens(loop_state);
+						if estimated > threshold {
+							eprintln!(
+								"Context compact triggered: estimated {estimated} tokens exceeds threshold {threshold}"
+							);
+							if let Some(sender) = event_sender {
+								let _ =
+									sender.send(crate::runtime_loop::LoopEvent::CompactTriggered {
+										step: current_step_index,
+										estimated_tokens: estimated,
+									});
+							}
+							let compact_config = crate::runtime_loop::CompactConfig {
+								retain_tail_steps: self
+									.agent_runtime_config
+									.r#loop
+									.retain_tail_steps,
+								working_summary_max_chars: self
+									.agent_runtime_config
+									.r#loop
+									.working_summary_max_chars,
+							};
+							crate::runtime_loop::compact_history(loop_state, &compact_config);
+						}
+					}
+					if let Some(sender) = event_sender {
+						let _ = sender.send(crate::runtime_loop::LoopEvent::StepComplete {
+							step: current_step_index,
+						});
+					}
+					// Check if the last tool in the batch set a terminal condition.
+					if let Some(last_step) = loop_state.history.last()
+						&& let Some(StepObservation::Tool(obs)) = &last_step.observation
+						&& obs.terminal
+					{
+						let message = summarized_tool_loop_message(&loop_state.goal, obs);
+						return self.synthetic_loop_terminal_result(
+							task_id,
+							"tool",
+							message,
+							StepAction::FinalAnswer,
+							ResultStatus::Ok,
+							Some(loop_state),
+						);
+					}
+				}
 				crate::runtime_loop::NextStepAction::AskUser => {
 					let payload = effective_ask_user_payload(
 						&loop_state.goal,
@@ -1762,6 +1893,7 @@ fn terminal_decision(
 		},
 		tool_name: None,
 		arguments: None,
+		tool_calls: None,
 		reason: reason.to_string(),
 		final_message,
 	}
@@ -4487,6 +4619,7 @@ mod tests {
 				action: crate::runtime_loop::NextStepAction::CallTool,
 				tool_name: Some("fs.read_text".to_string()),
 				arguments: Some(serde_json::json!({ "path": "Cargo.toml" })),
+				tool_calls: None,
 				reason: "Read the grounded workspace manifest first.".to_string(),
 				final_message: None,
 			},

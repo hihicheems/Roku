@@ -374,6 +374,7 @@ mod tests {
 			action: NextStepAction::CallTool,
 			tool_name: Some("inventory.describe".to_string()),
 			arguments: Some(json!({"path": "/workspace/README.md"})),
+			tool_calls: None,
 			reason: "Need to inspect the file".to_string(),
 			final_message: None,
 		};
@@ -382,6 +383,7 @@ mod tests {
 			action: NextStepAction::AskUser,
 			tool_name: None,
 			arguments: None,
+			tool_calls: None,
 			reason: "Need clarification from user".to_string(),
 			final_message: Some("Which file did you mean?".to_string()),
 		};
@@ -390,6 +392,7 @@ mod tests {
 			action: NextStepAction::FinalAnswer,
 			tool_name: None,
 			arguments: None,
+			tool_calls: None,
 			reason: "Task complete".to_string(),
 			final_message: Some("Done.".to_string()),
 		};

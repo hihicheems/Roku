@@ -376,6 +376,7 @@ mod tests {
 				action: NextStepAction::CallTool,
 				tool_name: Some("inventory.describe".to_string()),
 				arguments: Some(serde_json::json!({})),
+				tool_calls: None,
 				reason: "Use the inventory tool first.".to_string(),
 				final_message: None,
 			},
