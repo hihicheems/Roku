@@ -22,6 +22,7 @@
 mod backend;
 mod config;
 pub mod control_plane;
+mod long_term;
 mod registration;
 mod store;
 
@@ -35,5 +36,6 @@ pub use control_plane::{
 	SqliteControlPlaneError, SqliteDispatchQueue, SqliteEventRepository, SqliteResultRepository,
 	SqliteTaskRepository,
 };
+pub use long_term::SqliteLongTermMemoryBackend;
 pub use registration::{SqliteMemoryRegistration, SqliteMemorySubsystemRegistration};
 pub use store::SqliteMemoryStoreConfig;

@@ -131,11 +131,11 @@ max_prompt_document_bytes = 24576
 max_prompt_documents = 24
 
 [runtime.memory]
-# Memory is enabled by default and uses the provider-neutral OpenViking backend
-# unless runtime.toml/env overrides choose a different behavior.
+# Memory is enabled by default and uses the SQLite backend for zero-configuration
+# long-term memory. Set backend = "openviking" to use the external OpenViking service.
 enabled = true
 # Backend selection stays provider-neutral even when a given deployment only enables one adapter.
-backend = "openviking"
+backend = "sqlite"
 
 [runtime.memory.recall]
 # Long-term recall stays under Roku-owned control.

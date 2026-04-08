@@ -16,9 +16,11 @@ use std::sync::Arc;
 
 use roku_memory::{
 	MemoryAdapterAvailability, MemoryBackendId, MemorySubsystemRegistration,
-	NoopLongTermMemoryBackend, ResolvedMemorySubsystem,
+	ResolvedMemorySubsystem,
 };
 
+use crate::long_term::SqliteLongTermMemoryBackend;
+use crate::store::SqliteMemoryStoreConfig;
 use crate::{SqliteMemoryAdapterError, SqliteMemoryAdapters, SqliteMemoryConfig};
 
 /// Registration surface for the SQLite memory adapter.
@@ -29,7 +31,7 @@ impl SqliteMemoryRegistration {
 	pub const fn availability() -> MemoryAdapterAvailability {
 		MemoryAdapterAvailability {
 			backend: MemoryBackendId::Sqlite,
-			long_term: false,
+			long_term: true,
 			short_term: true,
 			session_state: true,
 			pending_loop: true,
@@ -41,9 +43,12 @@ impl SqliteMemoryRegistration {
 	pub fn resolve_subsystem(
 		config: SqliteMemoryConfig,
 	) -> Result<ResolvedMemorySubsystem, SqliteMemoryAdapterError> {
+		let store_config = SqliteMemoryStoreConfig::new(config.path.clone());
+		let long_term = SqliteLongTermMemoryBackend::connect(&store_config)
+			.map_err(|e| SqliteMemoryAdapterError::Resolution(e.to_string()))?;
 		let adapters = SqliteMemoryAdapters::connect(config)?;
 		Ok(ResolvedMemorySubsystem::with_parts(
-			Arc::new(NoopLongTermMemoryBackend),
+			Arc::new(long_term),
 			Box::new(adapters.short_term),
 			Box::new(adapters.session_state),
 			Box::new(adapters.pending_loop),

@@ -174,7 +174,7 @@ mod tests {
 
 		assert!(config.backends.sqlite.path.exists());
 		assert!(!layout.legacy_sqlite_compat_path.exists());
-		assert_eq!(bundle.memory.long_term.backend_name(), "noop");
+		assert_eq!(bundle.memory.long_term.backend_name(), "sqlite-fts5");
 		assert!(
 			bundle
 				.control_plane

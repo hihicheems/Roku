@@ -107,7 +107,7 @@ impl Default for MemoryRuntimeConfig {
 	fn default() -> Self {
 		Self {
 			enabled: true,
-			backend: MemoryBackendId::OpenViking,
+			backend: MemoryBackendId::Sqlite,
 			recall: MemoryRecallConfig::default(),
 			write: MemoryWriteConfig::default(),
 		}
@@ -211,11 +211,11 @@ mod tests {
 	}
 
 	#[test]
-	fn provider_neutral_memory_config_defaults_enable_openviking() {
+	fn provider_neutral_memory_config_defaults_to_sqlite() {
 		let config = MemoryRuntimeConfig::default();
 
 		assert!(config.enabled);
-		assert_eq!(config.backend, MemoryBackendId::OpenViking);
+		assert_eq!(config.backend, MemoryBackendId::Sqlite);
 		assert!(config.recall.enabled);
 		assert!(config.write.enabled);
 	}

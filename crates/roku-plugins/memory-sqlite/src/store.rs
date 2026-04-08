@@ -486,6 +486,14 @@ impl SqliteSessionCatalogRepository {
 	}
 }
 
+/// Opens and configures a SQLite connection at `path`.
+///
+/// Exposed at `pub(crate)` so that [`crate::long_term::SqliteLongTermMemoryBackend`]
+/// can reuse the same PRAGMA / schema bootstrap without duplicating setup.
+pub(crate) fn open_connection_pub(path: &Path) -> Result<Connection, SqliteMemoryStoreError> {
+	open_connection(path)
+}
+
 fn open_connection(path: &Path) -> Result<Connection, SqliteMemoryStoreError> {
 	ensure_parent_dir(path)?;
 	let connection = Connection::open(path)?;
@@ -540,7 +548,48 @@ fn ensure_schema_objects(connection: &Connection) -> Result<(), SqliteMemoryStor
 		CREATE INDEX IF NOT EXISTS idx_conversation_turns_session_seq
 			ON conversation_turns(session_id, seq);
 		CREATE INDEX IF NOT EXISTS idx_session_descriptors_binding_updated
-			ON session_descriptors(binding_id, updated_at_unix_ms DESC, session_id);",
+			ON session_descriptors(binding_id, updated_at_unix_ms DESC, session_id);
+		CREATE TABLE IF NOT EXISTS long_term_memories (
+			id TEXT PRIMARY KEY,
+			kind TEXT NOT NULL,
+			scope TEXT NOT NULL,
+			content TEXT NOT NULL,
+			summary TEXT NOT NULL DEFAULT '',
+			source_session_id TEXT,
+			source_user_id TEXT,
+			source_project_id TEXT,
+			source_workspace_id TEXT,
+			provenance_json TEXT,
+			created_at_unix_ms INTEGER NOT NULL,
+			updated_at_unix_ms INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_long_term_memories_kind_scope
+			ON long_term_memories(kind, scope);
+		CREATE INDEX IF NOT EXISTS idx_long_term_memories_scope
+			ON long_term_memories(scope);
+		CREATE VIRTUAL TABLE IF NOT EXISTS long_term_memories_fts USING fts5(
+			content,
+			summary,
+			content='long_term_memories',
+			content_rowid='rowid'
+		);
+		CREATE TRIGGER IF NOT EXISTS long_term_memories_fts_insert
+		AFTER INSERT ON long_term_memories BEGIN
+			INSERT INTO long_term_memories_fts(rowid, content, summary)
+			VALUES (new.rowid, new.content, new.summary);
+		END;
+		CREATE TRIGGER IF NOT EXISTS long_term_memories_fts_delete
+		AFTER DELETE ON long_term_memories BEGIN
+			INSERT INTO long_term_memories_fts(long_term_memories_fts, rowid, content, summary)
+			VALUES ('delete', old.rowid, old.content, old.summary);
+		END;
+		CREATE TRIGGER IF NOT EXISTS long_term_memories_fts_update
+		AFTER UPDATE ON long_term_memories BEGIN
+			INSERT INTO long_term_memories_fts(long_term_memories_fts, rowid, content, summary)
+			VALUES ('delete', old.rowid, old.content, old.summary);
+			INSERT INTO long_term_memories_fts(rowid, content, summary)
+			VALUES (new.rowid, new.content, new.summary);
+		END;",
 	)?;
 	Ok(())
 }
