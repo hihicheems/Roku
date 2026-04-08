@@ -788,7 +788,16 @@ impl GenericAgentRuntime {
 									.r#loop
 									.working_summary_max_chars,
 							};
-							crate::runtime_loop::compact_history(loop_state, &compact_config);
+							if let Some(router) = self.route_router.as_deref() {
+								crate::runtime_loop::compact_history_with_llm(
+									loop_state,
+									&compact_config,
+									router,
+								)
+								.await;
+							} else {
+								crate::runtime_loop::compact_history(loop_state, &compact_config);
+							}
 						}
 					}
 					// Notify: step complete

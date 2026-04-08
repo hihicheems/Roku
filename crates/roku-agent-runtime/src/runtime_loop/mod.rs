@@ -35,7 +35,8 @@ mod trace;
 pub(crate) use ask_user::effective_ask_user_payload;
 pub use ask_user::{AskUserPayload, AskUserResumeContract, AskUserResumeDirective};
 pub use compact::{
-	CompactConfig, compact_history, estimate_context_tokens, summarize_discarded_steps,
+	CompactConfig, compact_history, compact_history_with_llm, estimate_context_tokens,
+	summarize_discarded_steps,
 };
 pub use context_assembly::LoopContext;
 pub(crate) use context_assembly::build_loop_context;
