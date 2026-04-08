@@ -120,6 +120,9 @@ pub struct TableToolRuntimeConfigPatch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebToolRuntimeConfig {
 	pub endpoint: Option<String>,
+	/// Tavily Search API key. When set and `endpoint` is not configured,
+	/// `web.search` uses the Tavily API as a built-in search provider.
+	pub tavily_api_key: Option<String>,
 	pub default_top_k: usize,
 	pub max_fetch_bytes: usize,
 	pub fetch_timeout_ms: u64,
@@ -130,6 +133,7 @@ pub struct WebToolRuntimeConfig {
 #[serde(deny_unknown_fields)]
 pub struct WebToolRuntimeConfigPatch {
 	pub endpoint: Option<String>,
+	pub tavily_api_key: Option<String>,
 	pub default_top_k: Option<usize>,
 	pub max_fetch_bytes: Option<usize>,
 	pub fetch_timeout_ms: Option<u64>,
@@ -247,6 +251,7 @@ impl Default for WebToolRuntimeConfig {
 	fn default() -> Self {
 		Self {
 			endpoint: None,
+			tavily_api_key: None,
 			default_top_k: 5,
 			max_fetch_bytes: 102_400,
 			fetch_timeout_ms: 10_000,
@@ -469,6 +474,9 @@ impl WebToolRuntimeConfig {
 		if let Some(value) = patch.endpoint {
 			self.endpoint = Some(value);
 		}
+		if let Some(value) = patch.tavily_api_key {
+			self.tavily_api_key = Some(value);
+		}
 		if let Some(value) = patch.default_top_k {
 			self.default_top_k = value;
 		}
@@ -507,6 +515,9 @@ impl WebToolRuntimeConfig {
 	pub fn apply_env_overrides(&mut self) -> Result<(), ToolsRuntimeConfigError> {
 		if let Some(value) = env_override_string("ROKU_WEB_SEARCH_URL") {
 			self.endpoint = Some(value);
+		}
+		if let Some(value) = env_override_string("TAVILY_API_KEY") {
+			self.tavily_api_key = Some(value);
 		}
 		if let Some(value) = env_override_usize("ROKU_RUNTIME__TOOLS__WEB__DEFAULT_TOP_K") {
 			self.default_top_k = value?;
@@ -670,6 +681,7 @@ mod tests {
 			}),
 			web: Some(WebToolRuntimeConfigPatch {
 				endpoint: Some(" https://example.test/search ".to_string()),
+				tavily_api_key: None,
 				default_top_k: Some(HARD_MAX_WEB_TOP_K * 2),
 				max_fetch_bytes: Some(HARD_MAX_FETCH_BYTES * 2),
 				fetch_timeout_ms: Some(HARD_MAX_FETCH_TIMEOUT_MS * 2),

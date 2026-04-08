@@ -62,11 +62,13 @@ pub(crate) fn catalog_descriptors_with_config(
 			risk: ResourceRisk::Low,
 			cost: ResourceCost {
 				estimated_tokens: 0,
-				estimated_latency_ms: runtime_config
-					.endpoint
-					.as_ref()
-					.map(|_| 3_000)
-					.unwrap_or(500),
+				estimated_latency_ms: if runtime_config.endpoint.is_some()
+					|| runtime_config.tavily_api_key.is_some()
+				{
+					3_000
+				} else {
+					500
+				},
 			},
 			required_capabilities: vec!["web.search".to_string()],
 			summary: "Run a concrete web query and return structured search results.".to_string(),
@@ -185,15 +187,31 @@ impl Tool for WebSearchTool {
 			.and_then(|value| usize::try_from(value).ok())
 			.unwrap_or(self.config.default_top_k)
 			.clamp(1, HARD_MAX_WEB_TOP_K);
-		let Some(endpoint) = self.config.endpoint.clone() else {
-			return Ok(error_output(
-				"endpoint_not_configured",
-				"web search endpoint is not configured",
+
+		if let Some(endpoint) = self.config.endpoint.clone() {
+			self.invoke_custom_backend(query, top_k, &endpoint)
+		} else if let Some(api_key) = self.config.tavily_api_key.clone() {
+			self.invoke_tavily(query, top_k, &api_key)
+		} else {
+			Ok(error_output(
+				"search_not_configured",
+				"web search is not configured. Set TAVILY_API_KEY to use the built-in Tavily \
+				 provider, or set ROKU_WEB_SEARCH_URL to use a custom backend.",
 				query,
 				top_k,
 				None,
-			));
-		};
+			))
+		}
+	}
+}
+
+impl WebSearchTool {
+	fn invoke_custom_backend(
+		&self,
+		query: &str,
+		top_k: usize,
+		endpoint: &str,
+	) -> Result<Value, ToolFailure> {
 		let client = Client::builder()
 			.timeout(Duration::from_millis(8_000))
 			.build()
@@ -201,7 +219,7 @@ impl Tool for WebSearchTool {
 				ToolFailure::terminal(format!("failed to build search client: {error}"))
 			})?;
 		let mut builder = client
-			.get(&endpoint)
+			.get(endpoint)
 			.query(&[("q", query), ("top_k", &top_k.to_string())]);
 		if let Some((name, value)) = optional_auth_header() {
 			builder = builder.header(name, value);
@@ -255,6 +273,82 @@ impl Tool for WebSearchTool {
 				"results": results,
 				"top_k": top_k,
 				"endpoint": endpoint,
+			}),
+		)
+		.into_value())
+	}
+
+	fn invoke_tavily(
+		&self,
+		query: &str,
+		top_k: usize,
+		api_key: &str,
+	) -> Result<Value, ToolFailure> {
+		const TAVILY_ENDPOINT: &str = "https://api.tavily.com/search";
+		let client = Client::builder()
+			.timeout(Duration::from_millis(8_000))
+			.build()
+			.map_err(|error| {
+				ToolFailure::terminal(format!("failed to build tavily client: {error}"))
+			})?;
+		let body = json!({
+			"query": query,
+			"max_results": top_k,
+			"api_key": api_key,
+		});
+		let response = match client.post(TAVILY_ENDPOINT).json(&body).send() {
+			Ok(response) => response,
+			Err(error) => {
+				return Ok(error_output(
+					"tavily_request_failed",
+					format!("Tavily API request failed: {error}"),
+					query,
+					top_k,
+					None,
+				));
+			}
+		};
+		let status = response.status();
+		if !status.is_success() {
+			let hint = if status.as_u16() == 401 {
+				" (invalid or missing TAVILY_API_KEY)"
+			} else {
+				""
+			};
+			return Ok(error_output(
+				"tavily_http_error",
+				format!("Tavily API returned http {}{hint}", status.as_u16()),
+				query,
+				top_k,
+				Some(json!({ "http_status": status.as_u16() })),
+			));
+		}
+		let payload = match response.json::<Value>() {
+			Ok(payload) => payload,
+			Err(error) => {
+				return Ok(error_output(
+					"tavily_invalid_json",
+					format!("Tavily API returned invalid json: {error}"),
+					query,
+					top_k,
+					None,
+				));
+			}
+		};
+		// Tavily returns { results: [{ title, url, content, score }] }
+		// parse_results already handles "content" as a snippet alias.
+		let results = parse_results(&payload, top_k);
+		let message = render_result_message(query, &results);
+		Ok(ToolOutputEnvelope::new(
+			true,
+			Option::<String>::None,
+			false,
+			message,
+			json!({
+				"query": query,
+				"results": results,
+				"top_k": top_k,
+				"provider": "tavily",
 			}),
 		)
 		.into_value())
@@ -621,7 +715,7 @@ mod tests {
 	}
 
 	#[test]
-	fn missing_endpoint_returns_terminal_envelope() {
+	fn no_search_config_returns_actionable_error() {
 		let tool = WebSearchTool {
 			config: WebToolRuntimeConfig::default(),
 		};
@@ -636,9 +730,14 @@ mod tests {
 		assert!(!envelope.ok);
 		assert_eq!(
 			envelope.error_type.as_deref(),
-			Some("endpoint_not_configured")
+			Some("search_not_configured")
 		);
 		assert!(envelope.terminal);
+		// Message should mention how to configure search.
+		assert!(
+			envelope.message.contains("TAVILY_API_KEY")
+				|| envelope.message.contains("ROKU_WEB_SEARCH_URL")
+		);
 	}
 
 	#[test]
@@ -664,6 +763,87 @@ mod tests {
 
 		assert!(envelope.ok);
 		assert!(!envelope.terminal);
+		assert_eq!(
+			envelope
+				.data
+				.get("results")
+				.and_then(Value::as_array)
+				.map(Vec::len),
+			Some(1)
+		);
+	}
+
+	// -----------------------------------------------------------------------
+	// Tavily provider tests
+	// -----------------------------------------------------------------------
+
+	#[test]
+	fn tavily_response_parsed_to_search_results() {
+		// Verify that the Tavily response shape (title, url, content) maps correctly
+		// to the existing SearchResult format via parse_results().
+		let tavily_payload = json!({
+			"results": [
+				{
+					"title": "Rust async book",
+					"url": "https://rust-lang.github.io/async-book/",
+					"content": "Official async Rust book covering futures and executors.",
+					"score": 0.95,
+				},
+				{
+					"title": "Tokio docs",
+					"url": "https://docs.rs/tokio",
+					"content": "Tokio async runtime documentation.",
+					"score": 0.88,
+				},
+			]
+		});
+		let results = parse_results(&tavily_payload, 5);
+		assert_eq!(results.len(), 2);
+		assert_eq!(results[0]["title"], "Rust async book");
+		assert_eq!(results[0]["url"], "https://rust-lang.github.io/async-book/");
+		// "content" should be returned as "snippet"
+		assert_eq!(
+			results[0]["snippet"],
+			"Official async Rust book covering futures and executors."
+		);
+		assert_eq!(results[1]["title"], "Tokio docs");
+	}
+
+	#[test]
+	fn tavily_top_k_limits_results() {
+		let tavily_payload = json!({
+			"results": [
+				{ "title": "A", "url": "https://a.test/", "content": "a" },
+				{ "title": "B", "url": "https://b.test/", "content": "b" },
+				{ "title": "C", "url": "https://c.test/", "content": "c" },
+			]
+		});
+		let results = parse_results(&tavily_payload, 2);
+		assert_eq!(results.len(), 2);
+	}
+
+	#[test]
+	fn custom_backend_takes_priority_over_tavily() {
+		// When both endpoint and tavily_api_key are set, endpoint wins.
+		let endpoint = spawn_mock_search_server(
+			r#"{"results":[{"title":"Custom","url":"https://custom.test/","snippet":"from custom"}]}"#,
+		);
+		let tool = WebSearchTool {
+			config: WebToolRuntimeConfig {
+				endpoint: Some(endpoint),
+				tavily_api_key: Some("fake-tavily-key".to_string()),
+				default_top_k: 5,
+				..WebToolRuntimeConfig::default()
+			},
+		};
+		let output = tool
+			.invoke(invocation_request(json!({ "query": "test query" })))
+			.expect("web.search should return a structured observation");
+		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
+			.expect("web.search should emit ToolOutputEnvelope");
+		assert!(envelope.ok);
+		// Response should carry "endpoint" key, not "provider": "tavily"
+		assert!(envelope.data.get("endpoint").is_some());
 		assert_eq!(
 			envelope
 				.data

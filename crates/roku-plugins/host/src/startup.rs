@@ -153,10 +153,9 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 					provides_tools: vec!["web.search".to_string()],
 					..PluginCapabilities::default()
 				},
-				requirements: PluginRequirements {
-					env: vec!["ROKU_WEB_SEARCH_URL".to_string()],
-					..PluginRequirements::default()
-				},
+				// No env requirements: web.fetch always works; web.search handles
+				// missing search config at invoke time with an actionable error.
+				requirements: PluginRequirements::default(),
 			},
 			required: false,
 		},

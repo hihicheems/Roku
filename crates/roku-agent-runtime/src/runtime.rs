@@ -4107,7 +4107,7 @@ mod tests {
 				expected_tool: Some("web.search".to_string()),
 				forbidden_tools: Vec::new(),
 				expected_terminal_action: Some("fail".to_string()),
-				expected_error_type: Some("endpoint_not_configured".to_string()),
+				expected_error_type: Some("search_not_configured".to_string()),
 				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
 					field: "should_fail".to_string(),
 					expected: true,

@@ -165,7 +165,7 @@ fn summarize_failure(goal: &str, observation: &ToolObservation) -> Option<String
 		} else {
 			format!("The command `{command}` ran but exited with a non-zero status.")
 		}),
-		"endpoint_not_configured" => Some(if is_non_ascii {
+		"search_not_configured" | "endpoint_not_configured" => Some(if is_non_ascii {
 			"当前没有配置 web.search 的搜索后端，因此我现在不能执行联网搜索。".to_string()
 		} else {
 			"The web.search backend is not configured, so I can't run an external web lookup right now.".to_string()
