@@ -27,4 +27,6 @@ pub enum McpError {
 	InvalidRequest(String),
 	#[error("mcp transport error: {0}")]
 	Transport(String),
+	#[error("mcp connection failed: {0}")]
+	ConnectionFailed(String),
 }
