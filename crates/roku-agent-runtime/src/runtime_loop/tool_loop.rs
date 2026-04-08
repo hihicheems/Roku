@@ -116,9 +116,7 @@ async fn decide_with_router(
 		let _ = sender.send(LoopEvent::LlmDecisionComplete { step });
 
 		match llm_result {
-			Ok(llm_response)
-				if llm_response.finish_reason.as_deref() == Some("length") =>
-			{
+			Ok(llm_response) if llm_response.finish_reason.as_deref() == Some("length") => {
 				log_tool_loop_warning(
 					"streaming response truncated (finish_reason=length)",
 					[("run_id", loop_state.run_id.clone())],
