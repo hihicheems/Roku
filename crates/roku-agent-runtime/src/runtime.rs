@@ -979,7 +979,16 @@ impl GenericAgentRuntime {
 									.r#loop
 									.working_summary_max_chars,
 							};
-							crate::runtime_loop::compact_history(loop_state, &compact_config);
+							if let Some(router) = self.route_router.as_deref() {
+								crate::runtime_loop::compact_history_with_llm(
+									loop_state,
+									&compact_config,
+									router,
+								)
+								.await;
+							} else {
+								crate::runtime_loop::compact_history(loop_state, &compact_config);
+							}
 						}
 					}
 					if let Some(sender) = event_sender {
@@ -987,20 +996,75 @@ impl GenericAgentRuntime {
 							step: current_step_index,
 						});
 					}
-					// Check if the last tool in the batch set a terminal condition.
+					// Check terminal conditions from the last tool in the batch,
+					// mirroring the single-tool CallTool path's post-execution checks.
 					if let Some(last_step) = loop_state.history.last()
 						&& let Some(StepObservation::Tool(obs)) = &last_step.observation
-						&& obs.terminal
+						&& let Some(interp) = &last_step.interpreted_observation
 					{
-						let message = summarized_tool_loop_message(&loop_state.goal, obs);
-						return self.synthetic_loop_terminal_result(
-							task_id,
-							"tool",
-							message,
-							StepAction::FinalAnswer,
-							ResultStatus::Ok,
-							Some(loop_state),
-						);
+						if interp.should_ask_user {
+							let payload = effective_ask_user_payload(
+								&loop_state.goal,
+								loop_state.last_observation.as_ref(),
+								None,
+							);
+							let message = payload.final_message.clone();
+							self.record_ask_user_step(
+								loop_state,
+								"Runtime paused for user clarification after batch tool observation.",
+								payload,
+							);
+							return self.synthetic_loop_terminal_result(
+								task_id,
+								"tool",
+								message,
+								StepAction::AskUser,
+								ResultStatus::Ok,
+								Some(loop_state),
+							);
+						}
+						if interp.should_emit_final_answer || obs.terminal {
+							let message = summarized_tool_loop_message(&loop_state.goal, obs);
+							let (action, status) = if obs.ok {
+								(StepAction::FinalAnswer, ResultStatus::Ok)
+							} else {
+								(StepAction::Fail, ResultStatus::Error)
+							};
+							self.record_terminal_step(
+								loop_state,
+								action,
+								"Runtime completed after batch tool observation.",
+								Some(message.clone()),
+							);
+							return self.synthetic_loop_terminal_result(
+								task_id,
+								"tool",
+								message,
+								action,
+								status,
+								Some(loop_state),
+							);
+						}
+						if interp.should_fail
+							|| interp.budget_exhausted
+							|| interp.recovery_exhausted
+						{
+							let message = summarized_tool_loop_message(&loop_state.goal, obs);
+							self.record_terminal_step(
+								loop_state,
+								StepAction::Fail,
+								"Runtime failed after batch tool observation.",
+								Some(message.clone()),
+							);
+							return self.synthetic_loop_terminal_result(
+								task_id,
+								"tool",
+								message,
+								StepAction::Fail,
+								ResultStatus::Error,
+								Some(loop_state),
+							);
+						}
 					}
 				}
 				crate::runtime_loop::NextStepAction::AskUser => {
