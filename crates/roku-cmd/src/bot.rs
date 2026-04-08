@@ -291,6 +291,10 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 									} => Some(format!("⚙️ Step {step}: `{tool_name}`")),
 									roku_agent_runtime::LoopEvent::ToolEnd { .. }
 									| roku_agent_runtime::LoopEvent::CompactTriggered { .. }
+									| roku_agent_runtime::LoopEvent::LlmTextDelta { .. }
+									| roku_agent_runtime::LoopEvent::LlmDecisionComplete {
+										..
+									}
 									| roku_agent_runtime::LoopEvent::StepComplete { .. } => None,
 								};
 								if let (Some(chat_id), Some(text)) = (chat_id, text) {

@@ -36,6 +36,10 @@ pub enum LoopEvent {
 		/// Estimated token count that caused the trigger.
 		estimated_tokens: u64,
 	},
+	/// Incremental text from the LLM during the decision phase.
+	LlmTextDelta { step: u32, text: String },
+	/// The LLM finished producing its decision for this step.
+	LlmDecisionComplete { step: u32 },
 	/// One full loop iteration (decide + optional tool execution) is complete.
 	StepComplete { step: u32 },
 }

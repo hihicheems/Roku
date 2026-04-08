@@ -595,6 +595,12 @@ where
 									"[compact] step {step} triggered (~{estimated_tokens} tokens)"
 								);
 							}
+							roku_agent_runtime::LoopEvent::LlmTextDelta { text, .. } => {
+								eprint!("{text}");
+							}
+							roku_agent_runtime::LoopEvent::LlmDecisionComplete { .. } => {
+								eprintln!();
+							}
 							roku_agent_runtime::LoopEvent::StepComplete { step } => {
 								eprintln!("[step] {step} complete");
 							}

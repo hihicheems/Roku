@@ -547,6 +547,16 @@ impl LlmProvider for OpenRouterProvider {
 			ProviderCallError::retryable("openrouter exhausted explicit model fallback attempts")
 		}))
 	}
+
+	async fn stream(
+		&self,
+		model: &ModelProfile,
+		request: &GenerationRequest,
+		tx: tokio::sync::mpsc::Sender<StreamChunk>,
+	) -> Result<ProviderResponse, ProviderCallError> {
+		// Delegate to the existing inherent stream() method.
+		OpenRouterProvider::stream(self, model, request, tx).await
+	}
 }
 
 impl OpenRouterProvider {
