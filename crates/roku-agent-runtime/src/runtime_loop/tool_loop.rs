@@ -15,7 +15,7 @@
 use roku_common_types::{ExtractionHint, GroundingStrategy};
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_catalog::ResourceCatalog;
-use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier};
+use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier, StreamChunk};
 use serde_json::{Value, json};
 
 use crate::runtime_config::NextStepRuntimeConfig;
@@ -28,8 +28,9 @@ use crate::runtime_loop::grounding::{
 	grounded_python_code_allows_execution, grounded_shell_command_allows_execution,
 };
 use crate::runtime_loop::{
-	ContextProjection, LoopState, NextStepAction, NextStepDecision, ToolObservation,
-	ask_user::ask_user_from_observation, file_name_from_path, summarize_observation,
+	ContextProjection, LoopEvent, LoopEventSender, LoopState, NextStepAction, NextStepDecision,
+	ToolObservation, ask_user::ask_user_from_observation, file_name_from_path,
+	summarize_observation,
 };
 
 pub(crate) async fn decide_tool_loop_next_step(
@@ -39,6 +40,7 @@ pub(crate) async fn decide_tool_loop_next_step(
 	user_reply: Option<&str>,
 	config: &NextStepRuntimeConfig,
 	catalog: Option<&ResourceCatalog>,
+	event_sender: Option<&LoopEventSender>,
 ) -> NextStepDecision {
 	if should_force_ask_user_for_ambiguous_stagnation(loop_state, user_reply) {
 		return ask_user(
@@ -60,6 +62,7 @@ pub(crate) async fn decide_tool_loop_next_step(
 			user_reply,
 			config,
 			catalog,
+			event_sender,
 		)
 		.await
 	{
@@ -75,43 +78,124 @@ async fn decide_with_router(
 	user_reply: Option<&str>,
 	config: &NextStepRuntimeConfig,
 	catalog: Option<&ResourceCatalog>,
+	event_sender: Option<&LoopEventSender>,
 ) -> Option<NextStepDecision> {
-	let response = match router
-		.generate_json_value(&GenerationRequest {
-			system_prompt: Some(
-				"You are Roku's runtime loop next-step decision model. Return only valid JSON."
-					.to_string(),
-			),
-			prompt: tool_loop_prompt(context_projection, user_reply),
-			expected_output_tokens: config.expected_output_tokens,
-			risk_tier: RiskTier::Low,
-			preferred_provider: None,
-			budget_tokens_remaining: config.budget_tokens_remaining,
-			budget_cost_remaining_usd: config.budget_cost_remaining_usd,
-		})
-		.await
-	{
-		Ok(response) => response,
-		Err(error) => {
-			log_tool_loop_warning(
-				"next-step model did not return a usable response",
-				[
-					("run_id", loop_state.run_id.clone()),
-					(
-						"last_tool",
-						loop_state
-							.last_observation
-							.as_ref()
-							.map(|observation| observation.tool_name.clone())
-							.unwrap_or_else(|| "none".to_string()),
-					),
-					("error", error.to_string()),
-				],
-			);
-			return None;
+	let request = GenerationRequest {
+		system_prompt: Some(
+			"You are Roku's runtime loop next-step decision model. Return only valid JSON."
+				.to_string(),
+		),
+		prompt: tool_loop_prompt(context_projection, user_reply),
+		expected_output_tokens: config.expected_output_tokens,
+		risk_tier: RiskTier::Low,
+		preferred_provider: None,
+		budget_tokens_remaining: config.budget_tokens_remaining,
+		budget_cost_remaining_usd: config.budget_cost_remaining_usd,
+	};
+
+	let json_output = if let Some(sender) = event_sender {
+		let step = loop_state.step_index;
+		let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamChunk>(64);
+
+		// Spawn a forwarder that reads streaming chunks and emits LlmTextDelta events.
+		let event_tx = sender.clone();
+		let forwarder = tokio::spawn(async move {
+			while let Some(chunk) = rx.recv().await {
+				if let StreamChunk::TextDelta { text } = chunk {
+					let _ = event_tx.send(LoopEvent::LlmTextDelta { step, text });
+				}
+			}
+		});
+
+		let llm_result = router.generate_streaming(&request, tx).await;
+
+		// Wait for the forwarder to drain the channel.
+		let _ = forwarder.await;
+
+		// Emit decision complete regardless of success/failure.
+		let _ = sender.send(LoopEvent::LlmDecisionComplete { step });
+
+		match llm_result {
+			Ok(llm_response) => {
+				// Strip markdown code fences the same way generate_json_value does.
+				let raw = llm_response.output.trim();
+				let payload = if let Some(stripped) = raw.strip_prefix("```") {
+					stripped
+						.strip_prefix("json")
+						.map(str::trim_start)
+						.unwrap_or(stripped)
+						.strip_suffix("```")
+						.map(str::trim)
+						.unwrap_or(stripped)
+				} else {
+					raw
+				};
+				match serde_json::from_str::<serde_json::Value>(payload) {
+					Ok(value) => value,
+					Err(error) => {
+						log_tool_loop_warning(
+							"next-step model did not return a usable response",
+							[
+								("run_id", loop_state.run_id.clone()),
+								(
+									"last_tool",
+									loop_state
+										.last_observation
+										.as_ref()
+										.map(|observation| observation.tool_name.clone())
+										.unwrap_or_else(|| "none".to_string()),
+								),
+								("error", error.to_string()),
+							],
+						);
+						return None;
+					}
+				}
+			}
+			Err(error) => {
+				log_tool_loop_warning(
+					"next-step model did not return a usable response",
+					[
+						("run_id", loop_state.run_id.clone()),
+						(
+							"last_tool",
+							loop_state
+								.last_observation
+								.as_ref()
+								.map(|observation| observation.tool_name.clone())
+								.unwrap_or_else(|| "none".to_string()),
+						),
+						("error", error.to_string()),
+					],
+				);
+				return None;
+			}
+		}
+	} else {
+		match router.generate_json_value(&request).await {
+			Ok(response) => response.value,
+			Err(error) => {
+				log_tool_loop_warning(
+					"next-step model did not return a usable response",
+					[
+						("run_id", loop_state.run_id.clone()),
+						(
+							"last_tool",
+							loop_state
+								.last_observation
+								.as_ref()
+								.map(|observation| observation.tool_name.clone())
+								.unwrap_or_else(|| "none".to_string()),
+						),
+						("error", error.to_string()),
+					],
+				);
+				return None;
+			}
 		}
 	};
-	let decision = match NextStepDecision::from_json_value(&response.value) {
+
+	let decision = match NextStepDecision::from_json_value(&json_output) {
 		Ok(decision) => decision,
 		Err(error) => {
 			log_tool_loop_warning(
@@ -130,7 +214,7 @@ async fn decide_with_router(
 					(
 						"response",
 						truncate_for_log(
-							&serde_json::to_string(&response.value)
+							&serde_json::to_string(&json_output)
 								.unwrap_or_else(|_| "<unserializable-json>".to_string()),
 							320,
 						),
@@ -395,9 +479,10 @@ fn tool_loop_prompt(context_projection: &ContextProjection, user_reply: Option<&
 	format!(
 		r#"Return only JSON with exactly these keys:
 {{
-  "action": "call_tool | ask_user | final_answer | fail",
+  "action": "call_tool | call_tools | ask_user | final_answer | fail",
   "tool_name": "visible tool name or null",
   "arguments": {{ }},
+  "tool_calls": [{{ "tool_name": "...", "arguments": {{ }} }}],
   "reason": "short explanation",
   "final_message": "message or null"
 }}
@@ -407,6 +492,7 @@ Rules:
 - `call_tool` is the only action that may set `tool_name`.
 - `call_tool` should not use `final_message`; if you include it anyway, the runtime will ignore it.
 - Every `call_tool` decision must include all required argument keys for the selected tool.
+- `call_tools` invokes multiple tools in one step. Provide a `tool_calls` array instead of `tool_name`/`arguments`. Only use `call_tools` when the tools are independent (e.g., reading multiple files). For sequential operations, use `call_tool` one at a time. When using `call_tools`, `tool_name` and `arguments` must be null.
 - Keep `final_message` concise. Do not paste large grounded documents, search dumps, or long synthesized answers into the JSON decision.
 - Use the current user follow-up if it is present; do not inherit concrete code, paths, or queries from prior conversation turns unless they already exist in the current context projection.
 - For `chat`, prefer `general.execute` when it is visible.
@@ -1303,6 +1389,7 @@ mod tests {
 				None,
 				&NextStepRuntimeConfig::default(),
 				Some(&test_catalog()),
+				None,
 			));
 
 		assert_eq!(
@@ -1343,6 +1430,7 @@ mod tests {
 			None,
 			&NextStepRuntimeConfig::default(),
 			Some(&test_catalog()),
+			None,
 		)
 		.await;
 
@@ -1387,6 +1475,7 @@ mod tests {
 			None,
 			&NextStepRuntimeConfig::default(),
 			Some(&test_catalog()),
+			None,
 		)
 		.await;
 
@@ -1459,6 +1548,7 @@ mod tests {
 				None,
 				&NextStepRuntimeConfig::default(),
 				Some(&test_catalog()),
+				None,
 			));
 
 		assert_eq!(
@@ -1489,6 +1579,7 @@ mod tests {
 			None,
 			&NextStepRuntimeConfig::default(),
 			Some(&test_catalog()),
+			None,
 		)
 		.await;
 
@@ -1515,6 +1606,7 @@ mod tests {
 			None,
 			&NextStepRuntimeConfig::default(),
 			Some(&test_catalog()),
+			None,
 		)
 		.await;
 
@@ -1546,6 +1638,7 @@ mod tests {
 			None,
 			&NextStepRuntimeConfig::default(),
 			Some(&test_catalog()),
+			None,
 		)
 		.await;
 
@@ -1572,6 +1665,7 @@ mod tests {
 			None,
 			&NextStepRuntimeConfig::default(),
 			Some(&test_catalog()),
+			None,
 		)
 		.await;
 
@@ -1617,6 +1711,7 @@ mod tests {
 				None,
 				&NextStepRuntimeConfig::default(),
 				Some(&test_catalog()),
+				None,
 			));
 
 		assert_eq!(
@@ -1678,6 +1773,7 @@ mod tests {
 				None,
 				&NextStepRuntimeConfig::default(),
 				Some(&test_catalog()),
+				None,
 			));
 
 		assert_eq!(
@@ -1703,6 +1799,7 @@ mod tests {
 			None,
 			&NextStepRuntimeConfig::default(),
 			Some(&test_catalog()),
+			None,
 		)
 		.await;
 
@@ -1729,6 +1826,7 @@ mod tests {
 			None,
 			&NextStepRuntimeConfig::default(),
 			Some(&test_catalog()),
+			None,
 		)
 		.await;
 
