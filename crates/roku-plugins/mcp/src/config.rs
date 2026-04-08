@@ -16,6 +16,13 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Top-level MCP configuration, typically loaded from `config/mcp.toml`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpConfig {
+	#[serde(default)]
+	pub servers: Vec<McpServerConfig>,
+}
+
 /// Configuration for a single MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {

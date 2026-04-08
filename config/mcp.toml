@@ -1,0 +1,22 @@
+# MCP Server Configuration
+# ========================
+# Each [[servers]] entry defines one MCP server to connect to at startup.
+# Tools from connected servers appear in the agent's tool pool with the
+# naming convention: mcp__{server_name}__{tool_name}
+#
+# Servers that fail to connect are skipped with a warning — they don't
+# prevent Roku from starting.
+
+# Example: Filesystem MCP server (Node.js)
+# [[servers]]
+# name = "filesystem"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+# Example: Custom MCP server with environment variables
+# [[servers]]
+# name = "my-tools"
+# command = "/usr/local/bin/my-mcp-server"
+# args = ["--mode", "stdio"]
+# [servers.env]
+# API_KEY = "your-key-here"

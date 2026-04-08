@@ -97,6 +97,11 @@ pub struct GenericAgentRuntime {
 	route_router: Option<Arc<LlmRouter>>,
 	skill_execution_available: bool,
 	agent_runtime_config: AgentRuntimeConfig,
+	/// Keepalive for the MCP bootstrap tokio runtime. The rmcp serve loop tasks
+	/// are spawned on this runtime during MCP server connection. Dropping it
+	/// would kill those tasks and break all MCP tool calls. Never accessed
+	/// directly — its sole purpose is preventing the drop.
+	_mcp_runtime: Option<Arc<tokio::runtime::Runtime>>,
 }
 
 impl GenericAgentRuntime {
@@ -155,6 +160,7 @@ impl GenericAgentRuntime {
 			route_router: None,
 			skill_execution_available,
 			agent_runtime_config,
+			_mcp_runtime: None,
 		};
 		runtime.register_worker(
 			96,
@@ -385,6 +391,92 @@ impl GenericAgentRuntime {
 			agent_runtime_config,
 		)
 		.with_route_router(route_router)
+	}
+
+	/// Like `with_route_and_execution_routers_...` but also integrates external MCP tools.
+	///
+	/// MCP catalog entries and tools are merged into the standard catalog/runtime after
+	/// deduplication by name. Entries whose name collides with a builtin are skipped with
+	/// a warning. This constructor is intended for CLI bootstrap where MCP connections have
+	/// already been established.
+	pub fn with_routers_and_mcp(
+		route_router: LlmRouter,
+		execution_router: LlmRouter,
+		skill_registry: SkillRegistry,
+		tool_config: ToolCatalogConfig,
+		plugin_snapshot: PluginRegistrySnapshot,
+		tools_runtime_config: ToolsRuntimeConfig,
+		agent_runtime_config: AgentRuntimeConfig,
+		mcp_catalog_entries: Vec<roku_plugin_catalog::CatalogDescriptor>,
+		mcp_tools: Vec<Box<dyn roku_plugin_host::Tool>>,
+		mcp_runtime: Option<Arc<tokio::runtime::Runtime>>,
+	) -> Self {
+		use roku_observability::{LogLevel, LogRecord, emit_global_log};
+
+		let mut resource_catalog =
+			build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config(
+				&skill_registry,
+				&tool_config,
+				&plugin_snapshot,
+				&tools_runtime_config,
+				true,
+			);
+
+		let execution_router = Arc::new(execution_router);
+		let mut tool_runtime = build_llm_tool_runtime_with_plugin_snapshot_and_runtime_config(
+			Arc::clone(&execution_router),
+			skill_registry,
+			&tool_config,
+			&resource_catalog,
+			&plugin_snapshot,
+			&tools_runtime_config,
+		);
+
+		// Dedup: skip MCP entries whose name collides with existing catalog entries.
+		let existing_names: std::collections::HashSet<&str> = resource_catalog
+			.entries()
+			.iter()
+			.map(|e| e.name.as_str())
+			.collect();
+
+		let filtered_entries: Vec<_> = mcp_catalog_entries
+			.into_iter()
+			.filter(|e| {
+				if existing_names.contains(e.name.as_str()) {
+					let _ = emit_global_log(LogRecord::new(
+						"roku-agent-runtime",
+						LogLevel::Warn,
+						format!("MCP tool '{}' skipped: name collision with builtin", e.name),
+					));
+					false
+				} else {
+					true
+				}
+			})
+			.collect();
+
+		resource_catalog.extend(filtered_entries);
+
+		for tool in mcp_tools {
+			if let Err(e) = tool_runtime.register_tool_boxed(tool) {
+				let _ = emit_global_log(LogRecord::new(
+					"roku-agent-runtime",
+					LogLevel::Warn,
+					format!("failed to register MCP tool: {}", e),
+				));
+			}
+		}
+
+		let mut runtime = Self::with_tool_runtime_and_plugin_snapshot_and_runtime_config(
+			tool_runtime,
+			resource_catalog,
+			tool_config,
+			plugin_snapshot,
+			agent_runtime_config,
+		)
+		.with_route_router(Arc::new(route_router));
+		runtime._mcp_runtime = mcp_runtime;
+		runtime
 	}
 
 	pub fn resource_catalog(&self) -> &ResourceCatalog {

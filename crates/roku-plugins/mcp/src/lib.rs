@@ -25,7 +25,7 @@ mod types;
 
 pub use bridge::{InMemoryMcpBridge, McpClient};
 pub use catalog::McpToolCatalog;
-pub use config::McpServerConfig;
+pub use config::{McpConfig, McpServerConfig};
 pub use descriptor_convert::{
 	mcp_tool_name, mcp_tools_to_catalog_descriptors, normalize_server_name,
 };
