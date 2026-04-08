@@ -2,6 +2,54 @@
 
 # Changelog
 
+## [v0.0.10] - 2026-04-08
+
+### Features
+
+- **(roku-agent-runtime)** wire LLM streaming and call_tools prompt into tool loop (by @[itscheems](https://github.com/itscheems)) - ([4d4bee3](https://github.com/itscheems/Roku/commit/4d4bee30e9ecfdfa43d975b27bf1bd52949a7416))
+- **(roku-agent-runtime)** add LLM-assisted semantic compaction with mechanical fallback (by @[itscheems](https://github.com/itscheems)) - ([016ba2b](https://github.com/itscheems/Roku/commit/016ba2b85e573d68df1c302f94584616e6f6599b))
+- **(roku-agent-runtime)** add concurrent tool execution with batch call_tools action (by @[itscheems](https://github.com/itscheems)) - ([ffa467f](https://github.com/itscheems/Roku/commit/ffa467ff5f62ca91cab59d2d3dddf5d5389177ef))
+- **(roku-cmd)** wire MCP tools into runtime catalog and tool pool (by @[itscheems](https://github.com/itscheems)) - ([110a50c](https://github.com/itscheems/Roku/commit/110a50c2ce42142f2d9ed39f7cab7894b39e2c62))
+- **(roku-cmd)** add AwaitingUser detection, /compact command, and UX improvements to Telegram handler (#99) (by @[itscheems](https://github.com/itscheems))  - (#99) - ([d96ba58](https://github.com/itscheems/Roku/commit/d96ba58d8b6a5ea57ed4ed95ad48c6387659bdfc))
+- **(roku-cmd)** add multi-turn continuity and AwaitingUser to `roku chat` (by @[itscheems](https://github.com/itscheems)) - ([2d9eef4](https://github.com/itscheems/Roku/commit/2d9eef42bffdfbcd1384fd150ce467018cba0bf7))
+- **(roku-cmd)** add interactive `roku chat` REPL command (by @[itscheems](https://github.com/itscheems)) - ([acc6e52](https://github.com/itscheems/Roku/commit/acc6e5281030ce8f8e93c4f12e0d49a9b019dcb5))
+- **(roku-cmd)** wire LoopEvent streaming into telegram handler (by @[itscheems](https://github.com/itscheems)) - ([2065d3a](https://github.com/itscheems/Roku/commit/2065d3ab2b0dca30a3f910405a4498403dbbe443))
+- **(roku-cmd)** tokio runtime entry with live-once streaming output (by @[itscheems](https://github.com/itscheems)) - ([6d93817](https://github.com/itscheems/Roku/commit/6d938174f8abb57c2bc8e6e7403971f9b7933808))
+- **(roku-plugin-llm)** add streaming method to LlmProvider trait and LlmRouter (by @[itscheems](https://github.com/itscheems)) - ([6afb6cd](https://github.com/itscheems/Roku/commit/6afb6cdc60e70422606aba17e5a38d72e87ce17e))
+- **(roku-plugin-llm)** async LLM provider with streaming support (by @[itscheems](https://github.com/itscheems)) - ([a38a139](https://github.com/itscheems/Roku/commit/a38a1396edf67a8f01b589e34b9c7ca5ef62b944))
+- **(roku-plugin-mcp)** implement MCP client foundation with stdio transport (by @[itscheems](https://github.com/itscheems)) - ([4430c1f](https://github.com/itscheems/Roku/commit/4430c1f680dd5819d33ab1a4ad2537d767176809))
+- **(roku-plugin-memory-sqlite)** implement FTS5 long-term memory backend and set as default (#98) (by @[itscheems](https://github.com/itscheems))  - (#98) - ([98647c8](https://github.com/itscheems/Roku/commit/98647c856f87f90995b508b354557b31bed04962))
+- **(roku-plugin-tools)** integrate Tavily Search as default web search provider (#97) (by @[itscheems](https://github.com/itscheems))  - (#97) - ([77a1868](https://github.com/itscheems/Roku/commit/77a18682c372101d64aff74dc807caabcecb7152))
+- **(roku-plugin-tools)** replace command allowlist with 3-level execution policy (by @[itscheems](https://github.com/itscheems)) - ([7781657](https://github.com/itscheems/Roku/commit/77816572e9e7eb07ff141ad55c50c389f2093b31))
+
+### Bug Fixes
+
+- **(roku-agent-runtime)** reject truncated streaming responses (by @[itscheems](https://github.com/itscheems)) - ([fe4a9e0](https://github.com/itscheems/Roku/commit/fe4a9e097b6e740566daeeb12fe37ec867e3e90c))
+- **(roku-agent-runtime)** handle all terminal conditions in CallTools batch dispatch (by @[itscheems](https://github.com/itscheems)) - ([9171b6e](https://github.com/itscheems/Roku/commit/9171b6eb5482bea5efa2bcc9015a02a6027a9bdb))
+- **(roku-agent-runtime)** declare tokio sync feature explicitly (by @[itscheems](https://github.com/itscheems)) - ([d063035](https://github.com/itscheems/Roku/commit/d06303575976dd7866125558ae48d959b0b83c44))
+- **(roku-cmd)** use rt.spawn instead of rt.block_on for telegram requests (by @[itscheems](https://github.com/itscheems)) - ([daaafd6](https://github.com/itscheems/Roku/commit/daaafd678d4d7784416949339179e398936e7337))
+- **(roku-cmd)** resolve telegram bot runtime panic on request (by @[itscheems](https://github.com/itscheems)) - ([2f26e2a](https://github.com/itscheems/Roku/commit/2f26e2a22ebfbab903c4d41990af8bc8e47169f2))
+- **(roku-plugin-memory-openviking)** wrap response.text() in run_blocking (by @[itscheems](https://github.com/itscheems)) - ([6bb0f93](https://github.com/itscheems/Roku/commit/6bb0f93eae40f4e38c7bc00d470592a398b8bc45))
+- **(roku-plugin-memory-openviking)** isolate blocking HTTP from async runtime (by @[itscheems](https://github.com/itscheems)) - ([85fbab4](https://github.com/itscheems/Roku/commit/85fbab4d94f1a2e9218b0a5be98624348f933247))
+
+### Refactor
+
+- **(roku-agent-runtime)** derive compact LLM budget from CompactConfig (by @[itscheems](https://github.com/itscheems)) - ([85ad0ea](https://github.com/itscheems/Roku/commit/85ad0eaa5e1e3538032b6085dcccf032fbe1bd46))
+- **(roku-agent-runtime)** deduplicate compact check, fix CallTools batch gaps (by @[itscheems](https://github.com/itscheems)) - ([5f723ff](https://github.com/itscheems/Roku/commit/5f723ffb20da05fb6351f07ad8a5f0640a89cf91))
+- **(roku-agent-runtime)** migrate execute_tool_loop and decide_tool_loop_next_step to async (by @[itscheems](https://github.com/itscheems)) - ([3afe166](https://github.com/itscheems/Roku/commit/3afe1664b266c29d7844dc81f0538060f354cfb4))
+- **(roku-cmd)** migrate CLI parsing to clap derive API (by @[itscheems](https://github.com/itscheems)) - ([c593243](https://github.com/itscheems/Roku/commit/c593243cf0ca9845d9d0bc3ff2fbe0f1b3b8d956))
+- **(roku-runtime-service)** add bridge_async_to_sync helper and wire async runtime calls (by @[itscheems](https://github.com/itscheems)) - ([cdbd408](https://github.com/itscheems/Roku/commit/cdbd408110888fe3e99cfab62b63815761eed433))
+
+### Testing
+
+- **(roku-plugin-mcp)** add E2E integration tests with real MCP server (by @[itscheems](https://github.com/itscheems)) - ([4692288](https://github.com/itscheems/Roku/commit/4692288f774077dcd0a1a2854eda9c826d46bf62))
+
+### Miscellaneous Tasks
+
+- update .gitignore (by @[itscheems](https://github.com/itscheems)) - ([e6cdc01](https://github.com/itscheems/Roku/commit/e6cdc0162412e0bf61c9ec081763b755e780d484))
+- remove accidentally staged worktree directories (by @[itscheems](https://github.com/itscheems)) - ([3dc2b80](https://github.com/itscheems/Roku/commit/3dc2b80bf843108ddeacd6b150480f214475377c))
+- update runtime.toml (by @[itscheems](https://github.com/itscheems)) - ([30bd2b1](https://github.com/itscheems/Roku/commit/30bd2b1be34d9d02ca28873faf2000a1fc49a32e))
+
 ## [v0.0.9] - 2026-04-06
 
 ### Features
