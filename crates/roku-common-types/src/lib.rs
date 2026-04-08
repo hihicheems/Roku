@@ -733,6 +733,14 @@ pub struct ToolRuntimeContract {
 }
 
 impl ToolRuntimeContract {
+	/// Whether this tool is safe to run concurrently with other safe tools.
+	pub fn is_concurrency_safe(&self) -> bool {
+		matches!(
+			self.side_effects,
+			ToolSideEffectPolicy::None | ToolSideEffectPolicy::ReadOnly
+		)
+	}
+
 	pub fn searchable_text(&self) -> String {
 		format!(
 			"{:?} {:?} {} {:?}",

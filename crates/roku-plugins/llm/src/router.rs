@@ -23,8 +23,8 @@ use serde_json::Value;
 
 use crate::types::{
 	GenerationRequest, LlmAdapterError, LlmResponse, ModelProfile, ProviderCallError,
-	ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy, StructuredGenerationError,
-	StructuredJsonResponse, StructuredOutputError, estimate_cost_usd,
+	ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy, StreamChunk,
+	StructuredGenerationError, StructuredJsonResponse, StructuredOutputError, estimate_cost_usd,
 };
 
 #[async_trait]
@@ -35,6 +35,32 @@ pub trait LlmProvider: Send + Sync {
 		model: &ModelProfile,
 		request: &GenerationRequest,
 	) -> Result<ProviderResponse, ProviderCallError>;
+
+	/// Stream a generation request, sending [`StreamChunk`] events through `tx`.
+	///
+	/// Default implementation falls back to [`complete()`] and sends the full
+	/// output as a single [`StreamChunk::TextDelta`] followed by [`StreamChunk::Done`].
+	async fn stream(
+		&self,
+		model: &ModelProfile,
+		request: &GenerationRequest,
+		tx: tokio::sync::mpsc::Sender<StreamChunk>,
+	) -> Result<ProviderResponse, ProviderCallError> {
+		let response = self.complete(model, request).await?;
+		let _ = tx
+			.send(StreamChunk::TextDelta {
+				text: response.output.clone(),
+			})
+			.await;
+		let _ = tx
+			.send(StreamChunk::Done {
+				finish_reason: response.finish_reason.clone(),
+				prompt_tokens: response.prompt_tokens,
+				output_tokens: response.output_tokens,
+			})
+			.await;
+		Ok(response)
+	}
 }
 
 pub struct LlmRouter {
@@ -195,6 +221,51 @@ impl LlmRouter {
 			provider_response.latency_ms,
 			estimated_cost_usd,
 		);
+		Ok(LlmResponse {
+			provider: selected_model.provider.clone(),
+			model_id: selected_model.model_id.clone(),
+			output: provider_response.output,
+			finish_reason: provider_response.finish_reason,
+			prompt_tokens: provider_response.prompt_tokens,
+			output_tokens: provider_response.output_tokens,
+			total_tokens,
+			estimated_cost_usd,
+			latency_ms: provider_response.latency_ms,
+		})
+	}
+
+	/// Async entrypoint: stream a request, sending [`StreamChunk`] events through `tx`.
+	///
+	/// Returns the final [`LlmResponse`] after the stream completes.
+	pub async fn generate_streaming(
+		&self,
+		request: &GenerationRequest,
+		tx: tokio::sync::mpsc::Sender<StreamChunk>,
+	) -> Result<LlmResponse, LlmAdapterError> {
+		let selected_model = self.select_model(request)?;
+		let provider = self
+			.providers
+			.get(&selected_model.provider)
+			.ok_or_else(|| {
+				LlmAdapterError::ProviderNotRegistered(selected_model.provider.clone())
+			})?;
+
+		let provider_response = provider
+			.provider
+			.stream(selected_model, request, tx)
+			.await
+			.map_err(|error| LlmAdapterError::ProviderCallFailed {
+				provider: selected_model.provider.clone(),
+				model_id: selected_model.model_id.clone(),
+				message: error.to_string(),
+			})?;
+
+		let total_tokens = provider_response
+			.prompt_tokens
+			.saturating_add(provider_response.output_tokens);
+		let estimated_cost_usd =
+			estimate_cost_usd(total_tokens, selected_model.cost_per_1k_tokens_usd);
+
 		Ok(LlmResponse {
 			provider: selected_model.provider.clone(),
 			model_id: selected_model.model_id.clone(),

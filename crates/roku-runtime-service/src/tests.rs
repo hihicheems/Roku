@@ -189,6 +189,7 @@ fn pending_filesystem_candidate_loop_state() -> LoopState {
 			action: roku_agent_runtime::NextStepAction::CallTool,
 			tool_name: Some("fs.read_text".to_string()),
 			arguments: Some(serde_json::json!({ "path": "Cargo.toml" })),
+			tool_calls: None,
 			reason: "Read the grounded workspace manifest first.".to_string(),
 			final_message: None,
 		},
@@ -215,6 +216,7 @@ fn pending_filesystem_candidate_loop_state() -> LoopState {
 			action: roku_agent_runtime::NextStepAction::AskUser,
 			tool_name: None,
 			arguments: None,
+			tool_calls: None,
 			reason: "Runtime paused for user clarification after the latest tool observation."
 				.to_string(),
 			final_message: Some("你想看哪一个 Cargo.toml？".to_string()),
@@ -286,6 +288,7 @@ fn pending_filesystem_resume_success_loop_state() -> (LoopState, String) {
 			action: roku_agent_runtime::NextStepAction::CallTool,
 			tool_name: Some("inventory.describe".to_string()),
 			arguments: Some(serde_json::json!({})),
+			tool_calls: None,
 			reason: "Inspect the runtime inventory before answering.".to_string(),
 			final_message: None,
 		},
@@ -312,6 +315,7 @@ fn pending_filesystem_resume_success_loop_state() -> (LoopState, String) {
 			action: roku_agent_runtime::NextStepAction::AskUser,
 			tool_name: None,
 			arguments: None,
+			tool_calls: None,
 			reason: "Runtime paused for user clarification after the latest tool observation."
 				.to_string(),
 			final_message: Some("你想继续看 `tools` 还是 `skills`？".to_string()),

@@ -175,6 +175,7 @@ impl StepRecord {
 				action: crate::runtime_loop::NextStepAction::CallTool,
 				tool_name: None,
 				arguments: None,
+				tool_calls: None,
 				reason,
 				final_message: None,
 			},

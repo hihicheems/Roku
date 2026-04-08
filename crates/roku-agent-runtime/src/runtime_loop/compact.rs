@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier};
+
 use super::LoopState;
 
 /// Estimate the approximate token usage of the current loop context.
@@ -119,6 +121,104 @@ pub fn compact_history(state: &mut LoopState, config: &CompactConfig) {
 	let discarded: Vec<_> = state.history.drain(..split_point).collect();
 	let summary = summarize_discarded_steps(&discarded);
 
+	apply_compact_state(state, &discarded, summary, config);
+}
+
+/// Compact with LLM-assisted summarization, falling back to mechanical compact on failure.
+///
+/// Returns `true` if LLM summarization succeeded, `false` if it fell back to mechanical.
+pub async fn compact_history_with_llm(
+	state: &mut LoopState,
+	config: &CompactConfig,
+	router: &LlmRouter,
+) -> bool {
+	if state.history.len() <= config.retain_tail_steps {
+		return false;
+	}
+
+	let split_point = state.history.len() - config.retain_tail_steps;
+	let discarded: Vec<_> = state.history.drain(..split_point).collect();
+
+	// Build a concise JSON representation of discarded steps for the LLM.
+	let step_summaries: Vec<serde_json::Value> = discarded
+		.iter()
+		.map(|step| {
+			let tool = step.tool_name.as_deref().unwrap_or("unknown");
+			let outcome = step
+				.observation
+				.as_ref()
+				.map(|obs| match obs {
+					super::StepObservation::Tool(t) => {
+						let status = if t.ok { "ok" } else { "error" };
+						format!("{}: {}", status, truncate(&t.message, 150))
+					}
+					super::StepObservation::AskUser { final_message } => {
+						format!("ask_user: {}", truncate(final_message, 150))
+					}
+					super::StepObservation::FinalMessage { final_message } => {
+						format!("final: {}", truncate(final_message, 150))
+					}
+				})
+				.unwrap_or_else(|| "no observation".to_string());
+			serde_json::json!({
+				"step": step.step_index,
+				"tool": tool,
+				"reason": truncate(&step.decision_reason, 100),
+				"outcome": outcome,
+			})
+		})
+		.collect();
+
+	let steps_json = serde_json::to_string_pretty(&step_summaries).unwrap_or_default();
+	let prompt = format!(
+		"You are summarizing {} agent execution steps that are being compacted from history.\n\
+		 Produce a concise plain-text summary that captures:\n\
+		 - Key actions taken and their outcomes\n\
+		 - Any errors encountered\n\
+		 - Important state changes or discoveries\n\n\
+		 Keep the summary under {} characters. Output plain text only.\n\n\
+		 Steps:\n{}",
+		discarded.len(),
+		config.working_summary_max_chars,
+		steps_json
+	);
+
+	let llm_result = router
+		.generate(&GenerationRequest {
+			system_prompt: Some(
+				"You are a concise summarizer for an agent runtime's execution history."
+					.to_string(),
+			),
+			prompt,
+			expected_output_tokens: 512,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: 10_000,
+			budget_cost_remaining_usd: 0.50,
+		})
+		.await;
+
+	let summary = match llm_result {
+		Ok(response) if !response.output.trim().is_empty() => response.output,
+		_ => {
+			// Fallback to mechanical summarization.
+			let mechanical = summarize_discarded_steps(&discarded);
+			apply_compact_state(state, &discarded, mechanical, config);
+			return false;
+		}
+	};
+
+	apply_compact_state(state, &discarded, summary, config);
+	true
+}
+
+/// Apply compaction state updates after summarization (shared by both paths).
+fn apply_compact_state(
+	state: &mut LoopState,
+	discarded: &[super::StepRecord],
+	summary: String,
+	config: &CompactConfig,
+) {
 	let summary_preview = truncate(&summary, 200);
 	let boundary = super::StepRecord::compact_boundary(
 		state.step_index,
@@ -237,6 +337,7 @@ mod tests {
 				action: NextStepAction::CallTool,
 				tool_name: Some("general.execute".to_string()),
 				arguments: Some(json!({"command": "echo hello"})),
+				tool_calls: None,
 				reason: "Execute the command.".to_string(),
 				final_message: None,
 			},
@@ -497,6 +598,7 @@ mod tests {
 					action: NextStepAction::CallTool,
 					tool_name: Some("general.execute".to_string()),
 					arguments: Some(json!({"command": "echo hello"})),
+					tool_calls: None,
 					reason: "Execute.".to_string(),
 					final_message: None,
 				},

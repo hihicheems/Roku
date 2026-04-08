@@ -20,9 +20,18 @@ use thiserror::Error;
 #[serde(rename_all = "snake_case")]
 pub enum NextStepAction {
 	CallTool,
+	CallTools,
 	AskUser,
 	FinalAnswer,
 	Fail,
+}
+
+/// A single tool invocation entry within a batch `call_tools` decision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCallEntry {
+	pub tool_name: String,
+	#[serde(default)]
+	pub arguments: Option<Value>,
 }
 
 /// One-round decision emitted by the generic ReAct loop.
@@ -51,6 +60,9 @@ pub struct NextStepDecision {
 	pub action: NextStepAction,
 	pub tool_name: Option<String>,
 	pub arguments: Option<Value>,
+	/// Batch tool calls for the `CallTools` action.
+	#[serde(default)]
+	pub tool_calls: Option<Vec<ToolCallEntry>>,
 	pub reason: String,
 	pub final_message: Option<String>,
 }
@@ -79,6 +91,22 @@ impl NextStepDecision {
 			.get("arguments")
 			.cloned()
 			.filter(|value| !value.is_null());
+		let tool_calls = object
+			.get("tool_calls")
+			.and_then(Value::as_array)
+			.map(|arr| {
+				arr.iter()
+					.filter_map(|v| {
+						let name = v.get("tool_name").and_then(Value::as_str)?;
+						let args = v.get("arguments").cloned().filter(|a| !a.is_null());
+						Some(ToolCallEntry {
+							tool_name: name.to_string(),
+							arguments: args,
+						})
+					})
+					.collect::<Vec<_>>()
+			})
+			.filter(|v| !v.is_empty());
 		let final_message = object
 			.get("final_message")
 			.and_then(Value::as_str)
@@ -88,6 +116,7 @@ impl NextStepDecision {
 			action,
 			tool_name,
 			arguments,
+			tool_calls,
 			reason,
 			final_message,
 		};
@@ -102,6 +131,14 @@ impl NextStepDecision {
 					return Err(NextStepDecisionSchemaError::InvalidActionShape {
 						action: self.action,
 						message: "call_tool requires tool_name".to_string(),
+					});
+				}
+			}
+			NextStepAction::CallTools => {
+				if self.tool_calls.is_none() {
+					return Err(NextStepDecisionSchemaError::InvalidActionShape {
+						action: self.action,
+						message: "call_tools requires tool_calls array".to_string(),
 					});
 				}
 			}
@@ -147,6 +184,7 @@ fn parse_action(value: &Value) -> Result<NextStepAction, NextStepDecisionSchemaE
 		})?;
 	match raw {
 		"call_tool" => Ok(NextStepAction::CallTool),
+		"call_tools" => Ok(NextStepAction::CallTools),
 		"ask_user" => Ok(NextStepAction::AskUser),
 		"final_answer" => Ok(NextStepAction::FinalAnswer),
 		"fail" => Ok(NextStepAction::Fail),
