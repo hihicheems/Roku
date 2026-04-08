@@ -26,6 +26,7 @@ debug
 .env
 .ralph/
 .roku/
+.worktrees/
 AGENTS.md
 CLAUDE.md
 draft/
