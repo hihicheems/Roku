@@ -843,10 +843,10 @@ fn connect_mcp_servers_blocking(config: &McpConfig) -> McpBootstrapResult {
 				format!("failed to create MCP bootstrap runtime: {}", e),
 			));
 			return McpBootstrapResult {
-			catalog_entries: Vec::new(),
-			tools: Vec::new(),
-			runtime: None,
-		};
+				catalog_entries: Vec::new(),
+				tools: Vec::new(),
+				runtime: None,
+			};
 		}
 	};
 
