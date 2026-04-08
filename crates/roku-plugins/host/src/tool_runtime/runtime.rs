@@ -105,6 +105,23 @@ impl ToolRuntime {
 		Ok(())
 	}
 
+	/// Register a boxed tool (useful for type-erased tools like MCP wrappers).
+	pub fn register_tool_boxed(&mut self, tool: Box<dyn Tool>) -> Result<(), ToolRuntimeError> {
+		let descriptor = tool.descriptor();
+		descriptor.validate()?;
+		if self.tools.contains_key(&descriptor.name) {
+			return Err(ToolRuntimeError::ToolAlreadyRegistered(descriptor.name));
+		}
+		self.tools.insert(
+			descriptor.name.clone(),
+			RegisteredTool {
+				descriptor,
+				tool: Arc::from(tool),
+			},
+		);
+		Ok(())
+	}
+
 	pub fn register_hook(&mut self, hook: Arc<dyn ExecutionHook>) {
 		self.hooks.push(hook);
 	}

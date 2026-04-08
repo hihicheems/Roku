@@ -46,6 +46,7 @@ use roku_plugin_host::{
 	default_bundled_plugin_descriptors,
 };
 use roku_plugin_llm::build_openrouter_router_with_metrics;
+use roku_plugin_mcp::{McpConfig, McpConnection, McpTool, mcp_tools_to_catalog_descriptors};
 use roku_plugin_skills::{SkillRegistry, SkillsRuntimeConfig};
 pub use roku_runtime_service::RunMode;
 use roku_runtime_service::{RuntimeModeReport, RuntimeService};
@@ -638,7 +639,7 @@ pub(crate) fn build_live_runtime_service_from_layout_and_bootstrap(
 	bootstrap: PluginBootstrap,
 ) -> Result<RuntimeService, CommandError> {
 	let metrics = Arc::new(Metrics::default());
-	let (runtime, runtime_mode) = build_live_runtime(bootstrap.clone(), metrics.clone())?;
+	let (runtime, runtime_mode) = build_live_runtime(layout, bootstrap.clone(), metrics.clone())?;
 	let bundle = resolve_entry_runtime_bundle(&bootstrap.runtime_configs.memory, layout)?;
 
 	wire_memory_subsystem(
@@ -782,7 +783,148 @@ fn map_memory_error(error: MemoryError) -> CommandError {
 	CommandError::MemoryBackend(error.to_string())
 }
 
+/// Load MCP server configuration from `config/mcp.toml` relative to the layout's config dir.
+///
+/// Returns an empty config if the file is absent or unparseable (fail-open).
+fn load_mcp_config(layout: &LocalStorageLayout) -> McpConfig {
+	// Derive config dir from tool_config_path (e.g. "config/tools.toml" -> "config")
+	let config_dir = layout
+		.tool_config_path
+		.parent()
+		.map(|p| p.to_path_buf())
+		.unwrap_or_else(|| std::path::PathBuf::from("config"));
+	let mcp_path = config_dir.join("mcp.toml");
+
+	match std::fs::read_to_string(&mcp_path) {
+		Ok(content) => toml::from_str(&content).unwrap_or_else(|e| {
+			let _ = emit_global_log(LogRecord::new(
+				"roku-cmd",
+				LogLevel::Warn,
+				format!("invalid MCP config at {}: {}", mcp_path.display(), e),
+			));
+			McpConfig::default()
+		}),
+		Err(_) => McpConfig::default(),
+	}
+}
+
+struct McpBootstrapResult {
+	catalog_entries: Vec<roku_plugin_catalog::CatalogDescriptor>,
+	tools: Vec<Box<dyn roku_plugin_host::Tool>>,
+	/// Keepalive for the tokio runtime that hosts rmcp serve loop tasks.
+	runtime: Option<Arc<tokio::runtime::Runtime>>,
+}
+
+/// Connect to all configured MCP servers (blocking, fail-open).
+///
+/// The returned `runtime` must be kept alive for the process lifetime — rmcp
+/// serve loop tasks live on it. Dropping it kills all MCP connections.
+fn connect_mcp_servers_blocking(config: &McpConfig) -> McpBootstrapResult {
+	if config.servers.is_empty() {
+		return McpBootstrapResult {
+			catalog_entries: Vec::new(),
+			tools: Vec::new(),
+			runtime: None,
+		};
+	}
+
+	// Create a runtime that will live for the entire process. The rmcp serve
+	// loop tasks are spawned on this runtime during connection — dropping it
+	// would kill those tasks and break all MCP tool calls.
+	let rt = match tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+	{
+		Ok(rt) => Arc::new(rt),
+		Err(e) => {
+			let _ = emit_global_log(LogRecord::new(
+				"roku-cmd",
+				LogLevel::Warn,
+				format!("failed to create MCP bootstrap runtime: {}", e),
+			));
+			return McpBootstrapResult {
+			catalog_entries: Vec::new(),
+			tools: Vec::new(),
+			runtime: None,
+		};
+		}
+	};
+
+	let rt_for_thread = Arc::clone(&rt);
+	let (entries, tools) = std::thread::scope(|s| {
+		s.spawn(|| {
+			rt_for_thread.block_on(async {
+				let mut all_catalog_entries: Vec<roku_plugin_catalog::CatalogDescriptor> =
+					Vec::new();
+				let mut all_tools: Vec<Box<dyn roku_plugin_host::Tool>> = Vec::new();
+
+				for server_config in &config.servers {
+					match McpConnection::connect(server_config).await {
+						Ok(connection) => {
+							let connection = Arc::new(connection);
+							match connection.list_tools().await {
+								Ok(tools) => {
+									let server_name = connection.server_name();
+									let _ = emit_global_log(LogRecord::new(
+										"roku-cmd",
+										LogLevel::Info,
+										format!(
+											"MCP server '{}': discovered {} tools",
+											server_name,
+											tools.len()
+										),
+									));
+									let catalog_entries =
+										mcp_tools_to_catalog_descriptors(server_name, &tools);
+									all_catalog_entries.extend(catalog_entries);
+									for tool in tools {
+										all_tools.push(Box::new(McpTool::new(
+											Arc::clone(&connection),
+											tool,
+										)));
+									}
+								}
+								Err(e) => {
+									let _ = emit_global_log(LogRecord::new(
+										"roku-cmd",
+										LogLevel::Warn,
+										format!(
+											"MCP server '{}': failed to list tools: {}",
+											server_config.name, e
+										),
+									));
+								}
+							}
+						}
+						Err(e) => {
+							let _ = emit_global_log(LogRecord::new(
+								"roku-cmd",
+								LogLevel::Warn,
+								format!(
+									"MCP server '{}': connection failed: {}",
+									server_config.name, e
+								),
+							));
+						}
+					}
+				}
+
+				(all_catalog_entries, all_tools)
+			})
+		})
+		.join()
+		.unwrap_or_else(|_| (Vec::new(), Vec::new()))
+	});
+
+	McpBootstrapResult {
+		runtime: if entries.is_empty() { None } else { Some(rt) },
+		catalog_entries: entries,
+		tools,
+	}
+}
+
 fn build_live_runtime(
+	layout: &LocalStorageLayout,
 	mut bootstrap: PluginBootstrap,
 	metrics: Arc<Metrics>,
 ) -> Result<(GenericAgentRuntime, RuntimeModeReport), CommandError> {
@@ -836,8 +978,12 @@ fn build_live_runtime(
 	let execution_router = build_openrouter_router_with_metrics(config, metrics)?;
 	let runtime_mode = RuntimeModeReport::live_react();
 	log_runtime_bootstrap_mode(&runtime_mode);
+
+	let mcp_config = load_mcp_config(layout);
+	let mcp = connect_mcp_servers_blocking(&mcp_config);
+
 	Ok((
-		GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
+		GenericAgentRuntime::with_routers_and_mcp(
 			route_router,
 			execution_router,
 			bootstrap.skill_registry,
@@ -845,6 +991,9 @@ fn build_live_runtime(
 			bootstrap.plugin_snapshot,
 			bootstrap.runtime_configs.tools,
 			bootstrap.runtime_configs.agent,
+			mcp.catalog_entries,
+			mcp.tools,
+			mcp.runtime,
 		),
 		runtime_mode,
 	))

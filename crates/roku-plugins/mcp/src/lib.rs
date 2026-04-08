@@ -16,10 +16,20 @@
 
 mod bridge;
 mod catalog;
+mod config;
+mod descriptor_convert;
 mod error;
+mod tool_wrapper;
+mod transport;
 mod types;
 
 pub use bridge::{InMemoryMcpBridge, McpClient};
 pub use catalog::McpToolCatalog;
+pub use config::{McpConfig, McpServerConfig};
+pub use descriptor_convert::{
+	mcp_tool_name, mcp_tools_to_catalog_descriptors, normalize_server_name,
+};
 pub use error::McpError;
+pub use tool_wrapper::McpTool;
+pub use transport::McpConnection;
 pub use types::{McpRequest, McpResponse, McpToolDescriptor};

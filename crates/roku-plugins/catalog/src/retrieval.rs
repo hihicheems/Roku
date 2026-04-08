@@ -220,6 +220,16 @@ impl ResourceCatalog {
 			.map(|contract| &contract.grounding)
 	}
 
+	/// Extend the catalog with additional entries and rebuild search indexes.
+	pub fn extend(&mut self, new_entries: Vec<CatalogDescriptor>) {
+		if new_entries.is_empty() {
+			return;
+		}
+		let mut all_entries = std::mem::take(&mut self.entries);
+		all_entries.extend(new_entries);
+		*self = Self::new(all_entries);
+	}
+
 	pub fn descriptors_for_kind(&self, kind: ResourceKind) -> Vec<CatalogDescriptor> {
 		self.entries
 			.iter()
