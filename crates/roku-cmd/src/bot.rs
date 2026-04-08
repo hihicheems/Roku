@@ -48,6 +48,7 @@ use roku_runtime_service::{RunMode, RuntimeExecutionMode, RuntimeModeReport};
 use serde_json::json;
 
 use crate::CommandError;
+use crate::conversation::compact_conversation_history;
 use crate::entry_registry::resolve_memory_subsystem;
 use crate::runtime::ExecutionRequestOptions;
 use crate::runtime::{
@@ -280,25 +281,16 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 							tokio::sync::mpsc::unbounded_channel::<roku_agent_runtime::LoopEvent>();
 						let render_task = tokio::spawn(async move {
 							while let Some(event) = rx.recv().await {
+								// Only emit ToolStart notices. ToolEnd messages roughly double the
+								// message count for multi-step tasks and add little value while
+								// the final response makes the step outcome clear.
 								let text = match &event {
 									roku_agent_runtime::LoopEvent::ToolStart {
 										step,
 										tool_name,
-									} => Some(format!("⚙️ Step {step}: starting `{tool_name}`")),
-									roku_agent_runtime::LoopEvent::ToolEnd {
-										step,
-										tool_name,
-										elapsed_ms,
-									} => {
-										if let Some(ms) = elapsed_ms {
-											Some(format!(
-												"✅ Step {step}: `{tool_name}` done ({ms}ms)"
-											))
-										} else {
-											Some(format!("✅ Step {step}: `{tool_name}` done"))
-										}
-									}
-									roku_agent_runtime::LoopEvent::CompactTriggered { .. }
+									} => Some(format!("⚙️ Step {step}: `{tool_name}`")),
+									roku_agent_runtime::LoopEvent::ToolEnd { .. }
+									| roku_agent_runtime::LoopEvent::CompactTriggered { .. }
 									| roku_agent_runtime::LoopEvent::StepComplete { .. } => None,
 								};
 								if let (Some(chat_id), Some(text)) = (chat_id, text) {
@@ -356,18 +348,34 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 						created_at_unix_ms: now_unix_ms(),
 					},
 				)?;
-				Ok(response.into())
+				// Check if the agent paused and is waiting for the user to reply.
+				// If so, annotate the response so the user sees a clear indicator.
+				let is_awaiting = self
+					.service
+					.pending_loop(&session_id)
+					.ok()
+					.flatten()
+					.is_some();
+				let mut handler_response = TelegramHandlerResponse::from(response);
+				if is_awaiting {
+					handler_response.response.message = format!(
+						"{}\n\nRoku is waiting for your reply. Send your response to continue.",
+						handler_response.response.message
+					);
+				}
+				Ok(handler_response)
 			}
 			Err(error) => {
+				let error_summary = format!("Task could not be completed: {}", error.message);
 				self.transport_state.append_turn(
 					&session_id,
 					ConversationTurn {
 						role: ConversationRole::Assistant,
-						content: format!("task failed: {}", error.message),
+						content: error_summary.clone(),
 						created_at_unix_ms: now_unix_ms(),
 					},
 				)?;
-				Err(error)
+				Err(RuntimeError::new(error_summary))
 			}
 		}
 	}
@@ -554,6 +562,52 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 					)
 					.into())
 			}
+			TelegramControlCommand::Compact => {
+				let Some(active_session) = self
+					.transport_state
+					.get_active_session(&command.session_id)?
+				else {
+					return Ok(self
+						.control_command_response(
+							command.command,
+							ResponseStatus::Succeeded,
+							"No active session is currently selected for this chat.".to_string(),
+						)
+						.into());
+				};
+				let session_id = &active_session.session_id;
+				// Load all stored turns for the session (no cap — we need the full history).
+				let mut history = self
+					.transport_state
+					.load_short_term_continuity(session_id, usize::MAX)?;
+				match compact_conversation_history(&mut history) {
+					None => Ok(self
+						.control_command_response(
+							command.command,
+							ResponseStatus::Succeeded,
+							format!(
+								"Conversation history has {} turns — nothing to compact.",
+								history.len()
+							),
+						)
+						.into()),
+					Some(result) => {
+						// Replace stored turns with the compacted set.
+						self.transport_state
+							.replace_continuity(session_id, &history)?;
+						Ok(self
+							.control_command_response(
+								command.command,
+								ResponseStatus::Succeeded,
+								format!(
+									"Compacted {} turns into a summary. {} turns remain.",
+									result.discarded, result.retained
+								),
+							)
+							.into())
+					}
+				}
+			}
 		}
 	}
 
@@ -694,6 +748,7 @@ impl RuntimeServiceTelegramHandler {
 			"/delete - Delete the current active session after confirmation.".to_string(),
 			"/cancel - Cancel the current pending loop without clearing chat history.".to_string(),
 			"/clear - Clear the current chat session state and pending loop.".to_string(),
+			"/compact - Compact older conversation turns into a summary.".to_string(),
 			"".to_string(),
 			"Send natural language directly to start a task.".to_string(),
 		]
@@ -1269,6 +1324,26 @@ impl TelegramTransportState {
 		store
 			.load_short_term_continuity(session_id, limit)
 			.map_err(runtime_short_term_error)
+	}
+
+	/// Replaces all stored conversation turns for a session with the provided list.
+	///
+	/// Used by `/compact` to atomically swap the full history with the compacted version.
+	fn replace_continuity(
+		&self,
+		session_id: &str,
+		turns: &[ConversationTurn],
+	) -> Result<(), RuntimeError> {
+		let mut store = self.lock_conversation_store()?;
+		store
+			.delete_continuity(session_id)
+			.map_err(runtime_short_term_error)?;
+		for turn in turns {
+			store
+				.append_continuity_turn(session_id, turn.clone())
+				.map_err(runtime_short_term_error)?;
+		}
+		Ok(())
 	}
 
 	/// Clears Telegram session-scoped state for one chat/session.
@@ -2054,12 +2129,97 @@ mod tests {
 		assert!(response.response.message.contains("/new"));
 		assert!(response.response.message.contains("/delete"));
 		assert!(response.response.message.contains("/session-setting"));
+		assert!(response.response.message.contains("/compact"));
 		assert!(
 			response
 				.response
 				.message
 				.contains("Send natural language directly")
 		);
+	}
+
+	#[test]
+	fn telegram_control_compact_reports_nothing_when_history_is_short() {
+		let handler = test_handler();
+		let binding_id = "telegram-compact-short";
+		let session = bootstrap_session(&handler, binding_id);
+		// Seed two turns — below the compaction threshold.
+		handler
+			.transport_state
+			.append_turn(
+				&session.session_id,
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: "hello".to_string(),
+					created_at_unix_ms: 1,
+				},
+			)
+			.expect("turn should append");
+
+		let response = handler
+			.handle_control_command(control_command(binding_id, TelegramControlCommand::Compact))
+			.expect("compact command should succeed");
+		assert_eq!(response.response.status, ResponseStatus::Succeeded);
+		assert!(response.response.message.contains("nothing to compact"));
+		// History is unchanged.
+		assert_eq!(
+			handler
+				.transport_state
+				.load_short_term_continuity(&session.session_id, usize::MAX)
+				.expect("turns should load")
+				.len(),
+			1
+		);
+	}
+
+	#[test]
+	fn telegram_control_compact_compacts_long_history() {
+		let handler = test_handler();
+		let binding_id = "telegram-compact-long";
+		let session = bootstrap_session(&handler, binding_id);
+		// Seed 8 turns — above the RETAIN_TAIL=6 threshold.
+		for i in 0..8u64 {
+			handler
+				.transport_state
+				.append_turn(
+					&session.session_id,
+					ConversationTurn {
+						role: ConversationRole::User,
+						content: format!("msg {i}"),
+						created_at_unix_ms: i,
+					},
+				)
+				.expect("turn should append");
+		}
+
+		let response = handler
+			.handle_control_command(control_command(binding_id, TelegramControlCommand::Compact))
+			.expect("compact command should succeed");
+		assert_eq!(response.response.status, ResponseStatus::Succeeded);
+		assert!(
+			response.response.message.contains("Compacted"),
+			"response should mention compaction"
+		);
+		// After compaction: 2 discarded → 1 summary + 6 tail = 7 retained.
+		let turns = handler
+			.transport_state
+			.load_short_term_continuity(&session.session_id, usize::MAX)
+			.expect("turns should load");
+		assert_eq!(turns.len(), 7);
+		assert_eq!(turns[0].role, ConversationRole::System);
+	}
+
+	#[test]
+	fn telegram_control_compact_without_active_session_returns_graceful_response() {
+		let handler = test_handler();
+		let response = handler
+			.handle_control_command(control_command(
+				"compact-no-active",
+				TelegramControlCommand::Compact,
+			))
+			.expect("compact without active session should respond");
+		assert_eq!(response.response.status, ResponseStatus::Succeeded);
+		assert!(response.response.message.contains("No active session"));
 	}
 
 	#[test]

@@ -27,6 +27,7 @@
 mod api;
 mod bot;
 mod chat;
+mod conversation;
 mod entry_registry;
 mod memory_runtime_config;
 mod pending_loop_substrate;

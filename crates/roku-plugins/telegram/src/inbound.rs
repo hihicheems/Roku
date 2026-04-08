@@ -131,6 +131,8 @@ pub enum TelegramControlCommand {
 	Delete,
 	/// Rename the current active session via a follow-up text input.
 	SessionSetting,
+	/// Compact older conversation turns into a summary for the current active session.
+	Compact,
 }
 
 /// Parsed Telegram-side control command.
@@ -431,6 +433,11 @@ const TELEGRAM_CONTROL_COMMANDS: &[TelegramControlCommandSpec] = &[
 	TelegramControlCommandSpec {
 		name: "sessionsetting",
 		command: TelegramControlCommand::SessionSetting,
+		allows_inline_argument: false,
+	},
+	TelegramControlCommandSpec {
+		name: "compact",
+		command: TelegramControlCommand::Compact,
 		allows_inline_argument: false,
 	},
 ];

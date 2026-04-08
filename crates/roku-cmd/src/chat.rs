@@ -27,6 +27,7 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
 use crate::CommandError;
+use crate::conversation::compact_conversation_history;
 use crate::runtime::{build_live_runtime_service_from_env, next_cli_request_sequence};
 
 /// Options parsed from the `chat` subcommand arguments.
@@ -87,7 +88,16 @@ pub(crate) fn run_chat(
 						continue;
 					}
 					"/compact" => {
-						compact_conversation_history(&mut conversation_history);
+						match compact_conversation_history(&mut conversation_history) {
+							Some(result) => eprintln!(
+								"[compact] Compacted {} turns into summary. {} turns remain.",
+								result.discarded, result.retained
+							),
+							None => eprintln!(
+								"[compact] History has {} turns, nothing to compact.",
+								conversation_history.len()
+							),
+						}
 						continue;
 					}
 					input if input.starts_with('/') => {
@@ -317,63 +327,6 @@ fn execute_turn(
 
 		result
 	})
-}
-
-/// Deterministic compaction: keep the last few turns, summarize older ones into a single
-/// system turn.
-fn compact_conversation_history(history: &mut Vec<ConversationTurn>) {
-	const RETAIN_TAIL: usize = 6; // Keep last 3 user-assistant pairs
-
-	if history.len() <= RETAIN_TAIL {
-		eprintln!(
-			"[compact] History has {} turns, nothing to compact.",
-			history.len()
-		);
-		return;
-	}
-
-	let split_at = history.len() - RETAIN_TAIL;
-	let discarded: Vec<_> = history.drain(..split_at).collect();
-
-	// Build a deterministic one-line-per-turn summary.
-	let mut summary_lines = Vec::new();
-	for turn in &discarded {
-		let role = match turn.role {
-			ConversationRole::User => "User",
-			ConversationRole::Assistant => "Assistant",
-			ConversationRole::System => "System",
-		};
-		// Truncate long content for the summary.
-		let preview: String = turn.content.chars().take(120).collect();
-		let ellipsis = if turn.content.chars().count() > 120 {
-			"..."
-		} else {
-			""
-		};
-		summary_lines.push(format!("- {role}: {preview}{ellipsis}"));
-	}
-
-	let summary = format!(
-		"[Compacted {} earlier turns]\n{}",
-		discarded.len(),
-		summary_lines.join("\n")
-	);
-
-	// Insert the summary as a System turn at position 0.
-	history.insert(
-		0,
-		ConversationTurn {
-			role: ConversationRole::System,
-			content: summary,
-			created_at_unix_ms: now_unix_ms(),
-		},
-	);
-
-	eprintln!(
-		"[compact] Compacted {} turns into summary. {} turns remain.",
-		discarded.len(),
-		history.len()
-	);
 }
 
 fn now_unix_ms() -> u64 {
