@@ -780,6 +780,7 @@ impl GenericAgentRuntime {
 					.agent_runtime_config
 					.r#loop
 					.working_summary_max_chars,
+				..Default::default()
 			};
 			if let Some(router) = self.route_router.as_deref() {
 				crate::runtime_loop::compact_history_with_llm(loop_state, &compact_config, router)
@@ -812,6 +813,7 @@ impl GenericAgentRuntime {
 				user_reply,
 				&self.agent_runtime_config.next_step,
 				Some(&self.resource_catalog),
+				event_sender,
 			)
 			.await;
 			let current_step_index = loop_state.step_index + 1;

@@ -52,6 +52,9 @@ pub fn estimate_context_tokens(state: &LoopState) -> u64 {
 pub struct CompactConfig {
 	pub retain_tail_steps: usize,
 	pub working_summary_max_chars: usize,
+	pub llm_expected_output_tokens: u64,
+	pub llm_budget_tokens_remaining: u64,
+	pub llm_budget_cost_remaining_usd: f64,
 }
 
 impl Default for CompactConfig {
@@ -59,6 +62,9 @@ impl Default for CompactConfig {
 		Self {
 			retain_tail_steps: 4,
 			working_summary_max_chars: 4_000,
+			llm_expected_output_tokens: 512_u64,
+			llm_budget_tokens_remaining: 10_000,
+			llm_budget_cost_remaining_usd: 0.50,
 		}
 	}
 }
@@ -178,11 +184,11 @@ pub async fn compact_history_with_llm(
 					.to_string(),
 			),
 			prompt,
-			expected_output_tokens: 512,
+			expected_output_tokens: config.llm_expected_output_tokens,
 			risk_tier: RiskTier::Low,
 			preferred_provider: None,
-			budget_tokens_remaining: 10_000,
-			budget_cost_remaining_usd: 0.50,
+			budget_tokens_remaining: config.llm_budget_tokens_remaining,
+			budget_cost_remaining_usd: config.llm_budget_cost_remaining_usd,
 		})
 		.await;
 
@@ -525,6 +531,7 @@ mod tests {
 		let config = CompactConfig {
 			retain_tail_steps: 4,
 			working_summary_max_chars: 4_000,
+			..Default::default()
 		};
 		compact_history(&mut state, &config);
 
@@ -692,6 +699,7 @@ mod tests {
 		let config = CompactConfig {
 			retain_tail_steps: 3,
 			working_summary_max_chars: 4_000,
+			..Default::default()
 		};
 
 		// Phase 1: add 6 steps → compact
