@@ -664,6 +664,40 @@ impl GenericAgentRuntime {
 		ToolObservation::from_runtime_error(tool_name, error)
 	}
 
+	async fn maybe_compact(
+		&self,
+		loop_state: &mut LoopState,
+		current_step_index: u32,
+		event_sender: Option<&crate::runtime_loop::LoopEventSender>,
+	) {
+		let threshold = self.agent_runtime_config.r#loop.compact_threshold_tokens();
+		let estimated = crate::runtime_loop::estimate_context_tokens(loop_state);
+		if estimated > threshold {
+			eprintln!(
+				"Context compact triggered: estimated {estimated} tokens exceeds threshold {threshold}"
+			);
+			if let Some(sender) = event_sender {
+				let _ = sender.send(crate::runtime_loop::LoopEvent::CompactTriggered {
+					step: current_step_index,
+					estimated_tokens: estimated,
+				});
+			}
+			let compact_config = crate::runtime_loop::CompactConfig {
+				retain_tail_steps: self.agent_runtime_config.r#loop.retain_tail_steps,
+				working_summary_max_chars: self
+					.agent_runtime_config
+					.r#loop
+					.working_summary_max_chars,
+			};
+			if let Some(router) = self.route_router.as_deref() {
+				crate::runtime_loop::compact_history_with_llm(loop_state, &compact_config, router)
+					.await;
+			} else {
+				crate::runtime_loop::compact_history(loop_state, &compact_config);
+			}
+		}
+	}
+
 	pub async fn execute_tool_loop(
 		&self,
 		task_id: &TaskId,
@@ -763,43 +797,8 @@ impl GenericAgentRuntime {
 							.unwrap_or_else(|| loop_state.working_directory.clone()),
 					);
 					loop_state.record_step(step);
-					{
-						let threshold = self.agent_runtime_config.r#loop.compact_threshold_tokens();
-						let estimated = crate::runtime_loop::estimate_context_tokens(loop_state);
-						if estimated > threshold {
-							eprintln!(
-								"Context compact triggered: estimated {estimated} tokens exceeds threshold {threshold}"
-							);
-							// Notify: compact triggered
-							if let Some(sender) = event_sender {
-								let _ =
-									sender.send(crate::runtime_loop::LoopEvent::CompactTriggered {
-										step: current_step_index,
-										estimated_tokens: estimated,
-									});
-							}
-							let compact_config = crate::runtime_loop::CompactConfig {
-								retain_tail_steps: self
-									.agent_runtime_config
-									.r#loop
-									.retain_tail_steps,
-								working_summary_max_chars: self
-									.agent_runtime_config
-									.r#loop
-									.working_summary_max_chars,
-							};
-							if let Some(router) = self.route_router.as_deref() {
-								crate::runtime_loop::compact_history_with_llm(
-									loop_state,
-									&compact_config,
-									router,
-								)
-								.await;
-							} else {
-								crate::runtime_loop::compact_history(loop_state, &compact_config);
-							}
-						}
-					}
+					self.maybe_compact(loop_state, current_step_index, event_sender)
+						.await;
 					// Notify: step complete
 					if let Some(sender) = event_sender {
 						let _ = sender.send(crate::runtime_loop::LoopEvent::StepComplete {
@@ -950,47 +949,13 @@ impl GenericAgentRuntime {
 							|| interpreted.should_emit_final_answer
 							|| interpreted.should_fail
 							|| interpreted.budget_exhausted
+							|| interpreted.recovery_exhausted
 						{
 							break;
 						}
 					}
-					// Compact check after batch (same as single-tool path).
-					{
-						let threshold = self.agent_runtime_config.r#loop.compact_threshold_tokens();
-						let estimated = crate::runtime_loop::estimate_context_tokens(loop_state);
-						if estimated > threshold {
-							eprintln!(
-								"Context compact triggered: estimated {estimated} tokens exceeds threshold {threshold}"
-							);
-							if let Some(sender) = event_sender {
-								let _ =
-									sender.send(crate::runtime_loop::LoopEvent::CompactTriggered {
-										step: current_step_index,
-										estimated_tokens: estimated,
-									});
-							}
-							let compact_config = crate::runtime_loop::CompactConfig {
-								retain_tail_steps: self
-									.agent_runtime_config
-									.r#loop
-									.retain_tail_steps,
-								working_summary_max_chars: self
-									.agent_runtime_config
-									.r#loop
-									.working_summary_max_chars,
-							};
-							if let Some(router) = self.route_router.as_deref() {
-								crate::runtime_loop::compact_history_with_llm(
-									loop_state,
-									&compact_config,
-									router,
-								)
-								.await;
-							} else {
-								crate::runtime_loop::compact_history(loop_state, &compact_config);
-							}
-						}
-					}
+					self.maybe_compact(loop_state, current_step_index, event_sender)
+						.await;
 					if let Some(sender) = event_sender {
 						let _ = sender.send(crate::runtime_loop::LoopEvent::StepComplete {
 							step: current_step_index,

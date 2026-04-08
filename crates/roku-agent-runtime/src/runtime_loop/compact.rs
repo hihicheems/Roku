@@ -76,33 +76,37 @@ pub fn summarize_discarded_steps(steps: &[super::StepRecord]) -> String {
 	for step in steps {
 		let tool = step.tool_name.as_deref().unwrap_or("unknown");
 		let reason = truncate(&step.decision_reason, 80);
-		let outcome = step
-			.observation
-			.as_ref()
-			.map(|obs| match obs {
-				super::StepObservation::Tool(t) => {
-					let status = if t.ok { "ok" } else { "error" };
-					let detail = truncate(&t.message, 100);
-					if detail.is_empty() {
-						status.to_string()
-					} else {
-						format!("{status}: {detail}")
-					}
-				}
-				super::StepObservation::AskUser { final_message } => {
-					format!("ask_user: {}", truncate(final_message, 100))
-				}
-				super::StepObservation::FinalMessage { final_message } => {
-					format!("final: {}", truncate(final_message, 100))
-				}
-			})
-			.unwrap_or_else(|| "no observation".to_string());
+		let outcome = step_outcome_text(step, 100);
 		lines.push(format!(
 			"Step {}: {} — {} — {}",
 			step.step_index, tool, reason, outcome
 		));
 	}
 	lines.join("\n")
+}
+
+/// Render a step's observation outcome as a short text string.
+fn step_outcome_text(step: &super::StepRecord, max_detail_chars: usize) -> String {
+	step.observation
+		.as_ref()
+		.map(|obs| match obs {
+			super::StepObservation::Tool(t) => {
+				let status = if t.ok { "ok" } else { "error" };
+				let detail = truncate(&t.message, max_detail_chars);
+				if detail.is_empty() {
+					status.to_string()
+				} else {
+					format!("{status}: {detail}")
+				}
+			}
+			super::StepObservation::AskUser { final_message } => {
+				format!("ask_user: {}", truncate(final_message, max_detail_chars))
+			}
+			super::StepObservation::FinalMessage { final_message } => {
+				format!("final: {}", truncate(final_message, max_detail_chars))
+			}
+		})
+		.unwrap_or_else(|| "no observation".to_string())
 }
 
 /// Compact the loop history by truncating old steps and populating working_summary.
@@ -144,32 +148,16 @@ pub async fn compact_history_with_llm(
 		.iter()
 		.map(|step| {
 			let tool = step.tool_name.as_deref().unwrap_or("unknown");
-			let outcome = step
-				.observation
-				.as_ref()
-				.map(|obs| match obs {
-					super::StepObservation::Tool(t) => {
-						let status = if t.ok { "ok" } else { "error" };
-						format!("{}: {}", status, truncate(&t.message, 150))
-					}
-					super::StepObservation::AskUser { final_message } => {
-						format!("ask_user: {}", truncate(final_message, 150))
-					}
-					super::StepObservation::FinalMessage { final_message } => {
-						format!("final: {}", truncate(final_message, 150))
-					}
-				})
-				.unwrap_or_else(|| "no observation".to_string());
 			serde_json::json!({
 				"step": step.step_index,
 				"tool": tool,
 				"reason": truncate(&step.decision_reason, 100),
-				"outcome": outcome,
+				"outcome": step_outcome_text(step, 150),
 			})
 		})
 		.collect();
 
-	let steps_json = serde_json::to_string_pretty(&step_summaries).unwrap_or_default();
+	let steps_json = serde_json::to_string(&step_summaries).unwrap_or_default();
 	let prompt = format!(
 		"You are summarizing {} agent execution steps that are being compacted from history.\n\
 		 Produce a concise plain-text summary that captures:\n\
