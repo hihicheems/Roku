@@ -291,7 +291,7 @@ mod tests {
 			&state,
 			ToolObservation {
 				ok: false,
-				tool_name: "general.execute".to_string(),
+				tool_name: "inventory.describe".to_string(),
 				error_type: Some("needs_more_information".to_string()),
 				terminal: false,
 				data: json!({}),

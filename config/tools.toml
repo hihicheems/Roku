@@ -59,7 +59,6 @@ avoid_when = [
   "The request is only asking for a conversational explanation that is already proven by prior evidence."
 ]
 common_confusions = [
-  "general.execute for free-form explanation after inventory has already been gathered",
   "skill.execute when the user wants to run an installed skill instead of list capabilities"
 ]
 
@@ -104,7 +103,7 @@ isolation_profile = "no_isolation"
 [[tools]]
 name = "research.synthesize"
 role = "research"
-discoverable = true
+discoverable = false
 terminal_output = true
 description = "Use this after relevant evidence has already been gathered and the user needs a grounded summary, comparison, or synthesis. Do not use it instead of `web.search`, `fs.read_text`, or other evidence-gathering tools. It returns a user-facing synthesis built from current context rather than new external facts."
 selection_hint = "Synthesize already gathered evidence into a grounded summary or comparison."
@@ -118,7 +117,7 @@ required_capabilities = ["information.read"]
 [[tools]]
 name = "data.execute"
 role = "data"
-discoverable = true
+discoverable = false
 terminal_output = true
 description = "Use this for structured data transformation, aggregation, metrics rollups, or compact table-like output when the needed data is already in context. Do not use it for free-form critique or for gathering missing source material. It returns processed data results that can be presented directly or explained later."
 selection_hint = "Transform or aggregate structured data that is already in context."
@@ -132,7 +131,7 @@ required_capabilities = ["data.read"]
 [[tools]]
 name = "review.assess"
 role = "review"
-discoverable = true
+discoverable = false
 terminal_output = true
 description = "Use this when the user wants critique, correctness review, or residual risks called out on an existing draft, plan, or proposal. Do not use it to create the draft from scratch or to perform unrelated data processing. It returns review findings and risk-focused feedback, not side effects."
 selection_hint = "Review an existing draft or proposal for correctness, risks, and gaps."
@@ -143,16 +142,5 @@ risk = "Medium"
 cost = { estimated_tokens = 5000, estimated_latency_ms = 20000 }
 required_capabilities = ["review.check"]
 
-[[tools]]
-name = "general.execute"
-role = "general"
-discoverable = false
-terminal_output = true
-description = "Use this for plain conversation or for the last-mile explanation after other tools have already gathered the needed evidence. Do not use it to guess filesystem, web, table, or python results that a concrete tool could produce directly. It returns user-facing prose only and should not be treated as grounded external execution."
-selection_hint = "Handle plain conversation or last-mile explanation after evidence is gathered."
-tags = ["general", "conversation"]
-examples = ["Reply to a simple greeting or explain available capabilities."]
-input_schema = ["goal", "summary"]
-risk = "Low"
-cost = { estimated_tokens = 8000, estimated_latency_ms = 15000 }
-required_capabilities = []
+## general.execute removed — the LLM answers directly instead of nesting
+## another LLM call through a role-specific system prompt.

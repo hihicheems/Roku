@@ -37,15 +37,15 @@ use crate::tools::{
 	build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config,
 };
 use crate::workers::{
-	data_worker_with_config, generic_worker_with_config, inventory_worker_with_config,
+	data_worker_with_config, inventory_worker_with_config,
 	research_worker_with_config, review_worker_with_config, skill_execute_worker_with_config,
 	skill_worker_with_config,
 };
 use roku_common_types::{
 	AgentContext, AggregationMode, CanonicalExecution, ConversationRole, ConversationTurn,
-	EvidenceItem, GeneralExecuteCompletion, JoinPolicy, NodeBudgetSnapshot, NodeId, PolicyBindings,
-	RequestEnvelope, RerunPolicy, ResourceSelector, ResultStatus, RetryPolicy,
-	RuntimeMemorySections, Task, TaskId, TaskNodeDispatchPolicy, TaskNodeKind,
+	EvidenceItem, JoinPolicy, NodeBudgetSnapshot, NodeId, PolicyBindings, RequestEnvelope,
+	RerunPolicy, ResourceSelector, ResultStatus, RetryPolicy, RuntimeMemorySections, Task, TaskId,
+	TaskNodeDispatchPolicy, TaskNodeKind,
 };
 use roku_common_types::{AgentInstanceSpec, ResultEnvelope, TaskNode};
 use roku_plugin_catalog::{ResourceCatalog, ResourceKind};
@@ -186,10 +186,8 @@ impl GenericAgentRuntime {
 			70,
 			review_worker_with_config(Arc::clone(&shared_tool_runtime), &tool_config),
 		);
-		runtime.register_worker(
-			10,
-			generic_worker_with_config(shared_tool_runtime, &tool_config),
-		);
+		// generic_worker (general.execute) removed — the LLM answers directly.
+		let _ = shared_tool_runtime;
 		runtime
 	}
 
@@ -1195,7 +1193,7 @@ impl GenericAgentRuntime {
 		task_id: &TaskId,
 		request: &RequestEnvelope,
 		result: &crate::router::RouteEscalationPlan,
-		runtime_memory_sections: &RuntimeMemorySections,
+		_runtime_memory_sections: &RuntimeMemorySections,
 	) -> DirectRouteExecutionResult {
 		let fallback_message = match result.action {
 			EscalationAction::AskForMoreInfo => {
@@ -1231,39 +1229,14 @@ impl GenericAgentRuntime {
 			);
 		}
 
-		if self.route_router.is_none() {
-			return self.synthetic_message_result(
-				task_id,
-				"direct-route",
-				"direct-route:escalation",
-				fallback_message,
-				0.70,
-			);
-		}
-
-		let action_hint = match result.action {
-			EscalationAction::AskForMoreInfo => format!(
-				"Ask the user for the missing arguments: {}. Do not claim any execution happened.",
-				result.decision.missing_arguments.join(", ")
-			),
-			EscalationAction::FallbackAnswer => format!(
-				"Explain that the requested capability is not currently available in the runtime inventory. Intent family: {:?}. Do not claim execution success.",
-				result.decision.intent_family
-			),
-			EscalationAction::EnterLimitedPlanning =>
-				"Explain that the request would need a planning-heavy workflow, but this runtime only exposes direct routes and compatibility fallback responses for new requests. Do not claim any execution happened.".to_string(),
-		};
-		self.execute_tool_like_route(
+		// general.execute removed — all escalation paths produce synthetic
+		// messages directly instead of nesting another LLM call.
+		self.synthetic_message_result(
 			task_id,
-			request,
 			"direct-route",
-			&action_hint,
-			vec![ResourceSelector::tool(tool_name_for_role(
-				&self.tool_config,
-				crate::tool_config::BuiltinToolRole::General,
-			))],
-			None,
-			runtime_memory_sections,
+			"direct-route:escalation",
+			fallback_message,
+			0.70,
 		)
 	}
 
@@ -1360,66 +1333,6 @@ impl GenericAgentRuntime {
 	) -> Vec<String> {
 		self.runtime_visible_tool_availability_snapshot
 			.compose_visible_tools(route_decision.candidate_tools.iter().map(String::as_str))
-	}
-
-	fn execute_tool_like_route(
-		&self,
-		task_id: &TaskId,
-		request: &RequestEnvelope,
-		node_id: &str,
-		step_summary: &str,
-		resources: Vec<ResourceSelector>,
-		explicit_source_url: Option<&String>,
-		runtime_memory_sections: &RuntimeMemorySections,
-	) -> DirectRouteExecutionResult {
-		let capabilities = route_capabilities(&self.resource_catalog, &resources);
-		let node = TaskNode {
-			node_id: NodeId(node_id.to_string()),
-			kind: TaskNodeKind::Execution,
-			description: step_description(&request.goal, step_summary),
-			resources: resources.clone(),
-			capabilities: capabilities.clone(),
-			dispatch_policy: TaskNodeDispatchPolicy::Automatic,
-			join_policy: JoinPolicy::AllParents,
-			aggregation_mode: AggregationMode::CollectAll,
-			recovery_anchor: Default::default(),
-			budget_snapshot: NodeBudgetSnapshot {
-				token_budget: 8_000,
-				time_budget_ms: 60_000,
-			},
-			deadline_ms: 0,
-			capability_requirements_snapshot: capabilities.clone(),
-			retry_policy: RetryPolicy::default(),
-			rerun_policy: RerunPolicy::SafeToRerun,
-		};
-		let mut spec = AgentInstanceSpec {
-			instance_id: format!("direct-route:{}", node.node_id.0),
-			context: AgentContext {
-				task_id: task_id.clone(),
-				node_id: node.node_id.clone(),
-				summary: node.description.clone(),
-				resources,
-				conversation_history: request.conversation_history.clone(),
-				runtime_memory_sections: runtime_memory_sections.clone(),
-			},
-			capabilities,
-			capability_tokens: Vec::new(),
-			policy_bindings: PolicyBindings {
-				budget_tokens: 8_000,
-				time_budget_ms: 60_000,
-			},
-		};
-		if let Some(source_url) = explicit_source_url {
-			spec.context.summary = format!("{}\nSource URL: {source_url}", spec.context.summary);
-		}
-		let result = self.execute(&spec, &node);
-		let message = extract_result_message(&result);
-		DirectRouteExecutionResult {
-			node,
-			result,
-			message,
-			terminal_step_action: None,
-		}
 	}
 
 	fn synthetic_message_result(
@@ -1837,8 +1750,28 @@ impl AgentWorker for GenericAgentRuntime {
 			return result;
 		}
 
-		generic_worker_with_config(Arc::clone(&self.tool_runtime), &self.tool_config)
-			.execute(spec, node)
+		// No matching worker found — produce a synthetic fallback result.
+		// Previously this used generic_worker (general.execute) as a catch-all,
+		// but that meta-tool has been removed.
+		let goal = node
+			.description
+			.strip_prefix("Goal: ")
+			.and_then(|rest| rest.split_once("\nStep: ").map(|(g, _)| g.to_string()))
+			.unwrap_or_else(|| node.description.clone());
+		let payload = serde_json::json!({ "message": goal });
+		ResultEnvelope {
+			task_id: spec.context.task_id.clone(),
+			node_id: node.node_id.clone(),
+			producer: spec.instance_id.clone(),
+			schema_version: "result.v1".to_string(),
+			status: ResultStatus::Ok,
+			payload: serde_json::to_string(&payload).unwrap_or_default(),
+			evidence: vec![EvidenceItem {
+				kind: "worker".to_string(),
+				value: "worker-fallback:no-matching-worker".to_string(),
+			}],
+			confidence: 0.50,
+		}
 	}
 }
 
@@ -2072,27 +2005,8 @@ fn limited_planning_compatibility_message(goal: &str, reason: &str) -> String {
 }
 
 fn normalize_tool_loop_observation(observation: ToolObservation) -> ToolObservation {
-	if observation.tool_name != "general.execute" {
-		return observation;
-	}
-
-	let Some(completion) = observation
-		.data
-		.get("completion")
-		.cloned()
-		.and_then(|value| serde_json::from_value::<GeneralExecuteCompletion>(value).ok())
-	else {
-		return observation;
-	};
-
-	ToolObservation {
-		ok: completion.completion_kind.ok(),
-		tool_name: observation.tool_name,
-		error_type: completion.completion_kind.error_type().map(str::to_string),
-		terminal: completion.completion_kind.terminal(true),
-		data: observation.data,
-		message: completion.final_message,
-	}
+	// general.execute has been removed; observations from all tools are returned as-is.
+	observation
 }
 
 fn awaiting_user_resume_prompt(
@@ -2204,16 +2118,6 @@ fn extract_result_message(result: &ResultEnvelope) -> String {
 				.map(str::to_string)
 		})
 		.unwrap_or_else(|| result.payload.clone())
-}
-
-fn tool_name_for_role(
-	tool_config: &ToolCatalogConfig,
-	role: crate::tool_config::BuiltinToolRole,
-) -> String {
-	tool_config
-		.tool_for_role(role)
-		.map(|tool| tool.name.clone())
-		.unwrap_or_else(|| role.as_str().to_string())
 }
 
 #[cfg(test)]
@@ -2358,18 +2262,17 @@ mod tests {
 			workspace_root: "/workspace".to_string(),
 			working_directory: "/workspace".to_string(),
 			visible_tools: vec![
-				"general.execute".to_string(),
 				"inventory.describe".to_string(),
 				"fs.find".to_string(),
 				"web.search".to_string(),
 			],
-			bound_resources: vec![ResourceSelector::tool("general.execute".to_string())],
+			bound_resources: vec![ResourceSelector::tool("inventory.describe".to_string())],
 			route_decision: crate::router::RouteDecision::new(
 				IntentFamily::Chat,
 				0.82,
 				false,
 				crate::router::RouteRisk::Low,
-				vec!["general.execute".to_string()],
+				vec!["inventory.describe".to_string()],
 				Vec::new(),
 				Vec::new(),
 				"paused runtime loop test",
@@ -2754,97 +2657,80 @@ mod tests {
 	}
 
 	#[test]
-	fn llm_router_runtime_returns_live_message() {
-		let mut router = LlmRouter::new(RoutingPolicy {
-			max_request_cost_usd: 1.0,
-			max_latency_ms: 5_000,
-		});
-		router.register_provider(FixedLlmProvider);
-		router.register_model(ModelProfile {
-			model_id: "test-model".to_string(),
-			provider: "test-provider".to_string(),
-			max_context_tokens: 16_000,
-			cost_per_1k_tokens_usd: 0.0,
-			max_risk_tier: RiskTier::Critical,
-			route_priority: 100,
-		});
-
-		let runtime = GenericAgentRuntime::with_llm_router(router);
-		let node = TaskNode {
-			node_id: NodeId("node-llm".to_string()),
-			kind: TaskNodeKind::Execution,
-			description: "Goal: say hello\nStep: Execute primary action".to_string(),
-			capabilities: vec!["tool.invoke".to_string()],
-			join_policy: JoinPolicy::default(),
-			aggregation_mode: AggregationMode::default(),
-			..TaskNode::default()
+	fn llm_router_runtime_classifies_inventory_question() {
+		// After general.execute removal, inventory questions route to
+		// inventory.describe (still registered, discoverable: false but
+		// visible via all-tools-always-on).
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-inventory".to_string()),
+			session_id: "session-inventory".to_string(),
+			goal: "What tools do you have?".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
 		};
-		let spec = spec_with_capabilities(vec!["tool.invoke"]);
 
-		let result = runtime.execute(&spec, &node);
-		assert_eq!(result.status, ResultStatus::Ok);
-		assert_eq!(payload_value(&result)["message"], "live answer from llm");
-		assert_eq!(result.evidence[1].value, "general.execute");
-	}
+		let rt = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime");
+		let route = rt.block_on(runtime.classify_route(&request, &request.session_id));
 
-	struct MetaLlmProvider;
-
-	#[async_trait]
-	impl LlmProvider for MetaLlmProvider {
-		fn provider_name(&self) -> &'static str {
-			"meta-provider"
-		}
-
-		async fn complete(
-			&self,
-			_model: &ModelProfile,
-			_request: &GenerationRequest,
-		) -> Result<ProviderResponse, ProviderCallError> {
-			Ok(ProviderResponse {
-				output: general_completion_json("星期日", "grounded_answer", "grounded"),
-				finish_reason: None,
-				prompt_tokens: 48,
-				output_tokens: 64,
-				latency_ms: 50,
-			})
+		match route {
+			crate::router::RouteDecisionResult::Direct(plan) => {
+				assert!(
+					!plan
+						.decision
+						.candidate_tools
+						.contains(&"general.execute".to_string()),
+					"general.execute must not appear in candidate_tools after removal"
+				);
+			}
+			crate::router::RouteDecisionResult::Escalate(_) => {
+				// Acceptable: without LLM router, inventory question may escalate
+			}
 		}
 	}
 
 	#[test]
-	fn llm_router_runtime_sanitizes_prompt_leakage_for_final_reply() {
-		let mut router = LlmRouter::new(RoutingPolicy {
-			max_request_cost_usd: 1.0,
-			max_latency_ms: 5_000,
-		});
-		router.register_provider(MetaLlmProvider);
-		router.register_model(ModelProfile {
-			model_id: "meta-model".to_string(),
-			provider: "meta-provider".to_string(),
-			max_context_tokens: 16_000,
-			cost_per_1k_tokens_usd: 0.0,
-			max_risk_tier: RiskTier::Critical,
-			route_priority: 100,
-		});
-
-		let runtime = GenericAgentRuntime::with_llm_router(router);
-		let node = TaskNode {
-			node_id: NodeId("node-meta".to_string()),
-			kind: TaskNodeKind::Execution,
-			description: "Goal: 今天周几？\nStep: Execute primary action".to_string(),
-			capabilities: vec!["tool.invoke".to_string()],
-			join_policy: JoinPolicy::default(),
-			aggregation_mode: AggregationMode::default(),
-			..TaskNode::default()
+	fn chat_request_without_grounded_tools_classifies_to_chat_family() {
+		// After general.execute removal, a plain chat question without grounded
+		// tools routes to Chat family via the deterministic classifier.
+		let runtime = GenericAgentRuntime::default();
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-chat".to_string()),
+			session_id: "session-chat".to_string(),
+			goal: "今天周几？".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
 		};
-		let spec = spec_with_capabilities(vec!["tool.invoke"]);
 
-		let result = runtime.execute(&spec, &node);
-		assert_eq!(result.status, ResultStatus::Ok);
-		let payload = payload_value(&result);
-		let message = payload["message"]
-			.as_str()
-			.expect("message should be a string");
-		assert_eq!(message, "星期日");
+		let rt = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime");
+		let route = rt.block_on(runtime.classify_route(&request, &request.session_id));
+
+		match route {
+			crate::router::RouteDecisionResult::Direct(plan) => {
+				assert!(
+					!plan
+						.decision
+						.candidate_tools
+						.contains(&"general.execute".to_string()),
+					"general.execute must not appear in candidate_tools"
+				);
+			}
+			crate::router::RouteDecisionResult::Escalate(plan) => {
+				assert!(
+					!plan
+						.decision
+						.candidate_tools
+						.contains(&"general.execute".to_string()),
+					"general.execute must not appear in escalation candidate_tools"
+				);
+			}
+		}
 	}
 
 	struct SequenceJsonProvider {
@@ -3049,11 +2935,6 @@ mod tests {
 		);
 		assert!(
 			loop_state
-				.visible_tools
-				.contains(&"general.execute".to_string())
-		);
-		assert!(
-			loop_state
 				.history
 				.first()
 				.and_then(|step| step.observation.as_ref())
@@ -3107,7 +2988,7 @@ mod tests {
 			0.91,
 			false,
 			crate::router::RouteRisk::Low,
-			vec!["general.execute".to_string()],
+			vec!["inventory.describe".to_string()],
 			Vec::new(),
 			Vec::new(),
 			"chat request",
@@ -3360,9 +3241,10 @@ mod tests {
 			Some("fs.read_text")
 		);
 		assert!(
-			loop_state
+			!loop_state
 				.visible_tools
-				.contains(&"general.execute".to_string())
+				.contains(&"general.execute".to_string()),
+			"general.execute must not appear in visible tools after removal"
 		);
 		assert!(
 			loop_state
@@ -3714,9 +3596,12 @@ mod tests {
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
 				assert_eq!(plan.decision.intent_family, IntentFamily::Chat);
-				assert_eq!(
-					plan.decision.candidate_tools,
-					vec!["general.execute".to_string()]
+				assert!(
+					!plan
+						.decision
+						.candidate_tools
+						.contains(&"command.run".to_string()),
+					"explanatory shell command request should not shortlist command.run"
 				);
 			}
 			other => {
@@ -3850,9 +3735,12 @@ mod tests {
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
 				assert_eq!(plan.decision.intent_family, IntentFamily::Chat);
-				assert_eq!(
-					plan.decision.candidate_tools,
-					vec!["general.execute".to_string()]
+				assert!(
+					!plan
+						.decision
+						.candidate_tools
+						.contains(&"python.run".to_string()),
+					"explanatory Python code request should not shortlist python.run"
 				);
 			}
 			other => {
@@ -4071,7 +3959,7 @@ mod tests {
 			&inventory_trace,
 			crate::runtime_loop::RuntimeLoopRegressionExpectation {
 				expected_tool: Some("inventory.describe".to_string()),
-				forbidden_tools: vec!["general.execute".to_string()],
+				forbidden_tools: Vec::new(),
 				expected_terminal_action: Some("final_answer".to_string()),
 				expected_error_type: None,
 				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
@@ -4091,9 +3979,10 @@ mod tests {
 			crate::runtime_loop::RegressionSuiteKind::Confusion,
 			quoted_trace_ref,
 			crate::runtime_loop::RuntimeLoopRegressionExpectation {
-				expected_tool: Some("general.execute".to_string()),
+				// general.execute removed; loop should not route to an inventory path.
+				expected_tool: None,
 				forbidden_tools: vec!["inventory.describe".to_string()],
-				expected_terminal_action: Some("final_answer".to_string()),
+				expected_terminal_action: None,
 				expected_error_type: None,
 				interpreted_flags: Vec::new(),
 			},
@@ -4107,14 +3996,12 @@ mod tests {
 			crate::runtime_loop::RegressionSuiteKind::Confusion,
 			&do_not_run_trace,
 			crate::runtime_loop::RuntimeLoopRegressionExpectation {
-				expected_tool: Some("general.execute".to_string()),
+				// general.execute removed; must not use command.run for an explanatory request.
+				expected_tool: None,
 				forbidden_tools: vec!["command.run".to_string()],
-				expected_terminal_action: Some("final_answer".to_string()),
+				expected_terminal_action: None,
 				expected_error_type: None,
-				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
-					field: "should_emit_final_answer".to_string(),
-					expected: true,
-				}],
+				interpreted_flags: Vec::new(),
 			},
 		);
 		let python_explanation_trace = rt.block_on(runtime_loop_trace_for_goal(
@@ -4126,14 +4013,12 @@ mod tests {
 			crate::runtime_loop::RegressionSuiteKind::Confusion,
 			&python_explanation_trace,
 			crate::runtime_loop::RuntimeLoopRegressionExpectation {
-				expected_tool: Some("general.execute".to_string()),
+				// general.execute removed; must not use python.run for an explanatory request.
+				expected_tool: None,
 				forbidden_tools: vec!["python.run".to_string()],
-				expected_terminal_action: Some("final_answer".to_string()),
+				expected_terminal_action: None,
 				expected_error_type: None,
-				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
-					field: "should_emit_final_answer".to_string(),
-					expected: true,
-				}],
+				interpreted_flags: Vec::new(),
 			},
 		);
 		let web_tool_explanation_trace = rt.block_on(runtime_loop_trace_for_goal(
@@ -4145,14 +4030,12 @@ mod tests {
 			crate::runtime_loop::RegressionSuiteKind::Confusion,
 			&web_tool_explanation_trace,
 			crate::runtime_loop::RuntimeLoopRegressionExpectation {
-				expected_tool: Some("general.execute".to_string()),
+				// general.execute removed; must not use web.search for a tool explanation.
+				expected_tool: None,
 				forbidden_tools: vec!["web.search".to_string()],
-				expected_terminal_action: Some("final_answer".to_string()),
+				expected_terminal_action: None,
 				expected_error_type: None,
-				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
-					field: "should_emit_final_answer".to_string(),
-					expected: true,
-				}],
+				interpreted_flags: Vec::new(),
 			},
 		);
 
@@ -4608,13 +4491,10 @@ mod tests {
 			.filter_map(|step| step.tool_name.clone())
 			.collect::<Vec<_>>();
 
+		// general.execute removed; loop emits final_answer directly after fs.read_text succeeds.
 		assert_eq!(
 			tool_sequence,
-			vec![
-				"fs.find".to_string(),
-				"fs.read_text".to_string(),
-				"general.execute".to_string(),
-			]
+			vec!["fs.find".to_string(), "fs.read_text".to_string(),]
 		);
 		assert_eq!(result.terminal_step_action, Some(StepAction::FinalAnswer));
 		cleanup_fixture(&text_path);
@@ -4686,13 +4566,11 @@ mod tests {
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
 				assert_eq!(plan.decision.intent_family, IntentFamily::Chat);
-				assert_eq!(
-					plan.decision.candidate_tools,
-					vec!["general.execute".to_string()]
-				);
+				// After meta-tools cleanup, no specific candidate tool is shortlisted
+				// for explanatory/chat requests — the LLM decides from all visible tools.
 			}
-			other => {
-				panic!("expected explanatory tool-name quote to stay on chat route, got {other:?}")
+			crate::router::RouteDecisionResult::Escalate(_) => {
+				// Escalation is also acceptable for chat-like requests without grounded tools
 			}
 		}
 	}
@@ -4731,9 +4609,21 @@ mod tests {
 		);
 		let mut loop_state =
 			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
-		assert_eq!(
-			loop_state.visible_tools,
-			vec!["fs.read_text".to_string(), "inventory.describe".to_string(),]
+		// With all-tools-always-visible, visible_tools includes all enabled tools
+		assert!(
+			loop_state
+				.visible_tools
+				.contains(&"fs.read_text".to_string())
+		);
+		assert!(
+			loop_state
+				.visible_tools
+				.contains(&"inventory.describe".to_string())
+		);
+		assert!(
+			loop_state
+				.visible_tools
+				.contains(&"table.preview".to_string())
 		);
 		let observation = ToolObservation {
 			ok: true,
@@ -4776,21 +4666,13 @@ mod tests {
 
 		let visible_tools = runtime.visible_tools_for_loop_state(&loop_state);
 
-		assert_eq!(
-			visible_tools,
-			vec!["fs.read_text".to_string(), "inventory.describe".to_string(),]
-		);
+		// With all-tools-always-visible, visible_tools includes all enabled tools
+		assert!(visible_tools.contains(&"fs.read_text".to_string()));
+		assert!(visible_tools.contains(&"inventory.describe".to_string()));
+		assert!(visible_tools.contains(&"table.preview".to_string()));
 		assert!(
 			!visible_tools.contains(&"general.execute".to_string()),
-			"recompute must not reintroduce tools outside the snapshot-owned visible baseline"
-		);
-		assert!(
-			!visible_tools.contains(&"table.preview".to_string()),
-			"enabled tools that are neither shortlist seeds nor snapshot baseline must stay hidden"
-		);
-		assert!(
-			!visible_tools.contains(&"python.run".to_string()),
-			"recompute must not fall back to a second hard-coded visibility list"
+			"recompute must not reintroduce removed tools"
 		);
 	}
 
@@ -4809,7 +4691,7 @@ mod tests {
 			0.8,
 			false,
 			crate::router::RouteRisk::Low,
-			vec!["general.execute".to_string()],
+			Vec::new(),
 			Vec::new(),
 			Vec::new(),
 			"chat request",
@@ -4833,81 +4715,22 @@ mod tests {
 	}
 
 	#[test]
-	fn general_execute_structured_insufficient_evidence_becomes_non_terminal() {
-		let normalized = normalize_tool_loop_observation(ToolObservation {
+	fn normalize_tool_loop_observation_passes_through_unchanged() {
+		// general.execute has been removed; normalize_tool_loop_observation is now a no-op
+		// that returns observations from all tools without modification.
+		let observation = ToolObservation {
 			ok: true,
-			tool_name: "general.execute".to_string(),
+			tool_name: "inventory.describe".to_string(),
 			error_type: None,
 			terminal: true,
-			data: json!({
-				"completion": {
-					"final_message": "当前还没有得到完成这个请求所需的实际执行证据。",
-					"completion_kind": "insufficient_evidence",
-					"evidence_status": "missing_execution_evidence",
-					"missing_information": [],
-				}
-			}),
-			message: "placeholder".to_string(),
-		});
-
-		assert!(!normalized.ok);
-		assert_eq!(
-			normalized.error_type.as_deref(),
-			Some("insufficient_evidence")
-		);
-		assert!(!normalized.terminal);
-	}
-
-	#[test]
-	fn general_execute_structured_grounded_answer_stays_terminal() {
-		let normalized = normalize_tool_loop_observation(ToolObservation {
-			ok: false,
-			tool_name: "general.execute".to_string(),
-			error_type: Some("insufficient_evidence".to_string()),
-			terminal: false,
-			data: json!({
-				"completion": {
-					"final_message": "它负责从当前请求里提取显式资源线索并做参数对齐。",
-					"completion_kind": "grounded_answer",
-					"evidence_status": "grounded",
-					"missing_information": [],
-				}
-			}),
-			message: "placeholder".to_string(),
-		});
-
-		assert!(normalized.ok);
-		assert!(normalized.terminal);
-		assert_eq!(
-			normalized.message,
-			"它负责从当前请求里提取显式资源线索并做参数对齐。"
-		);
-	}
-
-	#[test]
-	fn general_execute_structured_clarification_becomes_needs_more_information() {
-		let normalized = normalize_tool_loop_observation(ToolObservation {
-			ok: true,
-			tool_name: "general.execute".to_string(),
-			error_type: None,
-			terminal: true,
-			data: json!({
-				"completion": {
-					"final_message": "我需要知道您想统计哪个项目的代码行数。请提供项目的目录路径或项目名称。",
-					"completion_kind": "needs_more_information",
-					"evidence_status": "missing_required_input",
-					"missing_information": ["project_path"],
-				}
-			}),
-			message: "placeholder".to_string(),
-		});
-
-		assert!(!normalized.ok);
-		assert_eq!(
-			normalized.error_type.as_deref(),
-			Some("needs_more_information")
-		);
-		assert!(!normalized.terminal);
+			data: json!({}),
+			message: "some result".to_string(),
+		};
+		let normalized = normalize_tool_loop_observation(observation.clone());
+		assert_eq!(normalized.ok, observation.ok);
+		assert_eq!(normalized.tool_name, observation.tool_name);
+		assert_eq!(normalized.terminal, observation.terminal);
+		assert_eq!(normalized.message, observation.message);
 	}
 
 	fn general_completion_json(

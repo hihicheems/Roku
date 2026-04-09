@@ -153,50 +153,32 @@ fn deterministic_pre_classify(
 		return Some(result);
 	}
 
-	if explanatory_shell_command_request(&request.goal)
-		&& context
-			.availability_snapshot
-			.is_tool_enabled("general.execute")
-	{
+	if explanatory_shell_command_request(&request.goal) {
 		let decision = RouteDecision::new(
 			IntentFamily::Chat,
 			0.81,
 			false,
 			RouteRisk::Low,
-			vec!["general.execute".to_string()],
-			candidate_plugins_for_tool(context.plugin_snapshot, "general.execute"),
 			Vec::new(),
-			"explicit shell command is referenced for explanation rather than execution; keep the request on the general assistant path",
+			Vec::new(),
+			Vec::new(),
+			"explicit shell command is referenced for explanation rather than execution; route to direct answer",
 		);
-		return Some(build_tool_loop_route(
-			context,
-			decision,
-			Some("general.execute"),
-			Vec::new(),
-		));
+		return Some(build_tool_loop_route(context, decision, None, Vec::new()));
 	}
 
-	if explanatory_python_code_request(&request.goal)
-		&& context
-			.availability_snapshot
-			.is_tool_enabled("general.execute")
-	{
+	if explanatory_python_code_request(&request.goal) {
 		let decision = RouteDecision::new(
 			IntentFamily::Chat,
 			0.8,
 			false,
 			RouteRisk::Low,
-			vec!["general.execute".to_string()],
-			candidate_plugins_for_tool(context.plugin_snapshot, "general.execute"),
 			Vec::new(),
-			"explicit Python code is referenced for explanation rather than execution; keep the request on the general assistant path",
+			Vec::new(),
+			Vec::new(),
+			"explicit Python code is referenced for explanation rather than execution; route to direct answer",
 		);
-		return Some(build_tool_loop_route(
-			context,
-			decision,
-			Some("general.execute"),
-			Vec::new(),
-		));
+		return Some(build_tool_loop_route(context, decision, None, Vec::new()));
 	}
 
 	if goal_requests_python_execution(&request.goal)
@@ -225,32 +207,6 @@ fn deterministic_pre_classify(
 		return Some(result);
 	}
 
-	if extract_skill_source_url(&request.goal).is_some()
-		&& goal_implies_install_intent(&request.goal)
-	{
-		let install_tool_name =
-			tool_name_for_role(context.tool_config, BuiltinToolRole::SkillInstall);
-		let decision = RouteDecision::new(
-			IntentFamily::TextTransform,
-			0.98,
-			false,
-			RouteRisk::Medium,
-			vec![install_tool_name.clone()],
-			vec![
-				"builtin-tools".to_string(),
-				"skill-source-local".to_string(),
-			],
-			Vec::new(),
-			"explicit skill install url with install intent detected in user request",
-		);
-		return Some(build_tool_loop_route(
-			context,
-			decision,
-			Some(&install_tool_name),
-			Vec::new(),
-		));
-	}
-
 	if let Some(selector) = explicit_skill_selector(context.catalog, &request.goal) {
 		if context.route_router.is_none() {
 			let descriptor = context.catalog.descriptor(&selector)?;
@@ -273,27 +229,18 @@ fn deterministic_pre_classify(
 		return Some(result);
 	}
 
-	if context.route_router.is_none()
-		&& context
-			.availability_snapshot
-			.is_tool_enabled("general.execute")
-	{
+	if context.route_router.is_none() {
 		let decision = RouteDecision::new(
 			IntentFamily::Chat,
 			0.68,
 			false,
 			RouteRisk::Low,
-			vec!["general.execute".to_string()],
-			candidate_plugins_for_tool(context.plugin_snapshot, "general.execute"),
 			Vec::new(),
-			"no grounded direct tool route matched; fall back to the general assistant loop in deterministic mode",
+			Vec::new(),
+			Vec::new(),
+			"no grounded direct tool route matched; fall back to direct answer in deterministic mode",
 		);
-		return Some(build_tool_loop_route(
-			context,
-			decision,
-			Some("general.execute"),
-			Vec::new(),
-		));
+		return Some(build_tool_loop_route(context, decision, None, Vec::new()));
 	}
 
 	None
@@ -340,22 +287,15 @@ fn classify_contract_level_grounded_hint(
 		}
 		let decision = RouteDecision::new(
 			coarse_intent_hint_for_tool(&tool_name),
-			0.9,
+			0.6,
 			false,
 			resource_risk(descriptor),
 			vec![tool_name.clone()],
 			candidate_plugins_for_tool(context.plugin_snapshot, &tool_name),
 			Vec::new(),
-			format!(
-				"explicit installed tool reference provides a non-authoritative `{tool_name}` hint"
-			),
+			format!("classifier hint: explicit tool reference suggests `{tool_name}`"),
 		);
-		return Some(build_tool_loop_route(
-			context,
-			decision,
-			Some(&tool_name),
-			Vec::new(),
-		));
+		return Some(build_loop_hint_route(context, decision));
 	}
 
 	if grounded_python_code_allows_execution(&request.goal)
@@ -364,21 +304,16 @@ fn classify_contract_level_grounded_hint(
 	{
 		let decision = RouteDecision::new(
 			IntentFamily::CodeExec,
-			0.93,
+			0.6,
 			false,
 			RouteRisk::Medium,
 			vec!["python.run".to_string()],
 			candidate_plugins_for_tool(context.plugin_snapshot, "python.run"),
 			Vec::new(),
-			"contract-level grounded Python code provides a non-authoritative `python.run` hint",
+			"classifier hint: grounded Python code suggests `python.run`",
 		);
 		let _ = code;
-		return Some(build_tool_loop_route(
-			context,
-			decision,
-			Some("python.run"),
-			Vec::new(),
-		));
+		return Some(build_loop_hint_route(context, decision));
 	}
 
 	if grounded_shell_command_allows_execution(&request.goal)
@@ -387,21 +322,16 @@ fn classify_contract_level_grounded_hint(
 	{
 		let decision = RouteDecision::new(
 			IntentFamily::CodeExec,
-			0.94,
+			0.6,
 			false,
 			RouteRisk::Medium,
 			vec!["command.run".to_string()],
 			candidate_plugins_for_tool(context.plugin_snapshot, "command.run"),
 			Vec::new(),
-			"contract-level grounded shell command provides a non-authoritative `command.run` hint",
+			"classifier hint: grounded shell command suggests `command.run`",
 		);
 		let _ = command;
-		return Some(build_tool_loop_route(
-			context,
-			decision,
-			Some("command.run"),
-			Vec::new(),
-		));
+		return Some(build_loop_hint_route(context, decision));
 	}
 
 	if goal_requests_web_lookup(&request.goal)
@@ -410,21 +340,16 @@ fn classify_contract_level_grounded_hint(
 	{
 		let decision = RouteDecision::new(
 			IntentFamily::WebLookup,
-			0.9,
+			0.6,
 			false,
 			RouteRisk::Low,
 			vec!["web.search".to_string()],
 			candidate_plugins_for_tool(context.plugin_snapshot, "web.search"),
 			Vec::new(),
-			"contract-level grounded web lookup provides a non-authoritative `web.search` hint",
+			"classifier hint: web lookup request suggests `web.search`",
 		);
 		let _ = query;
-		return Some(build_tool_loop_route(
-			context,
-			decision,
-			Some("web.search"),
-			Vec::new(),
-		));
+		return Some(build_loop_hint_route(context, decision));
 	}
 
 	if extract_glob_pattern(&request.goal).is_some()
@@ -432,20 +357,15 @@ fn classify_contract_level_grounded_hint(
 	{
 		let decision = RouteDecision::new(
 			IntentFamily::FilesystemRead,
-			0.92,
+			0.6,
 			false,
 			RouteRisk::Low,
 			vec!["fs.glob".to_string()],
 			candidate_plugins_for_tool(context.plugin_snapshot, "fs.glob"),
 			Vec::new(),
-			"contract-level grounded glob pattern provides a non-authoritative `fs.glob` hint",
+			"classifier hint: glob pattern suggests `fs.glob`",
 		);
-		return Some(build_tool_loop_route(
-			context,
-			decision,
-			Some("fs.glob"),
-			Vec::new(),
-		));
+		return Some(build_loop_hint_route(context, decision));
 	}
 
 	if extract_explicit_table_path(&request.goal).is_some()
@@ -459,22 +379,15 @@ fn classify_contract_level_grounded_hint(
 		{
 			let decision = RouteDecision::new(
 				IntentFamily::TableRead,
-				0.9,
+				0.6,
 				false,
 				RouteRisk::Low,
 				vec![tool_name.to_string()],
 				candidate_plugins_for_tool(context.plugin_snapshot, tool_name),
 				Vec::new(),
-				format!(
-					"explicit table path plus a concrete `{tool_name}` action provides a grounded direct start"
-				),
+				format!("classifier hint: table path suggests `{tool_name}`"),
 			);
-			return Some(build_tool_loop_route(
-				context,
-				decision,
-				Some(tool_name),
-				Vec::new(),
-			));
+			return Some(build_loop_hint_route(context, decision));
 		}
 		let candidate_tools = broad_table_candidate_tools();
 		let decision = RouteDecision::new(
@@ -501,22 +414,15 @@ fn classify_contract_level_grounded_hint(
 		{
 			let decision = RouteDecision::new(
 				IntentFamily::FilesystemRead,
-				0.89,
+				0.6,
 				false,
 				RouteRisk::Low,
 				vec![tool_name.to_string()],
 				candidate_plugins_for_tool(context.plugin_snapshot, tool_name),
 				Vec::new(),
-				format!(
-					"explicit filesystem path plus a concrete `{tool_name}` action provides a grounded direct start"
-				),
+				format!("classifier hint: filesystem path suggests `{tool_name}`"),
 			);
-			return Some(build_tool_loop_route(
-				context,
-				decision,
-				Some(tool_name),
-				Vec::new(),
-			));
+			return Some(build_loop_hint_route(context, decision));
 		}
 		let decision = RouteDecision::new(
 			IntentFamily::FilesystemRead,
@@ -561,7 +467,7 @@ fn explicit_tool_selector(
 
 fn coarse_intent_hint_for_tool(tool_name: &str) -> IntentFamily {
 	match tool_name {
-		"inventory.describe" | "general.execute" => IntentFamily::Chat,
+		"inventory.describe" => IntentFamily::Chat,
 		name if name.starts_with("fs.") => IntentFamily::FilesystemRead,
 		name if name.starts_with("table.") => IntentFamily::TableRead,
 		name if name.starts_with("web.") => IntentFamily::WebLookup,
@@ -1186,24 +1092,6 @@ fn contains_any(goal: &str, markers: &[&str]) -> bool {
 
 /// Check whether the user goal text expresses an intent to install or use a skill,
 /// as opposed to merely asking about a URL.
-fn goal_implies_install_intent(goal: &str) -> bool {
-	let lowered = goal.to_ascii_lowercase();
-	const INSTALL_MARKERS: &[&str] = &[
-		"install",
-		"安装",
-		"添加",
-		"add skill",
-		"use skill",
-		"用这个skill",
-		"用这个 skill",
-		"enable",
-		"启用",
-	];
-	INSTALL_MARKERS
-		.iter()
-		.any(|marker| lowered.contains(marker))
-}
-
 fn action_text_without_explicit_paths(goal: &str) -> String {
 	let mut lowered = goal.to_ascii_lowercase();
 	for path in extract_explicit_path_candidates(goal) {
@@ -1351,11 +1239,14 @@ fn build_skill_route_result(
 		0.94,
 		false,
 		resource_risk(descriptor),
-		vec![if executable {
-			tool_name_for_role(context.tool_config, BuiltinToolRole::SkillExecute)
+		if executable {
+			vec![tool_name_for_role(
+				context.tool_config,
+				BuiltinToolRole::SkillExecute,
+			)]
 		} else {
-			"general.execute".to_string()
-		}],
+			Vec::new()
+		},
 		if executable {
 			vec![
 				"builtin-tools".to_string(),
@@ -1704,7 +1595,6 @@ fn candidate_plugins_for_tool(
 			| "research.synthesize"
 			| "data.execute"
 			| "review.assess"
-			| "general.execute"
 	) && plugin_snapshot.is_plugin_enabled("builtin-tools")
 	{
 		plugins.push("builtin-tools".to_string());
@@ -1844,14 +1734,14 @@ mod tests {
 	#[test]
 	fn build_tool_loop_route_filters_shortlist_from_availability_snapshot() {
 		let catalog = ResourceCatalog::new(vec![
-			tool_descriptor("general.execute"),
+			tool_descriptor("inventory.describe"),
 			tool_descriptor("web.search"),
 		]);
 		let tool_config = ToolCatalogConfig::default();
 		let agent_runtime_config = AgentRuntimeConfig::default();
 		let plugin_snapshot = PluginRegistrySnapshot::permissive();
 		let availability_snapshot = RuntimeVisibleToolAvailabilitySnapshot {
-			enabled_tools: ["general.execute".to_string()]
+			enabled_tools: ["inventory.describe".to_string()]
 				.into_iter()
 				.collect::<BTreeSet<_>>(),
 			baseline_visible_tools: Vec::new(),
@@ -1870,7 +1760,7 @@ mod tests {
 			0.91,
 			false,
 			RouteRisk::Low,
-			vec!["general.execute".to_string(), "web.search".to_string()],
+			vec!["inventory.describe".to_string(), "web.search".to_string()],
 			Vec::new(),
 			Vec::new(),
 			"snapshot-owned shortlist filtering",
@@ -1884,7 +1774,7 @@ mod tests {
 
 		assert_eq!(
 			plan.decision.candidate_tools,
-			vec!["general.execute".to_string()]
+			vec!["inventory.describe".to_string()]
 		);
 	}
 }

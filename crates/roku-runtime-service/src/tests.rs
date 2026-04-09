@@ -1234,18 +1234,14 @@ async fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
 		goal: "继续".to_string(),
 		workspace_root: cwd.display().to_string(),
 		working_directory: cwd.display().to_string(),
-		visible_tools: vec![
-			"general.execute".to_string(),
-			"inventory.describe".to_string(),
-			"fs.find".to_string(),
-		],
-		bound_resources: vec![ResourceSelector::tool("general.execute".to_string())],
+		visible_tools: vec!["inventory.describe".to_string(), "fs.find".to_string()],
+		bound_resources: vec![ResourceSelector::tool("inventory.describe".to_string())],
 		route_decision: RouteDecision::new(
 			IntentFamily::Chat,
 			0.88,
 			false,
 			RouteRisk::Low,
-			vec!["general.execute".to_string()],
+			vec!["inventory.describe".to_string()],
 			Vec::new(),
 			Vec::new(),
 			"freeform clarification request",
@@ -1316,7 +1312,9 @@ async fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
 			.steps
 			.last()
 			.and_then(|step| step.visible_resources_before.clone()),
-		Some(vec![ResourceSelector::tool("general.execute".to_string())])
+		Some(vec![ResourceSelector::tool(
+			"inventory.describe".to_string()
+		)])
 	);
 }
 
@@ -1782,7 +1780,7 @@ fn compact_summary_is_written_back_when_compact_boundary_exists() {
 				"test",
 			),
 			last_observation: None,
-			visible_tools: vec!["general.execute".to_string()],
+			visible_tools: vec!["inventory.describe".to_string()],
 			bound_resources: Vec::new(),
 		},
 		10,

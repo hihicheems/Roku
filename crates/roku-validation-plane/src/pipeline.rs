@@ -261,7 +261,7 @@ mod tests {
 					},
 					visible_tools_before: vec![
 						"command.run".to_string(),
-						"general.execute".to_string(),
+						"inventory.describe".to_string(),
 					],
 					visible_resources_before: Some(vec![]),
 					started_at: "2026-01-01T00:00:00Z".to_string(),
@@ -286,7 +286,7 @@ mod tests {
 					},
 					visible_tools_before: vec![
 						"command.run".to_string(),
-						"general.execute".to_string(),
+						"inventory.describe".to_string(),
 					],
 					visible_resources_before: Some(vec![]),
 					started_at: "2026-01-01T00:00:01Z".to_string(),

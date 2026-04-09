@@ -25,7 +25,6 @@ use crate::runtime_loop::grounding::{
 	extract_explicit_path_candidates, extract_explicit_python_code, extract_explicit_shell_command,
 	extract_fetch_url, extract_glob_pattern, extract_grep_pattern, extract_path_candidates,
 	extract_row_limit, extract_sheet_name, extract_skill_source_url, extract_web_query,
-	grounded_python_code_allows_execution, grounded_shell_command_allows_execution,
 };
 use crate::runtime_loop::{
 	ContextProjection, LoopEvent, LoopEventSender, LoopState, NextStepAction, NextStepDecision,
@@ -502,19 +501,19 @@ Rules:
 - `call_tools` invokes multiple tools in one step. Provide a `tool_calls` array instead of `tool_name`/`arguments`. Only use `call_tools` when the tools are independent (e.g., reading multiple files). For sequential operations, use `call_tool` one at a time. When using `call_tools`, `tool_name` and `arguments` must be null.
 - Keep `final_message` concise. Do not paste large grounded documents, search dumps, or long synthesized answers into the JSON decision.
 - Use the current user follow-up if it is present; do not inherit concrete code, paths, or queries from prior conversation turns unless they already exist in the current context projection.
-- For `chat`, prefer `general.execute` when it is visible.
+- For `chat`, emit `final_answer` directly using your own judgment when no concrete tool action is needed.
 - For `code_exec`, you may call `python.run` when explicit Python code is present or when the task now requires one clearly bounded Python snippet for local computation over already grounded evidence. Prefer `python.run` over `command.run` for counting, aggregation, filtering, or transformation tasks.
 - You may call `command.run` to execute shell commands when doing so would help accomplish the task. Prefer specialized tools when they fit (`fs.read_text` over `cat`, `fs.grep` over `grep`, `fs.list_dir` over `ls`, `web.fetch` over `curl`). Use `command.run` as a general-purpose fallback for CLI tools and operations that no specialized tool covers (e.g. `gh`, `git`, `cargo`, `docker`, `kubectl`, `jq`, `make`). You may generate the shell command yourself based on the task — the user does not need to provide it literally. Avoid destructive or workspace-modifying commands unless the task explicitly requires it.
 - When generating `python.run` arguments, keep the code short and self-contained. Prefer walking one grounded directory or reading one grounded path at execution time. Do not inline huge path arrays, copied directory listings, or large observation payloads into the code string.
 - For `table_read`, prefer the first shortlisted `table.*` tool that matches the grounded table path.
 - For `web_lookup`, use `web.search` when a concrete query is available.
-- When the current request references concrete local files, directories, workspace paths, or shell-style inspection goals and `fs.*` tools are visible, gather grounded filesystem evidence before using `general.execute`.
+- When the current request references concrete local files, directories, workspace paths, or shell-style inspection goals and `fs.*` tools are visible, gather grounded filesystem evidence before emitting `final_answer`.
 - If the request only mentions a bare filename or fuzzy path hint like `grounding.rs` or `runtime.rs`, do not jump straight to `fs.read_text` or `table.preview`; resolve it with `fs.find` first unless the context already includes one grounded concrete path.
-- Do not call `general.execute` only to speculate about which filesystem tools could be used. Prefer `fs.inspect`, `fs.list_dir`, `fs.read_text`, `fs.find`, or `fs.glob` when the current context already grounds one of them.
+- Prefer `fs.inspect`, `fs.list_dir`, `fs.read_text`, `fs.find`, or `fs.glob` when the current context already grounds one of them.
 - If a filesystem or table consumer tool fails with `path_not_found` and `fs.find` is visible, prefer locating the target before failing the loop.
 - If a lookup tool returns one `resolved_path` and a visible consumer tool can now accept that concrete path, you may continue with that consumer tool instead of stopping at the lookup step.
-- When a filesystem, table, web, or python observation provides raw evidence but the user still needs explanation, comparison, or synthesis, prefer `general.execute` before emitting `final_answer`.
-- Do not use `general.execute` as a placeholder for future work. If the user asked for a counted, aggregated, transformed, searched, or executed result and the current observations do not already contain that result, keep gathering evidence, use another visible tool, ask the user, or fail honestly.
+- When a filesystem, table, web, or python observation provides raw evidence but the user still needs explanation, comparison, or synthesis, emit `final_answer` directly using the gathered evidence.
+- Do not use future tool calls as a placeholder for work the observations do not already support. If the user asked for a counted, aggregated, transformed, searched, or executed result and the current observations do not already contain that result, keep gathering evidence, use another visible tool, ask the user, or fail honestly.
 - Never emit pseudo tool-call markup, future execution plans, or "let me run/use tool X" prose as if it were a completed result.
 - When the latest observation already directly satisfies a bounded inspection or listing request, emit `final_answer` with a concise grounded reply that reuses the observation message instead of copying large raw payloads into JSON.
 - Treat `intent_family`, `route_reason`, and the initial shortlist as weak seeds, not binding truth. If the current observation is insufficient, you may choose any better-fitting tool from `visible_tools`.
@@ -578,14 +577,6 @@ fn next_step_from_observation(
 		}
 		if let Some(next_decision) = follow_up_tool_after_observation(loop_state, observation) {
 			return next_decision;
-		}
-		if observation.tool_name != "general.execute" && tool_visible(loop_state, "general.execute")
-		{
-			return call_tool(
-				"general.execute",
-				json!({}),
-				"Use the general worker to synthesize the latest grounded observation into a user-facing answer without inventing new evidence.",
-			);
 		}
 		return final_answer(summarize_observation(&loop_state.goal, observation).final_message);
 	}
@@ -670,16 +661,8 @@ fn bootstrap_tool_name<'a>(
 		.map(String::as_str)
 		.filter(|tool_name| tool_visible(loop_state, tool_name))
 		.collect::<Vec<_>>();
-	if let Some(tool_name) = shortlisted_tools
-		.iter()
-		.copied()
-		.find(|tool_name| bootstrap_tool_matches_request(tool_name, grounding_input, catalog))
-	{
-		return Some(tool_name);
-	}
-	if prefers_advisory_bootstrap(grounding_input) && tool_visible(loop_state, "general.execute") {
-		return Some("general.execute");
-	}
+	// For explanatory requests ("explain this command/code"), prefer non-execution
+	// tools so the bootstrap does not amplify an explanation into execution.
 	if prefers_advisory_bootstrap(grounding_input) {
 		return shortlisted_tools
 			.iter()
@@ -693,10 +676,16 @@ fn bootstrap_tool_name<'a>(
 					.find(|tool_name| !is_execution_tool(tool_name))
 			});
 	}
+	if let Some(tool_name) = shortlisted_tools
+		.iter()
+		.copied()
+		.find(|tool_name| bootstrap_tool_matches_request(tool_name, grounding_input, catalog))
+	{
+		return Some(tool_name);
+	}
 	shortlisted_tools
 		.into_iter()
 		.find(|tool_name| bootstrap_tool_is_groundable(tool_name, grounding_input, catalog))
-		.or_else(|| tool_visible(loop_state, "general.execute").then_some("general.execute"))
 		.or_else(|| loop_state.visible_tools.first().map(String::as_str))
 }
 
@@ -728,9 +717,11 @@ fn bootstrap_tool_matches_request(
 			ExtractionHint::WebQuery => extract_web_query(grounding_input).is_some(),
 			ExtractionHint::FetchUrl => extract_fetch_url(grounding_input).is_some(),
 			ExtractionHint::ShellCommand => {
-				grounded_shell_command_allows_execution(grounding_input)
+				ground_tool_arguments(tool_name, grounding_input).is_some()
 			}
-			ExtractionHint::PythonCode => grounded_python_code_allows_execution(grounding_input),
+			ExtractionHint::PythonCode => {
+				ground_tool_arguments(tool_name, grounding_input).is_some()
+			}
 			ExtractionHint::Default => {
 				bootstrap_tool_is_groundable(tool_name, grounding_input, catalog)
 			}
@@ -1225,7 +1216,6 @@ mod tests {
 				"fs.read_text".to_string(),
 				"fs.find".to_string(),
 				"fs.inspect".to_string(),
-				"general.execute".to_string(),
 			],
 			bound_resources: vec![ResourceSelector::tool("fs.read_text".to_string())],
 			route_decision: RouteDecision::new(
@@ -1537,9 +1527,9 @@ mod tests {
 		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 		let (router, _prompts) = router_with_responses(vec![json!({
 			"action": "call_tool",
-			"tool_name": "general.execute",
+			"tool_name": "fs.read_text",
 			"arguments": {},
-			"reason": "Try to explain anyway.",
+			"reason": "Try to read a file anyway.",
 			"final_message": null
 		})]);
 
@@ -1576,7 +1566,7 @@ mod tests {
 		let loop_state = sample_bootstrap_loop_state(
 			"Read Cargo.toml and summarize the workspace layout.",
 			vec!["fs.find", "fs.read_text"],
-			vec!["fs.find", "fs.read_text", "general.execute"],
+			vec!["fs.find", "fs.read_text"],
 		);
 		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 
@@ -1603,7 +1593,7 @@ mod tests {
 		let loop_state = sample_bootstrap_loop_state(
 			"Explain what this Python code does: `print(1)`",
 			vec!["python.run"],
-			vec!["python.run", "general.execute"],
+			vec!["python.run"],
 		);
 		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 
@@ -1618,11 +1608,9 @@ mod tests {
 		)
 		.await;
 
-		assert_eq!(
-			decision.action,
-			crate::runtime_loop::NextStepAction::CallTool
-		);
-		assert_eq!(decision.tool_name.as_deref(), Some("general.execute"));
+		// Explanatory requests must not execute python.run; the loop should fail gracefully
+		// (no visible non-execution tool) rather than running execution code for an explanation.
+		assert_ne!(decision.tool_name.as_deref(), Some("python.run"));
 	}
 
 	#[tokio::test]
@@ -1630,12 +1618,7 @@ mod tests {
 		let loop_state = sample_bootstrap_loop_state(
 			"Cargo.toml 这个文件帮我看看情况。",
 			vec!["fs.inspect", "fs.read_text", "fs.list_dir"],
-			vec![
-				"fs.inspect",
-				"fs.read_text",
-				"fs.list_dir",
-				"general.execute",
-			],
+			vec!["fs.inspect", "fs.read_text", "fs.list_dir"],
 		);
 		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 
@@ -1662,7 +1645,7 @@ mod tests {
 		let loop_state = sample_bootstrap_loop_state(
 			"我是说，帮我看看cmd那个crate下的runtime.rs，里面的第100行是什么内容？输出出来",
 			vec!["fs.find", "fs.glob", "fs.inspect"],
-			vec!["fs.find", "fs.glob", "fs.inspect", "general.execute"],
+			vec!["fs.find", "fs.glob", "fs.inspect"],
 		);
 		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 
@@ -1689,13 +1672,7 @@ mod tests {
 		let loop_state = sample_bootstrap_loop_state(
 			"我是说，帮我看看cmd那个crate下的runtime.rs，里面的第100行是什么内容？输出出来",
 			vec!["fs.find", "fs.glob", "fs.inspect"],
-			vec![
-				"fs.find",
-				"fs.glob",
-				"fs.inspect",
-				"fs.read_text",
-				"general.execute",
-			],
+			vec!["fs.find", "fs.glob", "fs.inspect", "fs.read_text"],
 		);
 		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 		let (router, _prompts) = router_with_responses(vec![json!({
@@ -1742,13 +1719,7 @@ mod tests {
 		let loop_state = sample_bootstrap_loop_state(
 			"帮我看看 grounding.rs 这个文件主要是做啥用的吧，一句话总结下",
 			vec!["fs.find", "fs.glob", "fs.inspect"],
-			vec![
-				"fs.find",
-				"fs.glob",
-				"fs.inspect",
-				"fs.read_text",
-				"general.execute",
-			],
+			vec!["fs.find", "fs.glob", "fs.inspect", "fs.read_text"],
 		);
 		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 		let (router, _prompts) = router_with_responses(vec![
@@ -1796,7 +1767,7 @@ mod tests {
 		let loop_state = sample_bootstrap_loop_state(
 			"Run this Python code: `print(1)`",
 			vec!["python.run"],
-			vec!["python.run", "general.execute"],
+			vec!["python.run"],
 		);
 		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 
@@ -1823,7 +1794,7 @@ mod tests {
 		let loop_state = sample_bootstrap_loop_state(
 			"Explain what the shell command `pwd` does, but do not run it.",
 			vec!["command.run"],
-			vec!["command.run", "general.execute"],
+			vec!["command.run"],
 		);
 		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
 
@@ -1838,10 +1809,8 @@ mod tests {
 		)
 		.await;
 
-		assert_eq!(
-			decision.action,
-			crate::runtime_loop::NextStepAction::CallTool
-		);
-		assert_eq!(decision.tool_name.as_deref(), Some("general.execute"));
+		// Explanatory requests must not execute command.run; the loop should not shortlist
+		// the execution tool for a plain explanation request.
+		assert_ne!(decision.tool_name.as_deref(), Some("command.run"));
 	}
 }
