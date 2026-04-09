@@ -15,10 +15,34 @@
 use roku_common_types::{ApprovalId, ApprovalStatus, ResultEnvelope, TaskState};
 
 pub(crate) fn failure_message(reason: &str, terminal_state: TaskState) -> String {
+	let brief = humanize_error(reason);
 	if terminal_state == TaskState::DeadLetter {
-		format!("task dead-lettered: {reason}")
+		format!("Request could not be processed: {brief}")
 	} else {
-		format!("task failed: {reason}")
+		format!("Unable to complete request: {brief}")
+	}
+}
+
+/// Reduce an internal error chain to a human-readable one-liner.
+fn humanize_error(raw: &str) -> String {
+	// Take only the last segment of a colon-separated error chain.
+	let leaf = raw.rsplit_once(": ").map_or(raw, |(_, last)| last).trim();
+
+	// Strip common internal prefixes.
+	let cleaned = leaf
+		.strip_prefix("failed to ")
+		.or_else(|| leaf.strip_prefix("error "))
+		.unwrap_or(leaf);
+
+	// Capitalize first letter.
+	let mut chars = cleaned.chars();
+	match chars.next() {
+		Some(first) => {
+			let mut result = first.to_uppercase().to_string();
+			result.push_str(chars.as_str());
+			result
+		}
+		None => raw.to_string(),
 	}
 }
 
