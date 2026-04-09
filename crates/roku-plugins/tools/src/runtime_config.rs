@@ -212,7 +212,7 @@ pub const HARD_MAX_SKILL_EXECUTION_OUTPUT_CHARS: usize = 16_000;
 impl Default for FsToolRuntimeConfig {
 	fn default() -> Self {
 		Self {
-			default_max_bytes: 4_096,
+			default_max_bytes: 65_536,
 			max_dir_entries: 200,
 			max_glob_matches: 200,
 			max_descendant_scan_entries: 8_000,
@@ -233,8 +233,8 @@ impl Default for PythonToolRuntimeConfig {
 impl Default for CommandToolRuntimeConfig {
 	fn default() -> Self {
 		Self {
-			default_timeout_ms: 1_500,
-			max_output_bytes: 8_192,
+			default_timeout_ms: 30_000,
+			max_output_bytes: 65_536,
 		}
 	}
 }
