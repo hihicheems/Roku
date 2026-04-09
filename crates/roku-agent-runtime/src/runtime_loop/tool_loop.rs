@@ -230,11 +230,8 @@ async fn decide_with_router(
 		&& !tool_calls.is_empty()
 		&& let Some(decision) = NextStepDecision::from_tool_calls(tool_calls)
 	{
-		let decision = align_router_tool_arguments(
-			decision,
-			user_reply.unwrap_or(&loop_state.goal),
-			catalog,
-		);
+		let decision =
+			align_router_tool_arguments(decision, user_reply.unwrap_or(&loop_state.goal), catalog);
 		return match validate_router_decision(loop_state, decision, catalog) {
 			Ok(decision) => Some(decision),
 			Err(reason) => {

@@ -249,10 +249,24 @@ pub enum StructuredGenerationError {
 /// Callers receive a sequence of these via an `mpsc::Receiver<StreamChunk>`
 /// and reassemble the full response from `TextDelta` events, then confirm
 /// completion via `Done`.
+///
+/// Tool call variants (`ToolCallStart`, `ToolCallDelta`, `ToolCallDone`) are
+/// emitted when the model responds with native tool_use during streaming.
+/// Providers that support streaming tool_use emit these alongside or instead
+/// of `TextDelta`. Downstream consumers can use these to begin tool
+/// execution before the stream completes.
 #[derive(Debug, Clone)]
 pub enum StreamChunk {
 	/// Incremental text content from the assistant.
 	TextDelta { text: String },
+	/// A new tool call block has started. Contains the tool call `id` and
+	/// the tool `name`. Arguments will follow via `ToolCallDelta`.
+	ToolCallStart { id: String, name: String },
+	/// Incremental JSON arguments for an in-progress tool call.
+	ToolCallDelta { id: String, arguments_chunk: String },
+	/// A tool call block has finished. All argument deltas for this `id`
+	/// have been sent.
+	ToolCallDone { id: String },
 	/// The stream has finished. `prompt_tokens` and `output_tokens` come
 	/// from the final usage block in the SSE stream; they are zero when the
 	/// provider does not include a usage event.
