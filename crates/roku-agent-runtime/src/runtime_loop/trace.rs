@@ -383,7 +383,7 @@ mod tests {
 			goal: "Run `pwd`".to_string(),
 			workspace_root: "/workspace".to_string(),
 			working_directory: "/workspace".to_string(),
-			visible_tools: vec!["command.run".to_string(), "general.execute".to_string()],
+			visible_tools: vec!["command.run".to_string(), "inventory.describe".to_string()],
 			bound_resources: vec![ResourceSelector::tool("command.run".to_string())],
 			route_decision: RouteDecision::new(
 				IntentFamily::CodeExec,
@@ -423,7 +423,7 @@ mod tests {
 			remaining_step_budget: 3,
 			remaining_recovery_budget: 2,
 			new_working_directory: None,
-			visible_tools: vec!["command.run".to_string(), "general.execute".to_string()],
+			visible_tools: vec!["command.run".to_string(), "inventory.describe".to_string()],
 		};
 		state.record_step(StepRecord::tool_call(
 			1,
@@ -435,7 +435,7 @@ mod tests {
 				reason: "run explicit command".to_string(),
 				final_message: None,
 			},
-			vec!["command.run".to_string(), "general.execute".to_string()],
+			vec!["command.run".to_string(), "inventory.describe".to_string()],
 			state.bound_resources.clone(),
 			json!({"ok": true}),
 			StepObservation::Tool(observation),
@@ -456,7 +456,7 @@ mod tests {
 				reason: "answer from grounded command".to_string(),
 				final_message: Some("/workspace".to_string()),
 			},
-			vec!["command.run".to_string(), "general.execute".to_string()],
+			vec!["command.run".to_string(), "inventory.describe".to_string()],
 			state.bound_resources.clone(),
 			Some(StepObservation::FinalMessage {
 				final_message: "/workspace".to_string(),
@@ -472,7 +472,7 @@ mod tests {
 		assert_eq!(trace.steps[0].decision.action, "call_tool");
 		assert_eq!(
 			trace.steps[0].visible_tools_before,
-			vec!["command.run".to_string(), "general.execute".to_string()]
+			vec!["command.run".to_string(), "inventory.describe".to_string()]
 		);
 		assert_eq!(
 			trace.steps[0].visible_resources_before,
@@ -724,7 +724,7 @@ mod tests {
 			remaining_step_budget: 3,
 			remaining_recovery_budget: 2,
 			new_working_directory: None,
-			visible_tools: vec!["command.run".to_string(), "general.execute".to_string()],
+			visible_tools: vec!["command.run".to_string(), "inventory.describe".to_string()],
 		};
 		state.record_step(StepRecord::tool_call(
 			1,
@@ -736,7 +736,7 @@ mod tests {
 				reason: "run explicit command".to_string(),
 				final_message: None,
 			},
-			vec!["command.run".to_string(), "general.execute".to_string()],
+			vec!["command.run".to_string(), "inventory.describe".to_string()],
 			state.bound_resources.clone(),
 			json!({
 				"ok": true,
@@ -762,7 +762,7 @@ mod tests {
 				reason: "answer from grounded command".to_string(),
 				final_message: Some("/workspace".to_string()),
 			},
-			vec!["command.run".to_string(), "general.execute".to_string()],
+			vec!["command.run".to_string(), "inventory.describe".to_string()],
 			state.bound_resources.clone(),
 			Some(StepObservation::FinalMessage {
 				final_message: "/workspace".to_string(),

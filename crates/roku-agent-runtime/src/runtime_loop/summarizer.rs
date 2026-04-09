@@ -55,7 +55,7 @@ pub(crate) fn summarize_observation(
 				.unwrap_or_else(|| observation.message.clone()),
 			"fs.list_dir" | "fs.inspect" | "fs.exists" | "fs.find" => observation.message.clone(),
 			"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema"
-			| "web.search" | "general.execute" => observation.message.clone(),
+			| "web.search" => observation.message.clone(),
 			"command.run" => observation
 				.data
 				.get("stdout")

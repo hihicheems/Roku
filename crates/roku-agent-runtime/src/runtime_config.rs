@@ -237,7 +237,6 @@ impl Default for LoopRuntimeConfig {
 
 fn default_baseline_tool_pool() -> Vec<String> {
 	[
-		"general.execute",
 		"inventory.describe",
 		"fs.find",
 		"fs.read_text",

@@ -288,7 +288,7 @@ mod tests {
 			remaining_recovery_budget: 2,
 			working_directory: "/workspace".to_string(),
 			working_summary: String::new(),
-			visible_tools: vec!["general.execute".to_string()],
+			visible_tools: vec!["inventory.describe".to_string()],
 			bound_resources: Vec::new(),
 			history: Vec::new(),
 			last_observation: None,
@@ -301,7 +301,7 @@ mod tests {
 	fn sample_observation() -> ToolObservation {
 		ToolObservation {
 			ok: true,
-			tool_name: "general.execute".to_string(),
+			tool_name: "inventory.describe".to_string(),
 			error_type: None,
 			terminal: false,
 			data: json!({ "result": "ok" }),
@@ -323,19 +323,19 @@ mod tests {
 			remaining_step_budget: budget_after,
 			remaining_recovery_budget: 2,
 			new_working_directory: None,
-			visible_tools: vec!["general.execute".to_string()],
+			visible_tools: vec!["inventory.describe".to_string()],
 		};
 		StepRecord::tool_call(
 			index,
 			NextStepDecision {
 				action: NextStepAction::CallTool,
-				tool_name: Some("general.execute".to_string()),
+				tool_name: Some("inventory.describe".to_string()),
 				arguments: Some(json!({"command": "echo hello"})),
 				tool_calls: None,
 				reason: "Execute the command.".to_string(),
 				final_message: None,
 			},
-			vec!["general.execute".to_string()],
+			vec!["inventory.describe".to_string()],
 			Vec::new(),
 			json!({"ok": true, "message": "hello"}),
 			StepObservation::Tool(observation),
@@ -481,7 +481,7 @@ mod tests {
 		assert!(summary.starts_with("[Compact summary — 6 steps discarded]"));
 		assert!(summary.contains("Step 1:"));
 		assert!(summary.contains("Step 6:"));
-		assert!(summary.contains("general.execute"));
+		assert!(summary.contains("inventory.describe"));
 		assert!(summary.contains("ok"));
 	}
 
@@ -596,19 +596,19 @@ mod tests {
 				remaining_step_budget: 10 - i,
 				remaining_recovery_budget: 2,
 				new_working_directory: None,
-				visible_tools: vec!["general.execute".to_string()],
+				visible_tools: vec!["inventory.describe".to_string()],
 			};
 			let step = StepRecord::tool_call(
 				i,
 				NextStepDecision {
 					action: NextStepAction::CallTool,
-					tool_name: Some("general.execute".to_string()),
+					tool_name: Some("inventory.describe".to_string()),
 					arguments: Some(json!({"command": "echo hello"})),
 					tool_calls: None,
 					reason: "Execute.".to_string(),
 					final_message: None,
 				},
-				vec!["general.execute".to_string()],
+				vec!["inventory.describe".to_string()],
 				Vec::new(),
 				json!({"ok": true, "output": "X".repeat(100_000)}),
 				StepObservation::Tool(observation),

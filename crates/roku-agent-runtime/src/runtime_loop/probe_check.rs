@@ -119,7 +119,7 @@ mod tests {
 			goal: "Run `pwd`".to_string(),
 			workspace_root: "/workspace".to_string(),
 			working_directory: "/workspace".to_string(),
-			visible_tools: vec!["command.run".to_string(), "general.execute".to_string()],
+			visible_tools: vec!["command.run".to_string(), "inventory.describe".to_string()],
 			bound_resources: vec![ResourceSelector::tool("command.run".to_string())],
 			route_decision: RouteDecision::new(
 				IntentFamily::CodeExec,
@@ -159,7 +159,7 @@ mod tests {
 			remaining_step_budget: 3,
 			remaining_recovery_budget: 2,
 			new_working_directory: None,
-			visible_tools: vec!["command.run".to_string(), "general.execute".to_string()],
+			visible_tools: vec!["command.run".to_string(), "inventory.describe".to_string()],
 		};
 		state.record_step(StepRecord::tool_call(
 			1,

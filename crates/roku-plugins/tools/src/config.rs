@@ -146,11 +146,8 @@ mod tests {
 				.tool_for_role(BuiltinToolRole::Inventory)
 				.is_some_and(|tool| tool.terminal_output)
 		);
-		assert!(
-			config
-				.tool_for_role(BuiltinToolRole::General)
-				.is_some_and(|tool| tool.terminal_output)
-		);
+		// general.execute removed from catalog — General role is no longer present
+		assert!(config.tool_for_role(BuiltinToolRole::General).is_none());
 	}
 
 	#[test]
@@ -158,10 +155,10 @@ mod tests {
 		let error = ToolCatalogConfig::from_toml(
 			r#"
 [[tools]]
-name = "general.execute"
-role = "general"
-description = "Answer directly when the request does not require an external tool or skill."
-selection_hint = "Handle plain conversation or last-mile explanation."
+name = "inventory.describe"
+role = "inventory"
+description = "Describe all available tools, skills, and capability families."
+selection_hint = "List or explain what tools and skills are available."
 extra = "not-allowed"
 "#,
 		)
@@ -176,9 +173,9 @@ extra = "not-allowed"
 		let config = ToolCatalogConfig::from_toml(
 			r#"
 [[tools]]
-name = "general.execute"
-role = "general"
-description = "Answer directly when the request does not require an external tool or skill."
+name = "inventory.describe"
+role = "inventory"
+description = "Describe all available tools, skills, and capability families."
 "#,
 		)
 		.expect("missing selection_hint should fall back to description");

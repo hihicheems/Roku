@@ -348,7 +348,7 @@ fn python_contract(timeout_ms: u64) -> ToolContract {
 			],
 			&[
 				"Commonly confused with command.run for inline code fences that are actually shell commands.",
-				"Commonly confused with general.execute for requests that ask to explain code rather than run it.",
+				"Commonly confused with a direct final_answer for requests that ask to explain code rather than run it.",
 			],
 		),
 		input: input_contract(

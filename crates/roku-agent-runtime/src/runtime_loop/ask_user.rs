@@ -319,7 +319,7 @@ mod tests {
 	fn needs_more_information_observation_creates_missing_input_contract() {
 		let observation = ToolObservation {
 			ok: false,
-			tool_name: "general.execute".to_string(),
+			tool_name: "inventory.describe".to_string(),
 			error_type: Some("needs_more_information".to_string()),
 			terminal: false,
 			data: json!({

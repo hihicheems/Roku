@@ -79,7 +79,7 @@ default_preview_rows = 5
 default_top_k = 5
 
 [runtime.tools.workers]
-# Timeout applied to tool-backed LLM workers such as inventory.describe or general.execute.
+# Timeout applied to tool-backed LLM workers such as inventory.describe, research.synthesize, or data.execute.
 llm_tool_timeout_ms = 45000
 # Character budget for injected installed-skill excerpts inside worker prompts.
 max_skill_prompt_context_chars = 16000

@@ -622,7 +622,7 @@ fn web_contract() -> ToolContract {
 				"Do not use for vague research planning without a concrete search query.",
 			],
 			&[
-				"Commonly confused with general.execute for knowledge questions that do not actually require fresh web results.",
+				"Commonly confused with a direct final_answer for knowledge questions that do not actually require fresh web results.",
 				"Commonly confused with fs.find when the word `search` refers to workspace files rather than the public web.",
 			],
 		),
