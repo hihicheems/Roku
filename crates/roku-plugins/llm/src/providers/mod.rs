@@ -13,4 +13,5 @@
 // limitations under the License.
 
 pub mod anthropic;
+pub mod openai;
 pub mod openrouter;

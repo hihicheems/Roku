@@ -19,6 +19,7 @@ mod router;
 mod types;
 
 pub use providers::anthropic::{AnthropicConfig, AnthropicProvider};
+pub use providers::openai::{OpenAiConfig, OpenAiProvider};
 pub use providers::openrouter::{
 	OpenRouterBootstrapError, OpenRouterConfig, OpenRouterProvider, OpenRouterRuntimeConfig,
 	OpenRouterRuntimeConfigPatch, build_openrouter_router, build_openrouter_router_with_metrics,
