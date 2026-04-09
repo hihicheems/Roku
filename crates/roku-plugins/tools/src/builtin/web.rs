@@ -427,9 +427,13 @@ impl Tool for WebFetchTool {
 
 		let status = response.status();
 		if !status.is_success() {
+			let reason = status.canonical_reason().unwrap_or("Unknown");
 			return Ok(fetch_error_output(
 				"http_error",
-				format!("HTTP {}", status.as_u16()),
+				format!(
+					"HTTP {} {reason}. The URL may be invalid, private, or temporarily unavailable.",
+					status.as_u16()
+				),
 				url,
 			));
 		}
@@ -481,10 +485,13 @@ impl Tool for WebFetchTool {
 }
 
 fn fetch_error_output(error_type: &str, message: impl Into<String>, url: &str) -> Value {
+	// Connection-level errors (DNS, refused) are terminal — truly unrecoverable.
+	// HTTP-level errors (4xx, 5xx) are non-terminal — let the LLM try alternatives.
+	let terminal = error_type != "http_error";
 	ToolOutputEnvelope::new(
 		false,
 		Some(error_type),
-		true,
+		terminal,
 		message,
 		json!({ "url": url }),
 	)
@@ -913,7 +920,10 @@ mod tests {
 			.expect("web.fetch should emit ToolOutputEnvelope");
 		assert!(!envelope.ok);
 		assert_eq!(envelope.error_type.as_deref(), Some("http_error"));
-		assert!(envelope.terminal);
+		assert!(
+			!envelope.terminal,
+			"HTTP errors should be non-terminal so LLM can recover"
+		);
 	}
 
 	#[test]

@@ -85,19 +85,13 @@ pub fn interpret_observation(
 	let budget_exhausted = remaining_step_budget == 0;
 	let recovery_exhausted = !raw_observation.ok && !terminal && remaining_recovery_budget == 0;
 	let should_ask_user = needs_more_information;
-	let unhandled_failure =
-		!raw_observation.ok && !terminal && !should_ask_user && !is_multiple_candidates;
 	let should_emit_final_answer = raw_observation.ok && terminal;
-	let should_fail = (!raw_observation.ok && terminal)
-		|| unhandled_failure
-		|| budget_exhausted
-		|| recovery_exhausted;
+	// Non-terminal errors consume recovery budget and let the LLM see the error
+	// as an observation so it can try alternatives.  Only terminal errors or
+	// exhausted budgets force failure.
+	let should_fail = (!raw_observation.ok && terminal) || budget_exhausted || recovery_exhausted;
 	InterpretedObservation {
-		continue_allowed: !terminal
-			&& !budget_exhausted
-			&& !recovery_exhausted
-			&& !should_ask_user
-			&& !unhandled_failure,
+		continue_allowed: !terminal && !budget_exhausted && !recovery_exhausted && !should_ask_user,
 		should_ask_user,
 		should_emit_final_answer,
 		should_fail,
@@ -211,7 +205,7 @@ mod tests {
 	}
 
 	#[test]
-	fn non_multiple_candidate_failures_stop_the_loop_immediately() {
+	fn non_terminal_errors_allow_recovery_via_budget() {
 		let state = loop_state();
 		let interpreted = interpret_observation(
 			&state,
@@ -226,10 +220,17 @@ mod tests {
 			None,
 		);
 
-		assert!(!interpreted.continue_allowed);
+		// Non-terminal errors should let the LLM continue (consuming recovery budget).
+		assert!(
+			interpreted.continue_allowed,
+			"non-terminal errors should allow continuation"
+		);
 		assert!(!interpreted.should_ask_user);
 		assert!(!interpreted.should_emit_final_answer);
-		assert!(interpreted.should_fail);
+		assert!(
+			!interpreted.should_fail,
+			"non-terminal errors should not force failure while recovery budget remains"
+		);
 	}
 
 	#[test]

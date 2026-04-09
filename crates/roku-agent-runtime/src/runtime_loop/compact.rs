@@ -440,7 +440,10 @@ mod tests {
 		}
 		assert_eq!(state.history.len(), 10);
 
-		let config = CompactConfig::default();
+		let config = CompactConfig {
+			retain_tail_steps: 4,
+			..CompactConfig::default()
+		};
 		compact_history(&mut state, &config);
 
 		// 4 retained + 1 boundary = 5
@@ -488,7 +491,11 @@ mod tests {
 		for i in 1..=10 {
 			state.record_step(sample_step(i, 10 - i));
 		}
-		compact_history(&mut state, &CompactConfig::default());
+		let config = CompactConfig {
+			retain_tail_steps: 4,
+			..CompactConfig::default()
+		};
+		compact_history(&mut state, &config);
 
 		assert!(
 			state.working_summary.contains("[Compact summary"),
@@ -550,7 +557,11 @@ mod tests {
 		for i in 1..=8 {
 			state.record_step(sample_step(i, 10 - i));
 		}
-		compact_history(&mut state, &CompactConfig::default());
+		let config = CompactConfig {
+			retain_tail_steps: 4,
+			..CompactConfig::default()
+		};
+		compact_history(&mut state, &config);
 
 		let boundary = &state.history[0];
 		assert_eq!(
@@ -611,7 +622,10 @@ mod tests {
 		}
 
 		let before = estimate_context_tokens(&state);
-		let config = CompactConfig::default();
+		let config = CompactConfig {
+			retain_tail_steps: 4,
+			..CompactConfig::default()
+		};
 		compact_history(&mut state, &config);
 		let after = estimate_context_tokens(&state);
 
