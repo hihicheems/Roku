@@ -1898,6 +1898,22 @@ impl Tool for FsGrepTool {
 				})
 			})
 			.transpose()?;
+		let file_type = request
+			.input
+			.get("file_type")
+			.and_then(Value::as_str)
+			.filter(|value| !value.trim().is_empty())
+			.map(str::to_string);
+		let context_before = request
+			.input
+			.get("context_before")
+			.and_then(Value::as_u64)
+			.unwrap_or(0) as usize;
+		let context_after = request
+			.input
+			.get("context_after")
+			.and_then(Value::as_u64)
+			.unwrap_or(0) as usize;
 		let roots = allowed_read_roots(&request)?;
 		let search_root = request
 			.input
@@ -1926,6 +1942,9 @@ impl Tool for FsGrepTool {
 			&search_root,
 			&compiled,
 			glob_filter.as_ref(),
+			file_type.as_deref(),
+			context_before,
+			context_after,
 			limit,
 			&mut matches,
 			&mut truncated,
@@ -1953,6 +1972,9 @@ fn grep_walk_directory(
 	directory: &Path,
 	pattern: &regex::Regex,
 	glob_filter: Option<&glob::Pattern>,
+	file_type: Option<&str>,
+	context_before: usize,
+	context_after: usize,
 	limit: usize,
 	matches: &mut Vec<Value>,
 	truncated: &mut bool,
@@ -1984,11 +2006,29 @@ fn grep_walk_directory(
 			{
 				continue;
 			}
+			if let Some(ext) = file_type {
+				let matches_ext = path
+					.extension()
+					.and_then(|e| e.to_str())
+					.map(|e| e == ext)
+					.unwrap_or(false);
+				if !matches_ext {
+					continue;
+				}
+			}
 			if matches.len() >= limit {
 				*truncated = true;
 				return Ok(());
 			}
-			grep_search_file(&path, pattern, limit, matches, truncated)?;
+			grep_search_file(
+				&path,
+				pattern,
+				context_before,
+				context_after,
+				limit,
+				matches,
+				truncated,
+			)?;
 			if *truncated {
 				return Ok(());
 			}
@@ -2001,6 +2041,8 @@ fn grep_walk_directory(
 fn grep_search_file(
 	path: &Path,
 	pattern: &regex::Regex,
+	context_before: usize,
+	context_after: usize,
 	limit: usize,
 	matches: &mut Vec<Value>,
 	truncated: &mut bool,
@@ -2009,17 +2051,63 @@ fn grep_search_file(
 		Ok(content) => content,
 		Err(_) => return Ok(()),
 	};
-	for (line_number, line) in content.lines().enumerate() {
-		if pattern.is_match(line) {
-			if matches.len() >= limit {
-				*truncated = true;
-				return Ok(());
+	if context_before == 0 && context_after == 0 {
+		for (line_number, line) in content.lines().enumerate() {
+			if pattern.is_match(line) {
+				if matches.len() >= limit {
+					*truncated = true;
+					return Ok(());
+				}
+				matches.push(json!({
+					"file_path": path.display().to_string(),
+					"line_number": line_number + 1,
+					"line_content": line,
+				}));
 			}
-			matches.push(json!({
-				"file_path": path.display().to_string(),
-				"line_number": line_number + 1,
-				"line_content": line,
-			}));
+		}
+	} else {
+		let lines: Vec<&str> = content.lines().collect();
+		let total = lines.len();
+		// collect match line indices first, then emit with context, merging overlaps
+		let match_indices: Vec<usize> = lines
+			.iter()
+			.enumerate()
+			.filter(|(_, line)| pattern.is_match(line))
+			.map(|(i, _)| i)
+			.collect();
+		// emit merged context windows
+		let mut emitted_up_to: Option<usize> = None; // last line index already emitted
+		for &idx in &match_indices {
+			let window_start = idx.saturating_sub(context_before);
+			let window_end = (idx + context_after).min(total - 1);
+			// skip lines already emitted via a previous window
+			let emit_from = match emitted_up_to {
+				Some(last) if last >= window_start => last + 1,
+				_ => window_start,
+			};
+			for (line_idx, line) in lines
+				.iter()
+				.enumerate()
+				.take(window_end + 1)
+				.skip(emit_from)
+			{
+				if matches.len() >= limit {
+					*truncated = true;
+					return Ok(());
+				}
+				let is_match = line_idx == idx || match_indices.binary_search(&line_idx).is_ok();
+				matches.push(json!({
+					"file_path": path.display().to_string(),
+					"line_number": line_idx + 1,
+					"line_content": *line,
+					"is_context": !is_match,
+				}));
+			}
+			// advance emitted_up_to only forward, never backward
+			emitted_up_to = Some(match emitted_up_to {
+				Some(prev) if prev > window_end => prev,
+				_ => window_end,
+			});
 		}
 	}
 	Ok(())
@@ -2265,6 +2353,112 @@ mod tests {
 		assert_eq!(env.data["match_count"], 1);
 		let matches = env.data["matches"].as_array().unwrap();
 		assert!(matches[0]["file_path"].as_str().unwrap().ends_with("a.rs"));
+	}
+
+	#[test]
+	fn fs_grep_file_type_filter() {
+		let dir = tempdir().expect("tempdir");
+		fs::write(dir.path().join("a.rs"), "fn main() {}\n").unwrap();
+		fs::write(dir.path().join("b.py"), "fn main() {}\n").unwrap();
+		fs::write(dir.path().join("c.txt"), "fn main() {}\n").unwrap();
+		let output = grep_tool()
+			.invoke(grep_request(
+				json!({"pattern": "fn main", "file_type": "rs"}),
+				dir.path(),
+			))
+			.expect("invoke");
+		let env = serde_json::from_value::<ToolOutputEnvelope>(output).expect("envelope");
+		assert!(env.ok);
+		assert_eq!(env.data["match_count"], 1);
+		let matches = env.data["matches"].as_array().unwrap();
+		assert!(matches[0]["file_path"].as_str().unwrap().ends_with("a.rs"));
+	}
+
+	#[test]
+	fn fs_grep_file_type_no_match_extension() {
+		let dir = tempdir().expect("tempdir");
+		fs::write(dir.path().join("a.txt"), "hello world\n").unwrap();
+		let output = grep_tool()
+			.invoke(grep_request(
+				json!({"pattern": "hello", "file_type": "rs"}),
+				dir.path(),
+			))
+			.expect("invoke");
+		let env = serde_json::from_value::<ToolOutputEnvelope>(output).expect("envelope");
+		assert!(env.ok);
+		assert_eq!(env.data["match_count"], 0);
+	}
+
+	#[test]
+	fn fs_grep_context_before_and_after() {
+		let dir = tempdir().expect("tempdir");
+		// lines: line1, line2, MATCH, line4, line5
+		fs::write(
+			dir.path().join("a.txt"),
+			"line1\nline2\nMATCH\nline4\nline5\n",
+		)
+		.unwrap();
+		let output = grep_tool()
+			.invoke(grep_request(
+				json!({"pattern": "MATCH", "context_before": 2, "context_after": 2}),
+				dir.path(),
+			))
+			.expect("invoke");
+		let env = serde_json::from_value::<ToolOutputEnvelope>(output).expect("envelope");
+		assert!(env.ok);
+		let matches = env.data["matches"].as_array().unwrap();
+		// expect 5 entries: lines 1-5
+		assert_eq!(matches.len(), 5);
+		assert_eq!(matches[0]["line_number"], 1);
+		assert_eq!(matches[0]["is_context"], true);
+		assert_eq!(matches[2]["line_number"], 3);
+		assert_eq!(matches[2]["is_context"], false);
+		assert_eq!(matches[4]["line_number"], 5);
+		assert_eq!(matches[4]["is_context"], true);
+	}
+
+	#[test]
+	fn fs_grep_context_overlapping_windows_merged() {
+		let dir = tempdir().expect("tempdir");
+		// lines: MATCH1, line2, MATCH3
+		// context_after=2 from MATCH1 reaches line3; context_before=2 from MATCH3 starts at line1
+		// merged window should be lines 1-3 with no duplicates
+		fs::write(dir.path().join("a.txt"), "MATCH1\nline2\nMATCH3\n").unwrap();
+		let output = grep_tool()
+			.invoke(grep_request(
+				json!({"pattern": "MATCH", "context_before": 2, "context_after": 2}),
+				dir.path(),
+			))
+			.expect("invoke");
+		let env = serde_json::from_value::<ToolOutputEnvelope>(output).expect("envelope");
+		assert!(env.ok);
+		let matches = env.data["matches"].as_array().unwrap();
+		// should be exactly 3 lines (no duplicates)
+		assert_eq!(matches.len(), 3);
+		let line_numbers: Vec<u64> = matches
+			.iter()
+			.map(|m| m["line_number"].as_u64().unwrap())
+			.collect();
+		assert_eq!(line_numbers, vec![1, 2, 3]);
+	}
+
+	#[test]
+	fn fs_grep_context_zero_behaves_like_default() {
+		let dir = tempdir().expect("tempdir");
+		fs::write(dir.path().join("a.txt"), "hello world\ngoodbye\n").unwrap();
+		let output = grep_tool()
+			.invoke(grep_request(
+				json!({"pattern": "hello", "context_before": 0, "context_after": 0}),
+				dir.path(),
+			))
+			.expect("invoke");
+		let env = serde_json::from_value::<ToolOutputEnvelope>(output).expect("envelope");
+		assert!(env.ok);
+		let matches = env.data["matches"].as_array().unwrap();
+		assert_eq!(matches.len(), 1);
+		assert_eq!(matches[0]["line_number"], 1);
+		// no is_context field in default (zero-context) path
+		assert!(matches[0].get("is_context").is_none());
 	}
 
 	// -----------------------------------------------------------------------
