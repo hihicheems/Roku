@@ -37,7 +37,7 @@ use crate::tools::{
 	build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config,
 };
 use crate::workers::{
-	data_worker_with_config, generic_worker_with_config, inventory_worker_with_config,
+	data_worker_with_config, inventory_worker_with_config,
 	research_worker_with_config, review_worker_with_config, skill_execute_worker_with_config,
 	skill_worker_with_config,
 };
@@ -186,10 +186,8 @@ impl GenericAgentRuntime {
 			70,
 			review_worker_with_config(Arc::clone(&shared_tool_runtime), &tool_config),
 		);
-		runtime.register_worker(
-			10,
-			generic_worker_with_config(shared_tool_runtime, &tool_config),
-		);
+		// generic_worker (general.execute) removed — the LLM answers directly.
+		let _ = shared_tool_runtime;
 		runtime
 	}
 
@@ -1195,7 +1193,7 @@ impl GenericAgentRuntime {
 		task_id: &TaskId,
 		request: &RequestEnvelope,
 		result: &crate::router::RouteEscalationPlan,
-		runtime_memory_sections: &RuntimeMemorySections,
+		_runtime_memory_sections: &RuntimeMemorySections,
 	) -> DirectRouteExecutionResult {
 		let fallback_message = match result.action {
 			EscalationAction::AskForMoreInfo => {
@@ -1231,39 +1229,14 @@ impl GenericAgentRuntime {
 			);
 		}
 
-		if self.route_router.is_none() {
-			return self.synthetic_message_result(
-				task_id,
-				"direct-route",
-				"direct-route:escalation",
-				fallback_message,
-				0.70,
-			);
-		}
-
-		let action_hint = match result.action {
-			EscalationAction::AskForMoreInfo => format!(
-				"Ask the user for the missing arguments: {}. Do not claim any execution happened.",
-				result.decision.missing_arguments.join(", ")
-			),
-			EscalationAction::FallbackAnswer => format!(
-				"Explain that the requested capability is not currently available in the runtime inventory. Intent family: {:?}. Do not claim execution success.",
-				result.decision.intent_family
-			),
-			EscalationAction::EnterLimitedPlanning =>
-				"Explain that the request would need a planning-heavy workflow, but this runtime only exposes direct routes and compatibility fallback responses for new requests. Do not claim any execution happened.".to_string(),
-		};
-		self.execute_tool_like_route(
+		// general.execute removed — all escalation paths produce synthetic
+		// messages directly instead of nesting another LLM call.
+		self.synthetic_message_result(
 			task_id,
-			request,
 			"direct-route",
-			&action_hint,
-			vec![ResourceSelector::tool(tool_name_for_role(
-				&self.tool_config,
-				crate::tool_config::BuiltinToolRole::General,
-			))],
-			None,
-			runtime_memory_sections,
+			"direct-route:escalation",
+			fallback_message,
+			0.70,
 		)
 	}
 
@@ -1360,66 +1333,6 @@ impl GenericAgentRuntime {
 	) -> Vec<String> {
 		self.runtime_visible_tool_availability_snapshot
 			.compose_visible_tools(route_decision.candidate_tools.iter().map(String::as_str))
-	}
-
-	fn execute_tool_like_route(
-		&self,
-		task_id: &TaskId,
-		request: &RequestEnvelope,
-		node_id: &str,
-		step_summary: &str,
-		resources: Vec<ResourceSelector>,
-		explicit_source_url: Option<&String>,
-		runtime_memory_sections: &RuntimeMemorySections,
-	) -> DirectRouteExecutionResult {
-		let capabilities = route_capabilities(&self.resource_catalog, &resources);
-		let node = TaskNode {
-			node_id: NodeId(node_id.to_string()),
-			kind: TaskNodeKind::Execution,
-			description: step_description(&request.goal, step_summary),
-			resources: resources.clone(),
-			capabilities: capabilities.clone(),
-			dispatch_policy: TaskNodeDispatchPolicy::Automatic,
-			join_policy: JoinPolicy::AllParents,
-			aggregation_mode: AggregationMode::CollectAll,
-			recovery_anchor: Default::default(),
-			budget_snapshot: NodeBudgetSnapshot {
-				token_budget: 8_000,
-				time_budget_ms: 60_000,
-			},
-			deadline_ms: 0,
-			capability_requirements_snapshot: capabilities.clone(),
-			retry_policy: RetryPolicy::default(),
-			rerun_policy: RerunPolicy::SafeToRerun,
-		};
-		let mut spec = AgentInstanceSpec {
-			instance_id: format!("direct-route:{}", node.node_id.0),
-			context: AgentContext {
-				task_id: task_id.clone(),
-				node_id: node.node_id.clone(),
-				summary: node.description.clone(),
-				resources,
-				conversation_history: request.conversation_history.clone(),
-				runtime_memory_sections: runtime_memory_sections.clone(),
-			},
-			capabilities,
-			capability_tokens: Vec::new(),
-			policy_bindings: PolicyBindings {
-				budget_tokens: 8_000,
-				time_budget_ms: 60_000,
-			},
-		};
-		if let Some(source_url) = explicit_source_url {
-			spec.context.summary = format!("{}\nSource URL: {source_url}", spec.context.summary);
-		}
-		let result = self.execute(&spec, &node);
-		let message = extract_result_message(&result);
-		DirectRouteExecutionResult {
-			node,
-			result,
-			message,
-			terminal_step_action: None,
-		}
 	}
 
 	fn synthetic_message_result(
@@ -1837,8 +1750,28 @@ impl AgentWorker for GenericAgentRuntime {
 			return result;
 		}
 
-		generic_worker_with_config(Arc::clone(&self.tool_runtime), &self.tool_config)
-			.execute(spec, node)
+		// No matching worker found — produce a synthetic fallback result.
+		// Previously this used generic_worker (general.execute) as a catch-all,
+		// but that meta-tool has been removed.
+		let goal = node
+			.description
+			.strip_prefix("Goal: ")
+			.and_then(|rest| rest.split_once("\nStep: ").map(|(g, _)| g.to_string()))
+			.unwrap_or_else(|| node.description.clone());
+		let payload = serde_json::json!({ "message": goal });
+		ResultEnvelope {
+			task_id: spec.context.task_id.clone(),
+			node_id: node.node_id.clone(),
+			producer: spec.instance_id.clone(),
+			schema_version: "result.v1".to_string(),
+			status: ResultStatus::Ok,
+			payload: serde_json::to_string(&payload).unwrap_or_default(),
+			evidence: vec![EvidenceItem {
+				kind: "worker".to_string(),
+				value: "worker-fallback:no-matching-worker".to_string(),
+			}],
+			confidence: 0.50,
+		}
 	}
 }
 
@@ -2185,16 +2118,6 @@ fn extract_result_message(result: &ResultEnvelope) -> String {
 				.map(str::to_string)
 		})
 		.unwrap_or_else(|| result.payload.clone())
-}
-
-fn tool_name_for_role(
-	tool_config: &ToolCatalogConfig,
-	role: crate::tool_config::BuiltinToolRole,
-) -> String {
-	tool_config
-		.tool_for_role(role)
-		.map(|tool| tool.name.clone())
-		.unwrap_or_else(|| role.as_str().to_string())
 }
 
 #[cfg(test)]

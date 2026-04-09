@@ -218,18 +218,7 @@ pub(crate) fn skill_execute_worker_with_config(
 	)
 }
 
-pub(crate) fn generic_worker_with_config(
-	tool_runtime: Arc<ToolRuntime>,
-	tool_config: &ToolCatalogConfig,
-) -> ToolBackedWorker {
-	ToolBackedWorker::new(
-		"generic-worker",
-		tool_name_for_role(tool_config, BuiltinToolRole::General),
-		&[],
-		tool_runtime,
-		0.75,
-	)
-}
+// generic_worker_with_config removed — general.execute is no longer registered.
 
 fn goal_and_step(description: &str) -> (String, String) {
 	if let Some(stripped) = description.strip_prefix("Goal: ")
