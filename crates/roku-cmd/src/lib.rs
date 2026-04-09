@@ -33,6 +33,7 @@ mod memory_runtime_config;
 mod pending_loop_substrate;
 mod runtime;
 mod runtime_config;
+mod session_store;
 mod storage;
 mod telegram_session_ux_config;
 
@@ -229,10 +230,26 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
 	/// Start an interactive REPL session. /help for in-session commands.
-	#[command(after_help = "Example:\n  roku-cmd chat --session-id my-session")]
+	#[command(after_help = concat!(
+		"EXAMPLES:\n",
+		"    # Interactive REPL (default, resumes last session)\n",
+		"    roku-cmd chat\n\n",
+		"    # Interactive REPL with named session\n",
+		"    roku-cmd chat --session-id my-project\n\n",
+		"    # Pipe mode: send one message, get JSON response\n",
+		"    echo \"what tools do you have?\" | roku-cmd chat --pipe\n\n",
+		"    # Pipe mode: continue an existing session\n",
+		"    echo \"continue\" | roku-cmd chat --pipe --session-id my-project\n\n",
+		"    # Pipe mode: stream events to file while reading response\n",
+		"    echo \"search for X\" | roku-cmd chat --pipe 2>events.jsonl",
+	))]
 	Chat {
 		#[arg(long, default_value = "chat-default")]
 		session_id: String,
+
+		/// Enable pipe mode: read from stdin, output JSON to stdout, events to stderr.
+		#[arg(long, default_value_t = false)]
+		pipe: bool,
 	},
 
 	/// Run the deterministic in-process pipeline.
@@ -288,6 +305,21 @@ enum Commands {
 	/// Skill management commands.
 	#[command(subcommand)]
 	Skill(SkillCommand),
+
+	/// Chat session management commands.
+	#[command(subcommand)]
+	Session(SessionCommand),
+}
+
+#[derive(Subcommand)]
+enum SessionCommand {
+	/// List all chat sessions with turn count and last activity time.
+	List,
+	/// Delete a chat session's conversation history.
+	Delete {
+		/// The session ID to delete.
+		session_id: String,
+	},
 }
 
 /// Shared request arguments used by once, live-once, and telegram-once.
@@ -554,8 +586,8 @@ where
 				.map_err(CommandError::Runtime)?;
 			Ok(Some(response.message))
 		}
-		Some(Commands::Chat { session_id }) => {
-			chat::run_chat(&rt, chat::ChatOptions { session_id })?;
+		Some(Commands::Chat { session_id, pipe }) => {
+			chat::run_chat(&rt, chat::ChatOptions { session_id, pipe })?;
 			Ok(None)
 		}
 		Some(Commands::Once(args)) => {
@@ -747,7 +779,53 @@ where
 			SkillCommand::List => show_skills_from_env().map(Some),
 			SkillCommand::Show { skill_name } => show_skill_from_env(&skill_name).map(Some),
 		},
+		Some(Commands::Session(cmd)) => {
+			let layout = storage::LocalStorageLayout::from_env();
+			let store = session_store::SessionStore::new(layout.session_history_dir);
+			match cmd {
+				SessionCommand::List => {
+					let sessions = store
+						.list()
+						.map_err(|e| CommandError::Io(std::io::Error::other(e)))?;
+					if sessions.is_empty() {
+						Ok(Some("No chat sessions found.".to_string()))
+					} else {
+						let mut out = String::from("Chat sessions:\n");
+						for s in &sessions {
+							let ts = format_unix_ms(s.last_modified);
+							out.push_str(&format!(
+								"  {:<24} {:>4} turns   last active: {}\n",
+								s.session_id, s.turn_count, ts
+							));
+						}
+						Ok(Some(out))
+					}
+				}
+				SessionCommand::Delete { session_id } => {
+					let deleted = store
+						.delete(&session_id)
+						.map_err(|e| CommandError::Io(std::io::Error::other(e)))?;
+					if deleted {
+						Ok(Some(format!("Deleted session '{session_id}'.")))
+					} else {
+						Ok(Some(format!("Session '{session_id}' not found.")))
+					}
+				}
+			}
+		}
 	}
+}
+
+fn format_unix_ms(ms: u64) -> String {
+	if ms == 0 {
+		return "unknown".to_string();
+	}
+	let secs = (ms / 1000) as i64;
+	let dt =
+		time::OffsetDateTime::from_unix_timestamp(secs).unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+	let format = time::format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]")
+		.unwrap_or_default();
+	dt.format(&format).unwrap_or_else(|_| "unknown".to_string())
 }
 
 // ---------------------------------------------------------------------------
