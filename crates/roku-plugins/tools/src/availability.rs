@@ -82,19 +82,22 @@ impl RuntimeVisibleToolAvailabilitySnapshot {
 		tools
 	}
 
+	/// Returns all enabled tools, with seed tools listed first for ordering/priority.
+	///
+	/// The `baseline_visible_tools` field is no longer the limiting factor; all enabled tools are
+	/// always visible. Seed tools appear at the front of the list; remaining enabled tools follow.
 	pub fn compose_visible_tools<'a>(
 		&self,
 		seed_tool_names: impl IntoIterator<Item = &'a str>,
 	) -> Vec<String> {
 		let mut visible_tools = Vec::new();
+		// Seed tools first (ordering/priority).
 		append_enabled_tool_names(&mut visible_tools, &self.enabled_tools, seed_tool_names);
-		append_enabled_tool_names(
-			&mut visible_tools,
-			&self.enabled_tools,
-			self.baseline_visible_tools.iter().map(String::as_str),
-		);
-		if visible_tools.is_empty() {
-			return self.enabled_tools.iter().cloned().collect();
+		// Then ALL remaining enabled tools.
+		for tool in &self.enabled_tools {
+			if !visible_tools.contains(tool) {
+				visible_tools.push(tool.clone());
+			}
 		}
 		visible_tools
 	}
@@ -169,30 +172,30 @@ mod tests {
 			&runtime_catalog(false),
 			&[
 				"skill.execute",
-				"general.execute",
+				"inventory.describe",
 				"fs.read_text",
-				"general.execute",
+				"inventory.describe",
 				"not.enabled",
 			],
 		);
 
 		assert!(!snapshot.is_tool_enabled("skill.execute"));
-		assert!(snapshot.is_tool_enabled("general.execute"));
+		assert!(snapshot.is_tool_enabled("inventory.describe"));
 		assert!(
 			snapshot.is_tool_enabled("command.run"),
 			"policy-gated tools must remain enabled in the visibility contract"
 		);
 		assert_eq!(
 			snapshot.baseline_visible_tools,
-			vec!["general.execute".to_string(), "fs.read_text".to_string()]
+			vec!["inventory.describe".to_string(), "fs.read_text".to_string()]
 		);
 	}
 
 	#[test]
-	fn snapshot_filters_shortlist_candidates_and_loop_visible_tools() {
+	fn snapshot_filters_shortlist_candidates_and_compose_returns_all_enabled_tools() {
 		let snapshot = RuntimeVisibleToolAvailabilitySnapshot::from_resource_catalog(
 			&runtime_catalog(false),
-			&["general.execute", "table.preview"],
+			&["inventory.describe", "table.preview"],
 		);
 
 		assert_eq!(
@@ -201,29 +204,37 @@ mod tests {
 				&[
 					"not.enabled".to_string(),
 					"fs.read_text".to_string(),
-					"general.execute".to_string(),
+					"inventory.describe".to_string(),
 					"fs.read_text".to_string(),
 				],
 			),
-			vec!["fs.read_text".to_string(), "general.execute".to_string()]
+			vec!["fs.read_text".to_string(), "inventory.describe".to_string()]
 		);
+
+		// compose_visible_tools now always returns ALL enabled tools.
+		// Seed tools appear first; remaining enabled tools follow in BTreeSet order.
+		let visible = snapshot.compose_visible_tools(["not.enabled", "fs.read_text"]);
+		// fs.read_text is the only valid seed tool, so it must be first.
+		assert_eq!(visible[0], "fs.read_text");
+		// All enabled tools must be present.
 		assert_eq!(
-			snapshot.compose_visible_tools(["not.enabled", "fs.read_text"]),
-			vec![
-				"fs.read_text".to_string(),
-				"general.execute".to_string(),
-				"table.preview".to_string(),
-			]
+			{
+				let mut v = visible.clone();
+				v.sort();
+				v
+			},
+			snapshot.enabled_tools.iter().cloned().collect::<Vec<_>>()
 		);
 	}
 
 	#[test]
-	fn snapshot_falls_back_to_all_enabled_tools_when_no_seed_is_visible() {
+	fn snapshot_always_returns_all_enabled_tools_regardless_of_seed() {
 		let snapshot = RuntimeVisibleToolAvailabilitySnapshot::from_resource_catalog(
 			&runtime_catalog(false),
 			&["not.enabled"],
 		);
 
+		// Even when no seed tools match, all enabled tools are returned.
 		assert_eq!(
 			snapshot.compose_visible_tools(["still.not.enabled"]),
 			snapshot.enabled_tools.iter().cloned().collect::<Vec<_>>()
