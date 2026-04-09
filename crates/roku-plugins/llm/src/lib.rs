@@ -26,5 +26,6 @@ pub use router::{LlmProvider, LlmRouter};
 pub use types::{
 	GenerationRequest, LlmAdapterError, LlmResponse, ModelProfile, ProviderCallError,
 	ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy, StreamChunk,
-	StructuredGenerationError, StructuredJsonResponse, StructuredOutputError,
+	StructuredGenerationError, StructuredJsonResponse, StructuredOutputError, ToolCallBlock,
+	ToolDefinition,
 };

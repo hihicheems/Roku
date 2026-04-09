@@ -96,6 +96,29 @@ impl Default for ProviderResiliencePolicy {
 	}
 }
 
+/// A tool definition sent to the LLM for native tool_use / function calling.
+///
+/// Follows the OpenAI-compatible format used by OpenRouter:
+/// `{"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}`
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolDefinition {
+	pub name: String,
+	pub description: String,
+	/// JSON Schema for the tool's input parameters.
+	pub parameters: Value,
+}
+
+/// A tool call block returned by the LLM via native tool_use.
+///
+/// Maps from OpenAI format:
+/// `{"id": "call_xxx", "type": "function", "function": {"name": "...", "arguments": "{...}"}}`
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCallBlock {
+	pub id: String,
+	pub name: String,
+	pub arguments: Value,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenerationRequest {
 	pub system_prompt: Option<String>,
@@ -105,6 +128,10 @@ pub struct GenerationRequest {
 	pub preferred_provider: Option<String>,
 	pub budget_tokens_remaining: u64,
 	pub budget_cost_remaining_usd: f64,
+	/// Tool definitions for native tool_use. When Some, the provider should
+	/// send these as the `tools` parameter and expect `tool_calls` in response.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub tools: Option<Vec<ToolDefinition>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -119,6 +146,10 @@ pub struct LlmResponse {
 	pub total_tokens: u64,
 	pub estimated_cost_usd: f64,
 	pub latency_ms: u64,
+	/// Tool call blocks from native tool_use response. Present when the model
+	/// chose to call tools via the native protocol instead of generating text.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub tool_calls: Option<Vec<ToolCallBlock>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -129,6 +160,10 @@ pub struct ProviderResponse {
 	pub prompt_tokens: u64,
 	pub output_tokens: u64,
 	pub latency_ms: u64,
+	/// Tool call blocks from native tool_use. None when the model responded
+	/// with text only.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub tool_calls: Option<Vec<ToolCallBlock>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

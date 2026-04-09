@@ -771,6 +771,7 @@ impl Tool for PromptedLlmTool {
 				preferred_provider: None,
 				budget_tokens_remaining: input.budget_tokens,
 				budget_cost_remaining_usd: 1.0,
+				tools: None,
 			})
 			.map_err(llm_failure)?;
 		if self.worker_id == "generic-worker" {
@@ -1241,6 +1242,7 @@ fn plan_skill_creator(
 			preferred_provider: None,
 			budget_tokens_remaining: input.budget_tokens,
 			budget_cost_remaining_usd: 1.0,
+			tools: None,
 		})
 		.map_err(llm_failure)?;
 	parse_json_reply::<SkillCreatorExecutionPlan>(&response.output).ok_or_else(|| {
@@ -1276,6 +1278,7 @@ fn plan_script_execution(
 			preferred_provider: None,
 			budget_tokens_remaining: input.budget_tokens,
 			budget_cost_remaining_usd: 1.0,
+			tools: None,
 		})
 		.map_err(llm_failure)?;
 	parse_json_reply::<SkillExecutionPlan>(&response.output)
@@ -2399,6 +2402,7 @@ So, I'll output: "星期日""#;
 				prompt_tokens: 12,
 				output_tokens: 4,
 				latency_ms: 10,
+				tool_calls: None,
 			})
 		}
 	}
@@ -2424,6 +2428,7 @@ So, I'll output: "星期日""#;
 				prompt_tokens: 12,
 				output_tokens: 32,
 				latency_ms: 10,
+				tool_calls: None,
 			})
 		}
 	}

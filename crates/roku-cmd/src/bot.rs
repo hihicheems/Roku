@@ -1694,6 +1694,7 @@ mod tests {
 				prompt_tokens: 64,
 				output_tokens: 24,
 				latency_ms: 10,
+				tool_calls: None,
 			})
 		}
 	}

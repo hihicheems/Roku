@@ -189,6 +189,7 @@ pub async fn compact_history_with_llm(
 			preferred_provider: None,
 			budget_tokens_remaining: config.llm_budget_tokens_remaining,
 			budget_cost_remaining_usd: config.llm_budget_cost_remaining_usd,
+			tools: None,
 		})
 		.await;
 

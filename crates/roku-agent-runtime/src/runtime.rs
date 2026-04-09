@@ -37,9 +37,8 @@ use crate::tools::{
 	build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config,
 };
 use crate::workers::{
-	data_worker_with_config, inventory_worker_with_config,
-	research_worker_with_config, review_worker_with_config, skill_execute_worker_with_config,
-	skill_worker_with_config,
+	data_worker_with_config, inventory_worker_with_config, research_worker_with_config,
+	review_worker_with_config, skill_execute_worker_with_config, skill_worker_with_config,
 };
 use roku_common_types::{
 	AgentContext, AggregationMode, CanonicalExecution, ConversationRole, ConversationTurn,
@@ -545,6 +544,7 @@ impl GenericAgentRuntime {
 					.agent_runtime_config
 					.router
 					.budget_cost_remaining_usd,
+				tools: None,
 			})
 			.await
 		{
@@ -2652,6 +2652,7 @@ mod tests {
 				prompt_tokens: 32,
 				output_tokens: 8,
 				latency_ms: 50,
+				tool_calls: None,
 			})
 		}
 	}
@@ -2765,6 +2766,7 @@ mod tests {
 				prompt_tokens: 24,
 				output_tokens: 18,
 				latency_ms: 10,
+				tool_calls: None,
 			})
 		}
 	}
@@ -2819,6 +2821,7 @@ mod tests {
 				prompt_tokens: 20,
 				output_tokens: 16,
 				latency_ms: 10,
+				tool_calls: None,
 			})
 		}
 	}

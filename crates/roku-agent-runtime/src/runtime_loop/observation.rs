@@ -314,6 +314,7 @@ mod tests {
 				prompt_tokens: 12,
 				output_tokens: 24,
 				latency_ms: 10,
+				tool_calls: None,
 			})
 		}
 	}
