@@ -224,11 +224,11 @@ pub const HARD_MAX_NEXT_STEP_BUDGET_COST_REMAINING_USD: f64 = 10.0;
 impl Default for LoopRuntimeConfig {
 	fn default() -> Self {
 		Self {
-			initial_step_budget: 10,
-			initial_recovery_budget: 2,
+			initial_step_budget: 30,
+			initial_recovery_budget: 5,
 			context_window_tokens: 200_000,
 			compact_threshold_ratio: 0.75,
-			retain_tail_steps: 4,
+			retain_tail_steps: 8,
 			working_summary_max_chars: 4_000,
 			baseline_tool_pool: default_baseline_tool_pool(),
 		}
@@ -660,11 +660,11 @@ mod tests {
 	#[test]
 	fn defaults_are_stable() {
 		let config = AgentRuntimeConfig::default();
-		assert_eq!(config.r#loop.initial_step_budget, 10);
+		assert_eq!(config.r#loop.initial_step_budget, 30);
 		assert_eq!(config.r#loop.context_window_tokens, 200_000);
 		assert_eq!(config.r#loop.compact_threshold_ratio, 0.75);
 		assert_eq!(config.r#loop.compact_threshold_tokens(), 150_000);
-		assert_eq!(config.r#loop.retain_tail_steps, 4);
+		assert_eq!(config.r#loop.retain_tail_steps, 8);
 		assert_eq!(config.r#loop.working_summary_max_chars, 4_000);
 		assert_eq!(config.router.budget_tokens_remaining, 10_000);
 		assert_eq!(config.prompts.visible_tool_hint_max_chars, 180);

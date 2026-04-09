@@ -60,7 +60,7 @@ pub struct CompactConfig {
 impl Default for CompactConfig {
 	fn default() -> Self {
 		Self {
-			retain_tail_steps: 4,
+			retain_tail_steps: 8,
 			working_summary_max_chars: 4_000,
 			llm_expected_output_tokens: 512_u64,
 			llm_budget_tokens_remaining: 10_000,
