@@ -16,6 +16,7 @@ mod ask_user;
 mod compact;
 mod context_assembly;
 mod context_projection;
+pub(crate) mod environment;
 mod execution_trace;
 mod grounding;
 mod loop_event;

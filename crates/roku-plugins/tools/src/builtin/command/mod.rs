@@ -47,9 +47,9 @@ pub(crate) fn catalog_descriptors_with_config(
 		kind: ResourceKind::Tool,
 		name: "command.run".to_string(),
 		role: Some("core_command".to_string()),
-		description: "Use this only when the request already includes one explicit shell-style command to run, such as a fenced bash snippet or inline command. Do not use it for multi-step scripts, shell metacharacters, or commands that would modify the workspace. It returns grounded command execution facts such as argv, cwd, exit code, stdout, stderr, truncation, and scope metadata."
+		description: "Execute a single shell command and return grounded subprocess facts (argv, cwd, exit code, stdout, stderr, truncation, scope metadata). Use this as a general-purpose fallback when no specialized tool fits the task — for example, to run `gh`, `git`, `cargo`, `docker`, `kubectl`, `jq`, or other CLI tools. Prefer specialized tools (`fs.read_text`, `fs.grep`, `fs.list_dir`, `web.fetch`) when they cover the operation. Do not use for multi-step scripts, chained shell expressions, or commands with shell metacharacters."
 			.to_string(),
-		selection_hint: "Run one explicit read-only shell command that is already present in the request."
+		selection_hint: "Run a shell command to accomplish a task when no specialized tool fits."
 			.to_string(),
 		discoverable: true,
 		tags: vec![
@@ -59,8 +59,8 @@ pub(crate) fn catalog_descriptors_with_config(
 		],
 		examples: vec![
 			"Run this command: `pwd`".to_string(),
-			"Execute this bash command: ```bash\nrg \"tool\" crates/roku-agent-runtime\n```"
-				.to_string(),
+			"Check the current git branch".to_string(),
+			"Show me PR #116 details".to_string(),
 		],
 		input_schema: contract_input_schema(
 			Some(&contract),
@@ -194,12 +194,14 @@ fn command_contract(timeout_ms: u64) -> ToolContract {
 	ToolContract {
 		selection: selection_contract(
 			&[
-				"Use when the user already provided one explicit shell command to run.",
-				"Best for bounded read-oriented commands such as pwd, ls, cat, rg, or safe git inspection.",
+				"Use as a general-purpose shell fallback when no specialized tool covers the operation.",
+				"Best for CLI tools such as gh, git, cargo, docker, kubectl, jq, make, and bounded read-oriented commands.",
+				"You may generate the command yourself based on the task — it does not need to be literally present in the user message.",
 			],
 			&[
-				"Do not use for multi-step scripts, chained shell expressions, or commands that modify the workspace.",
+				"Do not use for multi-step scripts, chained shell expressions, or commands with shell metacharacters.",
 				"Do not use when the user asks to explain a command without executing it.",
+				"Prefer specialized tools (fs.read_text, fs.grep, fs.list_dir, web.fetch) when they cover the operation.",
 			],
 			&[
 				"Commonly confused with python.run for inline backticks that are shell commands, not Python snippets.",
