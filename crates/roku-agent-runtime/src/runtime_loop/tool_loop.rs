@@ -503,7 +503,8 @@ Rules:
 - Keep `final_message` concise. Do not paste large grounded documents, search dumps, or long synthesized answers into the JSON decision.
 - Use the current user follow-up if it is present; do not inherit concrete code, paths, or queries from prior conversation turns unless they already exist in the current context projection.
 - For `chat`, prefer `general.execute` when it is visible.
-- For `code_exec`, you may call `python.run` when explicit Python code is present or when the task now requires one clearly bounded Python snippet for local computation over already grounded evidence. Prefer `python.run` over `command.run` for counting, aggregation, filtering, or transformation tasks. Only call `command.run` when the request includes one explicit shell command and the user is asking to execute it.
+- For `code_exec`, you may call `python.run` when explicit Python code is present or when the task now requires one clearly bounded Python snippet for local computation over already grounded evidence. Prefer `python.run` over `command.run` for counting, aggregation, filtering, or transformation tasks.
+- You may call `command.run` to execute shell commands when doing so would help accomplish the task. Prefer specialized tools when they fit (`fs.read_text` over `cat`, `fs.grep` over `grep`, `fs.list_dir` over `ls`, `web.fetch` over `curl`). Use `command.run` as a general-purpose fallback for CLI tools and operations that no specialized tool covers (e.g. `gh`, `git`, `cargo`, `docker`, `kubectl`, `jq`, `make`). You may generate the shell command yourself based on the task — the user does not need to provide it literally. Avoid destructive or workspace-modifying commands unless the task explicitly requires it.
 - When generating `python.run` arguments, keep the code short and self-contained. Prefer walking one grounded directory or reading one grounded path at execution time. Do not inline huge path arrays, copied directory listings, or large observation payloads into the code string.
 - For `table_read`, prefer the first shortlisted `table.*` tool that matches the grounded table path.
 - For `web_lookup`, use `web.search` when a concrete query is available.
@@ -954,7 +955,7 @@ fn missing_argument_message(tool_name: &str) -> String {
 		}
 		"web.search" => "I need a concrete search query before I can search the web.".to_string(),
 		"command.run" => {
-			"Please send one explicit shell command in inline code or a fenced bash block."
+			"I need to know what command to run. Please describe the task or provide a shell command."
 				.to_string()
 		}
 		"python.run" => {

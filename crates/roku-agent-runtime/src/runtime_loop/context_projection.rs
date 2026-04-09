@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use roku_common_types::RuntimeMemorySections;
 use serde::{Deserialize, Serialize};
 
+use crate::runtime_loop::environment;
 use crate::runtime_loop::{LoopState, StepAction, StepObservation, ToolObservation};
 
 /// Canonical model-facing projection derived from the current `LoopState`.
@@ -39,6 +40,7 @@ use crate::runtime_loop::{LoopState, StepAction, StepObservation, ToolObservatio
 /// - `visible_tool_hints`: Compact semantic hints for the currently visible tools.
 /// - `last_observation`: The latest grounded tool observation, if any.
 /// - `working_summary`: Runtime-owned short-term working memory carried separately from history.
+/// - `environment_context`: Probed environment info (available CLI tools, git repo context).
 /// - `history_digest`: A compact summary of recent steps and current open state.
 /// - `unresolved_blockers`: Open blockers that may require follow-up or user clarification.
 /// - `working_assumptions`: Explicitly marked tentative assumptions, not grounded facts.
@@ -73,6 +75,8 @@ pub struct ContextProjection {
 	pub working_summary: String,
 	#[serde(default)]
 	pub runtime_memory_sections: RuntimeMemorySections,
+	#[serde(default)]
+	pub environment_context: String,
 	pub history_digest: String,
 	pub unresolved_blockers: Vec<String>,
 	pub working_assumptions: Vec<String>,
@@ -120,6 +124,9 @@ pub(crate) fn build_context_projection(
 		last_observation: loop_state.last_observation.clone(),
 		working_summary: loop_state.working_summary.clone(),
 		runtime_memory_sections: runtime_memory_sections.clone(),
+		environment_context: environment::format_environment_context(
+			environment::probe_environment(),
+		),
 		history_digest: history_digest(loop_state, &unresolved_blockers, &working_assumptions),
 		unresolved_blockers,
 		working_assumptions,
