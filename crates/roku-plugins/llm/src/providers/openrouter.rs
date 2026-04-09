@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 use crate::router::{LlmProvider, LlmRouter};
 use crate::types::{
 	GenerationRequest, ModelProfile, ProviderCallError, ProviderResponse, RiskTier, RoutingPolicy,
-	StreamChunk, estimate_prompt_tokens,
+	StreamChunk, ToolCallBlock, estimate_prompt_tokens,
 };
 
 const OPENROUTER_PROVIDER: &str = "openrouter";
@@ -492,6 +492,7 @@ impl OpenRouterProvider {
 			prompt_tokens,
 			output_tokens,
 			latency_ms,
+			tool_calls: None,
 		})
 	}
 }
@@ -638,6 +639,7 @@ impl OpenRouterProvider {
 			prompt_tokens: parsed.prompt_tokens,
 			output_tokens: parsed.output_tokens,
 			latency_ms,
+			tool_calls: parsed.tool_calls,
 		})
 	}
 }
@@ -775,6 +777,20 @@ fn build_request_body_inner<'a>(
 		content: &request.prompt,
 	});
 
+	let tools = request.tools.as_ref().map(|tool_defs| {
+		tool_defs
+			.iter()
+			.map(|tool| OpenAiToolDefinition {
+				r#type: "function",
+				function: OpenAiFunctionDefinition {
+					name: tool.name.clone(),
+					description: tool.description.clone(),
+					parameters: tool.parameters.clone(),
+				},
+			})
+			.collect::<Vec<_>>()
+	});
+
 	OpenAiChatCompletionRequest {
 		model: model_id,
 		models: fallback_models.to_vec(),
@@ -782,6 +798,7 @@ fn build_request_body_inner<'a>(
 		max_tokens: request.expected_output_tokens,
 		reasoning: reasoning_config_for_model(model_id),
 		stream,
+		tools: tools.filter(|t| !t.is_empty()),
 	}
 }
 
@@ -792,6 +809,7 @@ struct ParsedOpenRouterResponse {
 	prompt_tokens: u64,
 	output_tokens: u64,
 	served_model_id: Option<String>,
+	tool_calls: Option<Vec<ToolCallBlock>>,
 }
 
 fn parse_response(response_body: &str) -> Result<ParsedOpenRouterResponse, String> {
@@ -812,29 +830,52 @@ fn parse_response(response_body: &str) -> Result<ParsedOpenRouterResponse, Strin
 				.to_string(),
 		);
 	}
+
+	// Parse tool_calls from the message before deciding how to handle content.
+	let tool_calls = parse_tool_calls_from_message(choice);
+	let has_tool_calls = tool_calls.as_ref().is_some_and(|tc| !tc.is_empty());
+
+	// When content is null and no tool_calls are present, treat as an error.
+	// When tool_calls are present, null content is expected — use empty string.
 	if choice
 		.get("message")
 		.and_then(Value::as_object)
 		.and_then(|message| message.get("content"))
 		.is_some_and(Value::is_null)
+		&& !has_tool_calls
 	{
 		return Err("provider_content_null: openrouter response content is null".to_string());
 	}
-	let output = choice
-		.get("message")
-		.and_then(extract_message_text)
-		.or_else(|| {
-			choice
-				.get("text")
-				.and_then(Value::as_str)
-				.map(str::to_string)
-		})
-		.ok_or_else(|| {
-			format!(
-				"provider_unreadable_content: openrouter response contained no readable assistant content: {}",
-				truncate_for_log(&choice.to_string(), 400)
-			)
-		})?;
+
+	let output = if has_tool_calls {
+		// Content may be null or absent when tool_calls are present — that is fine.
+		choice
+			.get("message")
+			.and_then(extract_message_text)
+			.or_else(|| {
+				choice
+					.get("text")
+					.and_then(Value::as_str)
+					.map(str::to_string)
+			})
+			.unwrap_or_default()
+	} else {
+		choice
+			.get("message")
+			.and_then(extract_message_text)
+			.or_else(|| {
+				choice
+					.get("text")
+					.and_then(Value::as_str)
+					.map(str::to_string)
+			})
+			.ok_or_else(|| {
+				format!(
+					"provider_unreadable_content: openrouter response contained no readable assistant content: {}",
+					truncate_for_log(&choice.to_string(), 400)
+				)
+			})?
+	};
 
 	let prompt_tokens = response
 		.get("usage")
@@ -857,7 +898,48 @@ fn parse_response(response_body: &str) -> Result<ParsedOpenRouterResponse, Strin
 		prompt_tokens,
 		output_tokens,
 		served_model_id,
+		tool_calls,
 	})
+}
+
+/// Parse the `tool_calls` array from a response message value.
+///
+/// OpenAI format:
+/// `[{"id": "call_xxx", "type": "function", "function": {"name": "...", "arguments": "{...}"}}]`
+///
+/// Returns `None` when no tool_calls are present or the array is empty.
+fn parse_tool_calls_from_message(choice: &Value) -> Option<Vec<ToolCallBlock>> {
+	let tool_calls_json = choice
+		.get("message")
+		.and_then(Value::as_object)
+		.and_then(|message| message.get("tool_calls"))
+		.and_then(Value::as_array)?;
+
+	let parsed: Vec<ToolCallBlock> = tool_calls_json
+		.iter()
+		.filter_map(|entry| {
+			let id = entry.get("id").and_then(Value::as_str)?.to_string();
+			let function = entry.get("function").and_then(Value::as_object)?;
+			let name = function.get("name").and_then(Value::as_str)?.to_string();
+			// `arguments` is a JSON-encoded string; parse it back into a Value.
+			let arguments = function
+				.get("arguments")
+				.and_then(Value::as_str)
+				.and_then(|s| serde_json::from_str::<Value>(s).ok())
+				.unwrap_or(Value::Null);
+			Some(ToolCallBlock {
+				id,
+				name,
+				arguments,
+			})
+		})
+		.collect();
+
+	if parsed.is_empty() {
+		None
+	} else {
+		Some(parsed)
+	}
 }
 
 #[derive(Debug, Serialize)]
@@ -871,12 +953,30 @@ struct OpenAiChatCompletionRequest<'a> {
 	/// When `true` the provider returns a server-sent event stream.
 	#[serde(skip_serializing_if = "std::ops::Not::not")]
 	stream: bool,
+	/// Tool definitions for native function calling. Omitted when empty.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	tools: Option<Vec<OpenAiToolDefinition>>,
 }
 
 #[derive(Debug, Serialize)]
 struct OpenAiChatCompletionMessage<'a> {
 	role: &'static str,
 	content: &'a str,
+}
+
+/// OpenAI-format tool definition wrapper sent in the request `tools` array.
+#[derive(Debug, Serialize)]
+struct OpenAiToolDefinition {
+	r#type: &'static str,
+	function: OpenAiFunctionDefinition,
+}
+
+/// The inner function definition inside an [`OpenAiToolDefinition`].
+#[derive(Debug, Serialize)]
+struct OpenAiFunctionDefinition {
+	name: String,
+	description: String,
+	parameters: Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -1128,6 +1228,7 @@ mod tests {
 			preferred_provider: None,
 			budget_tokens_remaining: 1024,
 			budget_cost_remaining_usd: 0.1,
+			tools: None,
 		}
 	}
 

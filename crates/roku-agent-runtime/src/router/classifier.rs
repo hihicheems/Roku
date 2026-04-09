@@ -530,6 +530,7 @@ async fn classify_with_llm(
 				.agent_runtime_config
 				.router
 				.budget_cost_remaining_usd,
+			tools: None,
 		})
 		.await;
 	let value = match response {

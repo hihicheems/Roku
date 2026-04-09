@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use roku_plugin_llm::ToolCallBlock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -133,6 +134,104 @@ impl NextStepDecision {
 		Ok(decision)
 	}
 
+	/// Construct from native tool_use response blocks.
+	///
+	/// Returns `None` if `tool_calls` is empty so that callers can fall back to
+	/// JSON text parsing.
+	pub fn from_tool_calls(tool_calls: &[ToolCallBlock]) -> Option<Self> {
+		if tool_calls.is_empty() {
+			return None;
+		}
+
+		let decision = if tool_calls.len() == 1 {
+			let call = &tool_calls[0];
+			let arguments = &call.arguments;
+
+			match call.name.as_str() {
+				"final_answer" => {
+					let message = arguments
+						.get("message")
+						.and_then(Value::as_str)
+						.unwrap_or("")
+						.to_string();
+					Self {
+						action: NextStepAction::FinalAnswer,
+						tool_name: None,
+						arguments: None,
+						tool_calls: None,
+						reason: "native tool_use: final_answer".to_string(),
+						final_message: Some(message),
+					}
+				}
+				"ask_user" => {
+					let message = arguments
+						.get("question")
+						.or_else(|| arguments.get("message"))
+						.and_then(Value::as_str)
+						.unwrap_or("")
+						.to_string();
+					Self {
+						action: NextStepAction::AskUser,
+						tool_name: None,
+						arguments: None,
+						tool_calls: None,
+						reason: "native tool_use: ask_user".to_string(),
+						final_message: Some(message),
+					}
+				}
+				"fail" => {
+					let reason = arguments
+						.get("reason")
+						.and_then(Value::as_str)
+						.unwrap_or("")
+						.to_string();
+					Self {
+						action: NextStepAction::Fail,
+						tool_name: None,
+						arguments: None,
+						tool_calls: None,
+						reason: "native tool_use: fail".to_string(),
+						final_message: Some(reason),
+					}
+				}
+				name => {
+					let reason = arguments
+						.get("reason")
+						.and_then(Value::as_str)
+						.unwrap_or("native tool_use call")
+						.to_string();
+					Self {
+						action: NextStepAction::CallTool,
+						tool_name: Some(name.to_string()),
+						arguments: Some(arguments.clone()),
+						tool_calls: None,
+						reason,
+						final_message: None,
+					}
+				}
+			}
+		} else {
+			let entries = tool_calls
+				.iter()
+				.map(|call| ToolCallEntry {
+					tool_name: call.name.clone(),
+					arguments: Some(call.arguments.clone()),
+				})
+				.collect::<Vec<_>>();
+			Self {
+				action: NextStepAction::CallTools,
+				tool_name: None,
+				arguments: None,
+				tool_calls: Some(entries),
+				reason: "native tool_use: multiple parallel calls".to_string(),
+				final_message: None,
+			}
+		};
+
+		decision.validate().ok()?;
+		Some(decision)
+	}
+
 	pub fn validate(&self) -> Result<(), NextStepDecisionSchemaError> {
 		match self.action {
 			NextStepAction::CallTool => {
@@ -213,6 +312,7 @@ mod tests {
 	use serde_json::json;
 
 	use super::{NextStepAction, NextStepDecision, NextStepDecisionSchemaError};
+	use roku_plugin_llm::ToolCallBlock;
 
 	#[test]
 	fn parses_call_tool_decision_with_tool_name() {
@@ -244,5 +344,120 @@ mod tests {
 			error,
 			NextStepDecisionSchemaError::InvalidActionShape { .. }
 		));
+	}
+
+	// --- from_tool_calls tests ---
+
+	#[test]
+	fn from_tool_calls_returns_none_for_empty_slice() {
+		assert!(NextStepDecision::from_tool_calls(&[]).is_none());
+	}
+
+	#[test]
+	fn from_tool_calls_final_answer() {
+		let calls = vec![ToolCallBlock {
+			id: "call_1".to_string(),
+			name: "final_answer".to_string(),
+			arguments: json!({ "message": "Task complete." }),
+		}];
+		let decision = NextStepDecision::from_tool_calls(&calls).expect("should produce decision");
+		assert_eq!(decision.action, NextStepAction::FinalAnswer);
+		assert_eq!(decision.final_message.as_deref(), Some("Task complete."));
+		assert!(decision.tool_name.is_none());
+	}
+
+	#[test]
+	fn from_tool_calls_ask_user_with_question_field() {
+		let calls = vec![ToolCallBlock {
+			id: "call_2".to_string(),
+			name: "ask_user".to_string(),
+			arguments: json!({ "question": "Which file?" }),
+		}];
+		let decision = NextStepDecision::from_tool_calls(&calls).expect("should produce decision");
+		assert_eq!(decision.action, NextStepAction::AskUser);
+		assert_eq!(decision.final_message.as_deref(), Some("Which file?"));
+	}
+
+	#[test]
+	fn from_tool_calls_ask_user_with_message_field() {
+		let calls = vec![ToolCallBlock {
+			id: "call_3".to_string(),
+			name: "ask_user".to_string(),
+			arguments: json!({ "message": "Which file?" }),
+		}];
+		let decision = NextStepDecision::from_tool_calls(&calls).expect("should produce decision");
+		assert_eq!(decision.action, NextStepAction::AskUser);
+		assert_eq!(decision.final_message.as_deref(), Some("Which file?"));
+	}
+
+	#[test]
+	fn from_tool_calls_fail() {
+		let calls = vec![ToolCallBlock {
+			id: "call_4".to_string(),
+			name: "fail".to_string(),
+			arguments: json!({ "reason": "File not found" }),
+		}];
+		let decision = NextStepDecision::from_tool_calls(&calls).expect("should produce decision");
+		assert_eq!(decision.action, NextStepAction::Fail);
+		assert_eq!(decision.final_message.as_deref(), Some("File not found"));
+	}
+
+	#[test]
+	fn from_tool_calls_regular_tool() {
+		let calls = vec![ToolCallBlock {
+			id: "call_5".to_string(),
+			name: "fs.read_text".to_string(),
+			arguments: json!({ "path": "Cargo.toml" }),
+		}];
+		let decision = NextStepDecision::from_tool_calls(&calls).expect("should produce decision");
+		assert_eq!(decision.action, NextStepAction::CallTool);
+		assert_eq!(decision.tool_name.as_deref(), Some("fs.read_text"));
+		assert_eq!(decision.arguments, Some(json!({ "path": "Cargo.toml" })));
+	}
+
+	#[test]
+	fn from_tool_calls_regular_tool_uses_reason_from_arguments() {
+		let calls = vec![ToolCallBlock {
+			id: "call_6".to_string(),
+			name: "fs.read_text".to_string(),
+			arguments: json!({ "path": "Cargo.toml", "reason": "need manifest" }),
+		}];
+		let decision = NextStepDecision::from_tool_calls(&calls).expect("should produce decision");
+		assert_eq!(decision.reason, "need manifest");
+	}
+
+	#[test]
+	fn from_tool_calls_regular_tool_default_reason() {
+		let calls = vec![ToolCallBlock {
+			id: "call_7".to_string(),
+			name: "fs.write_text".to_string(),
+			arguments: json!({ "path": "out.txt", "content": "hello" }),
+		}];
+		let decision = NextStepDecision::from_tool_calls(&calls).expect("should produce decision");
+		assert_eq!(decision.reason, "native tool_use call");
+	}
+
+	#[test]
+	fn from_tool_calls_multiple_calls_produces_call_tools() {
+		let calls = vec![
+			ToolCallBlock {
+				id: "call_8a".to_string(),
+				name: "fs.read_text".to_string(),
+				arguments: json!({ "path": "a.txt" }),
+			},
+			ToolCallBlock {
+				id: "call_8b".to_string(),
+				name: "fs.read_text".to_string(),
+				arguments: json!({ "path": "b.txt" }),
+			},
+		];
+		let decision = NextStepDecision::from_tool_calls(&calls).expect("should produce decision");
+		assert_eq!(decision.action, NextStepAction::CallTools);
+		let entries = decision.tool_calls.expect("tool_calls should be set");
+		assert_eq!(entries.len(), 2);
+		assert_eq!(entries[0].tool_name, "fs.read_text");
+		assert_eq!(entries[1].tool_name, "fs.read_text");
+		assert_eq!(entries[0].arguments, Some(json!({ "path": "a.txt" })));
+		assert_eq!(entries[1].arguments, Some(json!({ "path": "b.txt" })));
 	}
 }

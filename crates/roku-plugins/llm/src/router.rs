@@ -231,6 +231,7 @@ impl LlmRouter {
 			total_tokens,
 			estimated_cost_usd,
 			latency_ms: provider_response.latency_ms,
+			tool_calls: provider_response.tool_calls.clone(),
 		})
 	}
 
@@ -276,6 +277,7 @@ impl LlmRouter {
 			total_tokens,
 			estimated_cost_usd,
 			latency_ms: provider_response.latency_ms,
+			tool_calls: provider_response.tool_calls.clone(),
 		})
 	}
 
@@ -662,6 +664,7 @@ mod tests {
 				prompt_tokens: self.prompt_tokens,
 				output_tokens: self.output_tokens,
 				latency_ms: self.latency_ms,
+				tool_calls: None,
 			})
 		}
 	}
@@ -675,6 +678,7 @@ mod tests {
 			preferred_provider: None,
 			budget_tokens_remaining: 4_000,
 			budget_cost_remaining_usd: 2.0,
+			tools: None,
 		}
 	}
 
@@ -910,6 +914,7 @@ mod tests {
 					prompt_tokens: 40,
 					output_tokens: 12,
 					latency_ms: 80,
+					tool_calls: None,
 				}),
 			],
 		));
@@ -1013,6 +1018,7 @@ mod tests {
 					prompt_tokens: 30,
 					output_tokens: 10,
 					latency_ms: 60,
+					tool_calls: None,
 				}),
 			],
 		));
@@ -1084,6 +1090,7 @@ mod tests {
 					prompt_tokens: 10,
 					output_tokens: 5,
 					latency_ms: 20,
+					tool_calls: None,
 				})
 			}
 		}

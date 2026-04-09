@@ -15,7 +15,7 @@
 use roku_common_types::{ExtractionHint, GroundingStrategy};
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_catalog::ResourceCatalog;
-use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier, StreamChunk};
+use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier, StreamChunk, ToolDefinition};
 use serde_json::{Value, json};
 
 use crate::runtime_config::NextStepRuntimeConfig;
@@ -79,24 +79,49 @@ async fn decide_with_router(
 	catalog: Option<&ResourceCatalog>,
 	event_sender: Option<&LoopEventSender>,
 ) -> Option<NextStepDecision> {
+	let tool_definitions = build_tool_definitions(&context_projection.visible_tools, catalog);
+	let use_native_tools = !tool_definitions.is_empty();
+	let system_prompt = if use_native_tools {
+		"You are Roku's runtime loop decision model. Use the provided tools to accomplish the user's task. Call final_answer when the task is complete."
+			.to_string()
+	} else {
+		"You are Roku's runtime loop next-step decision model. Return only valid JSON.".to_string()
+	};
 	let request = GenerationRequest {
-		system_prompt: Some(
-			"You are Roku's runtime loop next-step decision model. Return only valid JSON."
-				.to_string(),
-		),
+		system_prompt: Some(system_prompt),
 		prompt: tool_loop_prompt(context_projection, user_reply),
 		expected_output_tokens: config.expected_output_tokens,
 		risk_tier: RiskTier::Low,
 		preferred_provider: None,
 		budget_tokens_remaining: config.budget_tokens_remaining,
 		budget_cost_remaining_usd: config.budget_cost_remaining_usd,
+		tools: if use_native_tools {
+			Some(tool_definitions)
+		} else {
+			None
+		},
 	};
 
-	let json_output = if let Some(sender) = event_sender {
+	// --- Dual-mode dispatch: native tool_use (primary) with JSON text fallback ---
+	//
+	// Streaming path: always uses text → JSON parsing (no streaming tool_use support yet).
+	// Non-streaming path: uses router.generate() which returns tool_calls if the model
+	// responds with native tool_use; falls back to JSON text parsing otherwise.
+
+	if let Some(sender) = event_sender {
+		// Streaming path — text deltas only, no tool_use accumulation yet.
+		// Strip tools from the request so the model responds with text (JSON),
+		// not tool_calls chunks that the streaming handler cannot parse.
+		let mut streaming_request = request.clone();
+		streaming_request.tools = None;
+		streaming_request.system_prompt = Some(
+			"You are Roku's runtime loop next-step decision model. Return only valid JSON."
+				.to_string(),
+		);
+
 		let step = loop_state.step_index;
 		let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamChunk>(64);
 
-		// Spawn a forwarder that reads streaming chunks and emits LlmTextDelta events.
 		let event_tx = sender.clone();
 		let forwarder = tokio::spawn(async move {
 			while let Some(chunk) = rx.recv().await {
@@ -106,93 +131,143 @@ async fn decide_with_router(
 			}
 		});
 
-		let llm_result = router.generate_streaming(&request, tx).await;
-
-		// Wait for the forwarder to drain the channel.
+		let llm_result = router.generate_streaming(&streaming_request, tx).await;
 		let _ = forwarder.await;
-
-		// Emit decision complete regardless of success/failure.
 		let _ = sender.send(LoopEvent::LlmDecisionComplete { step });
 
-		match llm_result {
-			Ok(llm_response) if llm_response.finish_reason.as_deref() == Some("length") => {
+		let llm_response = match llm_result {
+			Ok(r) if r.finish_reason.as_deref() == Some("length") => {
 				log_tool_loop_warning(
 					"streaming response truncated (finish_reason=length)",
 					[("run_id", loop_state.run_id.clone())],
 				);
 				return None;
 			}
-			Ok(llm_response) => {
-				// Strip markdown code fences the same way generate_json_value does.
-				let raw = llm_response.output.trim();
-				let payload = if let Some(stripped) = raw.strip_prefix("```") {
-					stripped
-						.strip_prefix("json")
-						.map(str::trim_start)
-						.unwrap_or(stripped)
-						.strip_suffix("```")
-						.map(str::trim)
-						.unwrap_or(stripped)
-				} else {
-					raw
-				};
-				match serde_json::from_str::<serde_json::Value>(payload) {
-					Ok(value) => value,
-					Err(error) => {
-						log_tool_loop_warning(
-							"next-step model did not return a usable response",
-							[
-								("run_id", loop_state.run_id.clone()),
-								(
-									"last_tool",
-									loop_state
-										.last_observation
-										.as_ref()
-										.map(|observation| observation.tool_name.clone())
-										.unwrap_or_else(|| "none".to_string()),
-								),
-								("error", error.to_string()),
-							],
-						);
-						return None;
-					}
-				}
-			}
+			Ok(r) => r,
 			Err(error) => {
 				log_tool_loop_warning(
 					"next-step model did not return a usable response",
 					[
 						("run_id", loop_state.run_id.clone()),
-						(
-							"last_tool",
-							loop_state
-								.last_observation
-								.as_ref()
-								.map(|observation| observation.tool_name.clone())
-								.unwrap_or_else(|| "none".to_string()),
-						),
 						("error", error.to_string()),
 					],
 				);
 				return None;
 			}
-		}
-	} else {
-		match router.generate_json_value(&request).await {
-			Ok(response) => response.value,
+		};
+
+		// Streaming path always uses JSON text (tools stripped from request).
+		// Parse text as JSON.
+		let raw = llm_response.output.trim();
+		let payload = if let Some(stripped) = raw.strip_prefix("```") {
+			stripped
+				.strip_prefix("json")
+				.map(str::trim_start)
+				.unwrap_or(stripped)
+				.strip_suffix("```")
+				.map(str::trim)
+				.unwrap_or(stripped)
+		} else {
+			raw
+		};
+		let json_output = match serde_json::from_str::<serde_json::Value>(payload) {
+			Ok(value) => value,
 			Err(error) => {
 				log_tool_loop_warning(
 					"next-step model did not return a usable response",
 					[
 						("run_id", loop_state.run_id.clone()),
-						(
-							"last_tool",
-							loop_state
-								.last_observation
-								.as_ref()
-								.map(|observation| observation.tool_name.clone())
-								.unwrap_or_else(|| "none".to_string()),
-						),
+						("error", error.to_string()),
+					],
+				);
+				return None;
+			}
+		};
+		let decision = match NextStepDecision::from_json_value(&json_output) {
+			Ok(d) => d,
+			Err(error) => {
+				log_tool_loop_warning(
+					"next-step model returned invalid decision JSON",
+					[
+						("run_id", loop_state.run_id.clone()),
+						("error", error.to_string()),
+					],
+				);
+				return None;
+			}
+		};
+		let decision =
+			align_router_tool_arguments(decision, user_reply.unwrap_or(&loop_state.goal), catalog);
+		return match validate_router_decision(loop_state, decision, catalog) {
+			Ok(decision) => Some(decision),
+			Err(reason) => {
+				log_tool_loop_warning(
+					"next-step model decision was rejected by runtime validation",
+					[("run_id", loop_state.run_id.clone()), ("reason", reason)],
+				);
+				None
+			}
+		};
+	}
+
+	// Non-streaming path: use generate() which preserves tool_calls.
+	let llm_response = match router.generate(&request).await {
+		Ok(r) => r,
+		Err(error) => {
+			log_tool_loop_warning(
+				"next-step model did not return a usable response",
+				[
+					("run_id", loop_state.run_id.clone()),
+					("error", error.to_string()),
+				],
+			);
+			return None;
+		}
+	};
+
+	// Primary path: native tool_use.
+	if let Some(tool_calls) = &llm_response.tool_calls
+		&& !tool_calls.is_empty()
+		&& let Some(decision) = NextStepDecision::from_tool_calls(tool_calls)
+	{
+		let decision = align_router_tool_arguments(
+			decision,
+			user_reply.unwrap_or(&loop_state.goal),
+			catalog,
+		);
+		return match validate_router_decision(loop_state, decision, catalog) {
+			Ok(decision) => Some(decision),
+			Err(reason) => {
+				log_tool_loop_warning(
+					"native tool_use decision rejected by validation",
+					[("run_id", loop_state.run_id.clone()), ("reason", reason)],
+				);
+				None
+			}
+		};
+	}
+
+	// Fallback: JSON text parsing.
+	let json_output = {
+		let raw = llm_response.output.trim();
+		let payload = if let Some(stripped) = raw.strip_prefix("```") {
+			stripped
+				.strip_prefix("json")
+				.map(str::trim_start)
+				.unwrap_or(stripped)
+				.strip_suffix("```")
+				.map(str::trim)
+				.unwrap_or(stripped)
+		} else {
+			raw
+		};
+		match serde_json::from_str::<serde_json::Value>(payload) {
+			Ok(value) => value,
+			Err(error) => {
+				log_tool_loop_warning(
+					"next-step model did not return a usable response",
+					[
+						("run_id", loop_state.run_id.clone()),
 						("error", error.to_string()),
 					],
 				);
@@ -540,6 +615,84 @@ pub(crate) fn tool_loop_prompt_for_test(
 	user_reply: Option<&str>,
 ) -> String {
 	tool_loop_prompt(context_projection, user_reply)
+}
+
+/// Build native tool definitions from visible tools for the LLM provider.
+///
+/// Converts CatalogDescriptor data into ToolDefinition objects and appends
+/// special pseudo-tools (final_answer, ask_user, fail) so the model can
+/// express all NextStepAction variants through native tool_use.
+fn build_tool_definitions(
+	visible_tools: &[String],
+	catalog: Option<&ResourceCatalog>,
+) -> Vec<ToolDefinition> {
+	let mut definitions = Vec::new();
+
+	// Real tools from catalog.
+	if let Some(catalog) = catalog {
+		for tool_name in visible_tools {
+			let selector = roku_common_types::ResourceSelector::tool(tool_name);
+			if let Some(descriptor) = catalog.descriptor(&selector) {
+				let parameters = if descriptor.input_schema.is_empty() {
+					json!({"type": "object", "properties": {}})
+				} else {
+					let mut properties = serde_json::Map::new();
+					for key in &descriptor.input_schema {
+						properties.insert(key.clone(), json!({"type": "string"}));
+					}
+					json!({
+						"type": "object",
+						"properties": properties,
+						"required": descriptor.input_schema.iter()
+							.filter(|key| *key != "cwd" && *key != "timeout_ms")
+							.collect::<Vec<_>>(),
+					})
+				};
+				definitions.push(ToolDefinition {
+					name: tool_name.clone(),
+					description: descriptor.selection_hint.clone(),
+					parameters,
+				});
+			}
+		}
+	}
+
+	// Special pseudo-tools for non-tool actions.
+	definitions.push(ToolDefinition {
+		name: "final_answer".to_string(),
+		description: "Provide the final answer to the user when the task is complete.".to_string(),
+		parameters: json!({
+			"type": "object",
+			"properties": {
+				"message": {"type": "string", "description": "The final response message to the user."}
+			},
+			"required": ["message"]
+		}),
+	});
+	definitions.push(ToolDefinition {
+		name: "ask_user".to_string(),
+		description: "Ask the user for clarification or additional information.".to_string(),
+		parameters: json!({
+			"type": "object",
+			"properties": {
+				"question": {"type": "string", "description": "The question to ask the user."}
+			},
+			"required": ["question"]
+		}),
+	});
+	definitions.push(ToolDefinition {
+		name: "fail".to_string(),
+		description: "Report that the task cannot be completed.".to_string(),
+		parameters: json!({
+			"type": "object",
+			"properties": {
+				"reason": {"type": "string", "description": "Why the task cannot be completed."}
+			},
+			"required": ["reason"]
+		}),
+	});
+
+	definitions
 }
 
 fn deterministic_next_step(
@@ -1173,6 +1326,7 @@ mod tests {
 				prompt_tokens: 24,
 				output_tokens: 18,
 				latency_ms: 10,
+				tool_calls: None,
 			})
 		}
 	}
