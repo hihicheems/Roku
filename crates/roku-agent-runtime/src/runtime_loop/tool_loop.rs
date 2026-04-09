@@ -109,7 +109,16 @@ async fn decide_with_router(
 	// responds with native tool_use; falls back to JSON text parsing otherwise.
 
 	if let Some(sender) = event_sender {
-		// Streaming path — text deltas only, no tool_use accumulation.
+		// Streaming path — text deltas only, no tool_use accumulation yet.
+		// Strip tools from the request so the model responds with text (JSON),
+		// not tool_calls chunks that the streaming handler cannot parse.
+		let mut streaming_request = request.clone();
+		streaming_request.tools = None;
+		streaming_request.system_prompt = Some(
+			"You are Roku's runtime loop next-step decision model. Return only valid JSON."
+				.to_string(),
+		);
+
 		let step = loop_state.step_index;
 		let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamChunk>(64);
 
@@ -122,7 +131,7 @@ async fn decide_with_router(
 			}
 		});
 
-		let llm_result = router.generate_streaming(&request, tx).await;
+		let llm_result = router.generate_streaming(&streaming_request, tx).await;
 		let _ = forwarder.await;
 		let _ = sender.send(LoopEvent::LlmDecisionComplete { step });
 
@@ -147,29 +156,8 @@ async fn decide_with_router(
 			}
 		};
 
-		// Try native tool_use from streaming response first (some providers include it).
-		if let Some(tool_calls) = &llm_response.tool_calls
-			&& !tool_calls.is_empty()
-			&& let Some(decision) = NextStepDecision::from_tool_calls(tool_calls)
-		{
-			let decision = align_router_tool_arguments(
-				decision,
-				user_reply.unwrap_or(&loop_state.goal),
-				catalog,
-			);
-			return match validate_router_decision(loop_state, decision, catalog) {
-				Ok(decision) => Some(decision),
-				Err(reason) => {
-					log_tool_loop_warning(
-						"native tool_use decision rejected by validation",
-						[("run_id", loop_state.run_id.clone()), ("reason", reason)],
-					);
-					None
-				}
-			};
-		}
-
-		// Fallback: parse text as JSON.
+		// Streaming path always uses JSON text (tools stripped from request).
+		// Parse text as JSON.
 		let raw = llm_response.output.trim();
 		let payload = if let Some(stripped) = raw.strip_prefix("```") {
 			stripped
