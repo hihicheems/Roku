@@ -61,6 +61,7 @@ pub(crate) struct LocalStorageLayout {
 	pub log_dir: PathBuf,
 	pub run_dir: PathBuf,
 	pub cache_dir: PathBuf,
+	pub session_history_dir: PathBuf,
 }
 
 impl LocalStorageLayout {
@@ -100,6 +101,8 @@ impl LocalStorageLayout {
 		let log_dir = env_path("ROKU_LOG_DIR").unwrap_or_else(|| roku_home.join("logs"));
 		let run_dir = env_path("ROKU_RUN_DIR").unwrap_or_else(|| roku_home.join("run"));
 		let cache_dir = env_path("ROKU_CACHE_DIR").unwrap_or_else(|| roku_home.join("cache"));
+		let session_history_dir = env_path("ROKU_SESSION_HISTORY_DIR")
+			.unwrap_or_else(|| state_dir.join("sessions").join("chat"));
 
 		Self {
 			home_dir: roku_home,
@@ -121,6 +124,7 @@ impl LocalStorageLayout {
 			log_dir,
 			run_dir,
 			cache_dir,
+			session_history_dir,
 		}
 	}
 
@@ -144,6 +148,7 @@ impl LocalStorageLayout {
 			&self.log_dir,
 			&self.run_dir,
 			&self.cache_dir,
+			&self.session_history_dir,
 		] {
 			fs::create_dir_all(directory)?;
 		}

@@ -167,6 +167,7 @@ mod tests {
 			log_dir: tempdir.path().join("logs"),
 			run_dir: tempdir.path().join("run"),
 			cache_dir: tempdir.path().join("cache"),
+			session_history_dir: tempdir.path().join("sessions").join("chat"),
 		};
 
 		let bundle =

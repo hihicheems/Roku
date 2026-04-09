@@ -278,6 +278,7 @@ mod tests {
 			log_dir: root.join(".roku/logs"),
 			run_dir: root.join(".roku/run"),
 			cache_dir: root.join(".roku/cache"),
+			session_history_dir: root.join(".roku/state/sessions/chat"),
 		}
 	}
 
