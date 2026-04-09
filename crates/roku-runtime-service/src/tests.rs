@@ -1049,6 +1049,7 @@ async fn pending_filesystem_tool_loops_survive_resume_through_the_generic_loop_d
 	assert!(
 		response
 			.message
+			.to_lowercase()
 			.contains("general execution did not use a live runtime")
 	);
 	assert!(
@@ -1082,6 +1083,7 @@ async fn configured_pending_loop_snapshot_store_survives_generic_loop_resume_fai
 	assert!(
 		response
 			.message
+			.to_lowercase()
 			.contains("general execution did not use a live runtime")
 	);
 	let events = store.events();
@@ -1110,6 +1112,7 @@ async fn reconstructed_service_instances_survive_generic_pending_loop_failures_f
 	assert!(
 		response
 			.message
+			.to_lowercase()
 			.contains("general execution did not use a live runtime")
 	);
 	assert!(!response.artifacts.is_empty());

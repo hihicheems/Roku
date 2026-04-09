@@ -225,7 +225,9 @@ fn deterministic_pre_classify(
 		return Some(result);
 	}
 
-	if extract_skill_source_url(&request.goal).is_some() {
+	if extract_skill_source_url(&request.goal).is_some()
+		&& goal_implies_install_intent(&request.goal)
+	{
 		let install_tool_name =
 			tool_name_for_role(context.tool_config, BuiltinToolRole::SkillInstall);
 		let decision = RouteDecision::new(
@@ -239,7 +241,7 @@ fn deterministic_pre_classify(
 				"skill-source-local".to_string(),
 			],
 			Vec::new(),
-			"explicit skill install url detected in user request",
+			"explicit skill install url with install intent detected in user request",
 		);
 		return Some(build_tool_loop_route(
 			context,
@@ -1180,6 +1182,26 @@ fn explicit_table_action_tool(goal: &str) -> Option<&'static str> {
 
 fn contains_any(goal: &str, markers: &[&str]) -> bool {
 	markers.iter().any(|marker| goal.contains(marker))
+}
+
+/// Check whether the user goal text expresses an intent to install or use a skill,
+/// as opposed to merely asking about a URL.
+fn goal_implies_install_intent(goal: &str) -> bool {
+	let lowered = goal.to_ascii_lowercase();
+	const INSTALL_MARKERS: &[&str] = &[
+		"install",
+		"安装",
+		"添加",
+		"add skill",
+		"use skill",
+		"用这个skill",
+		"用这个 skill",
+		"enable",
+		"启用",
+	];
+	INSTALL_MARKERS
+		.iter()
+		.any(|marker| lowered.contains(marker))
 }
 
 fn action_text_without_explicit_paths(goal: &str) -> String {

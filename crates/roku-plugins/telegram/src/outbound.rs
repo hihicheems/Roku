@@ -57,17 +57,10 @@ pub(crate) struct TelegramRenderOptions {
 }
 
 impl TelegramOutboundMessage {
-	pub fn progress_notice(chat_id: i64, request: &RequestEnvelope) -> Self {
+	pub fn progress_notice(chat_id: i64, _request: &RequestEnvelope) -> Self {
 		Self {
 			chat_id,
-			text: [
-				"*Status:* running".to_string(),
-				format!("*Request:* {}", escape_markdown_v2(&request.request_id.0)),
-				"*Message:* Processing your request\\. I will send the final result in a separate message\\."
-					.to_string(),
-				format!("*Goal:* {}", escape_markdown_v2(&request.goal)),
-			]
-			.join("\n"),
+			text: "Processing your request\\.\\.\\.".to_string(),
 			parse_mode: TelegramParseMode::MarkdownV2,
 			disable_web_page_preview: true,
 			reply_markup: None,
@@ -238,6 +231,7 @@ fn approval_markup(approval_id: &ApprovalId) -> TelegramReplyMarkup {
 	}
 }
 
+#[allow(dead_code)]
 fn escape_markdown_v2(value: &str) -> String {
 	let mut escaped = String::with_capacity(value.len());
 	for ch in value.chars() {
@@ -350,12 +344,17 @@ mod tests {
 
 		assert_eq!(message.chat_id, 1001);
 		assert_eq!(message.parse_mode, TelegramParseMode::MarkdownV2);
-		assert!(message.text.contains("*Status:* running"));
-		assert!(message.text.contains("*Request:* req\\-9"));
 		assert!(
-			message
-				.text
-				.contains("*Goal:* analyze the latest artifacts")
+			message.text.contains("Processing"),
+			"should contain processing text"
+		);
+		assert!(
+			!message.text.contains("*Request:*"),
+			"should not leak request ID"
+		);
+		assert!(
+			!message.text.contains("*Goal:*"),
+			"should not repeat user goal"
 		);
 		assert!(message.reply_markup.is_none());
 	}

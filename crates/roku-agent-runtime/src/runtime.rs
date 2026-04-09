@@ -3143,15 +3143,25 @@ mod tests {
 
 	#[test]
 	fn execute_tool_loop_preserves_approval_required_command_payload_for_terminal_failures() {
-		let (route_router, _prompts) = router_with_json_responses(vec![serde_json::json!({
-			"action": "call_tool",
-			"tool_name": "command.run",
-			"arguments": {
-				"command": "dd if=/dev/zero of=/dev/null"
-			},
-			"reason": "Run the requested command directly.",
-			"final_message": null
-		})]);
+		let (route_router, _prompts) = router_with_json_responses(vec![
+			serde_json::json!({
+				"action": "call_tool",
+				"tool_name": "command.run",
+				"arguments": {
+					"command": "dd if=/dev/zero of=/dev/null"
+				},
+				"reason": "Run the requested command directly.",
+				"final_message": null
+			}),
+			// Under the new semantics, approval_required is a non-terminal error that
+			// lets the LLM see the error as an observation and decide next. Provide a
+			// second response so the LLM router does not panic on the follow-up call.
+			serde_json::json!({
+				"action": "fail",
+				"reason": "Cannot proceed: command.run requires approval.",
+				"final_message": null
+			}),
+		]);
 		let execution_router = router_with_text_output("unused-execution-provider", "unused");
 		let root = tempfile::tempdir().expect("temp root should exist");
 		let runtime =
@@ -3201,22 +3211,13 @@ mod tests {
 
 		let payload = payload_value(&execution.result);
 		assert_eq!(execution.result.status, ResultStatus::Error);
-		assert_eq!(execution.node.node_id.0, "direct-route");
+		// Under the new semantics, approval_required is a non-terminal error: the loop
+		// continues and terminates via synthetic_loop_terminal_result, which uses
+		// "runtime-loop:tool" as the node_id rather than "direct-route".
+		assert_eq!(execution.node.node_id.0, "runtime-loop:tool");
 		assert_eq!(execution.terminal_step_action, Some(StepAction::Fail));
-		assert_eq!(
-			payload
-				.get("policy_decision")
-				.and_then(|value| value.get("outcome"))
-				.and_then(serde_json::Value::as_str),
-			Some("require_approval")
-		);
-		assert_eq!(
-			payload
-				.get("canonical_execution")
-				.and_then(|value| value.get("tool_name"))
-				.and_then(serde_json::Value::as_str),
-			Some("command.run")
-		);
+		// The policy payload is no longer promoted to the top-level result; it is
+		// captured in the probe_trace for the tool step.
 		assert_eq!(
 			payload
 				.get("runtime_loop")
@@ -3807,17 +3808,12 @@ mod tests {
 		// Drop rt here (before runtime) to ensure the runtime handle is released in sync scope
 		// before GenericAgentRuntime drops.
 		drop(rt);
-		let payload = payload_value(&execution.result);
 
 		assert_eq!(execution.result.status, ResultStatus::Error);
 		assert_eq!(execution.terminal_step_action, Some(StepAction::Fail));
-		assert_eq!(
-			payload
-				.get("policy_decision")
-				.and_then(|value| value.get("outcome"))
-				.and_then(serde_json::Value::as_str),
-			Some("require_approval")
-		);
+		// Under the new semantics, approval_required is a non-terminal error: the loop
+		// continues and the policy payload is no longer in the top-level result. The
+		// visibility invariant under test here is independent of this change.
 		assert!(
 			loop_state
 				.visible_tools
@@ -4230,9 +4226,12 @@ mod tests {
 				forbidden_tools: Vec::new(),
 				expected_terminal_action: Some("fail".to_string()),
 				expected_error_type: Some("approval_required".to_string()),
+				// approval_required is a non-terminal error under the new semantics: the
+				// loop consumes recovery budget and lets the LLM see the error, so
+				// should_fail is false at the tool step level.
 				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
 					field: "should_fail".to_string(),
-					expected: true,
+					expected: false,
 				}],
 			},
 		);
@@ -4334,9 +4333,10 @@ mod tests {
 				forbidden_tools: Vec::new(),
 				expected_terminal_action: Some("fail".to_string()),
 				expected_error_type: Some("path_not_found".to_string()),
+				// path_not_found is non-terminal: the LLM may attempt a different path.
 				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
 					field: "should_fail".to_string(),
-					expected: true,
+					expected: false,
 				}],
 			},
 		);
@@ -4353,9 +4353,10 @@ mod tests {
 				forbidden_tools: Vec::new(),
 				expected_terminal_action: Some("fail".to_string()),
 				expected_error_type: Some("non_zero_exit".to_string()),
+				// non_zero_exit is non-terminal: the LLM may modify and retry the code.
 				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
 					field: "should_fail".to_string(),
-					expected: true,
+					expected: false,
 				}],
 			},
 		);
@@ -4372,6 +4373,8 @@ mod tests {
 				forbidden_tools: Vec::new(),
 				expected_terminal_action: Some("fail".to_string()),
 				expected_error_type: Some("search_not_configured".to_string()),
+				// search_not_configured is explicitly terminal (the tool sets terminal:true),
+				// so should_fail remains true — the loop stops immediately on this error.
 				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
 					field: "should_fail".to_string(),
 					expected: true,

@@ -73,20 +73,29 @@ impl NextStepDecision {
 			.as_object()
 			.ok_or(NextStepDecisionSchemaError::RootNotObject)?;
 
-		let action = parse_action(
-			object
-				.get("action")
-				.ok_or(NextStepDecisionSchemaError::MissingRequiredKey { key: "action" })?,
-		)?;
+		let action_value = object
+			.get("action")
+			.ok_or(NextStepDecisionSchemaError::MissingRequiredKey { key: "action" })?;
+		let action_raw = action_value.as_str().unwrap_or_default();
+		let action = parse_action(action_value)?;
 		let reason = object
 			.get("reason")
 			.and_then(Value::as_str)
 			.ok_or(NextStepDecisionSchemaError::MissingRequiredKey { key: "reason" })?
 			.to_string();
-		let tool_name = object
+		// If the model placed a tool name in the action field (e.g. "web.fetch"),
+		// use it as tool_name when tool_name is not explicitly set.
+		let explicit_tool_name = object
 			.get("tool_name")
 			.and_then(Value::as_str)
 			.map(str::to_string);
+		let tool_name = explicit_tool_name.or_else(|| {
+			if action == NextStepAction::CallTool && action_raw.contains('.') {
+				Some(action_raw.to_string())
+			} else {
+				None
+			}
+		});
 		let arguments = object
 			.get("arguments")
 			.cloned()
@@ -188,6 +197,11 @@ fn parse_action(value: &Value) -> Result<NextStepAction, NextStepDecisionSchemaE
 		"ask_user" => Ok(NextStepAction::AskUser),
 		"final_answer" => Ok(NextStepAction::FinalAnswer),
 		"fail" => Ok(NextStepAction::Fail),
+		// Models sometimes put the tool name directly in the action field
+		// (e.g. "web.fetch" instead of "call_tool"). Treat any value
+		// containing a dot as an implicit call_tool — the caller will
+		// use the action value as tool_name if tool_name is not set.
+		other if other.contains('.') => Ok(NextStepAction::CallTool),
 		_ => Err(NextStepDecisionSchemaError::UnknownAction {
 			value: raw.to_string(),
 		}),
