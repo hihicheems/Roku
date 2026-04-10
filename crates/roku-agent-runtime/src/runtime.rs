@@ -2740,6 +2740,69 @@ mod tests {
 		responses: Arc<Mutex<VecDeque<String>>>,
 	}
 
+	/// Convert a legacy JSON-in-text test fixture into a `tool_calls` list so that
+	/// tests remain compatible with the tool_use-only dispatch path.
+	fn json_fixture_to_tool_calls(output: &str) -> Option<Vec<roku_plugin_llm::ToolCallBlock>> {
+		let v = serde_json::from_str::<serde_json::Value>(output).ok()?;
+		let action = v
+			.get("action")
+			.and_then(serde_json::Value::as_str)
+			.unwrap_or("");
+		let tool_name = v.get("tool_name").and_then(serde_json::Value::as_str);
+		match (action, tool_name) {
+			("call_tool", Some(name)) => {
+				let arguments = v
+					.get("arguments")
+					.cloned()
+					.filter(|a| !a.is_null())
+					.unwrap_or(serde_json::json!({}));
+				Some(vec![roku_plugin_llm::ToolCallBlock {
+					id: "test-call-1".to_string(),
+					name: name.to_string(),
+					arguments,
+				}])
+			}
+			("final_answer", _) => {
+				let message = v
+					.get("final_message")
+					.and_then(serde_json::Value::as_str)
+					.unwrap_or("")
+					.to_string();
+				Some(vec![roku_plugin_llm::ToolCallBlock {
+					id: "test-call-1".to_string(),
+					name: "final_answer".to_string(),
+					arguments: serde_json::json!({ "message": message }),
+				}])
+			}
+			("ask_user", _) => {
+				let question = v
+					.get("final_message")
+					.and_then(serde_json::Value::as_str)
+					.unwrap_or("")
+					.to_string();
+				Some(vec![roku_plugin_llm::ToolCallBlock {
+					id: "test-call-1".to_string(),
+					name: "ask_user".to_string(),
+					arguments: serde_json::json!({ "question": question }),
+				}])
+			}
+			("fail", _) => {
+				let reason = v
+					.get("final_message")
+					.and_then(serde_json::Value::as_str)
+					.or_else(|| v.get("reason").and_then(serde_json::Value::as_str))
+					.unwrap_or("")
+					.to_string();
+				Some(vec![roku_plugin_llm::ToolCallBlock {
+					id: "test-call-1".to_string(),
+					name: "fail".to_string(),
+					arguments: serde_json::json!({ "reason": reason }),
+				}])
+			}
+			_ => None,
+		}
+	}
+
 	#[async_trait]
 	impl LlmProvider for SequenceJsonProvider {
 		fn provider_name(&self) -> &'static str {
@@ -2761,13 +2824,14 @@ mod tests {
 				.expect("response lock should succeed")
 				.pop_front()
 				.expect("a canned response should be available");
+			let tool_calls = json_fixture_to_tool_calls(&output);
 			Ok(ProviderResponse {
 				output,
 				finish_reason: None,
 				prompt_tokens: 24,
 				output_tokens: 18,
 				latency_ms: 10,
-				tool_calls: None,
+				tool_calls,
 			})
 		}
 	}

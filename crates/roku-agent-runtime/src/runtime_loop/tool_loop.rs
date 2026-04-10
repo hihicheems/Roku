@@ -12,9 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use roku_common_types::{ExtractionHint, GroundingStrategy};
 use roku_common_types::{LogLevel, LogRecord, emit_global_log};
-use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier, StreamChunk, ToolDefinition};
+use roku_plugin_llm::{
+	GenerationRequest, LlmRouter, RiskTier, StreamChunk, ToolCallBlock, ToolDefinition,
+};
 use roku_plugin_tools::ResourceCatalog;
 use serde_json::{Value, json};
 
@@ -80,13 +84,9 @@ async fn decide_with_router(
 	event_sender: Option<&LoopEventSender>,
 ) -> Option<NextStepDecision> {
 	let tool_definitions = build_tool_definitions(&context_projection.visible_tools, catalog);
-	let use_native_tools = !tool_definitions.is_empty();
-	let system_prompt = if use_native_tools {
+	let system_prompt =
 		"You are Roku's runtime loop decision model. Use the provided tools to accomplish the user's task. Call final_answer when the task is complete."
-			.to_string()
-	} else {
-		"You are Roku's runtime loop next-step decision model. Return only valid JSON.".to_string()
-	};
+			.to_string();
 	let request = GenerationRequest {
 		system_prompt: Some(system_prompt),
 		prompt: tool_loop_prompt(context_projection, user_reply),
@@ -95,44 +95,56 @@ async fn decide_with_router(
 		preferred_provider: None,
 		budget_tokens_remaining: config.budget_tokens_remaining,
 		budget_cost_remaining_usd: config.budget_cost_remaining_usd,
-		tools: if use_native_tools {
-			Some(tool_definitions)
-		} else {
+		tools: if tool_definitions.is_empty() {
 			None
+		} else {
+			Some(tool_definitions)
 		},
 	};
 
-	// --- Dual-mode dispatch: native tool_use (primary) with JSON text fallback ---
-	//
-	// Streaming path: always uses text → JSON parsing (no streaming tool_use support yet).
-	// Non-streaming path: uses router.generate() which returns tool_calls if the model
-	// responds with native tool_use; falls back to JSON text parsing otherwise.
-
 	if let Some(sender) = event_sender {
-		// Streaming path — text deltas only, no tool_use accumulation yet.
-		// Strip tools from the request so the model responds with text (JSON),
-		// not tool_calls chunks that the streaming handler cannot parse.
-		let mut streaming_request = request.clone();
-		streaming_request.tools = None;
-		streaming_request.system_prompt = Some(
-			"You are Roku's runtime loop next-step decision model. Return only valid JSON."
-				.to_string(),
-		);
-
+		// Streaming path: accumulate tool_use chunks from the stream.
 		let step = loop_state.step_index;
 		let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamChunk>(64);
 
 		let event_tx = sender.clone();
-		let forwarder = tokio::spawn(async move {
+		let accumulator = tokio::spawn(async move {
+			let mut accumulated_tool_calls: Vec<ToolCallBlock> = Vec::new();
+			let mut pending_by_id: HashMap<String, (String, String)> = HashMap::new();
 			while let Some(chunk) = rx.recv().await {
-				if let StreamChunk::TextDelta { text } = chunk {
-					let _ = event_tx.send(LoopEvent::LlmTextDelta { step, text });
+				match chunk {
+					StreamChunk::TextDelta { text } => {
+						let _ = event_tx.send(LoopEvent::LlmTextDelta { step, text });
+					}
+					StreamChunk::ToolCallStart { id, name } => {
+						pending_by_id.insert(id, (name, String::new()));
+					}
+					StreamChunk::ToolCallDelta {
+						id,
+						arguments_chunk,
+					} => {
+						if let Some((_, args)) = pending_by_id.get_mut(&id) {
+							args.push_str(&arguments_chunk);
+						}
+					}
+					StreamChunk::ToolCallDone { id } => {
+						if let Some((name, args_str)) = pending_by_id.remove(&id) {
+							let arguments = serde_json::from_str(&args_str).unwrap_or(Value::Null);
+							accumulated_tool_calls.push(ToolCallBlock {
+								id,
+								name,
+								arguments,
+							});
+						}
+					}
+					StreamChunk::Done { .. } => {}
 				}
 			}
+			accumulated_tool_calls
 		});
 
-		let llm_result = router.generate_streaming(&streaming_request, tx).await;
-		let _ = forwarder.await;
+		let llm_result = router.generate_streaming(&request, tx).await;
+		let accumulated_tool_calls = accumulator.await.unwrap_or_default();
 		let _ = sender.send(LoopEvent::LlmDecisionComplete { step });
 
 		let llm_response = match llm_result {
@@ -155,62 +167,34 @@ async fn decide_with_router(
 				return None;
 			}
 		};
+		let _ = llm_response;
 
-		// Streaming path always uses JSON text (tools stripped from request).
-		// Parse text as JSON.
-		let raw = llm_response.output.trim();
-		let payload = if let Some(stripped) = raw.strip_prefix("```") {
-			stripped
-				.strip_prefix("json")
-				.map(str::trim_start)
-				.unwrap_or(stripped)
-				.strip_suffix("```")
-				.map(str::trim)
-				.unwrap_or(stripped)
-		} else {
-			raw
-		};
-		let json_output = match serde_json::from_str::<serde_json::Value>(payload) {
-			Ok(value) => value,
-			Err(error) => {
-				log_tool_loop_warning(
-					"next-step model did not return a usable response",
-					[
-						("run_id", loop_state.run_id.clone()),
-						("error", error.to_string()),
-					],
-				);
-				return None;
-			}
-		};
-		let decision = match NextStepDecision::from_json_value(&json_output) {
-			Ok(d) => d,
-			Err(error) => {
-				log_tool_loop_warning(
-					"next-step model returned invalid decision JSON",
-					[
-						("run_id", loop_state.run_id.clone()),
-						("error", error.to_string()),
-					],
-				);
-				return None;
-			}
-		};
-		let decision =
-			align_router_tool_arguments(decision, user_reply.unwrap_or(&loop_state.goal), catalog);
-		return match validate_router_decision(loop_state, decision, catalog) {
-			Ok(decision) => Some(decision),
-			Err(reason) => {
-				log_tool_loop_warning(
-					"next-step model decision was rejected by runtime validation",
-					[("run_id", loop_state.run_id.clone()), ("reason", reason)],
-				);
-				None
-			}
-		};
+		if let Some(decision) = NextStepDecision::from_tool_calls(&accumulated_tool_calls) {
+			let decision = align_router_tool_arguments(
+				decision,
+				user_reply.unwrap_or(&loop_state.goal),
+				catalog,
+			);
+			return match validate_router_decision(loop_state, decision, catalog) {
+				Ok(decision) => Some(decision),
+				Err(reason) => {
+					log_tool_loop_warning(
+						"streaming tool_use decision rejected by validation",
+						[("run_id", loop_state.run_id.clone()), ("reason", reason)],
+					);
+					None
+				}
+			};
+		}
+
+		log_tool_loop_warning(
+			"streaming response contained no usable tool_use blocks",
+			[("run_id", loop_state.run_id.clone())],
+		);
+		return None;
 	}
 
-	// Non-streaming path: use generate() which preserves tool_calls.
+	// Non-streaming path: use generate() which returns native tool_calls.
 	let llm_response = match router.generate(&request).await {
 		Ok(r) => r,
 		Err(error) => {
@@ -225,7 +209,6 @@ async fn decide_with_router(
 		}
 	};
 
-	// Primary path: native tool_use.
 	if let Some(tool_calls) = &llm_response.tool_calls
 		&& !tool_calls.is_empty()
 		&& let Some(decision) = NextStepDecision::from_tool_calls(tool_calls)
@@ -244,87 +227,21 @@ async fn decide_with_router(
 		};
 	}
 
-	// Fallback: JSON text parsing.
-	let json_output = {
-		let raw = llm_response.output.trim();
-		let payload = if let Some(stripped) = raw.strip_prefix("```") {
-			stripped
-				.strip_prefix("json")
-				.map(str::trim_start)
-				.unwrap_or(stripped)
-				.strip_suffix("```")
-				.map(str::trim)
-				.unwrap_or(stripped)
-		} else {
-			raw
-		};
-		match serde_json::from_str::<serde_json::Value>(payload) {
-			Ok(value) => value,
-			Err(error) => {
-				log_tool_loop_warning(
-					"next-step model did not return a usable response",
-					[
-						("run_id", loop_state.run_id.clone()),
-						("error", error.to_string()),
-					],
-				);
-				return None;
-			}
-		}
-	};
-
-	let decision = match NextStepDecision::from_json_value(&json_output) {
-		Ok(decision) => decision,
-		Err(error) => {
-			log_tool_loop_warning(
-				"next-step model returned invalid decision JSON",
-				[
-					("run_id", loop_state.run_id.clone()),
-					(
-						"last_tool",
-						loop_state
-							.last_observation
-							.as_ref()
-							.map(|observation| observation.tool_name.clone())
-							.unwrap_or_else(|| "none".to_string()),
-					),
-					("error", error.to_string()),
-					(
-						"response",
-						truncate_for_log(
-							&serde_json::to_string(&json_output)
-								.unwrap_or_else(|_| "<unserializable-json>".to_string()),
-							320,
-						),
-					),
-				],
-			);
-			return None;
-		}
-	};
-	let decision =
-		align_router_tool_arguments(decision, user_reply.unwrap_or(&loop_state.goal), catalog);
-	match validate_router_decision(loop_state, decision, catalog) {
-		Ok(decision) => Some(decision),
-		Err(reason) => {
-			log_tool_loop_warning(
-				"next-step model decision was rejected by runtime validation",
-				[
-					("run_id", loop_state.run_id.clone()),
-					(
-						"last_tool",
-						loop_state
-							.last_observation
-							.as_ref()
-							.map(|observation| observation.tool_name.clone())
-							.unwrap_or_else(|| "none".to_string()),
-					),
-					("reason", reason),
-				],
-			);
-			None
-		}
-	}
+	log_tool_loop_warning(
+		"next-step model did not return a usable tool_use response",
+		[
+			("run_id", loop_state.run_id.clone()),
+			(
+				"last_tool",
+				loop_state
+					.last_observation
+					.as_ref()
+					.map(|observation| observation.tool_name.clone())
+					.unwrap_or_else(|| "none".to_string()),
+			),
+		],
+	);
+	None
 }
 
 fn align_router_tool_arguments(
@@ -543,7 +460,10 @@ fn ungrounded_consumer_path_rejection_reason(
 	))
 }
 
-fn tool_loop_prompt(context_projection: &ContextProjection, user_reply: Option<&str>) -> String {
+pub(crate) fn tool_loop_prompt(
+	context_projection: &ContextProjection,
+	user_reply: Option<&str>,
+) -> String {
 	let projection_json =
 		serde_json::to_string_pretty(context_projection).unwrap_or_else(|_| "{}".to_string());
 	let prior_work_section = if context_projection.working_summary.is_empty() {
@@ -555,46 +475,7 @@ fn tool_loop_prompt(context_projection: &ContextProjection, user_reply: Option<&
 		)
 	};
 	format!(
-		r#"Return only JSON with exactly these keys:
-{{
-  "action": "call_tool | call_tools | ask_user | final_answer | fail",
-  "tool_name": "visible tool name or null",
-  "arguments": {{ }},
-  "tool_calls": [{{ "tool_name": "...", "arguments": {{ }} }}],
-  "reason": "short explanation",
-  "final_message": "message or null"
-}}
-
-Rules:
-- Only use a tool from `visible_tools`.
-- `call_tool` is the only action that may set `tool_name`.
-- `call_tool` should not use `final_message`; if you include it anyway, the runtime will ignore it.
-- Every `call_tool` decision must include all required argument keys for the selected tool.
-- `call_tools` invokes multiple tools in one step. Provide a `tool_calls` array instead of `tool_name`/`arguments`. Only use `call_tools` when the tools are independent (e.g., reading multiple files). For sequential operations, use `call_tool` one at a time. When using `call_tools`, `tool_name` and `arguments` must be null.
-- Keep `final_message` concise. Do not paste large grounded documents, search dumps, or long synthesized answers into the JSON decision.
-- Use the current user follow-up if it is present; do not inherit concrete code, paths, or queries from prior conversation turns unless they already exist in the current context projection.
-- For `chat`, emit `final_answer` directly using your own judgment when no concrete tool action is needed.
-- For `code_exec`, you may call `python.run` when explicit Python code is present or when the task now requires one clearly bounded Python snippet for local computation over already grounded evidence. Prefer `python.run` over `command.run` for counting, aggregation, filtering, or transformation tasks.
-- You may call `command.run` to execute shell commands when doing so would help accomplish the task. Prefer specialized tools when they fit (`fs.read_text` over `cat`, `fs.grep` over `grep`, `fs.list_dir` over `ls`, `web.fetch` over `curl`). Use `command.run` as a general-purpose fallback for CLI tools and operations that no specialized tool covers (e.g. `gh`, `git`, `cargo`, `docker`, `kubectl`, `jq`, `make`). You may generate the shell command yourself based on the task — the user does not need to provide it literally. Avoid destructive or workspace-modifying commands unless the task explicitly requires it.
-- When generating `python.run` arguments, keep the code short and self-contained. Prefer walking one grounded directory or reading one grounded path at execution time. Do not inline huge path arrays, copied directory listings, or large observation payloads into the code string.
-- For `table_read`, prefer the first shortlisted `table.*` tool that matches the grounded table path.
-- For `web_lookup`, use `web.search` when a concrete query is available.
-- When the current request references concrete local files, directories, workspace paths, or shell-style inspection goals and `fs.*` tools are visible, gather grounded filesystem evidence before emitting `final_answer`.
-- If the request only mentions a bare filename or fuzzy path hint like `grounding.rs` or `runtime.rs`, do not jump straight to `fs.read_text` or `table.preview`; resolve it with `fs.find` first unless the context already includes one grounded concrete path.
-- Prefer `fs.inspect`, `fs.list_dir`, `fs.read_text`, `fs.find`, or `fs.glob` when the current context already grounds one of them.
-- If a filesystem or table consumer tool fails with `path_not_found` and `fs.find` is visible, prefer locating the target before failing the loop.
-- If a lookup tool returns one `resolved_path` and a visible consumer tool can now accept that concrete path, you may continue with that consumer tool instead of stopping at the lookup step.
-- When a filesystem, table, web, or python observation provides raw evidence but the user still needs explanation, comparison, or synthesis, emit `final_answer` directly using the gathered evidence.
-- Do not use future tool calls as a placeholder for work the observations do not already support. If the user asked for a counted, aggregated, transformed, searched, or executed result and the current observations do not already contain that result, keep gathering evidence, use another visible tool, ask the user, or fail honestly.
-- Never emit pseudo tool-call markup, future execution plans, or "let me run/use tool X" prose as if it were a completed result.
-- When the latest observation already directly satisfies a bounded inspection or listing request, emit `final_answer` with a concise grounded reply that reuses the observation message instead of copying large raw payloads into JSON.
-- Treat `intent_family`, `route_reason`, and the initial shortlist as weak seeds, not binding truth. If the current observation is insufficient, you may choose any better-fitting tool from `visible_tools`.
-- Do not assume an ambiguous lookup must immediately become `ask_user` when another visible tool can still answer the task more directly.
-- Use `ask_user` when the current information is still insufficient.
-- Use `final_answer` only when the current context projection already proves the user request is satisfied.
-
-
-{prior_work_section}Context projection:
+		r#"{prior_work_section}Context projection:
 {projection_json}
 
 Current user follow-up:
@@ -604,14 +485,6 @@ Current user follow-up:
 		projection_json = projection_json,
 		user_reply = user_reply.unwrap_or("null"),
 	)
-}
-
-#[cfg(test)]
-pub(crate) fn tool_loop_prompt_for_test(
-	context_projection: &ContextProjection,
-	user_reply: Option<&str>,
-) -> String {
-	tool_loop_prompt(context_projection, user_reply)
 }
 
 /// Build native tool definitions from visible tools for the LLM provider.
@@ -1214,18 +1087,6 @@ fn log_tool_loop_warning(message: &str, fields: impl IntoIterator<Item = (&'stat
 	let _ = emit_global_log(record);
 }
 
-fn truncate_for_log(value: &str, max_chars: usize) -> String {
-	let char_count = value.chars().count();
-	if char_count <= max_chars {
-		return value.to_string();
-	}
-	let truncated = value
-		.chars()
-		.take(max_chars.saturating_sub(3))
-		.collect::<String>();
-	format!("{truncated}...")
-}
-
 pub(crate) fn next_working_directory_from_observation(
 	observation: &ToolObservation,
 	current_working_directory: &str,
@@ -1317,13 +1178,48 @@ mod tests {
 				.expect("response lock should succeed")
 				.pop_front()
 				.expect("a canned response should be available");
+			// Convert legacy JSON-in-text test fixtures into native tool_calls so
+			// that tests work with the tool_use-only dispatch path.
+			let tool_calls = if let Ok(v) = serde_json::from_str::<Value>(&output) {
+				let action = v.get("action").and_then(Value::as_str).unwrap_or("");
+				let tool_name = v.get("tool_name").and_then(Value::as_str);
+				match (action, tool_name) {
+					("call_tool", Some(name)) => {
+						let arguments = v
+							.get("arguments")
+							.cloned()
+							.filter(|a| !a.is_null())
+							.unwrap_or(json!({}));
+						Some(vec![roku_plugin_llm::ToolCallBlock {
+							id: "test-call-1".to_string(),
+							name: name.to_string(),
+							arguments,
+						}])
+					}
+					("final_answer", _) => {
+						let message = v
+							.get("final_message")
+							.and_then(Value::as_str)
+							.unwrap_or("")
+							.to_string();
+						Some(vec![roku_plugin_llm::ToolCallBlock {
+							id: "test-call-1".to_string(),
+							name: "final_answer".to_string(),
+							arguments: json!({ "message": message }),
+						}])
+					}
+					_ => None,
+				}
+			} else {
+				None
+			};
 			Ok(ProviderResponse {
 				output,
 				finish_reason: None,
 				prompt_tokens: 24,
 				output_tokens: 18,
 				latency_ms: 10,
-				tool_calls: None,
+				tool_calls,
 			})
 		}
 	}

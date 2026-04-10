@@ -668,7 +668,7 @@ mod tests {
 	#[test]
 	fn tool_loop_prompt_includes_prior_work_summary_when_nonempty() {
 		use crate::runtime_loop::build_context_projection;
-		use crate::runtime_loop::tool_loop::tool_loop_prompt_for_test;
+		use crate::runtime_loop::tool_loop::tool_loop_prompt;
 		use roku_common_types::RuntimeMemorySections;
 
 		let mut state = minimal_loop_state();
@@ -677,7 +677,7 @@ mod tests {
 		}
 		compact_history(&mut state, &CompactConfig::default());
 		let projection = build_context_projection(&state, &RuntimeMemorySections::default());
-		let prompt = tool_loop_prompt_for_test(&projection, None);
+		let prompt = tool_loop_prompt(&projection, None);
 		assert!(
 			prompt.contains("## Prior Work Summary"),
 			"prompt should include Prior Work Summary section"
@@ -691,12 +691,12 @@ mod tests {
 	#[test]
 	fn tool_loop_prompt_omits_prior_work_summary_when_empty() {
 		use crate::runtime_loop::build_context_projection;
-		use crate::runtime_loop::tool_loop::tool_loop_prompt_for_test;
+		use crate::runtime_loop::tool_loop::tool_loop_prompt;
 		use roku_common_types::RuntimeMemorySections;
 
 		let state = minimal_loop_state();
 		let projection = build_context_projection(&state, &RuntimeMemorySections::default());
-		let prompt = tool_loop_prompt_for_test(&projection, None);
+		let prompt = tool_loop_prompt(&projection, None);
 		assert!(
 			!prompt.contains("## Prior Work Summary"),
 			"prompt should omit Prior Work Summary when empty"
