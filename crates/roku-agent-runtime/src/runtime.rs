@@ -737,11 +737,18 @@ impl GenericAgentRuntime {
 	async fn maybe_compact(
 		&self,
 		loop_state: &mut LoopState,
+		messages: &mut Vec<roku_plugin_llm::Message>,
 		current_step_index: u32,
 		event_sender: Option<&crate::runtime_loop::LoopEventSender>,
 	) {
+		// Truncate oversized tool results in messages.
+		let tool_result_max_chars = self.agent_runtime_config.r#loop.working_summary_max_chars;
+		crate::runtime_loop::truncate_large_tool_results(messages, tool_result_max_chars);
+
 		let threshold = self.agent_runtime_config.r#loop.compact_threshold_tokens();
-		let estimated = crate::runtime_loop::estimate_context_tokens(loop_state);
+		let msg_tokens = crate::runtime_loop::estimate_message_tokens(messages);
+		let state_tokens = crate::runtime_loop::estimate_context_tokens(loop_state);
+		let estimated = msg_tokens.max(state_tokens);
 		if estimated > threshold {
 			eprintln!(
 				"Context compact triggered: estimated {estimated} tokens exceeds threshold {threshold}"
@@ -760,10 +767,15 @@ impl GenericAgentRuntime {
 					.working_summary_max_chars,
 				..Default::default()
 			};
+			// Compact conversation messages (preserve recent 5).
+			let retain_messages = 5_usize.max(compact_config.retain_tail_steps);
 			if let Some(router) = self.route_router.as_deref() {
+				crate::runtime_loop::compact_messages_with_llm(messages, retain_messages, router)
+					.await;
 				crate::runtime_loop::compact_history_with_llm(loop_state, &compact_config, router)
 					.await;
 			} else {
+				crate::runtime_loop::compact_messages(messages, retain_messages);
 				crate::runtime_loop::compact_history(loop_state, &compact_config);
 			}
 		}
@@ -1174,7 +1186,7 @@ impl GenericAgentRuntime {
 				}
 			}
 
-			self.maybe_compact(loop_state, current_step_index, event_sender)
+			self.maybe_compact(loop_state, &mut messages, current_step_index, event_sender)
 				.await;
 
 			// Emit StepComplete after all tools in this turn are done.
