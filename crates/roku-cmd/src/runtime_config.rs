@@ -25,8 +25,8 @@ use std::path::PathBuf;
 use roku_agent_runtime::{
 	AgentRuntimeConfig, AgentRuntimeConfigPatch, ToolsRuntimeConfig, ToolsRuntimeConfigPatch,
 };
+use roku_common_types::{LogLevel, LogRecord, emit_global_log};
 use roku_memory::MemoryBackendId;
-use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_llm::{
 	AnthropicRuntimeConfig, AnthropicRuntimeConfigPatch, LlmProviderKind, OpenAiRuntimeConfig,
 	OpenAiRuntimeConfigPatch, OpenRouterRuntimeConfig, OpenRouterRuntimeConfigPatch,

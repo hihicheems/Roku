@@ -2065,9 +2065,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "roku-common-types",
- "roku-observability",
- "roku-plugin-catalog",
- "roku-plugin-core",
  "roku-plugin-host",
  "roku-plugin-llm",
  "roku-plugin-skills",
@@ -2095,23 +2092,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "roku-artifact-store"
-version = "0.1.0"
-dependencies = [
- "roku-common-types",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "roku-capability-auth"
-version = "0.1.0"
-dependencies = [
- "roku-common-types",
-]
-
-[[package]]
 name = "roku-cmd"
 version = "0.1.0"
 dependencies = [
@@ -2121,14 +2101,8 @@ dependencies = [
  "dotenvy",
  "roku-agent-runtime",
  "roku-api-gateway",
- "roku-artifact-store",
  "roku-common-types",
- "roku-experiment-registry",
  "roku-memory",
- "roku-observability",
- "roku-orchestrator",
- "roku-plugin-catalog",
- "roku-plugin-core",
  "roku-plugin-host",
  "roku-plugin-llm",
  "roku-plugin-mcp",
@@ -2136,6 +2110,7 @@ dependencies = [
  "roku-plugin-memory-sqlite",
  "roku-plugin-skills",
  "roku-plugin-telegram",
+ "roku-plugin-tools",
  "roku-runtime-service",
  "rustyline",
  "serde",
@@ -2154,71 +2129,17 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "roku-experiment-registry"
-version = "0.1.0"
-dependencies = [
- "roku-common-types",
- "serde_json",
- "thiserror",
+ "time",
 ]
 
 [[package]]
 name = "roku-memory"
 version = "0.1.0"
 dependencies = [
- "roku-artifact-store",
  "roku-common-types",
- "roku-experiment-registry",
  "serde",
  "tempfile",
  "thiserror",
-]
-
-[[package]]
-name = "roku-observability"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "time",
-]
-
-[[package]]
-name = "roku-orchestrator"
-version = "0.1.0"
-dependencies = [
- "roku-common-types",
-]
-
-[[package]]
-name = "roku-plugin-catalog"
-version = "0.1.0"
-dependencies = [
- "roku-common-types",
- "serde",
-]
-
-[[package]]
-name = "roku-plugin-coding"
-version = "0.1.0"
-dependencies = [
- "roku-common-types",
- "roku-plugin-mcp",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "roku-plugin-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "thiserror",
- "toml",
 ]
 
 [[package]]
@@ -2226,8 +2147,6 @@ name = "roku-plugin-host"
 version = "0.1.0"
 dependencies = [
  "roku-common-types",
- "roku-observability",
- "roku-plugin-core",
  "serde",
  "serde_json",
  "tempfile",
@@ -2244,7 +2163,7 @@ dependencies = [
  "eventsource-stream",
  "futures",
  "reqwest",
- "roku-observability",
+ "roku-common-types",
  "serde",
  "serde_json",
  "thiserror",
@@ -2257,8 +2176,8 @@ version = "0.1.0"
 dependencies = [
  "rmcp",
  "roku-common-types",
- "roku-plugin-catalog",
  "roku-plugin-host",
+ "roku-plugin-tools",
  "serde",
  "serde_json",
  "tempfile",
@@ -2301,8 +2220,6 @@ version = "0.1.0"
 dependencies = [
  "reqwest",
  "roku-common-types",
- "roku-observability",
- "roku-plugin-catalog",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2319,7 +2236,6 @@ version = "0.1.0"
 dependencies = [
  "reqwest",
  "roku-common-types",
- "roku-observability",
  "serde",
  "serde_json",
  "thiserror",
@@ -2336,9 +2252,6 @@ dependencies = [
  "regex",
  "reqwest",
  "roku-common-types",
- "roku-observability",
- "roku-plugin-catalog",
- "roku-plugin-core",
  "roku-plugin-host",
  "roku-plugin-llm",
  "roku-plugin-skills",
@@ -2359,28 +2272,14 @@ name = "roku-runtime-service"
 version = "0.1.0"
 dependencies = [
  "roku-agent-runtime",
- "roku-artifact-store",
- "roku-capability-auth",
  "roku-common-types",
- "roku-experiment-registry",
  "roku-memory",
- "roku-observability",
- "roku-orchestrator",
- "roku-plugin-catalog",
  "roku-plugin-skills",
- "roku-validation-plane",
+ "roku-plugin-tools",
  "serde_json",
  "tempfile",
  "tokio",
  "zip 8.5.1",
-]
-
-[[package]]
-name = "roku-validation-plane"
-version = "0.1.0"
-dependencies = [
- "roku-common-types",
- "serde_json",
 ]
 
 [[package]]

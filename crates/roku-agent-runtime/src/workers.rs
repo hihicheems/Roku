@@ -140,58 +140,6 @@ impl RuntimeWorker for ToolBackedWorker {
 	}
 }
 
-pub(crate) fn research_worker_with_config(
-	tool_runtime: Arc<ToolRuntime>,
-	tool_config: &ToolCatalogConfig,
-) -> ToolBackedWorker {
-	ToolBackedWorker::new(
-		"research-worker",
-		tool_name_for_role(tool_config, BuiltinToolRole::Research),
-		&["information.", "research."],
-		tool_runtime,
-		0.86,
-	)
-}
-
-pub(crate) fn inventory_worker_with_config(
-	tool_runtime: Arc<ToolRuntime>,
-	tool_config: &ToolCatalogConfig,
-) -> ToolBackedWorker {
-	ToolBackedWorker::new(
-		"inventory-worker",
-		tool_name_for_role(tool_config, BuiltinToolRole::Inventory),
-		&["inventory."],
-		tool_runtime,
-		0.84,
-	)
-}
-
-pub(crate) fn data_worker_with_config(
-	tool_runtime: Arc<ToolRuntime>,
-	tool_config: &ToolCatalogConfig,
-) -> ToolBackedWorker {
-	ToolBackedWorker::new(
-		"data-worker",
-		tool_name_for_role(tool_config, BuiltinToolRole::Data),
-		&["data."],
-		tool_runtime,
-		0.88,
-	)
-}
-
-pub(crate) fn review_worker_with_config(
-	tool_runtime: Arc<ToolRuntime>,
-	tool_config: &ToolCatalogConfig,
-) -> ToolBackedWorker {
-	ToolBackedWorker::new(
-		"review-worker",
-		tool_name_for_role(tool_config, BuiltinToolRole::Review),
-		&["review.", "validation."],
-		tool_runtime,
-		0.92,
-	)
-}
-
 pub(crate) fn skill_worker_with_config(
 	tool_runtime: Arc<ToolRuntime>,
 	tool_config: &ToolCatalogConfig,

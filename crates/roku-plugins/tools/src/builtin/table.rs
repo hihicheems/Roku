@@ -23,11 +23,11 @@ use crate::contract::{
 use crate::runtime_config::{HARD_MAX_PREVIEW_ROWS, TableToolRuntimeConfig};
 use calamine::{Reader, open_workbook_auto};
 use csv::ReaderBuilder;
+use roku_common_types::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
 use roku_common_types::{
 	ExtractionHint, GroundingStrategy, ToolContract, ToolOutputEnvelope, ToolRetryPolicy,
 	ToolSideEffectPolicy,
 };
-use roku_plugin_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
 use roku_plugin_host::{
 	RuntimeConstraints, SandboxProfile, Tool, ToolDescriptor, ToolFailure, ToolInvocationRequest,
 	ToolRuntime, ToolRuntimeError,

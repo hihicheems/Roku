@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-roku-observability = { path = "../../roku-observability" }
+roku-common-types = { path = "../../roku-common-types" }
 async-trait = "0.1"
 eventsource-stream = "0.2"
 futures = "0.3"

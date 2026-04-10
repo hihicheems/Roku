@@ -8,9 +8,6 @@ authors.workspace = true
 [dependencies]
 async-trait = "0.1"
 roku-common-types = { path = "../roku-common-types" }
-roku-observability = { path = "../roku-observability" }
-roku-plugin-catalog = { path = "../roku-plugins/catalog" }
-roku-plugin-core = { path = "../roku-plugins/core" }
 roku-plugin-host = { path = "../roku-plugins/host" }
 roku-plugin-llm = { path = "../roku-plugins/llm" }
 roku-plugin-skills = { path = "../roku-plugins/skills" }

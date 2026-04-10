@@ -12,18 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use thiserror::Error;
+use super::retrieval::{CatalogDescriptor, ResourceCatalog};
 
-use roku_plugin_mcp::McpError;
-
-#[derive(Debug, Error)]
-pub enum CodingProviderError {
-	#[error("invalid coding work contract: {0}")]
-	InvalidContract(String),
-	#[error("mcp bridge error: {0}")]
-	Bridge(#[from] McpError),
-	#[error("coding provider rejected work contract: {0}")]
-	ProviderRejected(String),
-	#[error("invalid coding provider response: {0}")]
-	InvalidResponse(String),
+pub fn build_resource_catalog(
+	mut base_entries: Vec<CatalogDescriptor>,
+	extra_entries: Vec<CatalogDescriptor>,
+) -> ResourceCatalog {
+	base_entries.extend(extra_entries);
+	ResourceCatalog::new(base_entries)
 }

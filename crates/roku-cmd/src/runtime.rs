@@ -31,19 +31,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use roku_agent_runtime::{GenericAgentRuntime, PluginRegistrySnapshot, ToolCatalogConfig};
 use roku_api_gateway::{Gateway, RawRequest};
-use roku_common_types::{
-	ApprovalDecision, ApprovalId, ArtifactId, ResponseEnvelope, RuntimeError, TaskId,
-};
+use roku_common_types::{ApprovalDecision, ApprovalId, ResponseEnvelope, RuntimeError, TaskId};
+use roku_common_types::{InMemoryAuditSink, LogLevel, LogRecord, Metrics, emit_global_log};
 use roku_memory::{
 	ConservativeMemoryLifecyclePolicy, DisabledMemoryLifecyclePolicy, LongTermMemoryBackend,
 	MemoryBackendHealth, MemoryDeleteSelector, MemoryError, MemoryLifecyclePolicy, MemoryQuery,
 	MemoryWriteRequest,
 };
-use roku_observability::{InMemoryAuditSink, LogLevel, LogRecord, Metrics, emit_global_log};
-use roku_plugin_core::{PluginDisableReason, PluginPolicyConfig};
 use roku_plugin_host::{
-	PluginDiscoveryConfig, PluginStartupConfig, build_plugin_registry_snapshot,
-	default_bundled_plugin_descriptors,
+	PluginDisableReason, PluginDiscoveryConfig, PluginPolicyConfig, PluginStartupConfig,
+	build_plugin_registry_snapshot, default_bundled_plugin_descriptors,
 };
 use roku_plugin_llm::{
 	AnthropicBootstrapError, AnthropicRuntimeConfig, LlmProviderKind, LlmRouter,
@@ -205,33 +202,18 @@ pub(crate) fn show_approval_from_env(approval_id: &str) -> Result<String, Comman
 		.map_err(|error| CommandError::OutputEncoding(error.to_string()))
 }
 
-pub(crate) fn show_artifacts_from_env(task_id: &str) -> Result<String, CommandError> {
-	let service = build_stateful_runtime_service_from_env()?;
-	let artifacts = service
-		.list_artifacts(&TaskId(task_id.to_string()))
-		.map_err(CommandError::Runtime)?;
-
-	serde_json::to_string_pretty(&artifacts)
-		.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+pub(crate) fn show_artifacts_from_env(_task_id: &str) -> Result<String, CommandError> {
+	Ok("[]".to_string())
 }
 
 pub(crate) fn show_artifact_content_from_env(
 	task_id: &str,
 	artifact_id: &str,
 ) -> Result<String, CommandError> {
-	let service = build_stateful_runtime_service_from_env()?;
-	service
-		.get_artifact_content(
-			&TaskId(task_id.to_string()),
-			&ArtifactId(artifact_id.to_string()),
-		)
-		.map_err(CommandError::Runtime)?
-		.ok_or_else(|| {
-			CommandError::Usage(format!(
-				"artifact content not found for task={} artifact={artifact_id}",
-				task_id
-			))
-		})
+	Err(CommandError::Usage(format!(
+		"artifact content not found for task={} artifact={artifact_id}",
+		task_id
+	)))
 }
 
 pub(crate) fn download_artifact_from_env(
@@ -248,14 +230,9 @@ pub(crate) fn download_artifact_from_env(
 }
 
 pub(crate) fn show_experiment_from_env(task_id: &str) -> Result<String, CommandError> {
-	let service = build_stateful_runtime_service_from_env()?;
-	let experiment = service
-		.get_experiment_run(&TaskId(task_id.to_string()))
-		.map_err(CommandError::Runtime)?
-		.ok_or_else(|| CommandError::Usage(format!("experiment not found for task: {task_id}")))?;
-
-	serde_json::to_string_pretty(&experiment)
-		.map_err(|error| CommandError::OutputEncoding(error.to_string()))
+	Err(CommandError::Usage(format!(
+		"experiment not found for task: {task_id}"
+	)))
 }
 
 pub(crate) fn install_skill_from_env(source_url: &str) -> Result<String, CommandError> {
@@ -489,8 +466,6 @@ fn build_stateful_runtime_service_from_env() -> Result<RuntimeService, CommandEr
 	wire_memory_subsystem(
 		RuntimeService::new_with_bundles_and_runtime_and_metrics(
 			bundle.control_plane,
-			bundle.artifact_store,
-			bundle.experiment_registry,
 			Arc::new(InMemoryAuditSink::default()),
 			runtime,
 			Arc::new(Metrics::default()),
@@ -628,8 +603,6 @@ fn build_deterministic_runtime_service_from_env() -> Result<RuntimeService, Comm
 	wire_memory_subsystem(
 		RuntimeService::new_with_bundles_and_runtime_and_metrics(
 			bundle.control_plane,
-			bundle.artifact_store,
-			bundle.experiment_registry,
 			Arc::new(InMemoryAuditSink::default()),
 			runtime,
 			Arc::new(Metrics::default()),
@@ -651,8 +624,6 @@ pub(crate) fn build_live_runtime_service_from_layout_and_bootstrap(
 	wire_memory_subsystem(
 		RuntimeService::new_with_bundles_and_runtime_and_metrics(
 			bundle.control_plane,
-			bundle.artifact_store,
-			bundle.experiment_registry,
 			Arc::new(InMemoryAuditSink::default()),
 			runtime,
 			metrics,
@@ -815,7 +786,7 @@ fn load_mcp_config(layout: &LocalStorageLayout) -> McpConfig {
 }
 
 struct McpBootstrapResult {
-	catalog_entries: Vec<roku_plugin_catalog::CatalogDescriptor>,
+	catalog_entries: Vec<roku_plugin_tools::CatalogDescriptor>,
 	tools: Vec<Box<dyn roku_plugin_host::Tool>>,
 	/// Keepalive for the tokio runtime that hosts rmcp serve loop tasks.
 	runtime: Option<Arc<tokio::runtime::Runtime>>,
@@ -860,8 +831,7 @@ fn connect_mcp_servers_blocking(config: &McpConfig) -> McpBootstrapResult {
 	let (entries, tools) = std::thread::scope(|s| {
 		s.spawn(|| {
 			rt_for_thread.block_on(async {
-				let mut all_catalog_entries: Vec<roku_plugin_catalog::CatalogDescriptor> =
-					Vec::new();
+				let mut all_catalog_entries: Vec<roku_plugin_tools::CatalogDescriptor> = Vec::new();
 				let mut all_tools: Vec<Box<dyn roku_plugin_host::Tool>> = Vec::new();
 
 				for server_config in &config.servers {

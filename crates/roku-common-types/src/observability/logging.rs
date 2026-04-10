@@ -152,16 +152,13 @@ impl AsyncRotatingFileLogSink {
 				let line = match serde_json::to_string(&record) {
 					Ok(encoded) => encoded,
 					Err(error) => {
-						eprintln!(
-							"[roku-observability] failed to encode log record: {}",
-							error
-						);
+						eprintln!("[roku-common-types] failed to encode log record: {}", error);
 						continue;
 					}
 				};
 				if let Err(error) = write_record(&config, &mut writers, &record.component, &line) {
 					eprintln!(
-						"[roku-observability] failed to persist log record for component {}: {}",
+						"[roku-common-types] failed to persist log record for component {}: {}",
 						record.component, error
 					);
 				}

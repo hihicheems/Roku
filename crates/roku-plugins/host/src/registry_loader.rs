@@ -14,9 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use roku_plugin_core::{
-	PluginDisableReason, PluginPolicyConfig, PluginRegistryEntry, PluginRegistrySnapshot,
-};
+use crate::{PluginDisableReason, PluginPolicyConfig, PluginRegistryEntry, PluginRegistrySnapshot};
 
 use crate::discovery::DiscoveredPluginCandidate;
 use crate::startup::{
@@ -90,7 +88,7 @@ pub(crate) fn load_registry_snapshot(
 mod tests {
 	use std::fs;
 
-	use roku_plugin_core::{
+	use crate::{
 		PluginCapabilities, PluginDisableReason, PluginId, PluginKind, PluginManifest,
 		PluginPolicyConfig, PluginRequirements, PluginSource, PluginSourceKind, PluginStatus,
 	};

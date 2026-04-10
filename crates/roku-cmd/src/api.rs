@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use actix_web::{App, HttpServer, web};
 use roku_api_gateway::{GatewayAppState, RuntimeServiceExecutor, configure_routes};
-use roku_observability::{LogLevel, LogRecord, emit_global_log};
+use roku_common_types::{LogLevel, LogRecord, emit_global_log};
 
 use crate::CommandError;
 use crate::runtime::build_live_runtime_service_from_env;

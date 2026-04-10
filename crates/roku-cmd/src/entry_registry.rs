@@ -28,7 +28,7 @@
 
 use roku_memory::registry::{
 	EntryAdapterCatalog, EntryControlPlaneBuilder, EntryMemoryConfig, EntryRegistryError,
-	EntryRuntimeLayout, ResolvedEntryRuntimeBundle,
+	ResolvedEntryRuntimeBundle,
 	resolve_entry_runtime_bundle as resolve_entry_runtime_bundle_from_registry,
 	resolve_memory_subsystem as resolve_memory_subsystem_from_registry,
 };
@@ -73,10 +73,10 @@ pub(crate) fn resolve_memory_subsystem(
 
 pub(crate) fn resolve_entry_runtime_bundle(
 	memory_config: &MemoryRuntimeConfig,
-	layout: &LocalStorageLayout,
+	_layout: &LocalStorageLayout,
 ) -> Result<ResolvedEntryRuntimeBundle, CommandError> {
 	with_entry_catalog(memory_config, |config, catalog| {
-		resolve_entry_runtime_bundle_from_registry(config, &entry_layout(layout), catalog)
+		resolve_entry_runtime_bundle_from_registry(config, catalog)
 	})
 	.map_err(map_entry_registry_error)
 }
@@ -112,13 +112,6 @@ fn with_entry_catalog<T>(
 fn memory_config_view(memory_config: &MemoryRuntimeConfig) -> EntryMemoryConfig<'_> {
 	EntryMemoryConfig {
 		core: &memory_config.core,
-	}
-}
-
-fn entry_layout(layout: &LocalStorageLayout) -> EntryRuntimeLayout {
-	EntryRuntimeLayout {
-		artifact_root: layout.artifact_root.clone(),
-		experiment_root: layout.experiment_root.clone(),
 	}
 }
 

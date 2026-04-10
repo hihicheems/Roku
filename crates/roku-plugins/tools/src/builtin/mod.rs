@@ -14,8 +14,6 @@
 
 pub(crate) mod command;
 pub(crate) mod fs;
-pub(crate) mod inventory;
-pub(crate) mod llm_worker;
 pub(crate) mod python;
 pub(crate) mod skill_execute;
 pub(crate) mod skill_install;

@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use roku_common_types::{ResourceSelector, ToolContract};
+use crate::{ResourceSelector, ToolContract};
 use serde::{Deserialize, Serialize};
 
 // Retrieval invariants: these shape the in-process embedding/BM25 scoring model and are not
@@ -212,7 +212,7 @@ impl ResourceCatalog {
 	pub fn lookup_grounding_metadata(
 		&self,
 		tool_name: &str,
-	) -> Option<&roku_common_types::ToolGroundingContract> {
+	) -> Option<&crate::ToolGroundingContract> {
 		self.entries
 			.iter()
 			.find(|entry| entry.kind == ResourceKind::Tool && entry.name == tool_name)
@@ -511,13 +511,13 @@ mod tests {
 			key_commands: vec!["pwd".to_string()],
 			use_cases: vec!["cold-path usage example".to_string()],
 			contract: Some(ToolContract {
-				selection: roku_common_types::ToolSelectionContract {
+				selection: crate::ToolSelectionContract {
 					use_when: vec!["Explicit shell command already present.".to_string()],
 					avoid_when: Vec::new(),
 					common_confusions: Vec::new(),
 				},
-				input: roku_common_types::ToolInputContract::default(),
-				output: roku_common_types::ToolOutputContract {
+				input: crate::ToolInputContract::default(),
+				output: crate::ToolOutputContract {
 					observation_schema: "tool_output_envelope.v1".to_string(),
 					success_semantics: "Output-only semantics should stay cold.".to_string(),
 					empty_result_semantics: String::new(),
@@ -525,8 +525,8 @@ mod tests {
 					non_terminal_success: false,
 					terminal_success: false,
 				},
-				runtime: roku_common_types::ToolRuntimeContract::default(),
-				grounding: roku_common_types::ToolGroundingContract::default(),
+				runtime: crate::ToolRuntimeContract::default(),
+				grounding: crate::ToolGroundingContract::default(),
 			}),
 		};
 
@@ -543,7 +543,7 @@ mod tests {
 	#[test]
 	fn lookup_grounding_metadata_returns_metadata_for_known_tool() {
 		let entries = vec![CatalogDescriptor {
-			selector: roku_common_types::ResourceSelector::tool("fs.read_text"),
+			selector: crate::ResourceSelector::tool("fs.read_text"),
 			kind: ResourceKind::Tool,
 			name: "fs.read_text".to_string(),
 			role: None,
@@ -559,28 +559,25 @@ mod tests {
 			summary: String::new(),
 			key_commands: Vec::new(),
 			use_cases: Vec::new(),
-			contract: Some(roku_common_types::ToolContract {
-				grounding: roku_common_types::ToolGroundingContract {
+			contract: Some(crate::ToolContract {
+				grounding: crate::ToolGroundingContract {
 					required_argument_keys: vec!["file_path".to_string()],
-					grounding_strategy: roku_common_types::GroundingStrategy::PathBased,
+					grounding_strategy: crate::GroundingStrategy::PathBased,
 					grounding_argument: Some("file_path".to_string()),
 					requires_grounded_path: true,
 					bootstrap_matchable: true,
 					missing_argument_hint: None,
-					extraction_hint: roku_common_types::ExtractionHint::Default,
+					extraction_hint: crate::ExtractionHint::Default,
 					static_extra_arguments: Default::default(),
 				},
-				..roku_common_types::ToolContract::default()
+				..crate::ToolContract::default()
 			}),
 		}];
 		let catalog = ResourceCatalog::new(entries);
 		let grounding = catalog.lookup_grounding_metadata("fs.read_text");
 		assert!(grounding.is_some());
 		let g = grounding.unwrap();
-		assert_eq!(
-			g.grounding_strategy,
-			roku_common_types::GroundingStrategy::PathBased
-		);
+		assert_eq!(g.grounding_strategy, crate::GroundingStrategy::PathBased);
 		assert!(g.requires_grounded_path);
 		assert_eq!(g.required_argument_keys, vec!["file_path"]);
 	}

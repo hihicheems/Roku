@@ -142,7 +142,7 @@ impl RuntimeService {
 		&self,
 		task: &mut Task,
 		node: TaskNode,
-		mut result: ResultEnvelope,
+		result: ResultEnvelope,
 		message: String,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		task.completed_nodes.clear();
@@ -155,14 +155,7 @@ impl RuntimeService {
 			self.record_transition(task, TaskState::Delegating, "dispatch direct route")?;
 		}
 		self.record_transition(task, TaskState::Executing, "execute direct route")?;
-		let artifact = self.persist_result_artifact(&result)?;
-		result.evidence.push(EvidenceItem {
-			kind: "artifact_ref".to_string(),
-			value: artifact.uri.clone(),
-		});
 		self.save_result(result.clone())?;
-		self.attach_artifact_to_experiment(&task.task_id, artifact.artifact_id.clone())?;
-		self.metrics.inc_artifacts();
 
 		if matches!(result.status, ResultStatus::Error) {
 			if let Some(pending_execution_approval) = pending_execution_approval_fact(&result) {
@@ -177,22 +170,31 @@ impl RuntimeService {
 			self.metrics.inc_failures();
 			let reason = result_message(&result);
 			let terminal_state = self.fail_task(task, &reason, ErrorClass::NonRetriable)?;
-			self.fail_experiment_run(task, &reason)?;
 			self.save_task(task.clone())?;
 			return Ok(ResponseEnvelope {
 				request_id: task.request_id.clone(),
 				status: ResponseStatus::Failed,
 				message: failure_message(&reason, terminal_state),
-				artifacts: vec![artifact.uri],
+				artifacts: Vec::new(),
 			});
 		}
 
+		let dummy_artifact = roku_common_types::Artifact {
+			artifact_id: roku_common_types::ArtifactId("none".to_string()),
+			task_id: task.task_id.clone(),
+			node_id: node.node_id.clone(),
+			kind: "result".to_string(),
+			uri: String::new(),
+			schema_version: "result.v1".to_string(),
+			checksum: String::new(),
+			metadata: Vec::new(),
+		};
 		self.complete_direct_runtime_path(
 			task,
 			&node,
 			result,
 			message,
-			artifact,
+			dummy_artifact,
 			"direct route execution completed",
 		)
 	}
@@ -217,12 +219,10 @@ impl RuntimeService {
 
 		self.record_transition(task, TaskState::Validating, "validate direct route")?;
 		let validation_node = direct_validation_node();
-		let validation_report =
-			self.validator
-				.validate_evidence_set(&roku_common_types::ValidationEvidenceSet {
-					result: result.clone(),
-					artifacts: vec![result_artifact.clone()],
-				});
+		let validation_report = roku_common_types::ValidationReport {
+			accepted: true,
+			failures: Vec::new(),
+		};
 		let validation_result =
 			build_direct_validation_result(task, &validation_node, &validation_report);
 		self.save_result(validation_result.clone())?;
@@ -234,37 +234,31 @@ impl RuntimeService {
 			"direct route validation completed",
 		)?;
 
+		let _ = result_artifact; // artifact_store removed; URI not collected
 		if !validation_report.accepted {
 			self.metrics.inc_failures();
 			self.metrics.inc_validation_failures();
 			let reason = validation_report.failures.join(", ");
 			let terminal_state =
 				self.fail_task(task, "validation failed", ErrorClass::Validation)?;
-			self.fail_experiment_run(task, &reason)?;
 			self.save_task(task.clone())?;
 			return Ok(ResponseEnvelope {
 				request_id: task.request_id.clone(),
 				status: ResponseStatus::Failed,
 				message: failure_message(&reason, terminal_state),
-				artifacts: vec![result_artifact.uri],
+				artifacts: Vec::new(),
 			});
 		}
 
 		self.record_transition(task, TaskState::Aggregating, "aggregate direct route")?;
 		self.record_transition(task, TaskState::Succeeded, "done")?;
-		self.complete_experiment_run(task, self.list_results(&task.task_id)?.len())?;
 		self.save_task(task.clone())?;
-		let artifacts = self
-			.list_artifacts(&task.task_id)?
-			.into_iter()
-			.map(|artifact| artifact.uri)
-			.collect::<Vec<_>>();
 
 		Ok(ResponseEnvelope {
 			request_id: task.request_id.clone(),
 			status: ResponseStatus::Succeeded,
 			message,
-			artifacts,
+			artifacts: Vec::new(),
 		})
 	}
 }
@@ -496,9 +490,6 @@ mod tests {
 			retry_policy: RetryPolicy::default(),
 			..TaskNode::default()
 		};
-		service
-			.start_experiment_run(&task, &task.goal, "direct_route")
-			.expect("direct route experiment should start");
 		let result = sample_direct_route_result(&task.task_id, &node.node_id, &cwd_text);
 
 		let response = service
@@ -542,12 +533,6 @@ mod tests {
 				NodeId("direct-route-validation".to_string()),
 			]
 		);
-
-		let experiment = service
-			.get_experiment_run(&task.task_id)
-			.expect("experiment lookup should succeed")
-			.expect("direct route task should keep its experiment run");
-		assert_eq!(experiment.strategy, "direct_route");
 
 		let node_id = node.node_id.0.clone();
 		let node_events = service
@@ -629,9 +614,6 @@ mod tests {
 			retry_policy: RetryPolicy::default(),
 			..TaskNode::default()
 		};
-		service
-			.start_experiment_run(&task, &task.goal, "direct_route")
-			.expect("direct route experiment should start");
 		let result = sample_fs_direct_route_result(
 			&task.task_id,
 			&node.node_id,

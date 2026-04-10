@@ -15,7 +15,7 @@
 use roku_common_types::{
 	ResourceSelector, ToolContract, ToolRuntimeContract, ToolSideEffectPolicy,
 };
-use roku_plugin_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
+use roku_plugin_tools::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
 
 /// Replace any character that is not ASCII alphanumeric or `_` with `_`.
 pub fn normalize_server_name(name: &str) -> String {

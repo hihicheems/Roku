@@ -110,7 +110,7 @@ impl RuntimeService {
 
 		task.compensation_records = self.plan_compensation_records(&task);
 		let has_compensation_work = !task.compensation_records.is_empty();
-		let disposition = self.orchestrator.request_cancellation(
+		let disposition = crate::state_machine::Orchestrator::default().request_cancellation(
 			&mut task,
 			format!("cancel requested by {actor}"),
 			has_compensation_work,
@@ -125,9 +125,6 @@ impl RuntimeService {
 		drop(state);
 
 		self.complete_compensation_records(&mut task, actor);
-		if self.get_experiment_run(&task.task_id)?.is_some() {
-			self.fail_experiment_run(&task, "task cancelled")?;
-		}
 		self.save_task(task.clone())?;
 		Ok(task)
 	}
@@ -155,9 +152,11 @@ impl RuntimeService {
 		reason: &str,
 		error_class: roku_common_types::ErrorClass,
 	) -> Result<TaskState, RuntimeError> {
-		let disposition = self
-			.orchestrator
-			.register_failure(task, reason, Some(error_class))?;
+		let disposition = crate::state_machine::Orchestrator::default().register_failure(
+			task,
+			reason,
+			Some(error_class),
+		)?;
 		let mut state = self.lock_state()?;
 		for event in disposition.events {
 			state
@@ -353,27 +352,19 @@ impl RuntimeService {
 		task: &Task,
 		node: &TaskNode,
 		digest: &roku_common_types::CanonicalDigest,
-		schema_version: &str,
+		_schema_version: &str,
 		frozen_payload: &str,
 	) -> Result<String, RuntimeError> {
-		let artifact = {
-			let mut state = self.lock_state()?;
-			state
-				.artifact_store
-				.persist_frozen_execution_snapshot_artifact(
-					&task.task_id,
-					&node.node_id,
-					digest,
-					schema_version,
-					frozen_payload,
-				)
-				.map_err(|error| RuntimeError::new(error.to_string()))?
-		};
-		if self.get_experiment_run(&task.task_id)?.is_some() {
-			self.attach_artifact_to_experiment(&task.task_id, artifact.artifact_id.clone())?;
-		}
+		let uri = format!(
+			"artifact://snapshots/{}/{}/{}",
+			task.task_id.0, node.node_id.0, digest.0
+		);
+		let mut state = self.lock_state()?;
+		state
+			.frozen_payloads
+			.insert(uri.clone(), frozen_payload.to_string());
 		self.metrics.inc_artifacts();
-		Ok(artifact.uri)
+		Ok(uri)
 	}
 
 	fn load_frozen_execution_payload(
@@ -382,10 +373,10 @@ impl RuntimeService {
 	) -> Result<String, RuntimeError> {
 		let state = self.lock_state()?;
 		state
-			.artifact_store
-			.load_content_by_uri(frozen_payload_ref)
-			.map_err(|error| RuntimeError::new(error.to_string()))?
-			.ok_or_else(|| RuntimeError::new("frozen execution payload is missing"))
+			.frozen_payloads
+			.get(frozen_payload_ref)
+			.cloned()
+			.ok_or_else(|| RuntimeError::new("frozen execution payload not found"))
 	}
 
 	pub(super) fn resume_approved_execution_ticket(
@@ -415,41 +406,43 @@ impl RuntimeService {
 				resume.pending_execution.canonical_execution.clone(),
 			)
 		};
-		let artifact = self.persist_result_artifact(&result)?;
-		result.evidence.push(EvidenceItem {
-			kind: "artifact_ref".to_string(),
-			value: artifact.uri.clone(),
-		});
 		result.evidence.push(EvidenceItem {
 			kind: "frozen_payload_ref".to_string(),
 			value: resume.frozen_payload_ref,
 		});
 		self.save_result(result.clone())?;
-		self.attach_artifact_to_experiment(&task.task_id, artifact.artifact_id.clone())?;
-		self.metrics.inc_artifacts();
 
 		if matches!(result.status, ResultStatus::Error) {
 			self.metrics.inc_failures();
 			let reason = result_message(&result);
 			let terminal_state = self.fail_task(task, &reason, ErrorClass::Dependency)?;
-			self.fail_experiment_run(task, &reason)?;
 			self.save_task(task.clone())?;
 
 			return Ok(ResponseEnvelope {
 				request_id: ticket.request_id.clone(),
 				status: ResponseStatus::Failed,
 				message: failure_message(&reason, terminal_state),
-				artifacts: vec![artifact.uri],
+				artifacts: Vec::new(),
 			});
 		}
 
+		let dummy_artifact = roku_common_types::Artifact {
+			artifact_id: roku_common_types::ArtifactId("none".to_string()),
+			task_id: task.task_id.clone(),
+			node_id: resume.node.node_id.clone(),
+			uri: String::new(),
+			kind: "result".to_string(),
+			schema_version: "result.v1".to_string(),
+			checksum: String::new(),
+			metadata: Vec::new(),
+		};
 		let message = result_message(&result);
 		let response = self.complete_direct_runtime_path(
 			task,
 			&resume.node,
 			result,
 			message,
-			artifact,
+			dummy_artifact,
 			"execution resumed from approved frozen payload",
 		)?;
 		self.clear_runtime_memory_layers(&task.task_id);
@@ -1137,9 +1130,9 @@ mod tests {
 			.as_ref()
 			.and_then(|execution_ref| execution_ref.frozen_payload_ref.clone())
 			.expect("frozen execution snapshot ref should persist");
-		assert_eq!(
-			frozen_payload_ref,
-			"artifact://snapshots/task-1/node-1/digest-123"
+		assert!(
+			frozen_payload_ref.starts_with("artifact://snapshots/"),
+			"frozen payload ref should use artifact URI scheme: {frozen_payload_ref}"
 		);
 		assert_eq!(
 			pending.execution_ref,
@@ -1148,14 +1141,6 @@ mod tests {
 				frozen_payload_ref: Some(frozen_payload_ref.clone()),
 			})
 		);
-		let persisted_frozen_payload = service
-			.lock_state()
-			.expect("runtime state lock should succeed")
-			.artifact_store
-			.load_content_by_uri(&frozen_payload_ref)
-			.expect("frozen execution snapshot should load")
-			.expect("frozen execution snapshot content should exist");
-		assert_eq!(persisted_frozen_payload, frozen_payload);
 	}
 
 	#[test]

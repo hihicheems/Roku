@@ -23,7 +23,7 @@ use std::thread;
 use std::time::Duration;
 
 use roku_common_types::{ApprovalDecision, ApprovalId, RequestEnvelope, RuntimeError};
-use roku_observability::{LogLevel, LogRecord, emit_global_log};
+use roku_common_types::{LogLevel, LogRecord, emit_global_log};
 
 use crate::outbound::TelegramRenderOptions;
 use crate::{

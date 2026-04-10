@@ -29,7 +29,7 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
-use roku_observability::{LogLevel, LogRecord, Metrics, emit_global_log};
+use roku_common_types::{LogLevel, LogRecord, Metrics, emit_global_log};
 use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;

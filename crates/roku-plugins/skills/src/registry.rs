@@ -20,8 +20,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::blocking::Client;
-use roku_observability::{LogLevel, LogRecord, emit_global_log};
-use roku_plugin_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
+use roku_common_types::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
+use roku_common_types::{LogLevel, LogRecord, emit_global_log};
 use serde::Deserialize;
 use walkdir::WalkDir;
 

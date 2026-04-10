@@ -15,10 +15,18 @@
 //! Plugin host building blocks for Roku.
 
 mod admission;
+pub mod core;
 mod discovery;
 mod registry_loader;
 mod startup;
 pub mod tool_runtime;
+
+pub use core::{
+	PluginCapabilities, PluginCoreError, PluginDisableReason, PluginEntryPolicy, PluginId,
+	PluginIdError, PluginKind, PluginManifest, PluginPolicyConfig, PluginProfile,
+	PluginRegistryEntry, PluginRegistrySnapshot, PluginRequirements, PluginSource,
+	PluginSourceKind, PluginStatus,
+};
 
 pub use startup::{
 	BundledPluginDescriptor, PluginDiscoveryConfig, PluginHostError, PluginStartupConfig,

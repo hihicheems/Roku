@@ -43,6 +43,9 @@ pub use builders::{
 	build_resource_catalog_with_plugin_snapshot_and_runtime_config,
 };
 pub use config::{BuiltinToolRole, ConfiguredTool, ToolCatalogConfig, ToolCatalogConfigError};
+pub use roku_common_types::{
+	CatalogDescriptor, CatalogMatch, ResourceCatalog, ResourceCost, ResourceKind, ResourceRisk,
+};
 pub use runtime_config::{
 	CommandToolRuntimeConfig, CommandToolRuntimeConfigPatch, FsToolRuntimeConfig,
 	FsToolRuntimeConfigPatch, PythonToolRuntimeConfig, PythonToolRuntimeConfigPatch,

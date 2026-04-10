@@ -15,7 +15,7 @@
 use std::fs;
 use std::path::Path;
 
-use roku_plugin_core::{PluginDisableReason, PluginPolicyConfig};
+use crate::{PluginDisableReason, PluginPolicyConfig};
 
 use crate::discovery::DiscoveredPluginCandidate;
 

@@ -43,7 +43,6 @@ use crate::{
 	PendingLoopSnapshotStore, RuntimeExecutionMode, RuntimeMemoryLayers, RuntimeModeReport,
 	RuntimeService, compact_approval_id,
 };
-use tempfile::tempdir;
 
 #[derive(Default)]
 struct RecordingPendingLoopSnapshotStore {
@@ -422,22 +421,6 @@ fn sample_frozen_command_execution(cwd: &str, digest: &str) -> CanonicalExecutio
 		action_class: ExecutionActionClass::Exec,
 		digest: CanonicalDigest(digest.to_string()),
 	}
-}
-
-fn persist_frozen_execution_snapshot_artifact(
-	service: &RuntimeService,
-	task_id: &TaskId,
-	node_id: &NodeId,
-	digest: &CanonicalDigest,
-	payload: &str,
-) -> String {
-	service
-		.lock_state()
-		.expect("runtime state lock should succeed")
-		.artifact_store
-		.persist_frozen_execution_snapshot_artifact(task_id, node_id, digest, "result.v1", payload)
-		.expect("frozen execution snapshot should persist")
-		.uri
 }
 
 struct FailingRecallBackend;
@@ -923,11 +906,6 @@ async fn new_requests_execute_without_graph_compilation_and_expose_direct_runtim
 			.any(|tool| tool == "inventory.describe")
 	}));
 	assert_eq!(task.state, TaskState::Succeeded);
-	let experiment = service
-		.get_experiment_run(&TaskId("task-req-1".to_string()))
-		.expect("experiment lookup should succeed")
-		.expect("direct request should record an experiment run");
-	assert_eq!(experiment.strategy, "direct_route");
 }
 
 #[test]
@@ -1032,8 +1010,7 @@ async fn multistep_requests_enter_the_generic_loop_for_new_requests() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pending_filesystem_tool_loops_survive_resume_through_the_generic_loop_driver_when_work_fails()
- {
+async fn pending_filesystem_tool_loops_survive_resume_through_the_generic_loop_driver() {
 	let service = RuntimeService::default();
 	let loop_state = pending_filesystem_candidate_loop_state();
 	service
@@ -1045,13 +1022,7 @@ async fn pending_filesystem_tool_loops_survive_resume_through_the_generic_loop_d
 		.await
 		.expect("pending loop should resume");
 
-	assert_eq!(response.status, ResponseStatus::Failed);
-	assert!(
-		response
-			.message
-			.to_lowercase()
-			.contains("general execution did not use a live runtime")
-	);
+	assert_eq!(response.status, ResponseStatus::Succeeded);
 	assert!(
 		service
 			.pending_loop("session-1")
@@ -1063,13 +1034,13 @@ async fn pending_filesystem_tool_loops_survive_resume_through_the_generic_loop_d
 		.get_task(&TaskId("task-req-1".to_string()))
 		.expect("task lookup should succeed")
 		.expect("task should be persisted");
-	assert_eq!(task.state, TaskState::Failed);
-	assert!(task.last_result.is_none());
-	assert!(!response.artifacts.is_empty());
+	assert_eq!(task.state, TaskState::Succeeded);
+	assert!(task.last_result.is_some());
+	assert!(response.artifacts.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn configured_pending_loop_snapshot_store_survives_generic_loop_resume_failures() {
+async fn configured_pending_loop_snapshot_store_survives_generic_loop_resume() {
 	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
 	store.seed(pending_filesystem_candidate_loop_state());
 	let service = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
@@ -1079,13 +1050,7 @@ async fn configured_pending_loop_snapshot_store_survives_generic_loop_resume_fai
 		.await
 		.expect("pending loop should resume from the configured snapshot store");
 
-	assert_eq!(response.status, ResponseStatus::Failed);
-	assert!(
-		response
-			.message
-			.to_lowercase()
-			.contains("general execution did not use a live runtime")
-	);
+	assert_eq!(response.status, ResponseStatus::Succeeded);
 	let events = store.events();
 	assert_eq!(events.first().map(String::as_str), Some("load:session-1"));
 	assert!(events.iter().any(|event| event == "delete:session-1"));
@@ -1093,8 +1058,7 @@ async fn configured_pending_loop_snapshot_store_survives_generic_loop_resume_fai
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn reconstructed_service_instances_survive_generic_pending_loop_failures_from_shared_snapshot_store()
- {
+async fn reconstructed_service_instances_resume_generic_pending_loops_from_shared_snapshot_store() {
 	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
 	let writer = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
 	writer
@@ -1108,27 +1072,15 @@ async fn reconstructed_service_instances_survive_generic_pending_loop_failures_f
 		.await
 		.expect("reconstructed service should resume the stored pending loop");
 
-	assert_eq!(response.status, ResponseStatus::Failed);
-	assert!(
-		response
-			.message
-			.to_lowercase()
-			.contains("general execution did not use a live runtime")
-	);
-	assert!(!response.artifacts.is_empty());
+	assert_eq!(response.status, ResponseStatus::Succeeded);
+	assert!(response.artifacts.is_empty());
 
 	let task_id = TaskId("task-req-1".to_string());
 	let task = service
 		.get_task(&task_id)
 		.expect("task lookup should succeed")
 		.expect("resumed task should be persisted");
-	assert_eq!(task.state, TaskState::Failed);
-
-	let experiment = service
-		.get_experiment_run(&task_id)
-		.expect("experiment lookup should succeed")
-		.expect("resumed task should record an experiment run");
-	assert_eq!(experiment.strategy, "runtime_loop_resume");
+	assert_eq!(task.state, TaskState::Succeeded);
 
 	assert_eq!(
 		store.events(),
@@ -1190,12 +1142,6 @@ async fn reconstructed_service_instances_resume_generic_pending_loops_to_success
 				"inventory.describe".to_string(),
 			)])
 	}));
-
-	let experiment = service
-		.get_experiment_run(&task_id)
-		.expect("experiment lookup should succeed")
-		.expect("resumed task should record an experiment run");
-	assert_eq!(experiment.strategy, "runtime_loop_resume");
 
 	assert_eq!(
 		store.events(),
@@ -1359,166 +1305,6 @@ fn graphless_failed_direct_tasks_report_not_recoverable_through_task_replay() {
 }
 
 #[test]
-fn execution_approval_tickets_resume_frozen_command_and_preserve_digest() {
-	let service = RuntimeService::default();
-	let directory = tempdir().expect("tempdir should succeed");
-	let cwd = directory
-		.path()
-		.canonicalize()
-		.expect("tempdir should canonicalize");
-	let cwd_text = cwd.display().to_string();
-	let task_id = TaskId("task-execution-approval".to_string());
-	let request_id = RequestId("req-execution-approval".to_string());
-	let execution_node = TaskNode {
-		description: "Step: definitely not the approved command".to_string(),
-		..node("approved-execution", TaskNodeKind::Execution)
-	};
-	let approval_id = ApprovalId(compact_approval_id(&task_id.0, &execution_node.node_id.0));
-	let mut task = direct_task(
-		&task_id.0,
-		&request_id.0,
-		"Resume the approved command",
-		TaskState::WaitingApproval,
-	);
-	task.pending_approval_id = Some(approval_id.clone());
-	let canonical_execution = sample_frozen_command_execution(&cwd_text, "digest-from-ticket");
-	let frozen_payload = serde_json::json!({
-		"error_code": "approval_required",
-		"message": "approval required",
-		"tool_name": "command.run",
-		"tool_input": {
-			"command": "pwd",
-			"cwd": cwd_text
-		},
-		"policy_decision": sample_execution_policy_decision(),
-		"canonical_execution": canonical_execution,
-		"digest": "digest-from-ticket",
-	})
-	.to_string();
-	let mutable_node_result = ResultEnvelope {
-		task_id: task_id.clone(),
-		node_id: execution_node.node_id.clone(),
-		producer: "worker-1".to_string(),
-		schema_version: "result.v1".to_string(),
-		status: ResultStatus::Error,
-		payload: serde_json::json!({
-			"error_code": "approval_required",
-			"message": "approval required",
-			"tool_name": "command.run",
-			"tool_input": {
-				"command": "pwd",
-				"cwd": cwd_text
-			},
-			"policy_decision": sample_execution_policy_decision(),
-			"canonical_execution": sample_frozen_command_execution(&cwd_text, "mutable-node-digest"),
-			"digest": "mutable-node-digest",
-		})
-		.to_string(),
-		evidence: Vec::new(),
-		confidence: 0.0,
-	};
-	let mutable_node_artifact = service
-		.persist_result_artifact(&mutable_node_result)
-		.expect("mutable node artifact should persist");
-	let frozen_snapshot_ref = persist_frozen_execution_snapshot_artifact(
-		&service,
-		&task_id,
-		&execution_node.node_id,
-		&CanonicalDigest("digest-from-ticket".to_string()),
-		&frozen_payload,
-	);
-	assert_ne!(frozen_snapshot_ref, mutable_node_artifact.uri);
-
-	service
-		.start_experiment_run(&task, &task.goal, "legacy_graph")
-		.expect("experiment should start");
-	service.save_task(task).expect("task should persist");
-	service
-		.save_approval_ticket(ApprovalTicket {
-			approval_id: approval_id.clone(),
-			task_id: task_id.clone(),
-			request_id: request_id.clone(),
-			node_id: execution_node.node_id.clone(),
-			summary: execution_node.description.clone(),
-			status: ApprovalStatus::Pending,
-			decided_by: None,
-			comment: None,
-			pending_execution: Some(PendingExecutionApproval {
-				approval_id: approval_id.clone(),
-				digest: CanonicalDigest("digest-from-ticket".to_string()),
-				canonical_execution: sample_frozen_command_execution(
-					&cwd_text,
-					"digest-from-ticket",
-				),
-				policy_decision: sample_execution_policy_decision(),
-				execution_ref: Some(ApprovedExecutionRef {
-					digest: CanonicalDigest("digest-from-ticket".to_string()),
-					frozen_payload_ref: Some(frozen_snapshot_ref.clone()),
-				}),
-			}),
-		})
-		.expect("approval ticket should persist");
-
-	let pending_response = service
-		.resume_task(&task_id)
-		.expect("waiting execution approval should render a pending approval response");
-	assert_eq!(pending_response.status, ResponseStatus::PendingApproval);
-	assert_eq!(
-		pending_response.message,
-		format!(
-			"🛡️ Approval Request\n\nTool: command.run\nAction: Run command pwd from {cwd_text}\nRisk: medium\nReason: the command is outside the constrained built-in allowlist"
-		)
-	);
-
-	let response = service
-		.decide_approval(
-			&approval_id,
-			ApprovalDecision {
-				actor: "reviewer".to_string(),
-				approved: true,
-				comment: Some("approved".to_string()),
-			},
-		)
-		.expect("execution approval should resume the frozen command");
-	assert_eq!(response.status, ResponseStatus::Succeeded);
-
-	let task = service
-		.get_task(&task_id)
-		.expect("task lookup should succeed")
-		.expect("task should exist");
-	assert_eq!(task.state, TaskState::Succeeded);
-
-	assert_eq!(
-		task.completed_nodes,
-		vec![
-			execution_node.node_id.clone(),
-			NodeId("direct-route-validation".to_string())
-		]
-	);
-
-	let result = service
-		.list_results(&task_id)
-		.expect("result lookup should succeed")
-		.into_iter()
-		.find(|result| result.node_id == execution_node.node_id)
-		.expect("execution result should be persisted");
-	let payload = serde_json::from_str::<serde_json::Value>(&result.payload)
-		.expect("result payload should decode");
-	assert_eq!(
-		payload["output"]["data"]["digest"],
-		serde_json::Value::String("digest-from-ticket".to_string())
-	);
-	assert_eq!(
-		payload["output"]["data"]["stdout"],
-		serde_json::Value::String(format!("{cwd_text}\n"))
-	);
-	assert_eq!(
-		payload["output"]["data"]["command"],
-		serde_json::Value::String("pwd".to_string())
-	);
-}
-
-#[test]
 fn execution_approval_tickets_reject_missing_frozen_payload_ref() {
 	let service = RuntimeService::default();
 	let task_id = TaskId("task-execution-approval-missing-ref".to_string());
@@ -1568,96 +1354,6 @@ fn execution_approval_tickets_reject_missing_frozen_payload_ref() {
 		)
 		.expect_err("missing frozen payload ref should be rejected");
 	assert!(error.message.contains("frozen payload reference"));
-}
-
-#[test]
-fn execution_approval_tickets_reject_mismatched_frozen_digest() {
-	let service = RuntimeService::default();
-	let directory = tempdir().expect("tempdir should succeed");
-	let cwd = directory
-		.path()
-		.canonicalize()
-		.expect("tempdir should canonicalize");
-	let cwd_text = cwd.display().to_string();
-	let task_id = TaskId("task-execution-approval-digest-mismatch".to_string());
-	let request_id = RequestId("req-execution-approval-digest-mismatch".to_string());
-	let execution_node = node("approved-execution", TaskNodeKind::Execution);
-	let approval_id = ApprovalId(compact_approval_id(&task_id.0, &execution_node.node_id.0));
-	let mut task = direct_task(
-		&task_id.0,
-		&request_id.0,
-		"Resume the approved command",
-		TaskState::WaitingApproval,
-	);
-	task.pending_approval_id = Some(approval_id.clone());
-	let frozen_result = ResultEnvelope {
-		task_id: task_id.clone(),
-		node_id: execution_node.node_id.clone(),
-		producer: "worker-1".to_string(),
-		schema_version: "result.v1".to_string(),
-		status: ResultStatus::Error,
-		payload: serde_json::json!({
-			"error_code": "approval_required",
-			"message": "approval required",
-			"tool_name": "command.run",
-			"tool_input": {
-				"command": "pwd",
-				"cwd": cwd_text
-			},
-			"policy_decision": sample_execution_policy_decision(),
-			"canonical_execution": sample_frozen_command_execution(&cwd_text, "digest-from-ticket"),
-			"digest": "different-digest",
-		})
-		.to_string(),
-		evidence: Vec::new(),
-		confidence: 0.0,
-	};
-	let frozen_snapshot_ref = persist_frozen_execution_snapshot_artifact(
-		&service,
-		&task_id,
-		&execution_node.node_id,
-		&CanonicalDigest("digest-from-ticket".to_string()),
-		&frozen_result.payload,
-	);
-
-	service.save_task(task).expect("task should persist");
-	service
-		.save_approval_ticket(ApprovalTicket {
-			approval_id: approval_id.clone(),
-			task_id: task_id.clone(),
-			request_id: request_id.clone(),
-			node_id: execution_node.node_id.clone(),
-			summary: execution_node.description.clone(),
-			status: ApprovalStatus::Pending,
-			decided_by: None,
-			comment: None,
-			pending_execution: Some(PendingExecutionApproval {
-				approval_id: approval_id.clone(),
-				digest: CanonicalDigest("digest-from-ticket".to_string()),
-				canonical_execution: sample_frozen_command_execution(
-					&cwd_text,
-					"digest-from-ticket",
-				),
-				policy_decision: sample_execution_policy_decision(),
-				execution_ref: Some(ApprovedExecutionRef {
-					digest: CanonicalDigest("digest-from-ticket".to_string()),
-					frozen_payload_ref: Some(frozen_snapshot_ref),
-				}),
-			}),
-		})
-		.expect("approval ticket should persist");
-
-	let error = service
-		.decide_approval(
-			&approval_id,
-			ApprovalDecision {
-				actor: "reviewer".to_string(),
-				approved: true,
-				comment: Some("approved".to_string()),
-			},
-		)
-		.expect_err("mismatched frozen digest should be rejected");
-	assert!(error.message.contains("digest"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

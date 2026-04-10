@@ -23,7 +23,7 @@ mod tool_config;
 mod tools;
 mod workers;
 
-pub use roku_plugin_core::PluginRegistrySnapshot;
+pub use roku_plugin_host::PluginRegistrySnapshot;
 pub use router::{
 	DirectRouteExecutionResult, DirectRoutePlan, EscalationAction, EscalationReason, IntentFamily,
 	RouteDecision, RouteDecisionResult, RouteEscalationPlan, RouteRisk,

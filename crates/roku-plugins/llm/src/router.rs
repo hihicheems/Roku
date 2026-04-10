@@ -18,7 +18,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use roku_observability::{LlmInvocationOutcome, Metrics};
+use roku_common_types::{LlmInvocationOutcome, Metrics};
 use serde_json::Value;
 
 use crate::types::{
@@ -630,7 +630,7 @@ mod tests {
 	use std::sync::atomic::{AtomicUsize, Ordering};
 
 	use async_trait::async_trait;
-	use roku_observability::Metrics;
+	use roku_common_types::Metrics;
 
 	use crate::types::{
 		GenerationRequest, ModelProfile, ProviderCallError, ProviderResiliencePolicy,
