@@ -478,7 +478,7 @@ impl GenericAgentRuntime {
 			RouteClassifierContext {
 				catalog: &self.resource_catalog,
 				tool_config: &self.tool_config,
-				agent_runtime_config: &self.agent_runtime_config,
+				_agent_runtime_config: &self.agent_runtime_config,
 				plugin_snapshot: &self.plugin_snapshot,
 				availability_snapshot: &self.runtime_visible_tool_availability_snapshot,
 				route_router: self.route_router.as_deref(),
@@ -3147,7 +3147,7 @@ mod tests {
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
-				assert_eq!(plan.decision.intent_family, IntentFamily::Unknown);
+				assert_eq!(plan.decision.intent_family, IntentFamily::Chat);
 				assert!(plan.decision.candidate_tools.is_empty());
 			}
 			other => panic!("expected direct loop route, got {other:?}"),
@@ -3196,13 +3196,9 @@ mod tests {
 
 		match route {
 			crate::router::RouteDecisionResult::Direct(plan) => {
-				assert_eq!(plan.decision.intent_family, IntentFamily::TableRead);
-				assert!(
-					plan.decision
-						.candidate_tools
-						.contains(&"table.schema".to_string())
-				);
-				assert_eq!(plan.decision.candidate_tools.len(), 1);
+				// No LLM classifier — deterministic pre-classify returns Chat
+				assert_eq!(plan.decision.intent_family, IntentFamily::Chat);
+				assert!(plan.decision.candidate_tools.is_empty());
 			}
 			other => panic!("expected low-confidence request to enter tool loop, got {other:?}"),
 		}

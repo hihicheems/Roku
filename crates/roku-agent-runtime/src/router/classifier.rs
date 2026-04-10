@@ -93,10 +93,9 @@
 //!
 use roku_common_types::{RequestEnvelope, ResourceSelector};
 use roku_plugin_host::PluginRegistrySnapshot;
-use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier, StructuredGenerationError};
+use roku_plugin_llm::LlmRouter;
 use roku_plugin_tools::RuntimeVisibleToolAvailabilitySnapshot;
 use roku_plugin_tools::{CatalogDescriptor, CatalogMatch, ResourceCatalog, ResourceKind};
-use serde_json::json;
 
 use crate::AgentRuntimeConfig;
 use crate::router::{
@@ -116,15 +115,13 @@ use crate::runtime_loop::{
 };
 use crate::tool_config::{BuiltinToolRole, ToolCatalogConfig};
 
-const MIN_SKILL_SCORE: f32 = 0.72;
-const ROUTE_CONFIDENCE_FLOOR: f32 = 0.65;
 const DETERMINISTIC_TOOL_MATCH_SCORE_FLOOR: f32 = 0.18;
 const DETERMINISTIC_TOOL_MATCH_MARGIN_RATIO: f32 = 1.05;
 
 pub(crate) struct RouteClassifierContext<'a> {
 	pub(crate) catalog: &'a ResourceCatalog,
 	pub(crate) tool_config: &'a ToolCatalogConfig,
-	pub(crate) agent_runtime_config: &'a AgentRuntimeConfig,
+	pub(crate) _agent_runtime_config: &'a AgentRuntimeConfig,
 	pub(crate) plugin_snapshot: &'a PluginRegistrySnapshot,
 	pub(crate) availability_snapshot: &'a RuntimeVisibleToolAvailabilitySnapshot,
 	pub(crate) route_router: Option<&'a LlmRouter>,
@@ -139,10 +136,21 @@ pub(crate) async fn classify_request(
 		return result;
 	}
 
-	match context.route_router {
-		Some(router) => classify_with_llm(&context, request, router).await,
-		None => unresolved_without_route_model(),
-	}
+	// No LLM classification — return neutral Chat intent via the tool loop.
+	// The model decides which tools to use directly via native tool_use.
+	build_loop_hint_route(
+		&context,
+		RouteDecision::new(
+			IntentFamily::Chat,
+			0.5,
+			false,
+			RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			"no deterministic match; forwarding to tool loop",
+		),
+	)
 }
 
 fn deterministic_pre_classify(
@@ -493,241 +501,6 @@ fn explicit_tool_hint_is_grounded(tool_name: &str, goal: &str) -> bool {
 		"skill.install" | "skill.ensure_installed" => extract_skill_source_url(goal).is_some(),
 		_ => false,
 	}
-}
-
-async fn classify_with_llm(
-	context: &RouteClassifierContext<'_>,
-	request: &RequestEnvelope,
-	router: &LlmRouter,
-) -> RouteDecisionResult {
-	let tool_matches = discoverable_tool_matches(
-		context
-			.catalog
-			.retrieve(&request.goal, Some(ResourceKind::Tool), 8),
-		context.availability_snapshot,
-	);
-	let skill_matches = context
-		.catalog
-		.retrieve(&request.goal, Some(ResourceKind::Skill), 4);
-	let candidates = llm_candidates(
-		context.catalog,
-		context.availability_snapshot,
-		context.agent_runtime_config,
-	);
-	let response = router
-		.generate_json_value(&GenerationRequest {
-			system_prompt: Some(
-				"You are Roku's route classifier. Return only valid JSON matching the requested schema."
-					.to_string(),
-			),
-			prompt: route_classifier_prompt(request, &candidates),
-			expected_output_tokens: context.agent_runtime_config.router.expected_output_tokens,
-			risk_tier: RiskTier::Low,
-			preferred_provider: None,
-			budget_tokens_remaining: context.agent_runtime_config.router.budget_tokens_remaining,
-			budget_cost_remaining_usd: context
-				.agent_runtime_config
-				.router
-				.budget_cost_remaining_usd,
-			tools: None,
-		})
-		.await;
-	let value = match response {
-		Ok(response) => response.value,
-		Err(error) => {
-			return llm_classifier_failure_route(context, error);
-		}
-	};
-	let mut decision = match RouteDecision::from_json_value(&value) {
-		Ok(decision) => decision,
-		Err(error) => {
-			return build_loop_hint_route(
-				context,
-				RouteDecision::new(
-					IntentFamily::Unknown,
-					0.0,
-					false,
-					RouteRisk::Low,
-					Vec::new(),
-					Vec::new(),
-					Vec::new(),
-					format!("route classifier returned invalid schema: {error}"),
-				),
-			);
-		}
-	};
-	if let Some(result) = classify_skill_route_from_decision(
-		context,
-		request,
-		&decision,
-		&skill_matches,
-		&tool_matches,
-	) {
-		return result;
-	}
-	if !decision.missing_arguments.is_empty() {
-		return build_loop_hint_route(context, decision);
-	}
-	if decision.confidence_score() < ROUTE_CONFIDENCE_FLOOR {
-		return build_loop_hint_route(context, decision);
-	}
-	if decision.requires_multi_step || decision.intent_family == IntentFamily::MultiStep {
-		return build_loop_hint_route(context, decision);
-	}
-	normalize_direct_route_seed(&request.goal, &mut decision);
-	build_tool_loop_route(context, decision, None, Vec::new())
-}
-
-fn unresolved_without_route_model() -> RouteDecisionResult {
-	let decision = RouteDecision::new(
-		IntentFamily::Unknown,
-		0.0,
-		false,
-		RouteRisk::Low,
-		Vec::new(),
-		Vec::new(),
-		Vec::new(),
-		"deterministic pre-classifier did not find a stable contract-level hint and no route model is available",
-	);
-	RouteDecisionResult::Escalate(RouteEscalationPlan {
-		decision,
-		reason: EscalationReason::RouteModelUnavailable,
-		action: EscalationAction::FallbackAnswer,
-	})
-}
-
-fn llm_classifier_failure_route(
-	context: &RouteClassifierContext<'_>,
-	error: StructuredGenerationError,
-) -> RouteDecisionResult {
-	let (reason, escalation_reason) = match error {
-		StructuredGenerationError::ParseGuard(error) => (
-			format!("route classifier parse guard rejected provider output: {error}"),
-			EscalationReason::RouteParseGuardFailure,
-		),
-		StructuredGenerationError::Llm(error) => (
-			format!("route classifier failed before producing a usable decision: {error}"),
-			EscalationReason::RouteClassifierFailure,
-		),
-	};
-	let mut decision = RouteDecision::new(
-		IntentFamily::Unknown,
-		0.0,
-		false,
-		RouteRisk::Low,
-		Vec::new(),
-		Vec::new(),
-		Vec::new(),
-		reason,
-	);
-	if matches!(escalation_reason, EscalationReason::RouteParseGuardFailure) {
-		decision.requires_multi_step = false;
-	}
-	build_loop_hint_route(context, decision)
-}
-
-fn llm_candidates(
-	catalog: &ResourceCatalog,
-	availability_snapshot: &RuntimeVisibleToolAvailabilitySnapshot,
-	config: &AgentRuntimeConfig,
-) -> Vec<serde_json::Value> {
-	let mut entries = catalog
-		.entries()
-		.iter()
-		.filter(|entry| {
-			entry.kind != ResourceKind::Tool || availability_snapshot.is_tool_enabled(&entry.name)
-		})
-		.map(|entry| {
-			json!({
-				"selector": entry.selector.display_key(),
-				"kind": format!("{:?}", entry.kind),
-				"name": entry.name,
-				"selection_hint": compact_selection_hint_text(
-					entry.effective_selection_hint(),
-					config.prompts.candidate_description_max_chars,
-				),
-				"required_arguments": tool_required_argument_keys(&entry.name, Some(catalog)),
-			})
-		})
-		.collect::<Vec<_>>();
-	entries.truncate(config.router.candidate_inventory_limit);
-	entries
-}
-
-fn compact_selection_hint_text(value: &str, max_chars: usize) -> String {
-	let trimmed = value.trim();
-	if trimmed.chars().count() <= max_chars {
-		return trimmed.to_string();
-	}
-	let truncated = trimmed
-		.chars()
-		.take(max_chars.saturating_sub(3))
-		.collect::<String>();
-	format!("{truncated}...")
-}
-
-fn route_classifier_prompt(request: &RequestEnvelope, candidates: &[serde_json::Value]) -> String {
-	format!(
-		r#"Return only JSON with exactly these keys:
-{{
-  "intent_family": "chat | filesystem_read | table_read | web_lookup | code_exec | text_transform | multi_step | unknown",
-  "confidence": 0.0,
-  "requires_multi_step": false,
-  "risk": "low | medium | high",
-  "candidate_tools": ["tool names"],
-  "candidate_plugins": ["plugin ids"],
-  "missing_arguments": ["argument names"],
-  "reason": "short explanation"
-}}
-
-Rules:
-- Use only candidate tool names from the provided selection inventory if you name tools.
-- Base the decision on the current user goal and the current selection inventory. Do not inherit intent from prior conversation turns unless the current goal explicitly restates it.
-- Use `chat` for greetings or direct assistant conversation.
-- Use `filesystem_read`, `table_read`, `web_lookup`, or `code_exec` when the intent clearly asks for those families even if no tool is available yet.
-- Use `multi_step` when the request obviously needs a planning-heavy workflow.
-- Use `skill.execute` only when the user is asking to actually run an installed script-backed skill and perform side effects.
-- If the user is asking to summarize, explain, describe, list, or quote guidance from an installed skill, do not select `skill.execute`; prefer an advisory route with no execution tool.
-- For natural-language filesystem or table requests that do not already contain one explicit tool-ready resource argument, avoid collapsing the route to one narrow tool path. Prefer an empty shortlist or a broad family shortlist instead of pre-binding to a single finder/reader tool.
-- Leave `candidate_tools` empty if no current direct tool is safe.
-- `missing_arguments` should be empty unless the user must provide something concrete first.
-
-User goal:
-{goal}
-
-Current selection inventory:
-{candidates}"#,
-		goal = request.goal,
-		candidates = serde_json::to_string_pretty(candidates).unwrap_or_default(),
-	)
-}
-
-fn classify_skill_route_from_decision(
-	context: &RouteClassifierContext<'_>,
-	request: &RequestEnvelope,
-	decision: &RouteDecision,
-	skill_matches: &[CatalogMatch],
-	tool_matches: &[CatalogMatch],
-) -> Option<RouteDecisionResult> {
-	let explicit_selector = explicit_skill_selector(context.catalog, &request.goal);
-	let should_consider_skill =
-		explicit_selector.is_some() || decision_requests_skill_local_context(context, decision);
-	if !should_consider_skill {
-		return None;
-	}
-	let selector =
-		explicit_selector.or_else(|| best_skill_selector(skill_matches, tool_matches))?;
-	let descriptor = context.catalog.descriptor(&selector)?;
-	Some(build_skill_route_result(
-		context,
-		selector,
-		descriptor,
-		decision_requests_skill_execution(context, decision),
-		format!(
-			"route classifier selected installed skill `{}`",
-			descriptor.name
-		),
-	))
 }
 
 fn classify_structural_fallback(
@@ -1293,45 +1066,6 @@ fn explicit_skill_selector(catalog: &ResourceCatalog, goal: &str) -> Option<Reso
 	})
 }
 
-fn best_skill_selector(
-	skill_matches: &[CatalogMatch],
-	tool_matches: &[CatalogMatch],
-) -> Option<ResourceSelector> {
-	let skill = skill_matches.first()?;
-	let tool_score = tool_matches
-		.first()
-		.map(|entry| entry.score)
-		.unwrap_or_default();
-	(skill.score >= MIN_SKILL_SCORE && skill.score >= tool_score * 1.10)
-		.then(|| skill.descriptor.selector.clone())
-}
-
-fn decision_requests_skill_local_context(
-	context: &RouteClassifierContext<'_>,
-	decision: &RouteDecision,
-) -> bool {
-	let execute_tool_name = tool_name_for_role(context.tool_config, BuiltinToolRole::SkillExecute);
-	decision
-		.candidate_tools
-		.iter()
-		.any(|tool_name| tool_name == &execute_tool_name || tool_name == "skill.execute")
-		|| decision
-			.candidate_plugins
-			.iter()
-			.any(|plugin_id| plugin_id == "skill-source-local")
-}
-
-fn decision_requests_skill_execution(
-	context: &RouteClassifierContext<'_>,
-	decision: &RouteDecision,
-) -> bool {
-	let execute_tool_name = tool_name_for_role(context.tool_config, BuiltinToolRole::SkillExecute);
-	decision
-		.candidate_tools
-		.iter()
-		.any(|tool_name| tool_name == &execute_tool_name || tool_name == "skill.execute")
-}
-
 fn extract_explicit_path_candidates(goal: &str) -> Vec<String> {
 	shared_extract_explicit_path_candidates(goal)
 }
@@ -1708,7 +1442,7 @@ mod tests {
 		let context = RouteClassifierContext {
 			catalog: &catalog,
 			tool_config: &tool_config,
-			agent_runtime_config: &agent_runtime_config,
+			_agent_runtime_config: &agent_runtime_config,
 			plugin_snapshot: &plugin_snapshot,
 			availability_snapshot: &availability_snapshot,
 			route_router: None,
