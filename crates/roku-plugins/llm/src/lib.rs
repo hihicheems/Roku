@@ -14,12 +14,20 @@
 
 //! Multi-provider model routing with budget and risk-aware controls.
 
+mod bootstrap;
 mod providers;
 mod router;
 mod types;
 
-pub use providers::anthropic::{AnthropicConfig, AnthropicProvider};
-pub use providers::openai::{OpenAiConfig, OpenAiProvider};
+pub use bootstrap::LlmProviderKind;
+pub use providers::anthropic::{
+	AnthropicBootstrapError, AnthropicConfig, AnthropicProvider, AnthropicRuntimeConfig,
+	AnthropicRuntimeConfigPatch, anthropic_api_key_from_env, build_anthropic_router_with_metrics,
+};
+pub use providers::openai::{
+	OpenAiBootstrapError, OpenAiConfig, OpenAiProvider, OpenAiRuntimeConfig,
+	OpenAiRuntimeConfigPatch, build_openai_router_with_metrics, openai_api_key_from_env,
+};
 pub use providers::openrouter::{
 	OpenRouterBootstrapError, OpenRouterConfig, OpenRouterProvider, OpenRouterRuntimeConfig,
 	OpenRouterRuntimeConfigPatch, build_openrouter_router, build_openrouter_router_with_metrics,

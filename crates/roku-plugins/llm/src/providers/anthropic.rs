@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -28,25 +29,190 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
-use roku_observability::{LogLevel, LogRecord, emit_global_log};
+use roku_observability::{LogLevel, LogRecord, Metrics, emit_global_log};
+use serde::Deserialize;
 use serde_json::Value;
+use thiserror::Error;
 use tokio::sync::mpsc;
 
-use crate::router::LlmProvider;
+use crate::router::{LlmProvider, LlmRouter};
 use crate::types::{
-	GenerationRequest, ModelProfile, ProviderCallError, ProviderResponse, StreamChunk,
-	ToolCallBlock, estimate_prompt_tokens,
+	GenerationRequest, ModelProfile, ProviderCallError, ProviderResponse, RiskTier, RoutingPolicy,
+	StreamChunk, ToolCallBlock, estimate_prompt_tokens,
 };
 
 const ANTHROPIC_PROVIDER: &str = "anthropic";
 const DEFAULT_ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u64 = 8192;
+const DEFAULT_ANTHROPIC_PRIMARY_MODEL: &str = "claude-sonnet-4-5-20250929";
+const DEFAULT_ANTHROPIC_FALLBACK_MODEL: &str = "claude-3-5-haiku-20241022";
+const DEFAULT_ANTHROPIC_MAX_CONTEXT_TOKENS: u64 = 200_000;
+const HARD_MAX_CONTEXT_TOKENS: u64 = 1_000_000;
+const HARD_MAX_REQUEST_COST_USD: f64 = 100.0;
+const HARD_MAX_LATENCY_MS: u64 = 300_000;
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
+/// Effective non-secret Anthropic runtime configuration.
+///
+/// Mirrors the shape of [`OpenRouterRuntimeConfig`] so the startup layer can
+/// treat every provider uniformly: parse a patch from `runtime.toml`,
+/// overlay environment overrides, validate and clamp. Secrets (API key)
+/// stay out of this struct — they are attached separately via
+/// [`AnthropicRuntimeConfig::with_api_key`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnthropicRuntimeConfig {
+	pub primary_model: String,
+	pub fallback_models: Vec<String>,
+	pub base_url: String,
+	pub max_tokens: u64,
+	pub max_context_tokens: u64,
+	pub cost_per_1k_tokens_usd: f64,
+	pub max_request_cost_usd: f64,
+	pub max_latency_ms: u64,
+}
+
+/// Partial overrides for [`AnthropicRuntimeConfig`].
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnthropicRuntimeConfigPatch {
+	pub primary_model: Option<String>,
+	pub fallback_models: Option<Vec<String>>,
+	pub base_url: Option<String>,
+	pub max_tokens: Option<u64>,
+	pub max_context_tokens: Option<u64>,
+	pub cost_per_1k_tokens_usd: Option<f64>,
+	pub max_request_cost_usd: Option<f64>,
+	pub max_latency_ms: Option<u64>,
+}
+
+impl Default for AnthropicRuntimeConfig {
+	fn default() -> Self {
+		Self {
+			primary_model: DEFAULT_ANTHROPIC_PRIMARY_MODEL.to_string(),
+			fallback_models: vec![DEFAULT_ANTHROPIC_FALLBACK_MODEL.to_string()],
+			base_url: DEFAULT_ANTHROPIC_URL.to_string(),
+			max_tokens: DEFAULT_MAX_TOKENS,
+			max_context_tokens: DEFAULT_ANTHROPIC_MAX_CONTEXT_TOKENS,
+			cost_per_1k_tokens_usd: 0.0,
+			max_request_cost_usd: 1.0,
+			max_latency_ms: 60_000,
+		}
+	}
+}
+
+impl AnthropicRuntimeConfig {
+	pub fn apply_patch(&mut self, patch: AnthropicRuntimeConfigPatch) {
+		if let Some(value) = patch.primary_model {
+			self.primary_model = value;
+		}
+		if let Some(value) = patch.fallback_models {
+			self.fallback_models = value;
+		}
+		if let Some(value) = patch.base_url {
+			self.base_url = value;
+		}
+		if let Some(value) = patch.max_tokens {
+			self.max_tokens = value;
+		}
+		if let Some(value) = patch.max_context_tokens {
+			self.max_context_tokens = value;
+		}
+		if let Some(value) = patch.cost_per_1k_tokens_usd {
+			self.cost_per_1k_tokens_usd = value;
+		}
+		if let Some(value) = patch.max_request_cost_usd {
+			self.max_request_cost_usd = value;
+		}
+		if let Some(value) = patch.max_latency_ms {
+			self.max_latency_ms = value;
+		}
+	}
+
+	pub fn apply_env_overrides(&mut self) -> Result<(), AnthropicBootstrapError> {
+		if let Some(value) = env_override_string("ROKU_ANTHROPIC_PRIMARY_MODEL") {
+			self.primary_model = value;
+		}
+		if let Some(value) = env_override_string("ROKU_ANTHROPIC_BASE_URL") {
+			self.base_url = value;
+		}
+		if let Some(value) = env_var_u64("ROKU_ANTHROPIC_MAX_TOKENS")? {
+			self.max_tokens = value;
+		}
+		Ok(())
+	}
+
+	pub fn validate_and_clamp(&mut self) -> Result<(), AnthropicBootstrapError> {
+		self.primary_model = self.primary_model.trim().to_string();
+		self.base_url = self.base_url.trim().to_string();
+		if self.primary_model.is_empty() {
+			return Err(AnthropicBootstrapError::InvalidEnv {
+				key: "ROKU_ANTHROPIC_PRIMARY_MODEL",
+				message: "value cannot be empty".to_string(),
+			});
+		}
+		if self.base_url.is_empty() {
+			return Err(AnthropicBootstrapError::InvalidEnv {
+				key: "ROKU_ANTHROPIC_BASE_URL",
+				message: "value cannot be empty".to_string(),
+			});
+		}
+		if self.max_tokens == 0 {
+			return Err(AnthropicBootstrapError::InvalidEnv {
+				key: "ROKU_ANTHROPIC_MAX_TOKENS",
+				message: "value must be greater than zero".to_string(),
+			});
+		}
+		if self.max_context_tokens == 0 {
+			return Err(AnthropicBootstrapError::InvalidEnv {
+				key: "max_context_tokens",
+				message: "value must be greater than zero".to_string(),
+			});
+		}
+		if self.cost_per_1k_tokens_usd < 0.0 {
+			return Err(AnthropicBootstrapError::InvalidEnv {
+				key: "cost_per_1k_tokens_usd",
+				message: "value must be non-negative".to_string(),
+			});
+		}
+		if self.max_request_cost_usd <= 0.0 {
+			return Err(AnthropicBootstrapError::InvalidEnv {
+				key: "max_request_cost_usd",
+				message: "value must be greater than zero".to_string(),
+			});
+		}
+		if self.max_latency_ms == 0 {
+			return Err(AnthropicBootstrapError::InvalidEnv {
+				key: "max_latency_ms",
+				message: "value must be greater than zero".to_string(),
+			});
+		}
+		self.max_context_tokens = self.max_context_tokens.min(HARD_MAX_CONTEXT_TOKENS);
+		self.max_request_cost_usd = self.max_request_cost_usd.min(HARD_MAX_REQUEST_COST_USD);
+		self.max_latency_ms = self.max_latency_ms.min(HARD_MAX_LATENCY_MS);
+		// Drop any fallback that duplicates the primary.
+		self.fallback_models
+			.retain(|model| model != &self.primary_model);
+		Ok(())
+	}
+
+	/// Attach a resolved API key to produce the full [`AnthropicConfig`] the
+	/// provider uses at request time.
+	pub fn with_api_key(self, api_key: String) -> AnthropicConfig {
+		AnthropicConfig {
+			api_key,
+			base_url: self.base_url,
+			max_tokens: self.max_tokens,
+		}
+	}
+}
+
+/// Full per-request Anthropic configuration, including the resolved API
+/// key. Constructed via [`AnthropicRuntimeConfig::with_api_key`] at
+/// bootstrap time or [`AnthropicConfig::from_env`] for ad-hoc use.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnthropicConfig {
 	pub api_key: String,
@@ -69,6 +235,93 @@ impl AnthropicConfig {
 			max_tokens: DEFAULT_MAX_TOKENS,
 		})
 	}
+}
+
+#[derive(Debug, Error)]
+pub enum AnthropicBootstrapError {
+	#[error("missing required environment variable: {0}")]
+	MissingEnv(&'static str),
+	#[error("invalid environment variable {key}: {message}")]
+	InvalidEnv { key: &'static str, message: String },
+	#[error("failed to construct anthropic http client: {0}")]
+	HttpClient(#[from] reqwest::Error),
+	#[error("anthropic provider bootstrap failed: {0}")]
+	Provider(String),
+}
+
+impl From<ProviderCallError> for AnthropicBootstrapError {
+	fn from(error: ProviderCallError) -> Self {
+		AnthropicBootstrapError::Provider(error.to_string())
+	}
+}
+
+fn env_override_string(key: &str) -> Option<String> {
+	std::env::var(key)
+		.ok()
+		.map(|value| value.trim().to_string())
+		.filter(|value| !value.is_empty())
+}
+
+fn env_var_u64(key: &'static str) -> Result<Option<u64>, AnthropicBootstrapError> {
+	let Some(raw) = env_override_string(key) else {
+		return Ok(None);
+	};
+	raw.parse::<u64>()
+		.map(Some)
+		.map_err(|error| AnthropicBootstrapError::InvalidEnv {
+			key,
+			message: error.to_string(),
+		})
+}
+
+/// Read the Anthropic API key from the environment.
+///
+/// Kept separate from [`AnthropicRuntimeConfig`] so future credential
+/// sources (OAuth, TUI picker, keyring) can be added without reshaping the
+/// runtime config surface.
+pub fn anthropic_api_key_from_env() -> Result<String, AnthropicBootstrapError> {
+	std::env::var("ROKU_ANTHROPIC_API_KEY")
+		.ok()
+		.map(|value| value.trim().to_string())
+		.filter(|value| !value.is_empty())
+		.ok_or(AnthropicBootstrapError::MissingEnv(
+			"ROKU_ANTHROPIC_API_KEY",
+		))
+}
+
+/// Construct a live [`LlmRouter`] backed by Anthropic.
+///
+/// Registers the provider plus a prioritized sequence of
+/// [`ModelProfile`] entries built from
+/// [`AnthropicRuntimeConfig::primary_model`] and its fallback chain.
+pub fn build_anthropic_router_with_metrics(
+	config: AnthropicConfig,
+	runtime_config: AnthropicRuntimeConfig,
+	metrics: Arc<Metrics>,
+) -> Result<LlmRouter, AnthropicBootstrapError> {
+	let mut router = LlmRouter::new(RoutingPolicy {
+		max_request_cost_usd: runtime_config.max_request_cost_usd,
+		max_latency_ms: runtime_config.max_latency_ms,
+	})
+	.with_metrics(metrics);
+	router.register_provider(AnthropicProvider::new(config)?);
+
+	let mut model_chain =
+		Vec::with_capacity(runtime_config.fallback_models.len().saturating_add(1));
+	model_chain.push(runtime_config.primary_model.clone());
+	model_chain.extend(runtime_config.fallback_models.iter().cloned());
+
+	for (index, model_id) in model_chain.into_iter().enumerate() {
+		router.register_model(ModelProfile {
+			model_id,
+			provider: ANTHROPIC_PROVIDER.to_string(),
+			max_context_tokens: runtime_config.max_context_tokens,
+			cost_per_1k_tokens_usd: runtime_config.cost_per_1k_tokens_usd,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100u8.saturating_sub(u8::try_from(index).unwrap_or(u8::MAX)),
+		});
+	}
+	Ok(router)
 }
 
 // ---------------------------------------------------------------------------

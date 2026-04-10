@@ -27,7 +27,10 @@ use roku_agent_runtime::{
 };
 use roku_memory::MemoryBackendId;
 use roku_observability::{LogLevel, LogRecord, emit_global_log};
-use roku_plugin_llm::{OpenRouterRuntimeConfig, OpenRouterRuntimeConfigPatch};
+use roku_plugin_llm::{
+	AnthropicRuntimeConfig, AnthropicRuntimeConfigPatch, LlmProviderKind, OpenAiRuntimeConfig,
+	OpenAiRuntimeConfigPatch, OpenRouterRuntimeConfig, OpenRouterRuntimeConfigPatch,
+};
 use roku_plugin_skills::{SkillsRuntimeConfig, SkillsRuntimeConfigPatch};
 use roku_plugin_telegram::{TelegramRuntimeConfig, TelegramRuntimeConfigPatch};
 use serde::Deserialize;
@@ -43,7 +46,10 @@ use crate::{CommandError, storage::LocalStorageLayout};
 pub(crate) struct RuntimeConfigs {
 	pub agent: AgentRuntimeConfig,
 	pub tools: ToolsRuntimeConfig,
+	pub llm_provider: LlmProviderKind,
 	pub openrouter: OpenRouterRuntimeConfig,
+	pub anthropic: AnthropicRuntimeConfig,
+	pub openai: OpenAiRuntimeConfig,
 	pub telegram: TelegramRuntimeConfig,
 	pub skills: SkillsRuntimeConfig,
 	pub memory: MemoryRuntimeConfig,
@@ -76,8 +82,16 @@ struct RuntimeSections {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LlmSections {
+	/// Which provider backs the live runtime. Defaults to OpenRouter when
+	/// unset so existing deployments keep working without config changes.
+	#[serde(default)]
+	provider: Option<LlmProviderKind>,
 	#[serde(default)]
 	openrouter: OpenRouterRuntimeConfigPatch,
+	#[serde(default)]
+	anthropic: AnthropicRuntimeConfigPatch,
+	#[serde(default)]
+	openai: OpenAiRuntimeConfigPatch,
 }
 
 /// Loads the effective runtime config bundle from disk and env for this process.
@@ -125,6 +139,8 @@ pub(crate) fn load_runtime_configs(
 		))
 	})?;
 
+	let llm_provider = parsed.runtime.llm.provider.unwrap_or_default();
+
 	let mut openrouter = OpenRouterRuntimeConfig::default();
 	openrouter.apply_patch(parsed.runtime.llm.openrouter);
 	openrouter
@@ -133,6 +149,32 @@ pub(crate) fn load_runtime_configs(
 	openrouter
 		.validate_and_clamp()
 		.map_err(CommandError::from)?;
+
+	let mut anthropic = AnthropicRuntimeConfig::default();
+	anthropic.apply_patch(parsed.runtime.llm.anthropic);
+	anthropic.apply_env_overrides().map_err(|error| {
+		CommandError::RuntimeConfigBootstrap(format!(
+			"failed to load runtime.llm.anthropic config: {error}"
+		))
+	})?;
+	anthropic.validate_and_clamp().map_err(|error| {
+		CommandError::RuntimeConfigBootstrap(format!(
+			"failed to validate runtime.llm.anthropic config: {error}"
+		))
+	})?;
+
+	let mut openai = OpenAiRuntimeConfig::default();
+	openai.apply_patch(parsed.runtime.llm.openai);
+	openai.apply_env_overrides().map_err(|error| {
+		CommandError::RuntimeConfigBootstrap(format!(
+			"failed to load runtime.llm.openai config: {error}"
+		))
+	})?;
+	openai.validate_and_clamp().map_err(|error| {
+		CommandError::RuntimeConfigBootstrap(format!(
+			"failed to validate runtime.llm.openai config: {error}"
+		))
+	})?;
 
 	let mut telegram = TelegramRuntimeConfig::default();
 	telegram.apply_patch(parsed.runtime.telegram);
@@ -160,7 +202,10 @@ pub(crate) fn load_runtime_configs(
 	Ok(RuntimeConfigs {
 		agent,
 		tools,
+		llm_provider,
 		openrouter,
+		anthropic,
+		openai,
 		telegram,
 		skills,
 		memory,
@@ -455,6 +500,134 @@ api_key = "should-not-be-configurable"
 
 		assert!(matches!(error, CommandError::RuntimeConfigBootstrap(_)));
 		assert!(error.to_string().contains("unknown field `api_key`"));
+	}
+
+	#[test]
+	fn default_llm_provider_is_openrouter() {
+		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
+		let layout = temp_layout();
+
+		let configs = load_runtime_configs(&layout).expect("defaults should load");
+
+		assert_eq!(configs.llm_provider, LlmProviderKind::Openrouter);
+	}
+
+	#[test]
+	fn runtime_toml_selects_anthropic_provider_and_parses_subsection() {
+		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
+		let _clear_primary = EnvGuard::remove("ROKU_ANTHROPIC_PRIMARY_MODEL");
+		let _clear_base_url = EnvGuard::remove("ROKU_ANTHROPIC_BASE_URL");
+		let _clear_max_tokens = EnvGuard::remove("ROKU_ANTHROPIC_MAX_TOKENS");
+		let layout = temp_layout();
+		write_runtime_toml(
+			&layout,
+			r#"
+[runtime.llm]
+provider = "anthropic"
+
+[runtime.llm.anthropic]
+primary_model = "claude-opus-4-20250805"
+fallback_models = ["claude-sonnet-4-5-20250929"]
+max_tokens = 4096
+"#,
+		);
+
+		let configs = load_runtime_configs(&layout).expect("anthropic config should load");
+
+		assert_eq!(configs.llm_provider, LlmProviderKind::Anthropic);
+		assert_eq!(configs.anthropic.primary_model, "claude-opus-4-20250805");
+		assert_eq!(
+			configs.anthropic.fallback_models,
+			vec!["claude-sonnet-4-5-20250929".to_string()]
+		);
+		assert_eq!(configs.anthropic.max_tokens, 4096);
+	}
+
+	#[test]
+	fn runtime_toml_selects_openai_provider_and_parses_subsection() {
+		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
+		let _clear_primary = EnvGuard::remove("ROKU_OPENAI_PRIMARY_MODEL");
+		let _clear_base_url = EnvGuard::remove("ROKU_OPENAI_BASE_URL");
+		let _clear_max_tokens = EnvGuard::remove("ROKU_OPENAI_MAX_TOKENS");
+		let layout = temp_layout();
+		write_runtime_toml(
+			&layout,
+			r#"
+[runtime.llm]
+provider = "openai"
+
+[runtime.llm.openai]
+primary_model = "gpt-4o-2024-11-20"
+fallback_models = ["gpt-4o-mini"]
+max_tokens = 2048
+"#,
+		);
+
+		let configs = load_runtime_configs(&layout).expect("openai config should load");
+
+		assert_eq!(configs.llm_provider, LlmProviderKind::Openai);
+		assert_eq!(configs.openai.primary_model, "gpt-4o-2024-11-20");
+		assert_eq!(
+			configs.openai.fallback_models,
+			vec!["gpt-4o-mini".to_string()]
+		);
+		assert_eq!(configs.openai.max_tokens, 2048);
+	}
+
+	#[test]
+	fn runtime_toml_rejects_api_key_in_anthropic_section() {
+		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
+		let layout = temp_layout();
+		write_runtime_toml(
+			&layout,
+			r#"
+[runtime.llm.anthropic]
+api_key = "should-not-be-configurable"
+"#,
+		);
+
+		let error =
+			load_runtime_configs(&layout).expect_err("api_key in runtime.toml must be rejected");
+
+		assert!(matches!(error, CommandError::RuntimeConfigBootstrap(_)));
+		assert!(error.to_string().contains("unknown field `api_key`"));
+	}
+
+	#[test]
+	fn runtime_toml_rejects_api_key_in_openai_section() {
+		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
+		let layout = temp_layout();
+		write_runtime_toml(
+			&layout,
+			r#"
+[runtime.llm.openai]
+api_key = "should-not-be-configurable"
+"#,
+		);
+
+		let error =
+			load_runtime_configs(&layout).expect_err("api_key in runtime.toml must be rejected");
+
+		assert!(matches!(error, CommandError::RuntimeConfigBootstrap(_)));
+		assert!(error.to_string().contains("unknown field `api_key`"));
+	}
+
+	#[test]
+	fn runtime_toml_rejects_unknown_llm_provider_value() {
+		let _env_lock = ENV_MUTEX.lock().expect("env mutex should lock");
+		let layout = temp_layout();
+		write_runtime_toml(
+			&layout,
+			r#"
+[runtime.llm]
+provider = "bogus"
+"#,
+		);
+
+		let error =
+			load_runtime_configs(&layout).expect_err("unknown provider variant should fail");
+
+		assert!(matches!(error, CommandError::RuntimeConfigBootstrap(_)));
 	}
 
 	#[test]
