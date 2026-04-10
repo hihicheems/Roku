@@ -29,7 +29,6 @@ pub enum BuiltinToolRole {
 	Research,
 	Data,
 	Review,
-	General,
 }
 
 impl BuiltinToolRole {
@@ -41,7 +40,6 @@ impl BuiltinToolRole {
 			Self::Research => "research",
 			Self::Data => "data",
 			Self::Review => "review",
-			Self::General => "general",
 		}
 	}
 }
@@ -127,10 +125,6 @@ mod tests {
 	#[test]
 	fn default_config_exposes_expected_roles() {
 		let config = ToolCatalogConfig::default();
-		assert!(config.tool_for_role(BuiltinToolRole::Inventory).is_some());
-		assert!(config.tool_for_role(BuiltinToolRole::Research).is_some());
-		assert!(config.tool_for_role(BuiltinToolRole::Data).is_some());
-		assert!(config.tool_for_role(BuiltinToolRole::Review).is_some());
 		assert!(
 			config
 				.tool_for_role(BuiltinToolRole::SkillInstall)
@@ -141,13 +135,6 @@ mod tests {
 				.tool_for_role(BuiltinToolRole::SkillExecute)
 				.is_some()
 		);
-		assert!(
-			config
-				.tool_for_role(BuiltinToolRole::Inventory)
-				.is_some_and(|tool| tool.terminal_output)
-		);
-		// general.execute removed from catalog — General role is no longer present
-		assert!(config.tool_for_role(BuiltinToolRole::General).is_none());
 	}
 
 	#[test]
@@ -155,10 +142,10 @@ mod tests {
 		let error = ToolCatalogConfig::from_toml(
 			r#"
 [[tools]]
-name = "inventory.describe"
-role = "inventory"
-description = "Describe all available tools, skills, and capability families."
-selection_hint = "List or explain what tools and skills are available."
+name = "skill.ensure_installed"
+role = "skill_install"
+description = "Install a skill."
+selection_hint = "Install a skill."
 extra = "not-allowed"
 "#,
 		)
@@ -173,9 +160,9 @@ extra = "not-allowed"
 		let config = ToolCatalogConfig::from_toml(
 			r#"
 [[tools]]
-name = "inventory.describe"
-role = "inventory"
-description = "Describe all available tools, skills, and capability families."
+name = "skill.ensure_installed"
+role = "skill_install"
+description = "Install a skill."
 "#,
 		)
 		.expect("missing selection_hint should fall back to description");

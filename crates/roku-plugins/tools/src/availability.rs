@@ -172,22 +172,25 @@ mod tests {
 			&runtime_catalog(false),
 			&[
 				"skill.execute",
-				"inventory.describe",
+				"skill.ensure_installed",
 				"fs.read_text",
-				"inventory.describe",
+				"skill.ensure_installed",
 				"not.enabled",
 			],
 		);
 
 		assert!(!snapshot.is_tool_enabled("skill.execute"));
-		assert!(snapshot.is_tool_enabled("inventory.describe"));
+		assert!(snapshot.is_tool_enabled("skill.ensure_installed"));
 		assert!(
 			snapshot.is_tool_enabled("command.run"),
 			"policy-gated tools must remain enabled in the visibility contract"
 		);
 		assert_eq!(
 			snapshot.baseline_visible_tools,
-			vec!["inventory.describe".to_string(), "fs.read_text".to_string()]
+			vec![
+				"skill.ensure_installed".to_string(),
+				"fs.read_text".to_string()
+			]
 		);
 	}
 
@@ -195,7 +198,7 @@ mod tests {
 	fn snapshot_filters_shortlist_candidates_and_compose_returns_all_enabled_tools() {
 		let snapshot = RuntimeVisibleToolAvailabilitySnapshot::from_resource_catalog(
 			&runtime_catalog(false),
-			&["inventory.describe", "table.preview"],
+			&["skill.ensure_installed", "table.preview"],
 		);
 
 		assert_eq!(
@@ -204,11 +207,14 @@ mod tests {
 				&[
 					"not.enabled".to_string(),
 					"fs.read_text".to_string(),
-					"inventory.describe".to_string(),
+					"skill.ensure_installed".to_string(),
 					"fs.read_text".to_string(),
 				],
 			),
-			vec!["fs.read_text".to_string(), "inventory.describe".to_string()]
+			vec![
+				"fs.read_text".to_string(),
+				"skill.ensure_installed".to_string()
+			]
 		);
 
 		// compose_visible_tools now always returns ALL enabled tools.
