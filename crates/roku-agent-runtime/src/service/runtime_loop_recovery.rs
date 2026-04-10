@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_agent_runtime::{LoopEventSender, LoopState};
+use crate::{LoopEventSender, LoopState};
 use roku_common_types::LogLevel;
 use roku_common_types::{
 	RequestEnvelope, ResponseEnvelope, RuntimeError, RuntimeMemorySections, Task, TaskId,
 };
 
-use crate::{ContextBundle, RuntimeMemoryLayers, RuntimeService};
-use crate::{log_runtime, truncate_for_log};
+use super::{ContextBundle, RuntimeMemoryLayers, RuntimeService};
+use super::{log_runtime, truncate_for_log};
 
 impl RuntimeService {
 	pub fn pending_loop(&self, session_id: &str) -> Result<Option<LoopState>, RuntimeError> {
@@ -36,7 +36,7 @@ impl RuntimeService {
 
 	pub(super) fn sync_pending_loop(&self, loop_state: &LoopState) -> Result<(), RuntimeError> {
 		match loop_state.status {
-			roku_agent_runtime::LoopStatus::AwaitingUser => {
+			crate::LoopStatus::AwaitingUser => {
 				self.pending_loop_snapshot_store.store(loop_state)?;
 			}
 			_ => {

@@ -21,9 +21,9 @@
 //! of keeping a separate pending/resume shape.
 
 use roku_agent_runtime::LoopState;
+use roku_agent_runtime::PendingLoopSnapshotStore;
 use roku_common_types::RuntimeError;
 use roku_memory::{PendingLoopSnapshot, PendingLoopSnapshotBackend, PendingLoopSnapshotError};
-use roku_runtime_service::PendingLoopSnapshotStore;
 
 pub(crate) struct MemoryPendingLoopSnapshotStore {
 	backend: Box<dyn PendingLoopSnapshotBackend>,

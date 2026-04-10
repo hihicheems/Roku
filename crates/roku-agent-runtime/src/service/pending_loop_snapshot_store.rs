@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use roku_agent_runtime::LoopState;
+use crate::LoopState;
 use roku_common_types::RuntimeError;
 
 /// Runtime-facing persistence boundary for generic paused-loop snapshots.

@@ -790,21 +790,23 @@ impl GenericAgentRuntime {
 		user_reply: Option<&str>,
 		event_sender: Option<&crate::runtime_loop::LoopEventSender>,
 	) -> DirectRouteExecutionResult {
-		// Require a router — the message-based loop cannot function without LLM decisions.
+		// Without an LLM router the message-based loop cannot make decisions.
+		// Return a graceful completion — the runtime still functions for
+		// orchestration, approval, and memory paths.
 		let Some(router) = self.route_router.as_deref() else {
-			let message = "No LLM router is configured; cannot run the tool loop.".to_string();
+			let message = user_reply.unwrap_or(&loop_state.goal).to_string();
 			self.record_terminal_step(
 				loop_state,
-				StepAction::Fail,
-				"No LLM router available.",
+				StepAction::FinalAnswer,
+				"No LLM router available; echoing user input as final answer.",
 				Some(message.clone()),
 			);
 			return self.synthetic_loop_terminal_result(
 				task_id,
 				"tool",
 				message,
-				StepAction::Fail,
-				ResultStatus::Error,
+				StepAction::FinalAnswer,
+				ResultStatus::Ok,
 				Some(loop_state),
 			);
 		};

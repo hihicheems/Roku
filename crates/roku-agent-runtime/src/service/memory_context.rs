@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use roku_agent_runtime::RouteDecisionResult;
+use crate::RouteDecisionResult;
 use roku_common_types::LogLevel;
 use roku_common_types::{
 	ConversationRole, ConversationTurn, RequestEnvelope, ResourceSelector, ResponseEnvelope,
@@ -25,7 +25,7 @@ use roku_memory::{
 	MemoryWritePolicyInput,
 };
 
-use crate::{RuntimeService, log_runtime};
+use super::{RuntimeService, log_runtime};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RuntimeMemoryLayers {
@@ -218,7 +218,7 @@ impl RuntimeService {
 	pub(crate) fn attach_resumed_loop_resources(
 		&self,
 		context_bundle: &mut ContextBundle,
-		loop_state: &roku_agent_runtime::LoopState,
+		loop_state: &crate::LoopState,
 	) {
 		context_bundle.visible_resources = loop_state.bound_resources.clone();
 	}

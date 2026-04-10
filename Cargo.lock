@@ -2065,6 +2065,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "roku-common-types",
+ "roku-memory",
  "roku-plugin-host",
  "roku-plugin-llm",
  "roku-plugin-skills",
@@ -2085,8 +2086,8 @@ version = "0.1.0"
 dependencies = [
  "actix-web",
  "async-trait",
+ "roku-agent-runtime",
  "roku-common-types",
- "roku-runtime-service",
  "serde",
  "tokio",
 ]
@@ -2111,7 +2112,6 @@ dependencies = [
  "roku-plugin-skills",
  "roku-plugin-telegram",
  "roku-plugin-tools",
- "roku-runtime-service",
  "rustyline",
  "serde",
  "serde_json",
@@ -2264,21 +2264,6 @@ dependencies = [
  "time",
  "toml",
  "url",
- "zip 8.5.1",
-]
-
-[[package]]
-name = "roku-runtime-service"
-version = "0.1.0"
-dependencies = [
- "roku-agent-runtime",
- "roku-common-types",
- "roku-memory",
- "roku-plugin-skills",
- "roku-plugin-tools",
- "serde_json",
- "tempfile",
- "tokio",
  "zip 8.5.1",
 ]
 

@@ -12,14 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_agent_runtime::{
-	EscalationAction, EscalationReason, LoopEventSender, RouteDecisionResult,
-};
+use crate::{EscalationAction, EscalationReason, LoopEventSender, RouteDecisionResult};
 use roku_common_types::{
 	RequestEnvelope, ResponseEnvelope, RuntimeError, RuntimeMemorySections, Task,
 };
 
-use crate::{ContextBundle, RuntimeMemoryLayers, RuntimeService, log_route_decision};
+use super::{ContextBundle, RuntimeMemoryLayers, RuntimeService, log_route_decision};
 
 pub(super) struct RuntimeLoopOwner<'a> {
 	service: &'a RuntimeService,
@@ -121,7 +119,7 @@ impl<'a> RuntimeLoopOwner<'a> {
 		task: &mut Task,
 		request: &RequestEnvelope,
 		route: &RouteDecisionResult,
-		loop_state: &mut roku_agent_runtime::LoopState,
+		loop_state: &mut crate::LoopState,
 		prepared: &PreparedRuntimeLoopRequest,
 		event_sender: Option<&LoopEventSender>,
 	) -> Result<ResponseEnvelope, RuntimeError> {

@@ -254,8 +254,8 @@ mod tests {
 	use actix_web::{App, test};
 
 	use super::*;
+	use roku_agent_runtime::RuntimeService;
 	use roku_common_types::{RequestEnvelope, RequestId, TaskReplayReport, TaskState};
-	use roku_runtime_service::RuntimeService;
 
 	use crate::executor::{GatewayAppState, NoopExecutor, RuntimeServiceExecutor};
 	use crate::models::{ArtifactResponse, ExperimentResponse};
