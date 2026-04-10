@@ -19,7 +19,7 @@ use roku_common_types::{
 	CanonicalDigest, CanonicalExecution, ExecutionActionClass, ExecutionEnvPolicy,
 	ExecutionEnvPolicyMode, ExecutionResourceScope, InvocationMode, ToolOutputEnvelope,
 };
-use roku_observability::{LogLevel, LogRecord, emit_global_log};
+use roku_common_types::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_host::{ToolFailure, ToolInvocationRequest};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

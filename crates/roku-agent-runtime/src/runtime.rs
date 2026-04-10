@@ -47,11 +47,12 @@ use roku_common_types::{
 	TaskNodeDispatchPolicy, TaskNodeKind,
 };
 use roku_common_types::{AgentInstanceSpec, ResultEnvelope, TaskNode};
-use roku_plugin_catalog::{ResourceCatalog, ResourceKind};
-use roku_plugin_core::PluginRegistrySnapshot;
-use roku_plugin_host::{ToolExecutionResult, ToolInvocation, ToolRuntime, ToolRuntimeError};
+use roku_plugin_host::{
+	PluginRegistrySnapshot, ToolExecutionResult, ToolInvocation, ToolRuntime, ToolRuntimeError,
+};
 use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier};
 use roku_plugin_skills::SkillRegistry;
+use roku_plugin_tools::{ResourceCatalog, ResourceKind};
 use roku_plugin_tools::{
 	RuntimeVisibleToolAvailabilitySnapshot, build_runtime_visible_tool_availability_snapshot,
 	canonical_execution_for_builtin_tool_input,
@@ -404,11 +405,11 @@ impl GenericAgentRuntime {
 		plugin_snapshot: PluginRegistrySnapshot,
 		tools_runtime_config: ToolsRuntimeConfig,
 		agent_runtime_config: AgentRuntimeConfig,
-		mcp_catalog_entries: Vec<roku_plugin_catalog::CatalogDescriptor>,
+		mcp_catalog_entries: Vec<roku_plugin_tools::CatalogDescriptor>,
 		mcp_tools: Vec<Box<dyn roku_plugin_host::Tool>>,
 		mcp_runtime: Option<Arc<tokio::runtime::Runtime>>,
 	) -> Self {
-		use roku_observability::{LogLevel, LogRecord, emit_global_log};
+		use roku_common_types::{LogLevel, LogRecord, emit_global_log};
 
 		let mut resource_catalog =
 			build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config(
@@ -2208,7 +2209,7 @@ mod tests {
 			router,
 			SkillRegistry::disabled(),
 			ToolCatalogConfig::default(),
-			roku_plugin_core::PluginRegistrySnapshot::permissive(),
+			PluginRegistrySnapshot::permissive(),
 			tools_runtime_config,
 		)
 	}

@@ -92,10 +92,10 @@
 //! be treated as architecture drift.
 //!
 use roku_common_types::{RequestEnvelope, ResourceSelector};
-use roku_plugin_catalog::{CatalogDescriptor, CatalogMatch, ResourceCatalog, ResourceKind};
-use roku_plugin_core::PluginRegistrySnapshot;
+use roku_plugin_host::PluginRegistrySnapshot;
 use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier, StructuredGenerationError};
 use roku_plugin_tools::RuntimeVisibleToolAvailabilitySnapshot;
+use roku_plugin_tools::{CatalogDescriptor, CatalogMatch, ResourceCatalog, ResourceKind};
 use serde_json::json;
 
 use crate::AgentRuntimeConfig;
@@ -1623,9 +1623,9 @@ fn candidate_plugins_for_tool(
 
 fn resource_risk(descriptor: &CatalogDescriptor) -> RouteRisk {
 	match descriptor.risk {
-		roku_plugin_catalog::ResourceRisk::Low => RouteRisk::Low,
-		roku_plugin_catalog::ResourceRisk::Medium => RouteRisk::Medium,
-		roku_plugin_catalog::ResourceRisk::High => RouteRisk::High,
+		roku_plugin_tools::ResourceRisk::Low => RouteRisk::Low,
+		roku_plugin_tools::ResourceRisk::Medium => RouteRisk::Medium,
+		roku_plugin_tools::ResourceRisk::High => RouteRisk::High,
 	}
 }
 
@@ -1634,8 +1634,8 @@ mod tests {
 	use super::*;
 	use std::collections::BTreeSet;
 
-	use roku_plugin_catalog::{ResourceCost, ResourceRisk};
 	use roku_plugin_tools::RuntimeVisibleToolAvailabilitySnapshot;
+	use roku_plugin_tools::{ResourceCost, ResourceRisk};
 
 	fn tool_descriptor(name: &str) -> CatalogDescriptor {
 		CatalogDescriptor {

@@ -13,9 +13,6 @@ glob = "0.3"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 roku-common-types = { path = "../../roku-common-types" }
-roku-observability = { path = "../../roku-observability" }
-roku-plugin-catalog = { path = "../catalog" }
-roku-plugin-core = { path = "../core" }
 roku-plugin-host = { path = "../host" }
 roku-plugin-llm = { path = "../llm" }
 roku-plugin-skills = { path = "../skills" }

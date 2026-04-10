@@ -161,6 +161,7 @@ impl RuntimeService {
 			.map_err(|error| RuntimeError::new(error.to_string()))
 	}
 
+	#[allow(dead_code)]
 	pub(super) fn list_results(
 		&self,
 		task_id: &TaskId,

@@ -16,7 +16,7 @@ use std::fs;
 use std::path::Path;
 
 use roku_common_types::ToolContract;
-use roku_plugin_catalog::{ResourceCost, ResourceRisk};
+use roku_common_types::{ResourceCost, ResourceRisk};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

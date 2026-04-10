@@ -15,8 +15,8 @@
 use std::fs;
 use std::path::Path;
 
-use roku_observability::{LogLevel, LogRecord, emit_global_log};
-use roku_plugin_core::{PluginCoreError, PluginManifest, PluginSource, PluginSourceKind};
+use crate::{PluginCoreError, PluginManifest, PluginSource, PluginSourceKind};
+use roku_common_types::{LogLevel, LogRecord, emit_global_log};
 use walkdir::WalkDir;
 
 use crate::startup::{BundledPluginDescriptor, PluginDiscoveryConfig, PluginHostError};
@@ -87,7 +87,7 @@ fn discover_from_path(
 	path: &Path,
 	kind: PluginSourceKind,
 	precedence: u8,
-	implementation_ids: &[roku_plugin_core::PluginId],
+	implementation_ids: &[crate::PluginId],
 ) -> Result<Vec<DiscoveredPluginCandidate>, PluginHostError> {
 	if !path.exists() {
 		if matches!(
@@ -132,7 +132,7 @@ fn parse_manifest_candidate(
 	manifest_path: &Path,
 	kind: PluginSourceKind,
 	precedence: u8,
-	implementation_ids: &[roku_plugin_core::PluginId],
+	implementation_ids: &[crate::PluginId],
 ) -> Result<DiscoveredPluginCandidate, PluginHostError> {
 	let content = fs::read_to_string(manifest_path)?;
 	let manifest = toml::from_str::<PluginManifest>(&content)

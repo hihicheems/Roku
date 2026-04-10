@@ -14,6 +14,8 @@
 
 //! Task state machine and orchestration primitives.
 
+#![allow(dead_code)]
+
 use roku_common_types::{
 	ErrorClass, RecoveryEligibility, ReplayConsistencyStatus, RequestEnvelope, RuntimeError, Task,
 	TaskEvent, TaskEventKind, TaskId, TaskState,

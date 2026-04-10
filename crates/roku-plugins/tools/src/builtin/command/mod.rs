@@ -26,7 +26,7 @@ use roku_common_types::{
 	CanonicalExecution, ExtractionHint, GroundingStrategy, PolicyDecision, ToolContract,
 	ToolRetryPolicy, ToolSideEffectPolicy,
 };
-use roku_plugin_catalog::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
+use roku_common_types::{CatalogDescriptor, ResourceCost, ResourceKind, ResourceRisk};
 use roku_plugin_host::{
 	RuntimeConstraints, SandboxProfile, Tool, ToolDescriptor, ToolRuntime, ToolRuntimeError,
 };

@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use roku_agent_runtime::RouteDecisionResult;
+use roku_common_types::LogLevel;
 use roku_common_types::{
 	ConversationRole, ConversationTurn, RequestEnvelope, ResourceSelector, ResponseEnvelope,
 	RuntimeError, RuntimeMemorySections,
@@ -23,7 +24,6 @@ use roku_memory::{
 	LongTermMemoryBackend, MemoryHit, MemoryLifecyclePolicy, MemoryRecallInput,
 	MemoryWritePolicyInput,
 };
-use roku_observability::LogLevel;
 
 use crate::{RuntimeService, log_runtime};
 

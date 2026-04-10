@@ -13,10 +13,10 @@
 // limitations under the License.
 
 use roku_agent_runtime::{LoopEventSender, LoopState};
+use roku_common_types::LogLevel;
 use roku_common_types::{
 	RequestEnvelope, ResponseEnvelope, RuntimeError, RuntimeMemorySections, Task, TaskId,
 };
-use roku_observability::LogLevel;
 
 use crate::{ContextBundle, RuntimeMemoryLayers, RuntimeService};
 use crate::{log_runtime, truncate_for_log};

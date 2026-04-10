@@ -151,12 +151,12 @@ use std::sync::Arc;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use roku_agent_runtime::ToolCatalogConfigError;
 use roku_common_types::ApprovalDecision;
-use roku_memory::{
-	MemoryKind, MemoryQuery, MemoryRecallReason, MemoryScope, MemoryWriteReason, MemoryWriteRequest,
-};
-use roku_observability::{
+use roku_common_types::{
 	AsyncRotatingFileLogSink, FanoutLogSink, FileLogConfig, LogSink, StderrLogSink,
 	install_global_log_sink,
+};
+use roku_memory::{
+	MemoryKind, MemoryQuery, MemoryRecallReason, MemoryScope, MemoryWriteReason, MemoryWriteRequest,
 };
 use roku_plugin_host::PluginHostError;
 use roku_plugin_skills::SkillRegistryError;

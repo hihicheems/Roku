@@ -142,7 +142,7 @@ impl RuntimeService {
 		&self,
 		task: &mut Task,
 		node: TaskNode,
-		mut result: ResultEnvelope,
+		result: ResultEnvelope,
 		message: String,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		task.completed_nodes.clear();

@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use roku_common_types::{ExtractionHint, GroundingStrategy};
-use roku_observability::{LogLevel, LogRecord, emit_global_log};
-use roku_plugin_catalog::ResourceCatalog;
+use roku_common_types::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier, StreamChunk, ToolDefinition};
+use roku_plugin_tools::ResourceCatalog;
 use serde_json::{Value, json};
 
 use crate::runtime_config::NextStepRuntimeConfig;
@@ -1269,12 +1269,12 @@ mod tests {
 
 	use async_trait::async_trait;
 	use roku_common_types::{ResourceSelector, RuntimeMemorySections};
-	use roku_plugin_catalog::ResourceCatalog;
 	use roku_plugin_llm::{
 		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderCallError,
 		ProviderResponse, RiskTier, RoutingPolicy,
 	};
 	use roku_plugin_skills::SkillRegistry;
+	use roku_plugin_tools::ResourceCatalog;
 	use roku_plugin_tools::{ToolCatalogConfig, build_resource_catalog};
 	use serde_json::{Value, json};
 

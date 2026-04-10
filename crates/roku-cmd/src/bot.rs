@@ -27,6 +27,7 @@ use roku_common_types::{
 	ApprovalDecision, ApprovalId, ConversationRole, ConversationTurn, RequestEnvelope, RequestId,
 	ResponseEnvelope, ResponseStatus, RuntimeError,
 };
+use roku_common_types::{LogLevel, LogRecord, emit_global_log};
 use roku_memory::{
 	InMemorySessionManagementBackend, InMemorySessionStateBackend,
 	InMemoryShortTermContinuityBackend, ResolvedMemorySubsystem, SESSION_NAME_MAX_CHARS,
@@ -35,7 +36,6 @@ use roku_memory::{
 	SessionStateError, SessionSummary, ShortTermContinuityBackend, ShortTermContinuityError,
 	normalize_session_name,
 };
-use roku_observability::{LogLevel, LogRecord, emit_global_log};
 use roku_plugin_telegram::{
 	TelegramBotClient, TelegramBotConfig, TelegramChat, TelegramConnector, TelegramControlCommand,
 	TelegramControlCommandRequest, TelegramHandlerResponse, TelegramInlineKeyboardButton,
@@ -1858,12 +1858,6 @@ mod tests {
 					"inventory.describe".to_string(),
 				)])
 		}));
-		let experiment = handler
-			.service
-			.get_experiment_run(&task_id)
-			.expect("experiment lookup should succeed")
-			.expect("resumed telegram task should record an experiment run");
-		assert_eq!(experiment.strategy, "runtime_loop_resume");
 		assert!(
 			backend.snapshot(&session.session_id).is_none(),
 			"Telegram request flow should consume the shared pending loop snapshot"

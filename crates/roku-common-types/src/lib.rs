@@ -18,8 +18,10 @@ use std::fmt;
 
 pub mod approval;
 pub mod canonical_execution;
+pub mod catalog;
 pub mod execution_policy;
 pub mod execution_preview;
+pub mod observability;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -32,10 +34,15 @@ pub use canonical_execution::{
 	CanonicalDigest, CanonicalExecution, ExecutionActionClass, ExecutionEnvPolicy,
 	ExecutionEnvPolicyMode, ExecutionResourceScope, ExecutionShellContext, InvocationMode,
 };
+pub use catalog::{
+	CatalogDescriptor, CatalogMatch, ResourceCatalog, ResourceCost, ResourceKind, ResourceRisk,
+	build_resource_catalog,
+};
 pub use execution_policy::{
 	ApprovalRequirement, ApprovalRequirementScope, PolicyDecision, PolicyOutcome, PolicyReasonCode,
 };
 pub use execution_preview::{ExecutionPreview, project_execution_preview};
+pub use observability::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TaskId(pub String);

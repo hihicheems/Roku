@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{CatalogDescriptor, ResourceCatalog};
+use super::retrieval::{CatalogDescriptor, ResourceCatalog};
 
 pub fn build_resource_catalog(
 	mut base_entries: Vec<CatalogDescriptor>,

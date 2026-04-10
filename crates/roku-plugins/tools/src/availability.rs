@@ -14,7 +14,7 @@
 
 use std::collections::BTreeSet;
 
-use roku_plugin_catalog::{ResourceCatalog, ResourceKind};
+use roku_common_types::{ResourceCatalog, ResourceKind};
 use serde::{Deserialize, Serialize};
 
 /// Shared runtime-visible availability truth for route seeding and loop initialization.
@@ -141,14 +141,14 @@ mod tests {
 	use crate::{
 		ToolCatalogConfig, build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities,
 	};
-	use roku_plugin_core::PluginRegistrySnapshot;
+	use roku_plugin_host::PluginRegistrySnapshot;
 	use roku_plugin_skills::SkillRegistry;
 
 	use super::{
 		RuntimeVisibleToolAvailabilitySnapshot, build_runtime_visible_tool_availability_snapshot,
 	};
 
-	fn runtime_catalog(skill_execution_enabled: bool) -> roku_plugin_catalog::ResourceCatalog {
+	fn runtime_catalog(skill_execution_enabled: bool) -> roku_common_types::ResourceCatalog {
 		build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities(
 			&SkillRegistry::disabled(),
 			&ToolCatalogConfig::default(),

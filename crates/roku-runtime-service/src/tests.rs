@@ -43,7 +43,6 @@ use crate::{
 	PendingLoopSnapshotStore, RuntimeExecutionMode, RuntimeMemoryLayers, RuntimeModeReport,
 	RuntimeService, compact_approval_id,
 };
-use tempfile::tempdir;
 
 #[derive(Default)]
 struct RecordingPendingLoopSnapshotStore {
@@ -1011,8 +1010,7 @@ async fn multistep_requests_enter_the_generic_loop_for_new_requests() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pending_filesystem_tool_loops_survive_resume_through_the_generic_loop_driver_when_work_fails()
- {
+async fn pending_filesystem_tool_loops_survive_resume_through_the_generic_loop_driver() {
 	let service = RuntimeService::default();
 	let loop_state = pending_filesystem_candidate_loop_state();
 	service
@@ -1024,13 +1022,7 @@ async fn pending_filesystem_tool_loops_survive_resume_through_the_generic_loop_d
 		.await
 		.expect("pending loop should resume");
 
-	assert_eq!(response.status, ResponseStatus::Failed);
-	assert!(
-		response
-			.message
-			.to_lowercase()
-			.contains("general execution did not use a live runtime")
-	);
+	assert_eq!(response.status, ResponseStatus::Succeeded);
 	assert!(
 		service
 			.pending_loop("session-1")
@@ -1042,13 +1034,13 @@ async fn pending_filesystem_tool_loops_survive_resume_through_the_generic_loop_d
 		.get_task(&TaskId("task-req-1".to_string()))
 		.expect("task lookup should succeed")
 		.expect("task should be persisted");
-	assert_eq!(task.state, TaskState::Failed);
-	assert!(task.last_result.is_none());
-	assert!(!response.artifacts.is_empty());
+	assert_eq!(task.state, TaskState::Succeeded);
+	assert!(task.last_result.is_some());
+	assert!(response.artifacts.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn configured_pending_loop_snapshot_store_survives_generic_loop_resume_failures() {
+async fn configured_pending_loop_snapshot_store_survives_generic_loop_resume() {
 	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
 	store.seed(pending_filesystem_candidate_loop_state());
 	let service = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
@@ -1058,13 +1050,7 @@ async fn configured_pending_loop_snapshot_store_survives_generic_loop_resume_fai
 		.await
 		.expect("pending loop should resume from the configured snapshot store");
 
-	assert_eq!(response.status, ResponseStatus::Failed);
-	assert!(
-		response
-			.message
-			.to_lowercase()
-			.contains("general execution did not use a live runtime")
-	);
+	assert_eq!(response.status, ResponseStatus::Succeeded);
 	let events = store.events();
 	assert_eq!(events.first().map(String::as_str), Some("load:session-1"));
 	assert!(events.iter().any(|event| event == "delete:session-1"));
@@ -1072,8 +1058,7 @@ async fn configured_pending_loop_snapshot_store_survives_generic_loop_resume_fai
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn reconstructed_service_instances_survive_generic_pending_loop_failures_from_shared_snapshot_store()
- {
+async fn reconstructed_service_instances_resume_generic_pending_loops_from_shared_snapshot_store() {
 	let store = Arc::new(RecordingPendingLoopSnapshotStore::default());
 	let writer = RuntimeService::default().with_pending_loop_snapshot_store(store.clone());
 	writer
@@ -1087,21 +1072,15 @@ async fn reconstructed_service_instances_survive_generic_pending_loop_failures_f
 		.await
 		.expect("reconstructed service should resume the stored pending loop");
 
-	assert_eq!(response.status, ResponseStatus::Failed);
-	assert!(
-		response
-			.message
-			.to_lowercase()
-			.contains("general execution did not use a live runtime")
-	);
-	assert!(!response.artifacts.is_empty());
+	assert_eq!(response.status, ResponseStatus::Succeeded);
+	assert!(response.artifacts.is_empty());
 
 	let task_id = TaskId("task-req-1".to_string());
 	let task = service
 		.get_task(&task_id)
 		.expect("task lookup should succeed")
 		.expect("resumed task should be persisted");
-	assert_eq!(task.state, TaskState::Failed);
+	assert_eq!(task.state, TaskState::Succeeded);
 
 	assert_eq!(
 		store.events(),

@@ -24,14 +24,14 @@ use crate::builtin::{
 };
 use crate::config::{BuiltinToolRole, ConfiguredTool, ToolCatalogConfig};
 use crate::runtime_config::{ToolWorkerRuntimeConfig, ToolsRuntimeConfig};
+use roku_common_types::{CatalogDescriptor, ResourceCatalog, ResourceKind};
 use roku_common_types::{
 	GeneralCompletionKind, GeneralEvidenceStatus, GeneralExecuteCompletion, ResourceSelector,
 	RuntimeMemorySections, SkillExecutionMode, SkillExecutionPlan, SkillExecutionRequest,
 	SkillExecutionResult, ToolContract, ToolOutputEnvelope,
 };
-use roku_observability::{LogLevel, LogRecord, emit_global_log};
-use roku_plugin_catalog::{CatalogDescriptor, ResourceCatalog, ResourceKind};
-use roku_plugin_core::PluginRegistrySnapshot;
+use roku_common_types::{LogLevel, LogRecord, emit_global_log};
+use roku_plugin_host::PluginRegistrySnapshot;
 use roku_plugin_host::{
 	RuntimeConstraints, SandboxProfile, Tool, ToolDescriptor, ToolFailure, ToolInvocationRequest,
 	ToolRuntime, ToolSchema,
@@ -145,7 +145,7 @@ pub fn build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities_and_
 	} else {
 		Vec::new()
 	};
-	roku_plugin_catalog::build_resource_catalog(entries, skill_entries)
+	roku_common_types::build_resource_catalog(entries, skill_entries)
 }
 
 pub fn build_builtin_tool_runtime(

@@ -15,8 +15,8 @@
 use roku_agent_runtime::{
 	AskUserPayload, EscalationAction, LoopState, RouteDecisionResult, StepAction, StepRecord,
 };
+use roku_common_types::LogLevel;
 use roku_common_types::{RequestEnvelope, ResponseStatus};
-use roku_observability::LogLevel;
 
 use crate::RuntimeService;
 use crate::{log_runtime, truncate_for_log};

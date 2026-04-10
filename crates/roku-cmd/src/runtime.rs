@@ -32,16 +32,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use roku_agent_runtime::{GenericAgentRuntime, PluginRegistrySnapshot, ToolCatalogConfig};
 use roku_api_gateway::{Gateway, RawRequest};
 use roku_common_types::{ApprovalDecision, ApprovalId, ResponseEnvelope, RuntimeError, TaskId};
+use roku_common_types::{InMemoryAuditSink, LogLevel, LogRecord, Metrics, emit_global_log};
 use roku_memory::{
 	ConservativeMemoryLifecyclePolicy, DisabledMemoryLifecyclePolicy, LongTermMemoryBackend,
 	MemoryBackendHealth, MemoryDeleteSelector, MemoryError, MemoryLifecyclePolicy, MemoryQuery,
 	MemoryWriteRequest,
 };
-use roku_observability::{InMemoryAuditSink, LogLevel, LogRecord, Metrics, emit_global_log};
-use roku_plugin_core::{PluginDisableReason, PluginPolicyConfig};
 use roku_plugin_host::{
-	PluginDiscoveryConfig, PluginStartupConfig, build_plugin_registry_snapshot,
-	default_bundled_plugin_descriptors,
+	PluginDisableReason, PluginDiscoveryConfig, PluginPolicyConfig, PluginStartupConfig,
+	build_plugin_registry_snapshot, default_bundled_plugin_descriptors,
 };
 use roku_plugin_llm::{
 	AnthropicBootstrapError, AnthropicRuntimeConfig, LlmProviderKind, LlmRouter,
@@ -787,7 +786,7 @@ fn load_mcp_config(layout: &LocalStorageLayout) -> McpConfig {
 }
 
 struct McpBootstrapResult {
-	catalog_entries: Vec<roku_plugin_catalog::CatalogDescriptor>,
+	catalog_entries: Vec<roku_plugin_tools::CatalogDescriptor>,
 	tools: Vec<Box<dyn roku_plugin_host::Tool>>,
 	/// Keepalive for the tokio runtime that hosts rmcp serve loop tasks.
 	runtime: Option<Arc<tokio::runtime::Runtime>>,
@@ -832,8 +831,7 @@ fn connect_mcp_servers_blocking(config: &McpConfig) -> McpBootstrapResult {
 	let (entries, tools) = std::thread::scope(|s| {
 		s.spawn(|| {
 			rt_for_thread.block_on(async {
-				let mut all_catalog_entries: Vec<roku_plugin_catalog::CatalogDescriptor> =
-					Vec::new();
+				let mut all_catalog_entries: Vec<roku_plugin_tools::CatalogDescriptor> = Vec::new();
 				let mut all_tools: Vec<Box<dyn roku_plugin_host::Tool>> = Vec::new();
 
 				for server_config in &config.servers {

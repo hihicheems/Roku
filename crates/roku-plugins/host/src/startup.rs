@@ -15,11 +15,11 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use roku_observability::{LogLevel, LogRecord, emit_global_log};
-use roku_plugin_core::{
+use crate::{
 	PluginCapabilities, PluginDisableReason, PluginId, PluginManifest, PluginPolicyConfig,
 	PluginProfile, PluginRegistryEntry, PluginRegistrySnapshot, PluginRequirements, PluginStatus,
 };
+use roku_common_types::{LogLevel, LogRecord, emit_global_log};
 use thiserror::Error;
 
 use crate::admission::admission_outcome;
@@ -31,7 +31,7 @@ pub enum PluginHostError {
 	#[error("failed to read plugin policy config: {0}")]
 	PolicyIo(#[from] std::io::Error),
 	#[error(transparent)]
-	PluginCore(#[from] roku_plugin_core::PluginCoreError),
+	PluginCore(#[from] crate::PluginCoreError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,7 +69,7 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 		BundledPluginDescriptor {
 			manifest: PluginManifest {
 				id: PluginId::new("builtin-tools").expect("bundled plugin id should be valid"),
-				kind: roku_plugin_core::PluginKind::Toolset,
+				kind: crate::PluginKind::Toolset,
 				enabled_by_default: true,
 				capabilities: PluginCapabilities {
 					provides_tools: tool_names.to_vec(),
@@ -83,7 +83,7 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 		BundledPluginDescriptor {
 			manifest: PluginManifest {
 				id: PluginId::new("skill-source-local").expect("bundled plugin id should be valid"),
-				kind: roku_plugin_core::PluginKind::SkillSource,
+				kind: crate::PluginKind::SkillSource,
 				enabled_by_default: true,
 				capabilities: PluginCapabilities {
 					provides_skill_sources: vec!["local".to_string()],
@@ -96,7 +96,7 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 		BundledPluginDescriptor {
 			manifest: PluginManifest {
 				id: PluginId::new("core-fs").expect("bundled plugin id should be valid"),
-				kind: roku_plugin_core::PluginKind::Toolset,
+				kind: crate::PluginKind::Toolset,
 				enabled_by_default: true,
 				capabilities: PluginCapabilities {
 					provides_tools: vec![
@@ -115,7 +115,7 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 		BundledPluginDescriptor {
 			manifest: PluginManifest {
 				id: PluginId::new("core-command").expect("bundled plugin id should be valid"),
-				kind: roku_plugin_core::PluginKind::Toolset,
+				kind: crate::PluginKind::Toolset,
 				enabled_by_default: true,
 				capabilities: PluginCapabilities {
 					provides_tools: vec!["command.run".to_string()],
@@ -129,7 +129,7 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 		BundledPluginDescriptor {
 			manifest: PluginManifest {
 				id: PluginId::new("core-table").expect("bundled plugin id should be valid"),
-				kind: roku_plugin_core::PluginKind::Toolset,
+				kind: crate::PluginKind::Toolset,
 				enabled_by_default: true,
 				capabilities: PluginCapabilities {
 					provides_tools: vec![
@@ -147,7 +147,7 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 		BundledPluginDescriptor {
 			manifest: PluginManifest {
 				id: PluginId::new("core-web").expect("bundled plugin id should be valid"),
-				kind: roku_plugin_core::PluginKind::Toolset,
+				kind: crate::PluginKind::Toolset,
 				enabled_by_default: true,
 				capabilities: PluginCapabilities {
 					provides_tools: vec!["web.search".to_string()],
@@ -162,7 +162,7 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 		BundledPluginDescriptor {
 			manifest: PluginManifest {
 				id: PluginId::new("core-python").expect("bundled plugin id should be valid"),
-				kind: roku_plugin_core::PluginKind::Toolset,
+				kind: crate::PluginKind::Toolset,
 				enabled_by_default: true,
 				capabilities: PluginCapabilities {
 					provides_tools: vec!["python.run".to_string()],
@@ -179,7 +179,7 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 		BundledPluginDescriptor {
 			manifest: PluginManifest {
 				id: PluginId::new("openrouter").expect("bundled plugin id should be valid"),
-				kind: roku_plugin_core::PluginKind::Provider,
+				kind: crate::PluginKind::Provider,
 				enabled_by_default: true,
 				capabilities: PluginCapabilities {
 					provides_providers: vec!["llm".to_string()],
@@ -195,7 +195,7 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 		BundledPluginDescriptor {
 			manifest: PluginManifest {
 				id: PluginId::new("telegram").expect("bundled plugin id should be valid"),
-				kind: roku_plugin_core::PluginKind::Connector,
+				kind: crate::PluginKind::Connector,
 				enabled_by_default: false,
 				capabilities: PluginCapabilities {
 					provides_connectors: vec!["telegram".to_string()],
@@ -214,7 +214,7 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 		BundledPluginDescriptor {
 			manifest: PluginManifest {
 				id: PluginId::new("mcp").expect("bundled plugin id should be valid"),
-				kind: roku_plugin_core::PluginKind::Bridge,
+				kind: crate::PluginKind::Bridge,
 				enabled_by_default: false,
 				capabilities: PluginCapabilities {
 					provides_connectors: vec!["mcp".to_string()],
@@ -465,15 +465,15 @@ pub(crate) fn entry_enabled(candidate: DiscoveredPluginCandidate) -> PluginRegis
 
 #[cfg(test)]
 mod tests {
-	use roku_plugin_core::{PluginPolicyConfig, PluginProfile};
+	use crate::{PluginId, PluginPolicyConfig, PluginProfile};
 
 	use super::profile_decision;
 
 	#[test]
 	fn minimal_profile_keeps_openrouter_enabled() {
 		let profile = PluginProfile::Minimal;
-		let openrouter = roku_plugin_core::PluginId::new("openrouter").expect("id should be valid");
-		let telegram = roku_plugin_core::PluginId::new("telegram").expect("id should be valid");
+		let openrouter = PluginId::new("openrouter").expect("id should be valid");
+		let telegram = PluginId::new("telegram").expect("id should be valid");
 
 		assert_eq!(profile_decision(profile, &openrouter), Some(true));
 		assert_eq!(profile_decision(profile, &telegram), Some(false));
