@@ -134,30 +134,6 @@ impl AskUserPayload {
 			AskUserResumeContract::MissingRequiredInput { .. } => false,
 		}
 	}
-
-	pub(crate) fn resume_contract_summary(&self) -> String {
-		match &self.resume_contract {
-			AskUserResumeContract::NoAutomaticResume => "The loop is paused for clarification, but the next user message should be treated as a fresh intake unless a runtime-owned resume gate explicitly continues this paused loop.".to_string(),
-			AskUserResumeContract::CandidateSelection { candidates } => format!(
-				"The next user reply must select one of these grounded candidates: {}.",
-				candidates.join(", ")
-			),
-			AskUserResumeContract::MissingRequiredInput { fields } => format!(
-				"The paused loop still needs these required input fields before it may resume: {}.",
-				fields.join(", ")
-			),
-		}
-	}
-
-	pub(crate) fn selected_candidate(&self, user_input: &str) -> Option<String> {
-		match &self.resume_contract {
-			AskUserResumeContract::CandidateSelection { candidates } => {
-				reply_selects_candidate(user_input.trim(), candidates)
-			}
-			AskUserResumeContract::NoAutomaticResume
-			| AskUserResumeContract::MissingRequiredInput { .. } => None,
-		}
-	}
 }
 
 pub(crate) fn effective_ask_user_payload(

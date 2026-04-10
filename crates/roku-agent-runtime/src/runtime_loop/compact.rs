@@ -184,6 +184,7 @@ pub async fn compact_history_with_llm(
 					.to_string(),
 			),
 			prompt,
+			messages: None,
 			expected_output_tokens: config.llm_expected_output_tokens,
 			risk_tier: RiskTier::Low,
 			preferred_provider: None,
@@ -633,73 +634,6 @@ mod tests {
 		assert!(
 			after < before,
 			"compact should reduce token count: {after} < {before}"
-		);
-	}
-
-	// --- PRD-08 US-001: RuntimeMemorySections survives compact ---
-
-	#[test]
-	fn context_projection_includes_runtime_memory_sections_after_compact() {
-		use crate::runtime_loop::build_context_projection;
-		use roku_common_types::RuntimeMemorySections;
-
-		let mut state = minimal_loop_state();
-		for i in 1..=10 {
-			state.record_step(sample_step(i, 10 - i));
-		}
-		let sections = RuntimeMemorySections {
-			short_term_continuity: "user: hi".to_string(),
-			long_term_recall: "memory-record-1 | UserPreference".to_string(),
-			working_memory: String::new(),
-		};
-
-		compact_history(&mut state, &CompactConfig::default());
-
-		let projection = build_context_projection(&state, &sections);
-		assert_eq!(
-			projection.runtime_memory_sections.long_term_recall,
-			"memory-record-1 | UserPreference"
-		);
-		assert!(!projection.working_summary.is_empty());
-	}
-
-	// --- PRD-08 US-002: Working summary in model prompt ---
-
-	#[test]
-	fn tool_loop_prompt_includes_prior_work_summary_when_nonempty() {
-		use crate::runtime_loop::build_context_projection;
-		use crate::runtime_loop::tool_loop::tool_loop_prompt;
-		use roku_common_types::RuntimeMemorySections;
-
-		let mut state = minimal_loop_state();
-		for i in 1..=10 {
-			state.record_step(sample_step(i, 10 - i));
-		}
-		compact_history(&mut state, &CompactConfig::default());
-		let projection = build_context_projection(&state, &RuntimeMemorySections::default());
-		let prompt = tool_loop_prompt(&projection, None);
-		assert!(
-			prompt.contains("## Prior Work Summary"),
-			"prompt should include Prior Work Summary section"
-		);
-		assert!(
-			prompt.contains("[Compact summary"),
-			"prompt should include compact digest"
-		);
-	}
-
-	#[test]
-	fn tool_loop_prompt_omits_prior_work_summary_when_empty() {
-		use crate::runtime_loop::build_context_projection;
-		use crate::runtime_loop::tool_loop::tool_loop_prompt;
-		use roku_common_types::RuntimeMemorySections;
-
-		let state = minimal_loop_state();
-		let projection = build_context_projection(&state, &RuntimeMemorySections::default());
-		let prompt = tool_loop_prompt(&projection, None);
-		assert!(
-			!prompt.contains("## Prior Work Summary"),
-			"prompt should omit Prior Work Summary when empty"
 		);
 	}
 

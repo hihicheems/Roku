@@ -673,6 +673,7 @@ mod tests {
 		GenerationRequest {
 			system_prompt: None,
 			prompt: "summarize project risks".to_string(),
+			messages: None,
 			expected_output_tokens: 300,
 			risk_tier,
 			preferred_provider: None,

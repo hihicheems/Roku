@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -23,12 +23,10 @@ use crate::router::{
 };
 use crate::runtime_config::AgentRuntimeConfig;
 use crate::runtime_loop::{
-	AskUserPayload, AskUserResumeContract, ContextProjection, LoopContext, LoopState, LoopStatus,
-	StepAction, StepObservation, StepRecord, ToolObservation, VisibleToolHint,
-	attachments_for_tool, build_context_projection, build_loop_context, decide_tool_loop_next_step,
-	effective_ask_user_payload, intake_request, interpret_observation,
-	next_working_directory_from_observation, runtime_loop_trace, summarize_observation,
-	tool_required_argument_keys,
+	AskUserPayload, AskUserResumeContract, LoopContext, LoopState, LoopStatus, StepAction,
+	StepObservation, StepRecord, ToolObservation, attachments_for_tool, build_loop_context,
+	build_tool_definitions, effective_ask_user_payload, intake_request, interpret_observation,
+	next_working_directory_from_observation, runtime_loop_trace,
 };
 use crate::tool_config::{ToolCatalogConfig, ToolsRuntimeConfig};
 use crate::tools::{
@@ -47,7 +45,9 @@ use roku_common_types::{AgentInstanceSpec, ResultEnvelope, TaskNode};
 use roku_plugin_host::{
 	PluginRegistrySnapshot, ToolExecutionResult, ToolInvocation, ToolRuntime, ToolRuntimeError,
 };
-use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier};
+use roku_plugin_llm::{
+	GenerationRequest, LlmRouter, Message, RiskTier, StreamChunk, ToolCallBlock,
+};
 use roku_plugin_skills::SkillRegistry;
 use roku_plugin_tools::{ResourceCatalog, ResourceKind};
 use roku_plugin_tools::{
@@ -504,19 +504,18 @@ impl GenericAgentRuntime {
 						.to_string(),
 			};
 		};
-		let context_projection =
-			build_context_projection(loop_state, &RuntimeMemorySections::default());
 		let response = match router
 			.generate_json_value(&GenerationRequest {
 				system_prompt: Some(
 					"You are Roku's paused-loop resume gate. Return only valid JSON.".to_string(),
 				),
 				prompt: awaiting_user_resume_prompt(
-					&context_projection,
+					loop_state,
 					&payload.final_message,
 					fields,
 					user_input,
 				),
+				messages: None,
 				expected_output_tokens: 96,
 				risk_tier: RiskTier::Low,
 				preferred_provider: None,
@@ -779,117 +778,258 @@ impl GenericAgentRuntime {
 		user_reply: Option<&str>,
 		event_sender: Option<&crate::runtime_loop::LoopEventSender>,
 	) -> DirectRouteExecutionResult {
+		// Require a router — the message-based loop cannot function without LLM decisions.
+		let Some(router) = self.route_router.as_deref() else {
+			let message = "No LLM router is configured; cannot run the tool loop.".to_string();
+			self.record_terminal_step(
+				loop_state,
+				StepAction::Fail,
+				"No LLM router available.",
+				Some(message.clone()),
+			);
+			return self.synthetic_loop_terminal_result(
+				task_id,
+				"tool",
+				message,
+				StepAction::Fail,
+				ResultStatus::Error,
+				Some(loop_state),
+			);
+		};
+
 		let grounding_input = user_reply.unwrap_or(&loop_state.goal).to_string();
 		loop_state.note_grounding_input(&grounding_input);
+
+		// Build the system prompt once (environment context uses working_directory
+		// which may change across steps, but we read it fresh each turn below).
+		// Build initial conversation history from prior turns in the request.
+		let mut messages: Vec<Message> = request
+			.conversation_history
+			.iter()
+			.filter_map(|turn| match turn.role {
+				ConversationRole::User => Some(Message::User {
+					content: turn.content.clone(),
+				}),
+				ConversationRole::Assistant => Some(Message::Assistant {
+					text: turn.content.clone(),
+					tool_calls: Vec::new(),
+				}),
+				ConversationRole::System => None,
+			})
+			.collect();
+
+		// Append the current user message (either a resume reply or the original goal).
+		let initial_user_content = user_reply.unwrap_or(&loop_state.goal).to_string();
+		messages.push(Message::User {
+			content: initial_user_content,
+		});
+
 		loop {
+			// Refresh visible tools at the start of each turn.
 			self.refresh_tool_loop_visible_tools(loop_state);
-			let context_projection =
-				self.refresh_tool_loop_projection(loop_state, runtime_memory_sections);
-			let next_step = decide_tool_loop_next_step(
-				loop_state,
-				&context_projection,
-				self.route_router.as_deref(),
-				user_reply,
-				&self.agent_runtime_config.next_step,
-				Some(&self.resource_catalog),
-				event_sender,
-			)
-			.await;
+			let tool_definitions =
+				build_tool_definitions(&loop_state.visible_tools, Some(&self.resource_catalog));
+
+			// Check step budget before calling the LLM.
+			if loop_state.remaining_step_budget == 0 {
+				let message = format!(
+					"Step budget exhausted after {} steps; goal: {}",
+					loop_state.step_index, loop_state.goal,
+				);
+				self.record_terminal_step(
+					loop_state,
+					StepAction::Fail,
+					"Step budget exhausted.",
+					Some(message.clone()),
+				);
+				return self.synthetic_loop_terminal_result(
+					task_id,
+					"tool",
+					message,
+					StepAction::Fail,
+					ResultStatus::Error,
+					Some(loop_state),
+				);
+			}
+
+			// Build the system prompt with current environment context.
+			let env_snapshot = crate::runtime_loop::environment::probe_environment();
+			let env_context = crate::runtime_loop::environment::format_environment_context(
+				env_snapshot,
+				&loop_state.working_directory,
+			);
+			let system_prompt = format!(
+				"You are Roku, a coding assistant. Use the provided tools to accomplish the \
+				 user's task. Call final_answer when the task is complete.\n\n\
+				 # Environment\n{env_context}"
+			);
+
+			let config = &self.agent_runtime_config.next_step;
+			let gen_request = GenerationRequest {
+				system_prompt: Some(system_prompt),
+				prompt: String::new(),
+				messages: Some(messages.clone()),
+				expected_output_tokens: config.expected_output_tokens,
+				risk_tier: RiskTier::Low,
+				preferred_provider: None,
+				budget_tokens_remaining: config.budget_tokens_remaining,
+				budget_cost_remaining_usd: config.budget_cost_remaining_usd,
+				tools: if tool_definitions.is_empty() {
+					None
+				} else {
+					Some(tool_definitions)
+				},
+			};
+
 			let current_step_index = loop_state.step_index + 1;
-			match next_step.action {
-				crate::runtime_loop::NextStepAction::CallTool => {
-					let Some(tool_name) = next_step.tool_name.as_deref() else {
+
+			// Stream the LLM response, accumulating text and tool_calls.
+			let (accumulated_text, accumulated_tool_calls) = if let Some(sender) = event_sender {
+				let step = current_step_index;
+				let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamChunk>(64);
+				let event_tx = sender.clone();
+				let accumulator = tokio::spawn(async move {
+					let mut text = String::new();
+					let mut tool_calls: Vec<ToolCallBlock> = Vec::new();
+					let mut pending_by_id: HashMap<String, (String, String)> = HashMap::new();
+					while let Some(chunk) = rx.recv().await {
+						match chunk {
+							StreamChunk::TextDelta { text: delta } => {
+								text.push_str(&delta);
+								let _ =
+									event_tx.send(crate::runtime_loop::LoopEvent::LlmTextDelta {
+										step,
+										text: delta,
+									});
+							}
+							StreamChunk::ToolCallStart { id, name } => {
+								pending_by_id.insert(id, (name, String::new()));
+							}
+							StreamChunk::ToolCallDelta {
+								id,
+								arguments_chunk,
+							} => {
+								if let Some((_, args)) = pending_by_id.get_mut(&id) {
+									args.push_str(&arguments_chunk);
+								}
+							}
+							StreamChunk::ToolCallDone { id } => {
+								if let Some((name, args_str)) = pending_by_id.remove(&id) {
+									let arguments =
+										serde_json::from_str(&args_str).unwrap_or(Value::Null);
+									tool_calls.push(ToolCallBlock {
+										id,
+										name,
+										arguments,
+									});
+								}
+							}
+							StreamChunk::Done { .. } => {}
+						}
+					}
+					(text, tool_calls)
+				});
+				let _llm_result = router.generate_streaming(&gen_request, tx).await;
+				let (text, tool_calls) = accumulator.await.unwrap_or_default();
+				let _ = sender.send(crate::runtime_loop::LoopEvent::LlmDecisionComplete {
+					step: current_step_index,
+				});
+				(text, tool_calls)
+			} else {
+				// Non-streaming path.
+				match router.generate(&gen_request).await {
+					Ok(resp) => {
+						let tool_calls = resp.tool_calls.unwrap_or_default();
+						(resp.output, tool_calls)
+					}
+					Err(_) => {
+						let message = format!("LLM call failed for goal: {}", loop_state.goal);
+						self.record_terminal_step(
+							loop_state,
+							StepAction::Fail,
+							"LLM call failed.",
+							Some(message.clone()),
+						);
 						return self.synthetic_loop_terminal_result(
 							task_id,
 							"tool",
-							next_step.reason,
+							message,
 							StepAction::Fail,
 							ResultStatus::Error,
 							Some(loop_state),
 						);
-					};
-					// Notify: tool start
-					if let Some(sender) = event_sender {
-						let _ = sender.send(crate::runtime_loop::LoopEvent::ToolStart {
-							step: current_step_index,
-							tool_name: tool_name.to_string(),
-						});
 					}
-					let attachments =
-						attachments_for_tool(tool_name, user_reply.unwrap_or(&loop_state.goal));
-					// Tool::invoke is synchronous blocking I/O; use block_in_place so we do not
-					// stall the async executor thread while still holding &self references.
-					let tool_name_owned = tool_name.to_string();
-					let arguments = next_step.arguments.clone().unwrap_or_else(|| json!({}));
-					let execution = tokio::task::block_in_place(|| {
-						self.execute_loop_tool_invocation(
-							task_id,
-							request,
+				}
+			};
+
+			// Push the assistant turn (text + any tool_calls) to the conversation.
+			messages.push(Message::Assistant {
+				text: accumulated_text.clone(),
+				tool_calls: accumulated_tool_calls.clone(),
+			});
+
+			// If the LLM produced no tool_calls, treat the text as the final answer.
+			if accumulated_tool_calls.is_empty() {
+				let message = if accumulated_text.is_empty() {
+					"Runtime loop completed.".to_string()
+				} else {
+					accumulated_text.clone()
+				};
+				self.record_terminal_step(
+					loop_state,
+					StepAction::FinalAnswer,
+					"LLM produced a text response with no tool calls.",
+					Some(message.clone()),
+				);
+				return self.synthetic_loop_terminal_result(
+					task_id,
+					"tool",
+					message,
+					StepAction::FinalAnswer,
+					ResultStatus::Ok,
+					Some(loop_state),
+				);
+			}
+
+			// Check for special pseudo-tool calls first.
+			for tc in &accumulated_tool_calls {
+				match tc.name.as_str() {
+					"final_answer" => {
+						let message = tc
+							.arguments
+							.get("message")
+							.and_then(Value::as_str)
+							.unwrap_or("")
+							.to_string();
+						self.record_terminal_step(
 							loop_state,
-							&context_projection,
-							runtime_memory_sections,
-							&tool_name_owned,
-							arguments,
-							&attachments,
-						)
-					});
-					let elapsed = execution_elapsed_ms(&execution.result);
-					// Notify: tool end
-					if let Some(sender) = event_sender {
-						let _ = sender.send(crate::runtime_loop::LoopEvent::ToolEnd {
-							step: current_step_index,
-							tool_name: tool_name_owned.clone(),
-							elapsed_ms: elapsed,
-						});
+							StepAction::FinalAnswer,
+							"LLM called final_answer.",
+							Some(message.clone()),
+						);
+						return self.synthetic_loop_terminal_result(
+							task_id,
+							"tool",
+							message,
+							StepAction::FinalAnswer,
+							ResultStatus::Ok,
+							Some(loop_state),
+						);
 					}
-					let raw_tool_output = raw_tool_output_from_result(&execution.result);
-					let observation =
-						self.loop_observation_from_execution(&tool_name_owned, &execution.result);
-					let interpreted = interpret_observation(
-						loop_state,
-						observation.clone(),
-						next_working_directory_from_observation(
-							&observation,
-							&loop_state.working_directory,
-						),
-					);
-					let step = StepRecord::tool_call(
-						current_step_index,
-						next_step.clone(),
-						loop_state.visible_tools.clone(),
-						loop_state.bound_resources.clone(),
-						raw_tool_output,
-						StepObservation::Tool(observation.clone()),
-						interpreted.clone(),
-						elapsed,
-						interpreted.remaining_step_budget,
-						interpreted.remaining_recovery_budget,
-						interpreted
-							.new_working_directory
-							.clone()
-							.unwrap_or_else(|| loop_state.working_directory.clone()),
-					);
-					loop_state.record_step(step);
-					self.maybe_compact(loop_state, current_step_index, event_sender)
-						.await;
-					// Notify: step complete
-					if let Some(sender) = event_sender {
-						let _ = sender.send(crate::runtime_loop::LoopEvent::StepComplete {
-							step: current_step_index,
-						});
-					}
-					if interpreted.should_ask_user {
+					"ask_user" => {
+						let question = tc
+							.arguments
+							.get("question")
+							.and_then(Value::as_str)
+							.unwrap_or("")
+							.to_string();
 						let payload = effective_ask_user_payload(
 							&loop_state.goal,
 							loop_state.last_observation.as_ref(),
-							None,
+							Some(AskUserPayload::freeform(question)),
 						);
 						let message = payload.final_message.clone();
-						self.record_ask_user_step(
-							loop_state,
-							"Runtime paused for user clarification after the latest tool observation.",
-							payload,
-						);
+						self.record_ask_user_step(loop_state, "LLM called ask_user.", payload);
 						return self.synthetic_loop_terminal_result(
 							task_id,
 							"tool",
@@ -899,272 +1039,149 @@ impl GenericAgentRuntime {
 							Some(loop_state),
 						);
 					}
-					if interpreted.should_emit_final_answer {
-						let message = summarized_tool_loop_message(&loop_state.goal, &observation);
-						self.record_terminal_step(
-							loop_state,
-							StepAction::FinalAnswer,
-							"Runtime completed after a terminal tool observation.",
-							Some(message.clone()),
-						);
-						return self.synthetic_loop_terminal_result(
-							task_id,
-							"tool",
-							message,
-							StepAction::FinalAnswer,
-							ResultStatus::Ok,
-							Some(loop_state),
-						);
-					}
-					if interpreted.should_fail || !interpreted.continue_allowed {
-						let message = tool_loop_failure_message(&loop_state.goal, &interpreted);
+					"fail" => {
+						let reason = tc
+							.arguments
+							.get("reason")
+							.and_then(Value::as_str)
+							.unwrap_or("LLM reported failure.")
+							.to_string();
 						self.record_terminal_step(
 							loop_state,
 							StepAction::Fail,
-							"Runtime could not continue after the latest tool observation.",
-							Some(message.clone()),
+							"LLM called fail.",
+							Some(reason.clone()),
 						);
-						if execution.result.status == ResultStatus::Error {
-							return terminalize_existing_tool_execution_result(
-								execution,
-								message,
-								StepAction::Fail,
-								ResultStatus::Error,
-								"tool",
-								Some(loop_state),
-							);
-						}
 						return self.synthetic_loop_terminal_result(
 							task_id,
 							"tool",
-							message,
+							reason,
 							StepAction::Fail,
 							ResultStatus::Error,
 							Some(loop_state),
 						);
 					}
+					_ => {}
 				}
-				crate::runtime_loop::NextStepAction::CallTools => {
-					// Execute batch tool calls sequentially.
-					// TODO: partition by concurrency_safe and run safe batches in parallel.
-					let tool_calls = next_step.tool_calls.unwrap_or_default();
-					for entry in &tool_calls {
-						let tool_name = &entry.tool_name;
-						if let Some(sender) = event_sender {
-							let _ = sender.send(crate::runtime_loop::LoopEvent::ToolStart {
-								step: current_step_index,
-								tool_name: tool_name.clone(),
-							});
-						}
-						let arguments = entry.arguments.clone().unwrap_or_else(|| json!({}));
-						let execution = tokio::task::block_in_place(|| {
-							self.execute_loop_tool_invocation(
-								task_id,
-								request,
-								loop_state,
-								&context_projection,
-								runtime_memory_sections,
-								tool_name,
-								arguments,
-								&attachments_for_tool(
-									tool_name,
-									user_reply.unwrap_or(&loop_state.goal),
-								),
-							)
-						});
-						let elapsed = execution_elapsed_ms(&execution.result);
-						if let Some(sender) = event_sender {
-							let _ = sender.send(crate::runtime_loop::LoopEvent::ToolEnd {
-								step: current_step_index,
-								tool_name: tool_name.clone(),
-								elapsed_ms: elapsed,
-							});
-						}
-						let raw_tool_output = raw_tool_output_from_result(&execution.result);
-						let observation =
-							self.loop_observation_from_execution(tool_name, &execution.result);
-						let interpreted = interpret_observation(
-							loop_state,
-							observation.clone(),
-							next_working_directory_from_observation(
-								&observation,
-								&loop_state.working_directory,
-							),
-						);
-						let batch_decision = crate::runtime_loop::NextStepDecision {
-							action: crate::runtime_loop::NextStepAction::CallTool,
-							tool_name: Some(tool_name.clone()),
-							arguments: entry.arguments.clone(),
-							tool_calls: None,
-							reason: next_step.reason.clone(),
-							final_message: None,
-						};
-						let step = StepRecord::tool_call(
-							current_step_index,
-							batch_decision,
-							loop_state.visible_tools.clone(),
-							loop_state.bound_resources.clone(),
-							raw_tool_output,
-							StepObservation::Tool(observation.clone()),
-							interpreted.clone(),
-							elapsed,
+			}
+
+			// Execute regular tool calls and collect ToolResult messages.
+			for tc in &accumulated_tool_calls {
+				let tool_name = &tc.name;
+				let arguments = tc.arguments.clone();
+
+				// Emit ToolStart.
+				if let Some(sender) = event_sender {
+					let _ = sender.send(crate::runtime_loop::LoopEvent::ToolStart {
+						step: current_step_index,
+						tool_name: tool_name.clone(),
+					});
+				}
+
+				let step_summary = tool_loop_step_summary(&loop_state.goal, tool_name);
+				let attachments =
+					attachments_for_tool(tool_name, user_reply.unwrap_or(&loop_state.goal));
+				let tool_name_owned = tool_name.clone();
+				let execution = tokio::task::block_in_place(|| {
+					self.execute_loop_tool_invocation(
+						task_id,
+						request,
+						loop_state,
+						&step_summary,
+						runtime_memory_sections,
+						&tool_name_owned,
+						arguments.clone(),
+						&attachments,
+					)
+				});
+
+				let elapsed = execution_elapsed_ms(&execution.result);
+
+				// Emit ToolEnd.
+				if let Some(sender) = event_sender {
+					let _ = sender.send(crate::runtime_loop::LoopEvent::ToolEnd {
+						step: current_step_index,
+						tool_name: tool_name_owned.clone(),
+						elapsed_ms: elapsed,
+					});
+				}
+
+				let raw_tool_output = raw_tool_output_from_result(&execution.result);
+				let observation =
+					self.loop_observation_from_execution(&tool_name_owned, &execution.result);
+				let interpreted = interpret_observation(
+					loop_state,
+					observation.clone(),
+					next_working_directory_from_observation(
+						&observation,
+						&loop_state.working_directory,
+					),
+				);
+
+				// Build a synthetic NextStepDecision for the StepRecord.
+				let synthetic_decision = crate::runtime_loop::NextStepDecision {
+					action: crate::runtime_loop::NextStepAction::CallTool,
+					tool_name: Some(tool_name_owned.clone()),
+					arguments: Some(arguments.clone()),
+					tool_calls: None,
+					reason: "LLM tool_use".to_string(),
+					final_message: None,
+				};
+				let step = StepRecord::tool_call(
+					current_step_index,
+					synthetic_decision,
+					loop_state.visible_tools.clone(),
+					loop_state.bound_resources.clone(),
+					raw_tool_output.clone(),
+					StepObservation::Tool(observation.clone()),
+					interpreted.clone(),
+					elapsed,
+					interpreted.remaining_step_budget,
+					interpreted.remaining_recovery_budget,
+					interpreted
+						.new_working_directory
+						.clone()
+						.unwrap_or_else(|| loop_state.working_directory.clone()),
+				);
+				loop_state.record_step(step);
+
+				// Build ToolResult message for the next LLM turn.
+				let tool_result_content = if raw_tool_output.is_null() {
+					observation.message.clone()
+				} else if let Some(s) = raw_tool_output.as_str() {
+					s.to_string()
+				} else {
+					serde_json::to_string(&raw_tool_output)
+						.unwrap_or_else(|_| observation.message.clone())
+				};
+				let is_error = !observation.ok;
+				messages.push(Message::ToolResult {
+					tool_use_id: tc.id.clone(),
+					content: tool_result_content,
+					is_error,
+				});
+
+				// If budget is exhausted after this step, inject a warning message.
+				if interpreted.budget_exhausted || interpreted.recovery_exhausted {
+					messages.push(Message::User {
+						content: format!(
+							"System: step budget exhausted (remaining: {}, recovery: {}). \
+							 Please call final_answer or fail now.",
 							interpreted.remaining_step_budget,
 							interpreted.remaining_recovery_budget,
-							interpreted
-								.new_working_directory
-								.clone()
-								.unwrap_or_else(|| loop_state.working_directory.clone()),
-						);
-						loop_state.record_step(step);
-						// If a tool in the batch triggers a terminal condition, stop.
-						if interpreted.terminal
-							|| interpreted.should_ask_user
-							|| interpreted.should_emit_final_answer
-							|| interpreted.should_fail
-							|| interpreted.budget_exhausted
-							|| interpreted.recovery_exhausted
-						{
-							break;
-						}
-					}
-					self.maybe_compact(loop_state, current_step_index, event_sender)
-						.await;
-					if let Some(sender) = event_sender {
-						let _ = sender.send(crate::runtime_loop::LoopEvent::StepComplete {
-							step: current_step_index,
-						});
-					}
-					// Check terminal conditions from the last tool in the batch,
-					// mirroring the single-tool CallTool path's post-execution checks.
-					if let Some(last_step) = loop_state.history.last()
-						&& let Some(StepObservation::Tool(obs)) = &last_step.observation
-						&& let Some(interp) = &last_step.interpreted_observation
-					{
-						if interp.should_ask_user {
-							let payload = effective_ask_user_payload(
-								&loop_state.goal,
-								loop_state.last_observation.as_ref(),
-								None,
-							);
-							let message = payload.final_message.clone();
-							self.record_ask_user_step(
-								loop_state,
-								"Runtime paused for user clarification after batch tool observation.",
-								payload,
-							);
-							return self.synthetic_loop_terminal_result(
-								task_id,
-								"tool",
-								message,
-								StepAction::AskUser,
-								ResultStatus::Ok,
-								Some(loop_state),
-							);
-						}
-						if interp.should_emit_final_answer || obs.terminal {
-							let message = summarized_tool_loop_message(&loop_state.goal, obs);
-							let (action, status) = if obs.ok {
-								(StepAction::FinalAnswer, ResultStatus::Ok)
-							} else {
-								(StepAction::Fail, ResultStatus::Error)
-							};
-							self.record_terminal_step(
-								loop_state,
-								action,
-								"Runtime completed after batch tool observation.",
-								Some(message.clone()),
-							);
-							return self.synthetic_loop_terminal_result(
-								task_id,
-								"tool",
-								message,
-								action,
-								status,
-								Some(loop_state),
-							);
-						}
-						if interp.should_fail
-							|| interp.budget_exhausted
-							|| interp.recovery_exhausted
-						{
-							let message = summarized_tool_loop_message(&loop_state.goal, obs);
-							self.record_terminal_step(
-								loop_state,
-								StepAction::Fail,
-								"Runtime failed after batch tool observation.",
-								Some(message.clone()),
-							);
-							return self.synthetic_loop_terminal_result(
-								task_id,
-								"tool",
-								message,
-								StepAction::Fail,
-								ResultStatus::Error,
-								Some(loop_state),
-							);
-						}
-					}
-				}
-				crate::runtime_loop::NextStepAction::AskUser => {
-					let payload = effective_ask_user_payload(
-						&loop_state.goal,
-						loop_state.last_observation.as_ref(),
-						next_step.final_message.map(AskUserPayload::freeform),
-					);
-					let message = payload.final_message.clone();
-					self.record_ask_user_step(loop_state, next_step.reason, payload);
-					return self.synthetic_loop_terminal_result(
-						task_id,
-						"tool",
-						message,
-						StepAction::AskUser,
-						ResultStatus::Ok,
-						Some(loop_state),
-					);
-				}
-				crate::runtime_loop::NextStepAction::FinalAnswer => {
-					let message = next_step.final_message.unwrap_or_else(|| {
-						loop_state
-							.last_observation
-							.as_ref()
-							.map(|observation| {
-								summarized_tool_loop_message(&loop_state.goal, observation)
-							})
-							.unwrap_or_else(|| "Runtime loop completed.".to_string())
+						),
 					});
-					self.record_terminal_step(
-						loop_state,
-						StepAction::FinalAnswer,
-						next_step.reason,
-						Some(message.clone()),
-					);
-					return self.synthetic_loop_terminal_result(
-						task_id,
-						"tool",
-						message,
-						StepAction::FinalAnswer,
-						ResultStatus::Ok,
-						Some(loop_state),
-					);
 				}
-				crate::runtime_loop::NextStepAction::Fail => {
-					let reason = next_step.reason;
-					let message = next_step.final_message.unwrap_or_else(|| reason.clone());
-					self.record_terminal_step(
-						loop_state,
-						StepAction::Fail,
-						reason,
-						Some(message.clone()),
-					);
-					return self.synthetic_loop_terminal_result(
-						task_id,
-						"tool",
-						message,
-						StepAction::Fail,
-						ResultStatus::Error,
-						Some(loop_state),
-					);
-				}
+			}
+
+			self.maybe_compact(loop_state, current_step_index, event_sender)
+				.await;
+
+			// Emit StepComplete after all tools in this turn are done.
+			if let Some(sender) = event_sender {
+				let _ = sender.send(crate::runtime_loop::LoopEvent::StepComplete {
+					step: current_step_index,
+				});
 			}
 		}
 	}
@@ -1263,48 +1280,6 @@ impl GenericAgentRuntime {
 	fn refresh_tool_loop_visible_tools(&self, loop_state: &mut LoopState) {
 		let visible_tools = self.visible_tools_for_loop_state(loop_state);
 		loop_state.visible_tools = visible_tools;
-	}
-
-	fn refresh_tool_loop_projection(
-		&self,
-		loop_state: &LoopState,
-		runtime_memory_sections: &RuntimeMemorySections,
-	) -> ContextProjection {
-		let mut projection = build_context_projection(loop_state, runtime_memory_sections);
-		projection.visible_tool_hints = self.visible_tool_hints_for(&projection.visible_tools);
-		projection
-	}
-
-	fn visible_tool_hints_for(
-		&self,
-		visible_tools: &[String],
-	) -> BTreeMap<String, VisibleToolHint> {
-		visible_tools
-			.iter()
-			.filter_map(|tool_name| {
-				self.resource_catalog
-					.entries()
-					.iter()
-					.find(|entry| entry.kind == ResourceKind::Tool && entry.name == *tool_name)
-					.map(|entry| {
-						(
-							tool_name.clone(),
-							VisibleToolHint {
-								selection_hint: compact_selection_hint(
-									entry.effective_selection_hint(),
-									self.agent_runtime_config
-										.prompts
-										.visible_tool_hint_max_chars,
-								),
-								required_argument_keys: tool_required_argument_keys(
-									tool_name,
-									Some(&self.resource_catalog),
-								),
-							},
-						)
-					})
-			})
-			.collect()
 	}
 
 	fn compose_visible_tools(
@@ -1616,7 +1591,7 @@ impl GenericAgentRuntime {
 		task_id: &TaskId,
 		request: &RequestEnvelope,
 		loop_state: &LoopState,
-		context_projection: &ContextProjection,
+		step_summary: &str,
 		runtime_memory_sections: &RuntimeMemorySections,
 		tool_name: &str,
 		arguments: Value,
@@ -1640,7 +1615,7 @@ impl GenericAgentRuntime {
 			runtime_memory_sections,
 			attachments,
 			&loop_state.bound_resources,
-			&tool_loop_step_summary(context_projection, tool_name),
+			step_summary,
 		)
 	}
 
@@ -1855,69 +1830,6 @@ fn loop_probe_trace_payload(loop_state: &LoopState) -> Value {
 		.unwrap_or_else(|_| json!({ "schema_version": "runtime_loop_trace.v1" }))
 }
 
-fn terminalize_existing_tool_execution_result(
-	mut execution: DirectRouteExecutionResult,
-	message: String,
-	terminal_step_action: StepAction,
-	status: ResultStatus,
-	loop_name: &str,
-	loop_state: Option<&LoopState>,
-) -> DirectRouteExecutionResult {
-	execution.result.status = status;
-	execution.result.payload =
-		terminalized_result_payload(&execution.result.payload, &message, loop_name, loop_state);
-	if !execution
-		.result
-		.evidence
-		.iter()
-		.any(|item| item.kind == "runtime" && item.value == "runtime-loop")
-	{
-		execution.result.evidence.push(EvidenceItem {
-			kind: "runtime".to_string(),
-			value: "runtime-loop".to_string(),
-		});
-	}
-	if status == ResultStatus::Error {
-		execution.result.confidence = 0.0;
-	}
-	execution.message = message;
-	execution.terminal_step_action = Some(terminal_step_action);
-	execution
-}
-
-fn terminalized_result_payload(
-	upstream_payload: &str,
-	message: &str,
-	loop_name: &str,
-	loop_state: Option<&LoopState>,
-) -> String {
-	let mut payload = serde_json::from_str::<Value>(upstream_payload).unwrap_or_else(|_| {
-		json!({
-			"upstream_payload": upstream_payload,
-		})
-	});
-	if !payload.is_object() {
-		payload = json!({
-			"upstream_payload": payload,
-		});
-	}
-	payload["message"] = Value::String(message.to_string());
-	payload["direct_route"] = Value::Bool(true);
-	payload["runtime_loop"] = Value::String(loop_name.to_string());
-	if let Some(loop_state) = loop_state {
-		payload["probe_trace"] = loop_probe_trace_payload(loop_state);
-	}
-	serde_json::to_string(&payload).unwrap_or_else(|error| {
-		json!({
-			"message": message,
-			"direct_route": true,
-			"runtime_loop": loop_name,
-			"serialization_error": error.to_string(),
-		})
-		.to_string()
-	})
-}
-
 fn terminal_decision(
 	action: StepAction,
 	reason: &str,
@@ -1991,13 +1903,11 @@ fn normalize_tool_loop_observation(observation: ToolObservation) -> ToolObservat
 }
 
 fn awaiting_user_resume_prompt(
-	context_projection: &ContextProjection,
+	loop_state: &LoopState,
 	final_message: &str,
 	missing_fields: &[String],
 	user_input: &str,
 ) -> String {
-	let projection_json = serde_json::to_string_pretty(context_projection)
-		.unwrap_or_else(|_| "{\"error\":\"context_projection_unavailable\"}".to_string());
 	format!(
 		r#"Decide whether the latest user message should resume an existing paused runtime loop or start a fresh request.
 
@@ -2019,8 +1929,8 @@ Paused ask-user message:
 Latest user reply:
 {user_input}
 
-Paused loop context projection:
-{projection_json}"#,
+Paused loop goal:
+{goal}"#,
 		missing_fields = if missing_fields.is_empty() {
 			"(none)".to_string()
 		} else {
@@ -2028,49 +1938,8 @@ Paused loop context projection:
 		},
 		final_message = final_message,
 		user_input = user_input,
-		projection_json = projection_json,
+		goal = loop_state.goal,
 	)
-}
-
-fn summarized_tool_loop_message(goal: &str, observation: &ToolObservation) -> String {
-	summarize_observation(goal, observation).final_message
-}
-
-fn tool_loop_failure_message(
-	goal: &str,
-	interpreted: &crate::runtime_loop::InterpretedObservation,
-) -> String {
-	if interpreted.budget_exhausted {
-		return if !goal.is_ascii() {
-			"运行时循环在产出最终答案前已经耗尽 step budget。".to_string()
-		} else {
-			"The runtime loop exhausted its step budget before it produced a final answer."
-				.to_string()
-		};
-	}
-
-	if interpreted.recovery_exhausted {
-		return if !goal.is_ascii() {
-			"运行时循环在恢复失败后已经耗尽 recovery budget。".to_string()
-		} else {
-			"The runtime loop exhausted its recovery budget after repeated tool failures."
-				.to_string()
-		};
-	}
-
-	summarized_tool_loop_message(goal, &interpreted.raw_observation)
-}
-
-fn compact_selection_hint(selection_hint: &str, max_chars: usize) -> String {
-	let trimmed = selection_hint.trim();
-	if trimmed.chars().count() <= max_chars {
-		return trimmed.to_string();
-	}
-	let truncated = trimmed
-		.chars()
-		.take(max_chars.saturating_sub(3))
-		.collect::<String>();
-	format!("{truncated}...")
 }
 
 fn safe_baseline_tool_pool(config: &crate::runtime_config::LoopRuntimeConfig) -> Vec<&str> {
@@ -2081,12 +1950,8 @@ fn safe_baseline_tool_pool(config: &crate::runtime_config::LoopRuntimeConfig) ->
 		.collect()
 }
 
-fn tool_loop_step_summary(context_projection: &ContextProjection, tool_name: &str) -> String {
-	let projection_json =
-		serde_json::to_string_pretty(context_projection).unwrap_or_else(|_| "{}".to_string());
-	format!(
-		"Continue the generic runtime loop with tool `{tool_name}`.\nCurrent context projection:\n{projection_json}"
-	)
+fn tool_loop_step_summary(goal: &str, tool_name: &str) -> String {
+	format!("Executing tool `{tool_name}` for goal: {goal}")
 }
 
 fn extract_result_message(result: &ResultEnvelope) -> String {
@@ -2163,35 +2028,6 @@ mod tests {
 
 	fn payload_value(result: &ResultEnvelope) -> serde_json::Value {
 		serde_json::from_str(&result.payload).expect("payload should be valid json")
-	}
-
-	fn runtime_with_fixed_general_llm() -> GenericAgentRuntime {
-		runtime_with_fixed_general_llm_and_tools_config(ToolsRuntimeConfig::default())
-	}
-
-	fn runtime_with_fixed_general_llm_and_tools_config(
-		tools_runtime_config: ToolsRuntimeConfig,
-	) -> GenericAgentRuntime {
-		let mut router = LlmRouter::new(RoutingPolicy {
-			max_request_cost_usd: 1.0,
-			max_latency_ms: 5_000,
-		});
-		router.register_provider(FixedLlmProvider);
-		router.register_model(ModelProfile {
-			model_id: "test-model".to_string(),
-			provider: "test-provider".to_string(),
-			max_context_tokens: 16_000,
-			cost_per_1k_tokens_usd: 0.0,
-			max_risk_tier: RiskTier::Critical,
-			route_priority: 100,
-		});
-		GenericAgentRuntime::with_llm_router_skill_registry_tool_config_and_plugin_snapshot(
-			router,
-			SkillRegistry::disabled(),
-			ToolCatalogConfig::default(),
-			PluginRegistrySnapshot::permissive(),
-			tools_runtime_config,
-		)
 	}
 
 	async fn runtime_loop_trace_for_goal(
@@ -2559,32 +2395,248 @@ mod tests {
 		assert_eq!(payload_value(&result)["worker_id"], "custom-worker");
 	}
 
-	struct FixedLlmProvider;
+	/// A test LLM provider that picks the first non-pseudo tool on the first turn,
+	/// then returns final_answer or fail on subsequent turns based on ToolResult error status.
+	///
+	/// This allows regression tests that need to execute specific real tools to get a
+	/// tool_call on the first LLM turn, observe the tool result, then terminate cleanly.
+	struct GroundedSingleToolProvider;
+
+	const PSEUDO_TOOLS: &[&str] = &["final_answer", "ask_user", "fail"];
 
 	#[async_trait]
-	impl LlmProvider for FixedLlmProvider {
+	impl LlmProvider for GroundedSingleToolProvider {
 		fn provider_name(&self) -> &'static str {
-			"test-provider"
+			"grounded-single-tool-provider"
 		}
 
 		async fn complete(
 			&self,
 			_model: &ModelProfile,
-			_request: &GenerationRequest,
+			request: &GenerationRequest,
 		) -> Result<ProviderResponse, ProviderCallError> {
+			// Check if there are any ToolResult messages — if so, we're on a follow-up turn.
+			let has_tool_result = request
+				.messages
+				.as_deref()
+				.unwrap_or(&[])
+				.iter()
+				.any(|m| matches!(m, roku_plugin_llm::Message::ToolResult { .. }));
+
+			if has_tool_result {
+				// On follow-up turns, examine the last ToolResult to decide what to do.
+				let last_result = request
+					.messages
+					.as_deref()
+					.unwrap_or(&[])
+					.iter()
+					.rev()
+					.find_map(|m| {
+						if let roku_plugin_llm::Message::ToolResult {
+							is_error, content, ..
+						} = m
+						{
+							Some((*is_error, content.as_str()))
+						} else {
+							None
+						}
+					});
+				let (name, args) = match last_result {
+					Some((true, content))
+						if content.contains("multiple_candidates")
+							|| content.contains("ambiguous") =>
+					{
+						(
+							"ask_user",
+							serde_json::json!({ "question": "Multiple candidates found. Which one did you mean?" }),
+						)
+					}
+					Some((true, _)) => (
+						"fail",
+						serde_json::json!({ "reason": "tool returned an error" }),
+					),
+					_ => (
+						"final_answer",
+						serde_json::json!({ "message": "task complete" }),
+					),
+				};
+				return Ok(ProviderResponse {
+					output: String::new(),
+					finish_reason: None,
+					prompt_tokens: 8,
+					output_tokens: 8,
+					latency_ms: 1,
+					tool_calls: Some(vec![roku_plugin_llm::ToolCallBlock {
+						id: "grounded-follow-up".to_string(),
+						name: name.to_string(),
+						arguments: args,
+					}]),
+				});
+			}
+
+			// First turn: pick the first non-pseudo tool from the request's tools list.
+			// For explanatory goals (the user asks to explain something without executing it),
+			// skip execution tools so the mock returns final_answer directly.
+			const EXECUTION_TOOLS: &[&str] = &["command.run", "python.run"];
+			let user_text_for_intent = request
+				.messages
+				.as_deref()
+				.unwrap_or(&[])
+				.iter()
+				.rev()
+				.find_map(|m| {
+					if let roku_plugin_llm::Message::User { content } = m {
+						Some(content.clone())
+					} else {
+						None
+					}
+				})
+				.unwrap_or_default();
+			let user_text_lower = user_text_for_intent.to_lowercase();
+			let is_explanatory_goal = (user_text_lower.contains("explain")
+				|| user_text_lower.contains("what does")
+				|| user_text_lower.contains("what is"))
+				&& (user_text_lower.contains("do not run")
+					|| user_text_lower.contains("don't run")
+					|| user_text_lower.contains("without running")
+					|| user_text_lower.contains("but do not")
+					|| user_text_lower.contains("not run it"));
+			let first_real_tool = request.tools.as_deref().unwrap_or(&[]).iter().find(|t| {
+				!(PSEUDO_TOOLS.contains(&t.name.as_str())
+					|| is_explanatory_goal && EXECUTION_TOOLS.contains(&t.name.as_str()))
+			});
+
+			let (name, args) = if let Some(tool) = first_real_tool {
+				// Build a minimal set of arguments: use empty string for each required key.
+				let required_keys: Vec<String> = tool
+					.parameters
+					.get("required")
+					.and_then(serde_json::Value::as_array)
+					.map(|arr| {
+						arr.iter()
+							.filter_map(|v| v.as_str().map(str::to_string))
+							.collect()
+					})
+					.unwrap_or_default();
+				let mut args_obj = serde_json::Map::new();
+				for key in &required_keys {
+					// Try to extract a sensible value from the user message for known keys.
+					let value = extract_arg_from_messages(request, key);
+					args_obj.insert(key.clone(), serde_json::Value::String(value));
+				}
+				(tool.name.clone(), serde_json::Value::Object(args_obj))
+			} else {
+				// No real tools: emit final_answer directly.
+				(
+					"final_answer".to_string(),
+					serde_json::json!({ "message": "no tools available" }),
+				)
+			};
+
 			Ok(ProviderResponse {
-				output: general_completion_json(
-					"live answer from llm",
-					"grounded_answer",
-					"grounded",
-				),
+				output: String::new(),
 				finish_reason: None,
-				prompt_tokens: 32,
+				prompt_tokens: 16,
 				output_tokens: 8,
-				latency_ms: 50,
-				tool_calls: None,
+				latency_ms: 1,
+				tool_calls: Some(vec![roku_plugin_llm::ToolCallBlock {
+					id: "grounded-first-turn".to_string(),
+					name,
+					arguments: args,
+				}]),
 			})
 		}
+	}
+
+	/// Extract a plausible argument value for a known key from the user messages in the request.
+	fn extract_arg_from_messages(request: &GenerationRequest, key: &str) -> String {
+		let user_text = request
+			.messages
+			.as_deref()
+			.unwrap_or(&[])
+			.iter()
+			.rev()
+			.find_map(|m| {
+				if let roku_plugin_llm::Message::User { content } = m {
+					Some(content.as_str())
+				} else {
+					None
+				}
+			})
+			.unwrap_or("");
+
+		match key {
+			"command" => {
+				// Extract backtick-quoted command, e.g. "`nc -l 1234`" → "nc -l 1234"
+				if let Some(start) = user_text.find('`')
+					&& let Some(end) = user_text[start + 1..].find('`')
+				{
+					return user_text[start + 1..start + 1 + end].to_string();
+				}
+				user_text.to_string()
+			}
+			"code" => {
+				// Extract backtick-quoted Python code.
+				if let Some(start) = user_text.find('`')
+					&& let Some(end) = user_text[start + 1..].find('`')
+				{
+					return user_text[start + 1..start + 1 + end].to_string();
+				}
+				user_text.to_string()
+			}
+			"query" => user_text.to_string(),
+			"pattern" | "path" | "name" => {
+				// Prefer a word that looks like a filename (contains a dot or path separator).
+				// Fall back to the last word in the message.
+				let filename_like = user_text.split_whitespace().find(|word| {
+					let trimmed =
+						word.trim_matches(|c: char| c == '.' || c == ',' || c == '"' || c == '\'');
+					trimmed.contains('.') || trimmed.contains('/')
+				});
+				if let Some(candidate) = filename_like {
+					candidate
+						.trim_matches(|c: char| c == '.' || c == ',' || c == '"' || c == '\'')
+						.to_string()
+				} else {
+					user_text
+						.split_whitespace()
+						.last()
+						.unwrap_or(".")
+						.trim_matches(|c: char| c == '.' || c == '"' || c == '\'')
+						.to_string()
+				}
+			}
+			_ => String::new(),
+		}
+	}
+
+	fn runtime_with_grounded_mock_llm() -> GenericAgentRuntime {
+		runtime_with_grounded_mock_llm_and_tools_config(ToolsRuntimeConfig::default())
+	}
+
+	fn runtime_with_grounded_mock_llm_and_tools_config(
+		tools_runtime_config: ToolsRuntimeConfig,
+	) -> GenericAgentRuntime {
+		let mut router = LlmRouter::new(RoutingPolicy {
+			max_request_cost_usd: 1.0,
+			max_latency_ms: 5_000,
+		});
+		router.register_provider(GroundedSingleToolProvider);
+		router.register_model(ModelProfile {
+			model_id: "grounded-model".to_string(),
+			provider: "grounded-single-tool-provider".to_string(),
+			max_context_tokens: 16_000,
+			cost_per_1k_tokens_usd: 0.0,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		});
+		GenericAgentRuntime::with_llm_router_skill_registry_tool_config_and_plugin_snapshot(
+			router,
+			SkillRegistry::disabled(),
+			ToolCatalogConfig::default(),
+			PluginRegistrySnapshot::permissive(),
+			tools_runtime_config,
+		)
 	}
 
 	#[test]
@@ -2743,10 +2795,21 @@ mod tests {
 			_model: &ModelProfile,
 			request: &GenerationRequest,
 		) -> Result<ProviderResponse, ProviderCallError> {
+			// Capture a serialized snapshot of the request that includes both the
+			// legacy prompt field and the new messages/tools fields, so tests can
+			// assert on either representation.
+			let captured = serde_json::json!({
+				"prompt": request.prompt,
+				"messages": request.messages,
+				"tool_names": request.tools.as_deref().map(|tools| {
+					tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+				}),
+			})
+			.to_string();
 			self.prompts
 				.lock()
 				.expect("prompt lock should succeed")
-				.push(request.prompt.clone());
+				.push(captured);
 			let output = self
 				.responses
 				.lock()
@@ -2944,13 +3007,11 @@ mod tests {
 
 		let prompts = prompts.lock().expect("prompt lock should succeed");
 		assert_eq!(prompts.len(), 2);
-		assert!(prompts[0].contains("\"visible_tools\": ["));
-		assert!(prompts[0].contains("\"visible_tool_hints\": {"));
+		// First LLM call: tool definitions include fs.inspect.
 		assert!(prompts[0].contains("\"fs.inspect\""));
-		assert!(prompts[1].contains("\"history_digest\":"));
-		assert!(prompts[1].contains("step 1"));
+		// Second LLM call: messages include the ToolResult from the first fs.inspect call,
+		// so the fs.inspect name should appear in the captured messages JSON.
 		assert!(prompts[1].contains("fs.inspect"));
-		assert!(!prompts[1].contains("\"started_at\""));
 	}
 
 	#[test]
@@ -3613,7 +3674,7 @@ mod tests {
 
 	#[test]
 	fn command_run_visibility_stays_separate_from_invocation_time_approval() {
-		let runtime = GenericAgentRuntime::default();
+		let runtime = runtime_with_grounded_mock_llm();
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId(
 				"req-command-run-visibility-boundary".to_string(),
@@ -3909,7 +3970,7 @@ mod tests {
 
 	#[test]
 	fn runtime_loop_confusion_suite_covers_grounded_and_quoted_requests() {
-		let runtime = runtime_with_fixed_general_llm();
+		let runtime = runtime_with_grounded_mock_llm();
 		let deterministic_runtime = GenericAgentRuntime::default();
 		let csv_path = regression_fixture_path(".csv", "name,count\nalpha,1\nbeta,2\n");
 
@@ -4034,7 +4095,7 @@ mod tests {
 
 	#[test]
 	fn runtime_loop_boundary_suite_covers_contract_edges() {
-		let runtime = GenericAgentRuntime::default();
+		let runtime = runtime_with_grounded_mock_llm();
 		// runtime_loop_trace_for_goal calls execute_tool_loop (async, uses block_in_place).
 		// Bridge via block_on with a multi-thread runtime so block_in_place works.
 		let rt = tokio::runtime::Builder::new_multi_thread()
@@ -4241,7 +4302,7 @@ mod tests {
 
 	#[test]
 	fn runtime_loop_output_interpretation_suite_covers_terminal_and_non_terminal_success() {
-		let runtime = runtime_with_fixed_general_llm();
+		let runtime = runtime_with_grounded_mock_llm();
 		let deterministic_runtime = GenericAgentRuntime::default();
 		let text_path = regression_fixture_path(".txt", "phase3 interpretation smoke\n");
 
@@ -4326,7 +4387,7 @@ mod tests {
 		);
 		let mut tools_runtime_config = ToolsRuntimeConfig::default();
 		tools_runtime_config.web.endpoint = Some(endpoint);
-		let web_runtime = runtime_with_fixed_general_llm_and_tools_config(tools_runtime_config);
+		let web_runtime = runtime_with_grounded_mock_llm_and_tools_config(tools_runtime_config);
 		let web_trace = rt.block_on(runtime_loop_trace_for_goal(
 			&web_runtime,
 			"Search the web for the latest Rust edition.",
@@ -4403,13 +4464,47 @@ mod tests {
 
 	#[test]
 	fn execute_tool_loop_can_switch_tools_after_an_insufficient_lookup_observation() {
-		let runtime = runtime_with_fixed_general_llm();
 		let text_path = regression_fixture_path(".txt", "react recovery fixture\n");
 		let file_name = PathBuf::from(&text_path)
 			.file_name()
 			.and_then(|value| value.to_str())
 			.expect("fixture file name should resolve")
 			.to_string();
+		// Supply a two-turn mock: first call fs.find (which finds and returns a path),
+		// then read the located path with fs.read_text, then emit final_answer.
+		let (route_router, _prompts) = router_with_json_responses(vec![
+			serde_json::json!({
+				"action": "call_tool",
+				"tool_name": "fs.find",
+				"arguments": { "name": file_name },
+				"reason": "find the file first",
+				"final_message": null
+			}),
+			serde_json::json!({
+				"action": "call_tool",
+				"tool_name": "fs.read_text",
+				"arguments": { "path": text_path },
+				"reason": "read the located file",
+				"final_message": null
+			}),
+			serde_json::json!({
+				"action": "final_answer",
+				"tool_name": null,
+				"arguments": null,
+				"reason": "file read complete",
+				"final_message": "react recovery fixture\n"
+			}),
+		]);
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				router_with_text_output("execution-provider", "live answer"),
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+			);
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-react-recovery".to_string()),
 			session_id: "session-react-recovery".to_string(),
@@ -4433,7 +4528,6 @@ mod tests {
 
 		// execute_tool_loop is async; bridge via block_on with a multi-thread runtime so that
 		// block_in_place inside execute_tool_loop can run blocking tool invocations.
-		// LlmRouter (from runtime_with_fixed_general_llm) drops in sync scope after block_on.
 		let result = tokio::runtime::Builder::new_multi_thread()
 			.enable_all()
 			.build()
@@ -4453,63 +4547,12 @@ mod tests {
 			.filter_map(|step| step.tool_name.clone())
 			.collect::<Vec<_>>();
 
-		// general.execute removed; loop emits final_answer directly after fs.read_text succeeds.
 		assert_eq!(
 			tool_sequence,
-			vec!["fs.find".to_string(), "fs.read_text".to_string(),]
+			vec!["fs.find".to_string(), "fs.read_text".to_string()]
 		);
 		assert_eq!(result.terminal_step_action, Some(StepAction::FinalAnswer));
 		cleanup_fixture(&text_path);
-	}
-
-	#[test]
-	fn refresh_tool_loop_projection_includes_semantic_tool_hints() {
-		let runtime = GenericAgentRuntime::default();
-		let request = RequestEnvelope {
-			request_id: roku_common_types::RequestId("req-tool-hints".to_string()),
-			session_id: "session-tool-hints".to_string(),
-			goal: "Count Cargo.toml files in the workspace".to_string(),
-			planning_mode_hint: None,
-			conversation_history: Vec::new(),
-		};
-		let decision = crate::router::RouteDecision::new(
-			IntentFamily::FilesystemRead,
-			0.9,
-			false,
-			crate::router::RouteRisk::Low,
-			vec!["fs.glob".to_string()],
-			vec!["core-fs".to_string()],
-			Vec::new(),
-			"filesystem request",
-		);
-		let mut loop_state =
-			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
-		loop_state.visible_tools = vec!["fs.glob".to_string()];
-
-		let projection =
-			runtime.refresh_tool_loop_projection(&loop_state, &RuntimeMemorySections::default());
-
-		assert_eq!(projection.visible_tools, vec!["fs.glob".to_string()]);
-		assert_eq!(loop_state.visible_tools, vec!["fs.glob".to_string()]);
-		assert_eq!(
-			projection
-				.visible_tool_hints
-				.keys()
-				.cloned()
-				.collect::<Vec<_>>(),
-			vec!["fs.glob".to_string()]
-		);
-		let glob_hint = projection
-			.visible_tool_hints
-			.get("fs.glob")
-			.expect("fs.glob hint should be present");
-		assert!(glob_hint.selection_hint.contains("glob pattern"));
-		assert!(
-			glob_hint
-				.required_argument_keys
-				.contains(&"pattern".to_string())
-		);
-		assert!(glob_hint.selection_hint.chars().count() <= 180);
 	}
 
 	#[tokio::test]
@@ -4693,20 +4736,6 @@ mod tests {
 		assert_eq!(normalized.tool_name, observation.tool_name);
 		assert_eq!(normalized.terminal, observation.terminal);
 		assert_eq!(normalized.message, observation.message);
-	}
-
-	fn general_completion_json(
-		final_message: &str,
-		completion_kind: &str,
-		evidence_status: &str,
-	) -> String {
-		json!({
-			"final_message": final_message,
-			"completion_kind": completion_kind,
-			"evidence_status": evidence_status,
-			"missing_information": [],
-		})
-		.to_string()
 	}
 
 	fn test_skill_archive_bytes() -> Vec<u8> {

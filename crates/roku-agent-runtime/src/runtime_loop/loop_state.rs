@@ -183,18 +183,6 @@ impl LoopState {
 		}
 	}
 
-	pub(crate) fn ambiguity_requires_ask_user(&self, grounding_input: &str) -> bool {
-		let Some(stagnation) = self.ambiguity_stagnation.as_ref() else {
-			return false;
-		};
-		if stagnation.streak < 2 {
-			return false;
-		}
-		let current_fingerprint = explicit_grounding_fingerprint(grounding_input);
-		current_fingerprint.is_empty()
-			|| current_fingerprint == stagnation.explicit_grounding_fingerprint
-	}
-
 	fn update_ambiguity_stagnation(&mut self, observation: &ToolObservation) {
 		let Some(candidate_fingerprint) = ambiguous_candidate_fingerprint(observation) else {
 			self.ambiguity_stagnation = None;

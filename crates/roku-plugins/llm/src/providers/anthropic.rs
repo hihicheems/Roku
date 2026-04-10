@@ -37,8 +37,8 @@ use tokio::sync::mpsc;
 
 use crate::router::{LlmProvider, LlmRouter};
 use crate::types::{
-	GenerationRequest, ModelProfile, ProviderCallError, ProviderResponse, RiskTier, RoutingPolicy,
-	StreamChunk, ToolCallBlock, estimate_prompt_tokens,
+	GenerationRequest, Message, ModelProfile, ProviderCallError, ProviderResponse, RiskTier,
+	RoutingPolicy, StreamChunk, ToolCallBlock, estimate_prompt_tokens,
 };
 
 const ANTHROPIC_PROVIDER: &str = "anthropic";
@@ -372,11 +372,52 @@ impl AnthropicProvider {
 			self.config.max_tokens
 		};
 
-		let mut messages = Vec::new();
-		messages.push(serde_json::json!({
-			"role": "user",
-			"content": request.prompt,
-		}));
+		let messages: Vec<Value> = if let Some(msgs) = &request.messages {
+			msgs.iter()
+				.map(|msg| match msg {
+					Message::User { content } => {
+						serde_json::json!({"role": "user", "content": content})
+					}
+					Message::Assistant { text, tool_calls } => {
+						if tool_calls.is_empty() {
+							serde_json::json!({"role": "assistant", "content": text})
+						} else {
+							let mut content_blocks: Vec<Value> = Vec::new();
+							if !text.is_empty() {
+								content_blocks
+									.push(serde_json::json!({"type": "text", "text": text}));
+							}
+							for tc in tool_calls {
+								content_blocks.push(serde_json::json!({
+									"type": "tool_use",
+									"id": tc.id,
+									"name": tc.name,
+									"input": tc.arguments,
+								}));
+							}
+							serde_json::json!({"role": "assistant", "content": content_blocks})
+						}
+					}
+					Message::ToolResult {
+						tool_use_id,
+						content,
+						is_error,
+					} => {
+						serde_json::json!({
+							"role": "user",
+							"content": [{
+								"type": "tool_result",
+								"tool_use_id": tool_use_id,
+								"content": content,
+								"is_error": is_error,
+							}],
+						})
+					}
+				})
+				.collect()
+		} else {
+			vec![serde_json::json!({"role": "user", "content": request.prompt})]
+		};
 
 		let mut body = serde_json::json!({
 			"model": model_id,
@@ -1009,6 +1050,7 @@ mod tests {
 		let request = GenerationRequest {
 			system_prompt: Some("You are helpful.".to_string()),
 			prompt: "Hello".to_string(),
+			messages: None,
 			expected_output_tokens: 1024,
 			risk_tier: crate::types::RiskTier::Low,
 			preferred_provider: None,
@@ -1042,6 +1084,7 @@ mod tests {
 		let request = GenerationRequest {
 			system_prompt: None,
 			prompt: "Hi".to_string(),
+			messages: None,
 			expected_output_tokens: 512,
 			risk_tier: crate::types::RiskTier::Low,
 			preferred_provider: None,
