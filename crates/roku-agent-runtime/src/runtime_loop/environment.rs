@@ -28,6 +28,8 @@ static ENVIRONMENT_SNAPSHOT: OnceLock<EnvironmentSnapshot> = OnceLock::new();
 /// Probed environment information available for prompt injection.
 #[derive(Debug, Clone)]
 pub(crate) struct EnvironmentSnapshot {
+	/// Current working directory.
+	pub working_directory: String,
 	/// CLI tools confirmed available via `which`.
 	pub available_tools: Vec<String>,
 	/// Git repository context (if inside a git repo).
@@ -46,6 +48,9 @@ pub(crate) struct GitContext {
 /// subsequent calls.
 pub(crate) fn probe_environment() -> &'static EnvironmentSnapshot {
 	ENVIRONMENT_SNAPSHOT.get_or_init(|| EnvironmentSnapshot {
+		working_directory: std::env::current_dir()
+			.map(|p| p.display().to_string())
+			.unwrap_or_else(|_| "(unknown)".to_string()),
 		available_tools: probe_cli_tools(),
 		git_context: probe_git_context(),
 	})
@@ -55,17 +60,19 @@ pub(crate) fn probe_environment() -> &'static EnvironmentSnapshot {
 pub(crate) fn format_environment_context(snapshot: &EnvironmentSnapshot) -> String {
 	let mut sections = Vec::new();
 
-	if !snapshot.available_tools.is_empty() {
-		sections.push(format!(
-			"Available CLI tools: {}",
-			snapshot.available_tools.join(", ")
-		));
-	}
+	sections.push(format!("Working directory: {}", snapshot.working_directory));
 
 	if let Some(git) = &snapshot.git_context {
 		sections.push(format!(
 			"Git repository: {} (branch: {}, remote: {})",
 			git.repo_name, git.branch, git.remote_url
+		));
+	}
+
+	if !snapshot.available_tools.is_empty() {
+		sections.push(format!(
+			"Available CLI tools: {}",
+			snapshot.available_tools.join(", ")
 		));
 	}
 
@@ -177,6 +184,7 @@ mod tests {
 	#[test]
 	fn format_environment_context_renders_tools_and_git() {
 		let snapshot = EnvironmentSnapshot {
+			working_directory: "/home/user/project".to_string(),
 			available_tools: vec!["git".to_string(), "gh".to_string()],
 			git_context: Some(GitContext {
 				branch: "main".to_string(),
@@ -185,6 +193,7 @@ mod tests {
 			}),
 		};
 		let context = format_environment_context(&snapshot);
+		assert!(context.contains("Working directory: /home/user/project"));
 		assert!(context.contains("Available CLI tools: git, gh"));
 		assert!(context.contains("Git repository: itscheems/Roku"));
 		assert!(context.contains("branch: main"));
