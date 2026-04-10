@@ -245,98 +245,11 @@ async fn decide_with_router(
 }
 
 fn align_router_tool_arguments(
-	mut decision: NextStepDecision,
-	grounding_input: &str,
-	catalog: Option<&ResourceCatalog>,
+	decision: NextStepDecision,
+	_grounding_input: &str,
+	_catalog: Option<&ResourceCatalog>,
 ) -> NextStepDecision {
-	if !matches!(decision.action, NextStepAction::CallTool) {
-		return decision;
-	}
-	let Some(tool_name) = decision.tool_name.as_deref() else {
-		return decision;
-	};
-	let Some(grounded_arguments) = uniquely_grounded_arguments(tool_name, grounding_input, catalog)
-	else {
-		return decision;
-	};
-	let mut merged_arguments = decision
-		.arguments
-		.take()
-		.and_then(|value| value.as_object().cloned())
-		.unwrap_or_default();
-	if let Some(grounded_object) = grounded_arguments.as_object() {
-		for (key, value) in grounded_object {
-			merged_arguments.insert(key.clone(), value.clone());
-		}
-	}
-	decision.arguments = Some(Value::Object(merged_arguments));
 	decision
-}
-
-fn uniquely_grounded_arguments(
-	tool_name: &str,
-	grounding_input: &str,
-	catalog: Option<&ResourceCatalog>,
-) -> Option<Value> {
-	if let Some(grounding) = catalog.and_then(|c| c.lookup_grounding_metadata(tool_name))
-		&& grounding.grounding_strategy != GroundingStrategy::None
-	{
-		let arg = grounding.grounding_argument.as_deref().unwrap_or("path");
-		let hint = resolve_extraction_hint(grounding);
-		let mut result = match hint {
-			ExtractionHint::ExplicitPath => {
-				let paths = extract_explicit_path_candidates(grounding_input);
-				(paths.len() == 1).then(|| json!({ arg: paths[0].clone() }))
-			}
-			ExtractionHint::ConcretePath => {
-				let paths = extract_concrete_path_candidates(grounding_input);
-				(paths.len() == 1).then(|| json!({ arg: paths[0].clone() }))
-			}
-			ExtractionHint::TablePath => {
-				let path = extract_concrete_table_path(grounding_input)?;
-				let mut arguments = json!({ arg: path });
-				if let Some(row_limit) = extract_row_limit(grounding_input) {
-					arguments["rows"] = Value::from(row_limit);
-				}
-				if let Some(sheet) = extract_sheet_name(grounding_input) {
-					arguments["sheet"] = Value::String(sheet);
-				}
-				Some(arguments)
-			}
-			ExtractionHint::GlobPattern => {
-				extract_glob_pattern(grounding_input).map(|p| json!({ arg: p }))
-			}
-			ExtractionHint::GrepPattern => {
-				extract_grep_pattern(grounding_input).map(|p| json!({ arg: p }))
-			}
-			ExtractionHint::WebQuery => {
-				extract_web_query(grounding_input).map(|q| json!({ arg: q }))
-			}
-			ExtractionHint::FetchUrl => {
-				extract_fetch_url(grounding_input).map(|url| json!({ arg: url }))
-			}
-			ExtractionHint::ShellCommand => {
-				extract_explicit_shell_command(grounding_input).map(|cmd| json!({ arg: cmd }))
-			}
-			ExtractionHint::PythonCode => {
-				extract_explicit_python_code(grounding_input).map(|code| json!({ arg: code }))
-			}
-			ExtractionHint::Default => None,
-		};
-		// Merge static_extra_arguments from the contract.
-		if let Some(Value::Object(ref mut map)) = result {
-			for (key, value) in &grounding.static_extra_arguments {
-				map.entry(key.clone()).or_insert_with(|| value.clone());
-			}
-		}
-		return result;
-	}
-	// Fallback for unregistered tools (e.g. skills without grounding metadata).
-	match tool_name {
-		"skill.install" | "skill.ensure_installed" => extract_skill_source_url(grounding_input)
-			.map(|source_url| json!({ "source_url": source_url })),
-		_ => None,
-	}
 }
 
 fn resolve_extraction_hint(grounding: &roku_common_types::ToolGroundingContract) -> ExtractionHint {
@@ -386,11 +299,6 @@ fn validate_router_decision(
 					missing_keys.join(", ")
 				));
 			}
-			if let Some(reason) =
-				ungrounded_consumer_path_rejection_reason(loop_state, tool_name, arguments, catalog)
-			{
-				return Err(reason);
-			}
 			Ok(decision)
 		}
 		NextStepAction::CallTools => {
@@ -411,53 +319,6 @@ fn validate_router_decision(
 		NextStepAction::FinalAnswer => Ok(decision),
 		NextStepAction::AskUser | NextStepAction::Fail => Ok(decision),
 	}
-}
-
-fn ungrounded_consumer_path_rejection_reason(
-	loop_state: &LoopState,
-	tool_name: &str,
-	arguments: &serde_json::Map<String, Value>,
-	catalog: Option<&ResourceCatalog>,
-) -> Option<String> {
-	let path = arguments
-		.get("path")
-		.or_else(|| arguments.get("file_path"))
-		.and_then(Value::as_str)?;
-	let resolved_lookup_path = loop_state
-		.last_observation
-		.as_ref()
-		.and_then(|observation| {
-			observation
-				.data
-				.get("resolved_path")
-				.and_then(Value::as_str)
-				.map(str::to_string)
-		});
-	let path_is_grounded = resolved_lookup_path.as_deref() == Some(path)
-		|| extract_concrete_path_candidates(&loop_state.goal)
-			.iter()
-			.any(|candidate| candidate == path)
-		|| extract_concrete_table_path(&loop_state.goal).as_deref() == Some(path)
-		|| matches!(tool_name, "fs.inspect" | "fs.list_dir")
-			&& path == loop_state.working_directory;
-
-	if path_is_grounded {
-		return None;
-	}
-
-	let requires_grounded_path =
-		if let Some(grounding) = catalog.and_then(|c| c.lookup_grounding_metadata(tool_name)) {
-			grounding.requires_grounded_path
-		} else {
-			false
-		};
-	if !requires_grounded_path || !tool_visible(loop_state, "fs.find") {
-		return None;
-	}
-
-	Some(format!(
-		"`{tool_name}` requires a grounded concrete path. The current round only mentions an unresolved file hint, so resolve it with `fs.find` before calling `{tool_name}`."
-	))
 }
 
 pub(crate) fn tool_loop_prompt(
@@ -1751,40 +1612,33 @@ mod tests {
 			crate::runtime_loop::NextStepAction::CallTool
 		);
 		assert_eq!(decision.tool_name.as_deref(), Some("fs.find"));
+		// align_router_tool_arguments is now a passthrough; the LLM's own argument is preserved.
 		assert_eq!(
 			decision
 				.arguments
 				.as_ref()
 				.and_then(|value| value.get("name"))
 				.and_then(Value::as_str),
-			Some("runtime.rs")
+			Some("cmd")
 		);
 	}
 
 	#[test]
-	fn router_rejects_consumer_reads_for_unresolved_basenames() {
+	fn router_returns_first_valid_tool_call_without_path_gate() {
+		// The ungrounded path gate was removed; the LLM's first valid call is accepted directly.
 		let loop_state = sample_bootstrap_loop_state(
 			"帮我看看 grounding.rs 这个文件主要是做啥用的吧，一句话总结下",
 			vec!["fs.find", "fs.glob", "fs.inspect"],
 			vec!["fs.find", "fs.glob", "fs.inspect", "fs.read_text"],
 		);
 		let projection = build_context_projection(&loop_state, &RuntimeMemorySections::default());
-		let (router, _prompts) = router_with_responses(vec![
-			json!({
-				"action": "call_tool",
-				"tool_name": "fs.read_text",
-				"arguments": { "path": "/Users/jojo/cjj_project/Roku/grounding.rs" },
-				"reason": "Read the file directly.",
-				"final_message": null
-			}),
-			json!({
-				"action": "call_tool",
-				"tool_name": "fs.find",
-				"arguments": { "name": "grounding.rs", "kind": "any" },
-				"reason": "Resolve the basename first.",
-				"final_message": null
-			}),
-		]);
+		let (router, _prompts) = router_with_responses(vec![json!({
+			"action": "call_tool",
+			"tool_name": "fs.read_text",
+			"arguments": { "path": "/Users/jojo/cjj_project/Roku/grounding.rs" },
+			"reason": "Read the file directly.",
+			"final_message": null
+		})]);
 
 		// decide_tool_loop_next_step is async; bridge via block_on so that the LlmRouter
 		// (which holds a blocking_runtime) is dropped in sync scope rather than async scope.
@@ -1806,7 +1660,8 @@ mod tests {
 			decision.action,
 			crate::runtime_loop::NextStepAction::CallTool
 		);
-		assert_eq!(decision.tool_name.as_deref(), Some("fs.find"));
+		// Without the path gate, fs.read_text is accepted directly.
+		assert_eq!(decision.tool_name.as_deref(), Some("fs.read_text"));
 	}
 
 	#[tokio::test]

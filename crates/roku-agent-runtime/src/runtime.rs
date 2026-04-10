@@ -36,10 +36,7 @@ use crate::tools::{
 	build_llm_tool_runtime_with_plugin_snapshot_and_runtime_config,
 	build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config,
 };
-use crate::workers::{
-	data_worker_with_config, inventory_worker_with_config, research_worker_with_config,
-	review_worker_with_config, skill_execute_worker_with_config, skill_worker_with_config,
-};
+use crate::workers::{skill_execute_worker_with_config, skill_worker_with_config};
 use roku_common_types::{
 	AgentContext, AggregationMode, CanonicalExecution, ConversationRole, ConversationTurn,
 	EvidenceItem, JoinPolicy, NodeBudgetSnapshot, NodeId, PolicyBindings, RequestEnvelope,
@@ -170,23 +167,6 @@ impl GenericAgentRuntime {
 			95,
 			skill_worker_with_config(Arc::clone(&shared_tool_runtime), &tool_config),
 		);
-		runtime.register_worker(
-			90,
-			research_worker_with_config(Arc::clone(&shared_tool_runtime), &tool_config),
-		);
-		runtime.register_worker(
-			85,
-			inventory_worker_with_config(Arc::clone(&shared_tool_runtime), &tool_config),
-		);
-		runtime.register_worker(
-			80,
-			data_worker_with_config(Arc::clone(&shared_tool_runtime), &tool_config),
-		);
-		runtime.register_worker(
-			70,
-			review_worker_with_config(Arc::clone(&shared_tool_runtime), &tool_config),
-		);
-		// generic_worker (general.execute) removed — the LLM answers directly.
 		let _ = shared_tool_runtime;
 		runtime
 	}
@@ -2471,40 +2451,6 @@ mod tests {
 		assert!(report.passed, "regression case failed: {report:?}");
 	}
 
-	#[test]
-	fn dispatches_to_data_worker_through_tool_runtime() {
-		let runtime = GenericAgentRuntime::default();
-		let node = node_with_capability("data.read");
-		let spec = spec_with_capabilities(vec!["data.read"]);
-
-		let result = runtime.execute(&spec, &node);
-		assert_eq!(result.status, ResultStatus::Ok);
-		assert_eq!(result.evidence[0].value, "data-worker");
-		assert_eq!(result.evidence[1].value, "data.execute");
-
-		let payload = payload_value(&result);
-		assert_eq!(payload["worker_id"], "data-worker");
-		assert_eq!(payload["tool_name"], "data.execute");
-		assert_eq!(
-			payload["message"],
-			"deterministic placeholder only: data processing was not executed by a live runtime"
-		);
-		assert_eq!(payload["output"]["data"]["runtime_mode"], "deterministic");
-		assert_eq!(payload["output"]["data"]["placeholder"], true);
-	}
-
-	#[test]
-	fn dispatches_to_review_worker_through_tool_runtime() {
-		let runtime = GenericAgentRuntime::default();
-		let node = node_with_capability("review.check");
-		let spec = spec_with_capabilities(vec!["review.check"]);
-
-		let result = runtime.execute(&spec, &node);
-		assert_eq!(result.status, ResultStatus::Ok);
-		assert_eq!(result.evidence[0].value, "review-worker");
-		assert_eq!(result.evidence[1].value, "review.assess");
-	}
-
 	#[derive(Clone)]
 	struct StaticArchiveFetcher {
 		archive: DownloadedArchive,
@@ -2566,23 +2512,6 @@ mod tests {
 			payload_value(&result)["error_code"],
 			"policy_bindings_rejected"
 		);
-	}
-
-	#[test]
-	fn reports_tool_runtime_capability_denial_as_error_result() {
-		let runtime = GenericAgentRuntime::default();
-		let node = node_with_capability("research.analyze");
-		let spec = spec_with_capabilities(vec!["research.analyze"]);
-
-		let result = runtime.execute(&spec, &node);
-		assert_eq!(result.status, ResultStatus::Error);
-		assert!(
-			result
-				.evidence
-				.iter()
-				.any(|item| item.kind == "tool_error" && item.value == "capability_denied")
-		);
-		assert_eq!(payload_value(&result)["error_code"], "capability_denied");
 	}
 
 	struct CustomWorker;
@@ -3315,9 +3244,15 @@ mod tests {
 			"general.execute must not appear in visible tools after removal"
 		);
 		assert!(
+			!loop_state
+				.visible_tools
+				.contains(&"inventory.describe".to_string()),
+			"inventory.describe must not appear in visible tools after removal"
+		);
+		assert!(
 			loop_state
 				.visible_tools
-				.contains(&"inventory.describe".to_string())
+				.contains(&"skill.ensure_installed".to_string())
 		);
 		assert!(
 			loop_state
@@ -3617,33 +3552,6 @@ mod tests {
 			}
 			other => {
 				panic!("expected explicit inspect action to start with fs.inspect, got {other:?}")
-			}
-		}
-	}
-
-	#[tokio::test]
-	async fn classify_route_shortlists_inventory_describe_for_inventory_questions() {
-		let runtime = GenericAgentRuntime::default();
-		let request = RequestEnvelope {
-			request_id: roku_common_types::RequestId("req-inventory-tool-loop".to_string()),
-			session_id: "session-inventory-tool-loop".to_string(),
-			goal: "What skills and tools do you have right now?".to_string(),
-			planning_mode_hint: None,
-			conversation_history: Vec::new(),
-		};
-
-		let route = runtime.classify_route(&request, &request.session_id).await;
-
-		match route {
-			crate::router::RouteDecisionResult::Direct(plan) => {
-				assert_eq!(plan.decision.intent_family, IntentFamily::Chat);
-				assert_eq!(
-					plan.decision.candidate_tools,
-					vec!["inventory.describe".to_string()]
-				);
-			}
-			other => {
-				panic!("expected inventory question to shortlist inventory.describe, got {other:?}")
 			}
 		}
 	}
@@ -4026,14 +3934,12 @@ mod tests {
 			crate::runtime_loop::RegressionSuiteKind::Confusion,
 			&inventory_trace,
 			crate::runtime_loop::RuntimeLoopRegressionExpectation {
-				expected_tool: Some("inventory.describe".to_string()),
-				forbidden_tools: Vec::new(),
-				expected_terminal_action: Some("final_answer".to_string()),
+				// inventory.describe removed — the LLM answers inventory questions directly.
+				expected_tool: None,
+				forbidden_tools: vec!["inventory.describe".to_string()],
+				expected_terminal_action: None,
 				expected_error_type: None,
-				interpreted_flags: vec![crate::runtime_loop::InterpretedFlagExpectation {
-					field: "should_emit_final_answer".to_string(),
-					expected: true,
-				}],
+				interpreted_flags: Vec::new(),
 			},
 		);
 
@@ -4411,20 +4317,12 @@ mod tests {
 			crate::runtime_loop::RegressionSuiteKind::OutputInterpretation,
 			&inventory_trace,
 			crate::runtime_loop::RuntimeLoopRegressionExpectation {
-				expected_tool: Some("inventory.describe".to_string()),
-				forbidden_tools: Vec::new(),
-				expected_terminal_action: Some("final_answer".to_string()),
+				// inventory.describe removed — the LLM answers inventory questions directly.
+				expected_tool: None,
+				forbidden_tools: vec!["inventory.describe".to_string()],
+				expected_terminal_action: None,
 				expected_error_type: None,
-				interpreted_flags: vec![
-					crate::runtime_loop::InterpretedFlagExpectation {
-						field: "continue_allowed".to_string(),
-						expected: false,
-					},
-					crate::runtime_loop::InterpretedFlagExpectation {
-						field: "should_emit_final_answer".to_string(),
-						expected: true,
-					},
-				],
+				interpreted_flags: Vec::new(),
 			},
 		);
 		let endpoint = spawn_mock_web_search_server(

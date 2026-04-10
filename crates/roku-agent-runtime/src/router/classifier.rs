@@ -467,7 +467,6 @@ fn explicit_tool_selector(
 
 fn coarse_intent_hint_for_tool(tool_name: &str) -> IntentFamily {
 	match tool_name {
-		"inventory.describe" => IntentFamily::Chat,
 		name if name.starts_with("fs.") => IntentFamily::FilesystemRead,
 		name if name.starts_with("table.") => IntentFamily::TableRead,
 		name if name.starts_with("web.") => IntentFamily::WebLookup,
@@ -1307,6 +1306,32 @@ fn best_skill_selector(
 		.then(|| skill.descriptor.selector.clone())
 }
 
+fn decision_requests_skill_local_context(
+	context: &RouteClassifierContext<'_>,
+	decision: &RouteDecision,
+) -> bool {
+	let execute_tool_name = tool_name_for_role(context.tool_config, BuiltinToolRole::SkillExecute);
+	decision
+		.candidate_tools
+		.iter()
+		.any(|tool_name| tool_name == &execute_tool_name || tool_name == "skill.execute")
+		|| decision
+			.candidate_plugins
+			.iter()
+			.any(|plugin_id| plugin_id == "skill-source-local")
+}
+
+fn decision_requests_skill_execution(
+	context: &RouteClassifierContext<'_>,
+	decision: &RouteDecision,
+) -> bool {
+	let execute_tool_name = tool_name_for_role(context.tool_config, BuiltinToolRole::SkillExecute);
+	decision
+		.candidate_tools
+		.iter()
+		.any(|tool_name| tool_name == &execute_tool_name || tool_name == "skill.execute")
+}
+
 fn extract_explicit_path_candidates(goal: &str) -> Vec<String> {
 	shared_extract_explicit_path_candidates(goal)
 }
@@ -1431,32 +1456,6 @@ fn normalize(value: &str) -> String {
 		.filter(|character| character.is_ascii_alphanumeric())
 		.collect::<String>()
 		.to_ascii_lowercase()
-}
-
-fn decision_requests_skill_local_context(
-	context: &RouteClassifierContext<'_>,
-	decision: &RouteDecision,
-) -> bool {
-	let execute_tool_name = tool_name_for_role(context.tool_config, BuiltinToolRole::SkillExecute);
-	decision
-		.candidate_tools
-		.iter()
-		.any(|tool_name| tool_name == &execute_tool_name || tool_name == "skill.execute")
-		|| decision
-			.candidate_plugins
-			.iter()
-			.any(|plugin_id| plugin_id == "skill-source-local")
-}
-
-fn decision_requests_skill_execution(
-	context: &RouteClassifierContext<'_>,
-	decision: &RouteDecision,
-) -> bool {
-	let execute_tool_name = tool_name_for_role(context.tool_config, BuiltinToolRole::SkillExecute);
-	decision
-		.candidate_tools
-		.iter()
-		.any(|tool_name| tool_name == &execute_tool_name || tool_name == "skill.execute")
 }
 
 fn extract_fenced_python_code(goal: &str) -> Option<String> {
@@ -1589,13 +1588,7 @@ fn candidate_plugins_for_tool(
 	let mut plugins = Vec::new();
 	if matches!(
 		tool_name,
-		"skill.install"
-			| "skill.ensure_installed"
-			| "skill.execute"
-			| "inventory.describe"
-			| "research.synthesize"
-			| "data.execute"
-			| "review.assess"
+		"skill.install" | "skill.ensure_installed" | "skill.execute"
 	) && plugin_snapshot.is_plugin_enabled("builtin-tools")
 	{
 		plugins.push("builtin-tools".to_string());
@@ -1673,41 +1666,6 @@ mod tests {
 	}
 
 	#[test]
-	fn llm_candidates_emit_compact_selection_inventory_without_examples() {
-		let catalog = ResourceCatalog::new(vec![tool_descriptor("web.search")]);
-		let availability_snapshot = RuntimeVisibleToolAvailabilitySnapshot {
-			enabled_tools: ["web.search".to_string()]
-				.into_iter()
-				.collect::<BTreeSet<_>>(),
-			baseline_visible_tools: Vec::new(),
-		};
-		let candidates = llm_candidates(
-			&catalog,
-			&availability_snapshot,
-			&AgentRuntimeConfig::default(),
-		);
-		let candidate = candidates
-			.first()
-			.expect("selection inventory should include one candidate");
-
-		assert_eq!(
-			candidate
-				.get("selection_hint")
-				.and_then(|value| value.as_str()),
-			Some("Compact selection hint.")
-		);
-		assert!(candidate.get("description").is_none());
-		assert!(candidate.get("example").is_none());
-		assert_eq!(
-			candidate
-				.get("required_arguments")
-				.and_then(|value| value.as_array())
-				.expect("required arguments should serialize"),
-			&vec![serde_json::Value::String("query".to_string())]
-		);
-	}
-
-	#[test]
 	fn executable_skill_detection_ignores_examples_only_signal() {
 		let descriptor = CatalogDescriptor {
 			selector: ResourceSelector::skill("skill-creator"),
@@ -1735,14 +1693,14 @@ mod tests {
 	#[test]
 	fn build_tool_loop_route_filters_shortlist_from_availability_snapshot() {
 		let catalog = ResourceCatalog::new(vec![
-			tool_descriptor("inventory.describe"),
+			tool_descriptor("skill.ensure_installed"),
 			tool_descriptor("web.search"),
 		]);
 		let tool_config = ToolCatalogConfig::default();
 		let agent_runtime_config = AgentRuntimeConfig::default();
 		let plugin_snapshot = PluginRegistrySnapshot::permissive();
 		let availability_snapshot = RuntimeVisibleToolAvailabilitySnapshot {
-			enabled_tools: ["inventory.describe".to_string()]
+			enabled_tools: ["skill.ensure_installed".to_string()]
 				.into_iter()
 				.collect::<BTreeSet<_>>(),
 			baseline_visible_tools: Vec::new(),
@@ -1761,7 +1719,10 @@ mod tests {
 			0.91,
 			false,
 			RouteRisk::Low,
-			vec!["inventory.describe".to_string(), "web.search".to_string()],
+			vec![
+				"skill.ensure_installed".to_string(),
+				"web.search".to_string(),
+			],
 			Vec::new(),
 			Vec::new(),
 			"snapshot-owned shortlist filtering",
@@ -1775,7 +1736,7 @@ mod tests {
 
 		assert_eq!(
 			plan.decision.candidate_tools,
-			vec!["inventory.describe".to_string()]
+			vec!["skill.ensure_installed".to_string()]
 		);
 	}
 }
