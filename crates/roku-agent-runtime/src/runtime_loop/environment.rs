@@ -28,8 +28,6 @@ static ENVIRONMENT_SNAPSHOT: OnceLock<EnvironmentSnapshot> = OnceLock::new();
 /// Probed environment information available for prompt injection.
 #[derive(Debug, Clone)]
 pub(crate) struct EnvironmentSnapshot {
-	/// Current working directory.
-	pub working_directory: String,
 	/// CLI tools confirmed available via `which`.
 	pub available_tools: Vec<String>,
 	/// Git repository context (if inside a git repo).
@@ -48,24 +46,33 @@ pub(crate) struct GitContext {
 /// subsequent calls.
 pub(crate) fn probe_environment() -> &'static EnvironmentSnapshot {
 	ENVIRONMENT_SNAPSHOT.get_or_init(|| EnvironmentSnapshot {
-		working_directory: std::env::current_dir()
-			.map(|p| p.display().to_string())
-			.unwrap_or_else(|_| "(unknown)".to_string()),
 		available_tools: probe_cli_tools(),
 		git_context: probe_git_context(),
 	})
 }
 
 /// Format the environment snapshot as a compact text section for prompt injection.
-pub(crate) fn format_environment_context(snapshot: &EnvironmentSnapshot) -> String {
+///
+/// `working_directory` is passed explicitly because it may change per step
+/// (via `LoopState`), unlike CLI tools and git context which are static per
+/// process.
+pub(crate) fn format_environment_context(
+	snapshot: &EnvironmentSnapshot,
+	working_directory: &str,
+) -> String {
 	let mut sections = Vec::new();
 
-	sections.push(format!("Working directory: {}", snapshot.working_directory));
+	sections.push(format!(
+		"Working directory: {}",
+		sanitize_prompt_value(working_directory)
+	));
 
 	if let Some(git) = &snapshot.git_context {
 		sections.push(format!(
 			"Git repository: {} (branch: {}, remote: {})",
-			git.repo_name, git.branch, git.remote_url
+			sanitize_prompt_value(&git.repo_name),
+			sanitize_prompt_value(&git.branch),
+			sanitize_prompt_value(&git.remote_url),
 		));
 	}
 
@@ -77,6 +84,18 @@ pub(crate) fn format_environment_context(snapshot: &EnvironmentSnapshot) -> Stri
 	}
 
 	sections.join("\n")
+}
+
+/// Strip control characters and truncate to prevent prompt injection via
+/// crafted directory names, git remotes, or branch names.
+fn sanitize_prompt_value(value: &str) -> String {
+	const MAX_LEN: usize = 256;
+	let sanitized: String = value
+		.chars()
+		.filter(|c| !c.is_control() || *c == ' ')
+		.take(MAX_LEN)
+		.collect();
+	sanitized
 }
 
 /// Check which CLI tools are available via `which`.
@@ -184,7 +203,6 @@ mod tests {
 	#[test]
 	fn format_environment_context_renders_tools_and_git() {
 		let snapshot = EnvironmentSnapshot {
-			working_directory: "/home/user/project".to_string(),
 			available_tools: vec!["git".to_string(), "gh".to_string()],
 			git_context: Some(GitContext {
 				branch: "main".to_string(),
@@ -192,10 +210,26 @@ mod tests {
 				repo_name: "itscheems/Roku".to_string(),
 			}),
 		};
-		let context = format_environment_context(&snapshot);
+		let context = format_environment_context(&snapshot, "/home/user/project");
 		assert!(context.contains("Working directory: /home/user/project"));
 		assert!(context.contains("Available CLI tools: git, gh"));
 		assert!(context.contains("Git repository: itscheems/Roku"));
 		assert!(context.contains("branch: main"));
+	}
+
+	#[test]
+	fn sanitize_strips_control_characters() {
+		assert_eq!(sanitize_prompt_value("normal/path"), "normal/path");
+		assert_eq!(
+			sanitize_prompt_value("path\nwith\nnewlines"),
+			"pathwithnewlines"
+		);
+		assert_eq!(sanitize_prompt_value("has\x00null\x1besc"), "hasnullesc");
+	}
+
+	#[test]
+	fn sanitize_truncates_long_values() {
+		let long = "a".repeat(500);
+		assert_eq!(sanitize_prompt_value(&long).len(), 256);
 	}
 }

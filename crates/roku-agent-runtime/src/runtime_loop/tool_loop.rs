@@ -86,6 +86,7 @@ async fn decide_with_router(
 	let tool_definitions = build_tool_definitions(&context_projection.visible_tools, catalog);
 	let env_context = crate::runtime_loop::environment::format_environment_context(
 		crate::runtime_loop::environment::probe_environment(),
+		&context_projection.working_directory,
 	);
 	let system_prompt = format!(
 		"You are Roku, a coding assistant. Use the provided tools to accomplish the user's task. \
