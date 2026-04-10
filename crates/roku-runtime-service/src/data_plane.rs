@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_common_types::{
-	ApprovalTicket, Artifact, ArtifactId, ErrorClass, ExperimentMetric, ExperimentRun, NodeId,
-	RecoveryEligibility, ReplayConsistencyStatus, ResultEnvelope, ResumeCandidate, RuntimeError,
-	Task, TaskEvent, TaskEventKind, TaskId, TaskNode, TaskReplayCursor, TaskReplayReport,
-	TaskReplaySnapshot, TaskState,
-};
-use roku_orchestrator::{
+use crate::state_machine::{
 	replay_consistency_status, replay_consistency_status_from, replayed_state, replayed_state_from,
+};
+use roku_common_types::{
+	ApprovalTicket, ErrorClass, NodeId, RecoveryEligibility, ReplayConsistencyStatus,
+	ResultEnvelope, ResumeCandidate, RuntimeError, Task, TaskEvent, TaskEventKind, TaskId,
+	TaskNode, TaskReplayCursor, TaskReplayReport, TaskReplaySnapshot, TaskState,
 };
 
 use crate::RuntimeService;
@@ -74,49 +73,6 @@ impl RuntimeService {
 		};
 		let analysis = self.analyze_task_recovery(&task)?;
 		Ok(Some(build_replay_report(task, analysis)))
-	}
-
-	pub fn list_artifacts(&self, task_id: &TaskId) -> Result<Vec<Artifact>, RuntimeError> {
-		let state = self.lock_state()?;
-		state
-			.artifact_store
-			.list_by_task(task_id)
-			.map_err(|error| RuntimeError::new(error.to_string()))
-	}
-
-	pub fn get_experiment_run(
-		&self,
-		task_id: &TaskId,
-	) -> Result<Option<ExperimentRun>, RuntimeError> {
-		let state = self.lock_state()?;
-		state
-			.experiment_registry
-			.load_by_task(task_id)
-			.map_err(|error| RuntimeError::new(error.to_string()))
-	}
-
-	pub fn get_artifact_content(
-		&self,
-		task_id: &TaskId,
-		artifact_id: &ArtifactId,
-	) -> Result<Option<String>, RuntimeError> {
-		let state = self.lock_state()?;
-		let Some(artifact) = state
-			.artifact_store
-			.load_artifact(artifact_id)
-			.map_err(|error| RuntimeError::new(error.to_string()))?
-		else {
-			return Ok(None);
-		};
-
-		if artifact.task_id != *task_id {
-			return Err(RuntimeError::new("artifact does not belong to task"));
-		}
-
-		state
-			.artifact_store
-			.load_content_by_uri(&artifact.uri)
-			.map_err(|error| RuntimeError::new(error.to_string()))
 	}
 
 	#[allow(dead_code)]
@@ -205,30 +161,6 @@ impl RuntimeService {
 			.map_err(|error| RuntimeError::new(error.to_string()))
 	}
 
-	pub(super) fn persist_result_artifact(
-		&self,
-		result: &ResultEnvelope,
-	) -> Result<Artifact, RuntimeError> {
-		let mut state = self.lock_state()?;
-		state
-			.artifact_store
-			.persist_result_artifact(result)
-			.map_err(|error| RuntimeError::new(error.to_string()))
-	}
-
-	pub(super) fn attach_artifact_to_experiment(
-		&self,
-		task_id: &TaskId,
-		artifact_id: ArtifactId,
-	) -> Result<(), RuntimeError> {
-		let mut state = self.lock_state()?;
-		state
-			.experiment_registry
-			.attach_artifact(task_id, artifact_id)
-			.map(|_| ())
-			.map_err(|error| RuntimeError::new(error.to_string()))
-	}
-
 	pub(super) fn list_results(
 		&self,
 		task_id: &TaskId,
@@ -238,62 +170,6 @@ impl RuntimeService {
 			.result_repo
 			.list_results(task_id)
 			.map_err(|error| RuntimeError::new(error.to_string()))
-	}
-
-	pub(super) fn start_experiment_run(
-		&self,
-		task: &Task,
-		goal: &str,
-		strategy: &str,
-	) -> Result<(), RuntimeError> {
-		let mut state = self.lock_state()?;
-		state
-			.experiment_registry
-			.start_run(&task.task_id, &task.request_id, goal, strategy)
-			.map_err(|error| RuntimeError::new(error.to_string()))?;
-		self.metrics.inc_experiments_started();
-		Ok(())
-	}
-
-	pub(super) fn complete_experiment_run(
-		&self,
-		task: &Task,
-		result_count: usize,
-	) -> Result<(), RuntimeError> {
-		let mut state = self.lock_state()?;
-		state
-			.experiment_registry
-			.complete_run(
-				&task.task_id,
-				"task succeeded",
-				vec![
-					ExperimentMetric {
-						name: "completed_nodes".to_string(),
-						value: task.completed_nodes.len() as f64,
-					},
-					ExperimentMetric {
-						name: "validated_results".to_string(),
-						value: result_count as f64,
-					},
-				],
-			)
-			.map_err(|error| RuntimeError::new(error.to_string()))?;
-		self.metrics.inc_experiments_succeeded();
-		Ok(())
-	}
-
-	pub(super) fn fail_experiment_run(
-		&self,
-		task: &Task,
-		reason: &str,
-	) -> Result<(), RuntimeError> {
-		let mut state = self.lock_state()?;
-		state
-			.experiment_registry
-			.fail_run(&task.task_id, reason)
-			.map_err(|error| RuntimeError::new(error.to_string()))?;
-		self.metrics.inc_experiments_failed();
-		Ok(())
 	}
 
 	pub(super) fn mark_node_completed(&self, task: &mut Task, node: &TaskNode) {

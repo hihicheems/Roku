@@ -6,9 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-roku-artifact-store = { path = "../roku-artifact-store" }
 roku-common-types = { path = "../roku-common-types" }
-roku-experiment-registry = { path = "../roku-experiment-registry" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 

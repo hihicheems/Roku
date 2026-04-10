@@ -60,8 +60,6 @@ impl<'a> RuntimeLoopOwner<'a> {
 		if let Some(mut loop_state) = resumable_loop.take() {
 			self.service
 				.attach_resumed_loop_resources(&mut prepared.context_bundle, &loop_state);
-			self.service
-				.start_experiment_run(task, &request.goal, "runtime_loop_resume")?;
 			let runtime_memory_sections = prepared.runtime_memory_sections();
 			return self
 				.service
@@ -132,8 +130,6 @@ impl<'a> RuntimeLoopOwner<'a> {
 			RouteDecisionResult::Direct(plan) => {
 				self.service.metrics.inc_direct_route_hits();
 				self.service
-					.start_experiment_run(task, &request.goal, "direct_route")?;
-				self.service
 					.process_direct_route(
 						task,
 						request,
@@ -161,22 +157,16 @@ impl<'a> RuntimeLoopOwner<'a> {
 					| EscalationReason::LowConfidence => {}
 				}
 				match plan.action {
-					EscalationAction::AskForMoreInfo => {
-						self.service
-							.start_experiment_run(task, &request.goal, "direct_route")?;
-						self.service.process_direct_escalation(
-							task,
-							request,
-							plan,
-							loop_state,
-							&prepared.context_bundle,
-							&runtime_memory_sections,
-						)
-					}
+					EscalationAction::AskForMoreInfo => self.service.process_direct_escalation(
+						task,
+						request,
+						plan,
+						loop_state,
+						&prepared.context_bundle,
+						&runtime_memory_sections,
+					),
 					EscalationAction::FallbackAnswer => {
 						self.service.metrics.inc_direct_route_fallbacks();
-						self.service
-							.start_experiment_run(task, &request.goal, "direct_route")?;
 						self.service.process_direct_escalation(
 							task,
 							request,
@@ -189,11 +179,6 @@ impl<'a> RuntimeLoopOwner<'a> {
 					EscalationAction::EnterLimitedPlanning => {
 						self.service.metrics.inc_route_limited_planning();
 						self.service.metrics.inc_direct_route_fallbacks();
-						self.service.start_experiment_run(
-							task,
-							&request.goal,
-							"compatibility_fallback",
-						)?;
 						self.service.process_direct_escalation(
 							task,
 							request,

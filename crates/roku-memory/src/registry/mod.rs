@@ -35,8 +35,7 @@ use thiserror::Error;
 
 pub use entry::{
 	EntryAdapterCatalog, EntryControlPlaneBuilder, EntryMemoryConfig, EntryRegistryError,
-	EntryRuntimeLayout, ResolvedEntryRuntimeBundle, resolve_entry_runtime_bundle,
-	resolve_memory_subsystem,
+	ResolvedEntryRuntimeBundle, resolve_entry_runtime_bundle, resolve_memory_subsystem,
 };
 
 /// Provider-neutral identifier for the configured long-term memory backend.

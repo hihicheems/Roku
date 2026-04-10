@@ -205,20 +205,20 @@ impl ApprovalExecutor for RuntimeServiceExecutor {
 }
 
 impl TaskDataExecutor for RuntimeServiceExecutor {
-	fn list_artifacts(&self, task_id: &TaskId) -> Result<Vec<Artifact>, RuntimeError> {
-		self.service.list_artifacts(task_id)
+	fn list_artifacts(&self, _task_id: &TaskId) -> Result<Vec<Artifact>, RuntimeError> {
+		Ok(Vec::new())
 	}
 
-	fn get_experiment_run(&self, task_id: &TaskId) -> Result<Option<ExperimentRun>, RuntimeError> {
-		self.service.get_experiment_run(task_id)
+	fn get_experiment_run(&self, _task_id: &TaskId) -> Result<Option<ExperimentRun>, RuntimeError> {
+		Ok(None)
 	}
 
 	fn get_artifact_content(
 		&self,
-		task_id: &TaskId,
-		artifact_id: &ArtifactId,
+		_task_id: &TaskId,
+		_artifact_id: &ArtifactId,
 	) -> Result<Option<String>, RuntimeError> {
-		self.service.get_artifact_content(task_id, artifact_id)
+		Ok(None)
 	}
 
 	fn get_task_replay_report(

@@ -23,6 +23,7 @@ mod pending_loop_snapshot_store;
 mod runtime_loop_lifecycle;
 mod runtime_loop_owner;
 mod runtime_loop_recovery;
+pub(crate) mod state_machine;
 #[cfg(test)]
 mod tests;
 
@@ -30,13 +31,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use roku_agent_runtime::{GenericAgentRuntime, RouteDecisionResult};
-use roku_artifact_store::ArtifactStore;
 use roku_common_types::{
 	ApprovalDecision, ApprovalId, ApprovalStatus, ApprovalTicket, ErrorClass, RequestEnvelope,
 	ResponseEnvelope, ResponseStatus, RuntimeError, TaskEventKind, TaskNode, TaskNodeKind,
 	TaskState,
 };
-use roku_experiment_registry::ExperimentRegistry;
 use roku_memory::{
 	ApprovalRepository, ConservativeMemoryLifecyclePolicy, ControlPlaneDataPlane, EventRepository,
 	LongTermMemoryBackend, MemoryLifecyclePolicy, NoopLongTermMemoryBackend, ResultRepository,
@@ -46,8 +45,6 @@ use roku_observability::{
 	AuditCorrelation, AuditRecord, AuditSink, InMemoryAuditSink, LogLevel, LogRecord, Metrics,
 	MetricsSnapshot, emit_global_log,
 };
-use roku_orchestrator::Orchestrator;
-use roku_validation_plane::ValidationPipeline;
 
 use crate::helpers::{failure_message, ticket_status_label};
 pub use crate::memory_context::{ContextBundle, RuntimeMemoryLayers};
@@ -145,21 +142,19 @@ struct RuntimeState {
 	event_repo: Box<dyn EventRepository + Send>,
 	approval_repo: Box<dyn ApprovalRepository + Send>,
 	result_repo: Box<dyn ResultRepository + Send>,
-	artifact_store: ArtifactStore,
-	experiment_registry: ExperimentRegistry,
+	/// Inline frozen payload store — replaces the deleted artifact_store for
+	/// execution-approval snapshots only. Not exposed as a public API.
+	frozen_payloads: HashMap<String, String>,
 }
 
 pub struct RuntimeDataPlane {
 	pub control_plane: ControlPlaneDataPlane,
-	pub artifact_store: ArtifactStore,
-	pub experiment_registry: ExperimentRegistry,
 }
 
 pub struct RuntimeService {
-	orchestrator: Orchestrator,
+	orchestrator: crate::state_machine::Orchestrator,
 	runtime: GenericAgentRuntime,
 	runtime_mode: RuntimeModeReport,
-	validator: ValidationPipeline,
 	metrics: Arc<Metrics>,
 	audit_sink: Arc<dyn AuditSink>,
 	memory_backend: Arc<dyn LongTermMemoryBackend>,
@@ -186,35 +181,6 @@ impl RuntimeService {
 					approval_repo,
 					result_repo,
 				},
-				artifact_store: ArtifactStore::default(),
-				experiment_registry: ExperimentRegistry::default(),
-			},
-			audit_sink,
-			runtime,
-			Arc::new(Metrics::default()),
-		)
-	}
-
-	pub fn new_with_data_plane(
-		task_repo: Box<dyn TaskRepository + Send>,
-		event_repo: Box<dyn EventRepository + Send>,
-		approval_repo: Box<dyn ApprovalRepository + Send>,
-		result_repo: Box<dyn ResultRepository + Send>,
-		artifact_store: ArtifactStore,
-		experiment_registry: ExperimentRegistry,
-		audit_sink: Arc<dyn AuditSink>,
-	) -> Self {
-		let runtime = GenericAgentRuntime::default();
-		Self::new_with_runtime_data_plane_and_metrics(
-			RuntimeDataPlane {
-				control_plane: ControlPlaneDataPlane {
-					task_repo,
-					event_repo,
-					approval_repo,
-					result_repo,
-				},
-				artifact_store,
-				experiment_registry,
 			},
 			audit_sink,
 			runtime,
@@ -227,8 +193,6 @@ impl RuntimeService {
 		event_repo: Box<dyn EventRepository + Send>,
 		approval_repo: Box<dyn ApprovalRepository + Send>,
 		result_repo: Box<dyn ResultRepository + Send>,
-		artifact_store: ArtifactStore,
-		experiment_registry: ExperimentRegistry,
 		audit_sink: Arc<dyn AuditSink>,
 		runtime: GenericAgentRuntime,
 	) -> Self {
@@ -240,8 +204,6 @@ impl RuntimeService {
 					approval_repo,
 					result_repo,
 				},
-				artifact_store,
-				experiment_registry,
 			},
 			audit_sink,
 			runtime,
@@ -249,48 +211,14 @@ impl RuntimeService {
 		)
 	}
 
-	pub fn new_with_data_plane_and_runtime_and_metrics(
-		task_repo: Box<dyn TaskRepository + Send>,
-		event_repo: Box<dyn EventRepository + Send>,
-		approval_repo: Box<dyn ApprovalRepository + Send>,
-		result_repo: Box<dyn ResultRepository + Send>,
-		artifact_store: ArtifactStore,
-		experiment_registry: ExperimentRegistry,
-		audit_sink: Arc<dyn AuditSink>,
-		runtime: GenericAgentRuntime,
-		metrics: Arc<Metrics>,
-	) -> Self {
-		Self::new_with_runtime_data_plane_and_metrics(
-			RuntimeDataPlane {
-				control_plane: ControlPlaneDataPlane {
-					task_repo,
-					event_repo,
-					approval_repo,
-					result_repo,
-				},
-				artifact_store,
-				experiment_registry,
-			},
-			audit_sink,
-			runtime,
-			metrics,
-		)
-	}
-
 	pub fn new_with_bundles_and_runtime_and_metrics(
 		control_plane: ControlPlaneDataPlane,
-		artifact_store: ArtifactStore,
-		experiment_registry: ExperimentRegistry,
 		audit_sink: Arc<dyn AuditSink>,
 		runtime: GenericAgentRuntime,
 		metrics: Arc<Metrics>,
 	) -> Self {
 		Self::new_with_runtime_data_plane_and_metrics(
-			RuntimeDataPlane {
-				control_plane,
-				artifact_store,
-				experiment_registry,
-			},
+			RuntimeDataPlane { control_plane },
 			audit_sink,
 			runtime,
 			metrics,
@@ -303,23 +231,17 @@ impl RuntimeService {
 		runtime: GenericAgentRuntime,
 		metrics: Arc<Metrics>,
 	) -> Self {
-		let RuntimeDataPlane {
-			control_plane,
-			artifact_store,
-			experiment_registry,
-		} = data_plane;
 		let ControlPlaneDataPlane {
 			task_repo,
 			event_repo,
 			approval_repo,
 			result_repo,
-		} = control_plane;
+		} = data_plane.control_plane;
 
 		Self {
-			orchestrator: Orchestrator::default(),
+			orchestrator: crate::state_machine::Orchestrator::default(),
 			runtime,
 			runtime_mode: RuntimeModeReport::deterministic(),
-			validator: ValidationPipeline::default(),
 			metrics,
 			audit_sink,
 			memory_backend: Arc::new(NoopLongTermMemoryBackend),
@@ -329,8 +251,7 @@ impl RuntimeService {
 				event_repo,
 				approval_repo,
 				result_repo,
-				artifact_store,
-				experiment_registry,
+				frozen_payloads: HashMap::new(),
 			}),
 			pending_loop_snapshot_store: Arc::new(InMemoryPendingLoopSnapshotStore::default()),
 			runtime_memory_layers: Mutex::new(HashMap::new()),
@@ -368,8 +289,6 @@ impl RuntimeService {
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
 				control_plane: ControlPlaneDataPlane::in_memory(),
-				artifact_store: ArtifactStore::default(),
-				experiment_registry: ExperimentRegistry::default(),
 			},
 			Arc::new(InMemoryAuditSink::default()),
 			runtime,
@@ -384,8 +303,6 @@ impl RuntimeService {
 		Self::new_with_runtime_data_plane_and_metrics(
 			RuntimeDataPlane {
 				control_plane: ControlPlaneDataPlane::in_memory(),
-				artifact_store: ArtifactStore::default(),
-				experiment_registry: ExperimentRegistry::default(),
 			},
 			Arc::new(InMemoryAuditSink::default()),
 			runtime,
@@ -446,7 +363,8 @@ impl RuntimeService {
 				],
 			);
 		}
-		let mut task = self.orchestrator.create_task(&normalized_request);
+		let mut task =
+			crate::state_machine::Orchestrator::default().create_task(&normalized_request);
 
 		self.record_transition(&mut task, TaskState::Planning, "classify direct route")?;
 
@@ -567,7 +485,6 @@ impl RuntimeService {
 			self.metrics.inc_failures();
 			let terminal_state =
 				self.fail_task(&mut task, "approval rejected", ErrorClass::NonRetriable)?;
-			self.fail_experiment_run(&task, "approval rejected")?;
 			self.save_task(task)?;
 
 			Ok(ResponseEnvelope {

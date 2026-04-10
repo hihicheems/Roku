@@ -24,7 +24,6 @@ use crate::{PluginCoreError, PluginId};
 pub enum PluginProfile {
 	#[default]
 	Minimal,
-	Coding,
 	Messaging,
 	Full,
 }
@@ -90,7 +89,7 @@ mod tests {
 			r#"
 profile = "minimal"
 allow = ["telegram"]
-deny = ["coding"]
+deny = ["mcp"]
 
 [entries.openrouter]
 enabled = true

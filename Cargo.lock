@@ -2095,23 +2095,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "roku-artifact-store"
-version = "0.1.0"
-dependencies = [
- "roku-common-types",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "roku-capability-auth"
-version = "0.1.0"
-dependencies = [
- "roku-common-types",
-]
-
-[[package]]
 name = "roku-cmd"
 version = "0.1.0"
 dependencies = [
@@ -2121,12 +2104,9 @@ dependencies = [
  "dotenvy",
  "roku-agent-runtime",
  "roku-api-gateway",
- "roku-artifact-store",
  "roku-common-types",
- "roku-experiment-registry",
  "roku-memory",
  "roku-observability",
- "roku-orchestrator",
  "roku-plugin-catalog",
  "roku-plugin-core",
  "roku-plugin-host",
@@ -2157,21 +2137,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "roku-experiment-registry"
-version = "0.1.0"
-dependencies = [
- "roku-common-types",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "roku-memory"
 version = "0.1.0"
 dependencies = [
- "roku-artifact-store",
  "roku-common-types",
- "roku-experiment-registry",
  "serde",
  "tempfile",
  "thiserror",
@@ -2187,29 +2156,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "roku-orchestrator"
-version = "0.1.0"
-dependencies = [
- "roku-common-types",
-]
-
-[[package]]
 name = "roku-plugin-catalog"
 version = "0.1.0"
 dependencies = [
  "roku-common-types",
  "serde",
-]
-
-[[package]]
-name = "roku-plugin-coding"
-version = "0.1.0"
-dependencies = [
- "roku-common-types",
- "roku-plugin-mcp",
- "serde",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]
@@ -2359,28 +2310,15 @@ name = "roku-runtime-service"
 version = "0.1.0"
 dependencies = [
  "roku-agent-runtime",
- "roku-artifact-store",
- "roku-capability-auth",
  "roku-common-types",
- "roku-experiment-registry",
  "roku-memory",
  "roku-observability",
- "roku-orchestrator",
  "roku-plugin-catalog",
  "roku-plugin-skills",
- "roku-validation-plane",
  "serde_json",
  "tempfile",
  "tokio",
  "zip 8.5.1",
-]
-
-[[package]]
-name = "roku-validation-plane"
-version = "0.1.0"
-dependencies = [
- "roku-common-types",
- "serde_json",
 ]
 
 [[package]]

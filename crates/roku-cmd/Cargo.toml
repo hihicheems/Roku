@@ -15,13 +15,10 @@ actix-web = "4"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "signal"] }
 dotenvy = "0.15"
 roku-agent-runtime = { path = "../roku-agent-runtime" }
-roku-artifact-store = { path = "../roku-artifact-store" }
 roku-api-gateway = { path = "../roku-api-gateway" }
 roku-common-types = { path = "../roku-common-types" }
-roku-experiment-registry = { path = "../roku-experiment-registry" }
 roku-memory = { path = "../roku-memory" }
 roku-observability = { path = "../roku-observability" }
-roku-orchestrator = { path = "../roku-orchestrator" }
 roku-plugin-core = { path = "../roku-plugins/core" }
 roku-plugin-host = { path = "../roku-plugins/host" }
 roku-plugin-llm = { path = "../roku-plugins/llm" }

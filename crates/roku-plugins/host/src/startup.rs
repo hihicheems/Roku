@@ -213,20 +213,6 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 		},
 		BundledPluginDescriptor {
 			manifest: PluginManifest {
-				id: PluginId::new("coding").expect("bundled plugin id should be valid"),
-				kind: roku_plugin_core::PluginKind::Provider,
-				enabled_by_default: false,
-				capabilities: PluginCapabilities {
-					provides_providers: vec!["coding".to_string()],
-					has_side_effects: true,
-					..PluginCapabilities::default()
-				},
-				requirements: PluginRequirements::default(),
-			},
-			required: false,
-		},
-		BundledPluginDescriptor {
-			manifest: PluginManifest {
 				id: PluginId::new("mcp").expect("bundled plugin id should be valid"),
 				kind: roku_plugin_core::PluginKind::Bridge,
 				enabled_by_default: false,
@@ -242,47 +228,37 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 }
 
 pub(crate) fn profile_decision(profile: PluginProfile, plugin_id: &PluginId) -> Option<bool> {
-	let enabled =
-		match profile {
-			PluginProfile::Minimal => matches!(
-				plugin_id.as_str(),
-				"builtin-tools"
-					| "skill-source-local"
-					| "openrouter" | "core-fs"
-					| "core-command"
-					| "core-table" | "core-web"
-					| "core-python"
-			),
-			PluginProfile::Coding => matches!(
-				plugin_id.as_str(),
-				"builtin-tools"
-					| "skill-source-local"
-					| "openrouter" | "core-fs"
-					| "core-command"
-					| "core-table" | "core-web"
-					| "core-python" | "coding"
-					| "mcp"
-			),
-			PluginProfile::Messaging => matches!(
-				plugin_id.as_str(),
-				"builtin-tools"
-					| "skill-source-local"
-					| "openrouter" | "core-fs"
-					| "core-command"
-					| "core-table" | "core-web"
-					| "core-python" | "telegram"
-			),
-			PluginProfile::Full => matches!(
-				plugin_id.as_str(),
-				"builtin-tools"
-					| "skill-source-local"
-					| "openrouter" | "core-fs"
-					| "core-command"
-					| "core-table" | "core-web"
-					| "core-python" | "telegram"
-					| "coding" | "mcp"
-			),
-		};
+	let enabled = match profile {
+		PluginProfile::Minimal => matches!(
+			plugin_id.as_str(),
+			"builtin-tools"
+				| "skill-source-local"
+				| "openrouter"
+				| "core-fs" | "core-command"
+				| "core-table"
+				| "core-web" | "core-python"
+		),
+		PluginProfile::Messaging => matches!(
+			plugin_id.as_str(),
+			"builtin-tools"
+				| "skill-source-local"
+				| "openrouter"
+				| "core-fs" | "core-command"
+				| "core-table"
+				| "core-web" | "core-python"
+				| "telegram"
+		),
+		PluginProfile::Full => matches!(
+			plugin_id.as_str(),
+			"builtin-tools"
+				| "skill-source-local"
+				| "openrouter"
+				| "core-fs" | "core-command"
+				| "core-table"
+				| "core-web" | "core-python"
+				| "telegram" | "mcp"
+		),
+	};
 
 	if matches!(
 		plugin_id.as_str(),
@@ -294,7 +270,6 @@ pub(crate) fn profile_decision(profile: PluginProfile, plugin_id: &PluginId) -> 
 			| "core-web"
 			| "core-python"
 			| "telegram"
-			| "coding"
 			| "mcp"
 	) {
 		Some(enabled)
