@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_agent_runtime::{
+use crate::{
 	AskUserPayload, EscalationAction, LoopState, RouteDecisionResult, StepAction, StepRecord,
 };
 use roku_common_types::LogLevel;
 use roku_common_types::{RequestEnvelope, ResponseStatus};
 
-use crate::RuntimeService;
-use crate::{log_runtime, truncate_for_log};
+use super::RuntimeService;
+use super::{log_runtime, truncate_for_log};
 
 impl RuntimeService {
 	pub(super) fn record_runtime_loop_history(&self, loop_state: &LoopState, start_index: usize) {
@@ -235,16 +235,12 @@ impl RuntimeService {
 		action: StepAction,
 	) -> Option<StepRecord> {
 		let terminal_status_matches = match action {
-			StepAction::AskUser => {
-				loop_state.status == roku_agent_runtime::LoopStatus::AwaitingUser
-			}
-			StepAction::FinalAnswer => {
-				loop_state.status == roku_agent_runtime::LoopStatus::Succeeded
-			}
-			StepAction::Fail => loop_state.status == roku_agent_runtime::LoopStatus::Failed,
-			StepAction::Stop => loop_state.status == roku_agent_runtime::LoopStatus::Stopped,
+			StepAction::AskUser => loop_state.status == crate::LoopStatus::AwaitingUser,
+			StepAction::FinalAnswer => loop_state.status == crate::LoopStatus::Succeeded,
+			StepAction::Fail => loop_state.status == crate::LoopStatus::Failed,
+			StepAction::Stop => loop_state.status == crate::LoopStatus::Stopped,
 			StepAction::CallTool | StepAction::CompactBoundary => {
-				loop_state.status == roku_agent_runtime::LoopStatus::LoopRunning
+				loop_state.status == crate::LoopStatus::LoopRunning
 			}
 		};
 		terminal_status_matches
@@ -266,7 +262,7 @@ impl RuntimeService {
 	}
 }
 
-fn route_decision(route: &RouteDecisionResult) -> &roku_agent_runtime::RouteDecision {
+fn route_decision(route: &RouteDecisionResult) -> &crate::RouteDecision {
 	match route {
 		RouteDecisionResult::Direct(plan) => &plan.decision,
 		RouteDecisionResult::Escalate(plan) => &plan.decision,
@@ -282,7 +278,7 @@ fn route_bound_resources(route: &RouteDecisionResult) -> Vec<roku_common_types::
 
 #[cfg(test)]
 mod tests {
-	use roku_agent_runtime::{
+	use crate::{
 		AskUserPayload, DirectRoutePlan, IntentFamily, RouteDecision, RouteRisk, StepAction,
 		runtime_loop_trace,
 	};

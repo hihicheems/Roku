@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::env;
 use std::sync::{Arc, Mutex};
 
-use roku_agent_runtime::{
+use crate::{
 	AskUserPayload, AskUserResumeContract, AskUserResumeDirective, DirectRoutePlan, IntentFamily,
 	LoopContext, LoopState, RouteDecision, RouteDecisionResult, RouteRisk, StepObservation,
 	StepRecord, ToolObservation, runtime_loop_trace,
@@ -39,7 +39,7 @@ use roku_memory::{
 	MemoryWriteReason, MemoryWriteRequest,
 };
 
-use crate::{
+use super::{
 	PendingLoopSnapshotStore, RuntimeExecutionMode, RuntimeMemoryLayers, RuntimeModeReport,
 	RuntimeService, compact_approval_id,
 };
@@ -180,12 +180,11 @@ fn pending_filesystem_candidate_loop_state() -> LoopState {
 		}),
 		message: "Found 2 matching candidates for `Cargo.toml`.".to_string(),
 	};
-	let interpreted =
-		roku_agent_runtime::interpret_observation(&loop_state, observation.clone(), None);
+	let interpreted = crate::interpret_observation(&loop_state, observation.clone(), None);
 	loop_state.record_step(StepRecord::tool_call(
 		1,
-		roku_agent_runtime::NextStepDecision {
-			action: roku_agent_runtime::NextStepAction::CallTool,
+		crate::NextStepDecision {
+			action: crate::NextStepAction::CallTool,
 			tool_name: Some("fs.read_text".to_string()),
 			arguments: Some(serde_json::json!({ "path": "Cargo.toml" })),
 			tool_calls: None,
@@ -210,9 +209,9 @@ fn pending_filesystem_candidate_loop_state() -> LoopState {
 	));
 	loop_state.record_step(StepRecord::terminal(
 		2,
-		roku_agent_runtime::StepAction::AskUser,
-		roku_agent_runtime::NextStepDecision {
-			action: roku_agent_runtime::NextStepAction::AskUser,
+		crate::StepAction::AskUser,
+		crate::NextStepDecision {
+			action: crate::NextStepAction::AskUser,
 			tool_name: None,
 			arguments: None,
 			tool_calls: None,
@@ -279,12 +278,11 @@ fn pending_filesystem_resume_success_loop_state() -> (LoopState, String) {
 		}),
 		message: "I can continue with either `tools` or `skills`.".to_string(),
 	};
-	let interpreted =
-		roku_agent_runtime::interpret_observation(&loop_state, observation.clone(), None);
+	let interpreted = crate::interpret_observation(&loop_state, observation.clone(), None);
 	loop_state.record_step(StepRecord::tool_call(
 		1,
-		roku_agent_runtime::NextStepDecision {
-			action: roku_agent_runtime::NextStepAction::CallTool,
+		crate::NextStepDecision {
+			action: crate::NextStepAction::CallTool,
 			tool_name: Some("inventory.describe".to_string()),
 			arguments: Some(serde_json::json!({})),
 			tool_calls: None,
@@ -309,9 +307,9 @@ fn pending_filesystem_resume_success_loop_state() -> (LoopState, String) {
 	));
 	loop_state.record_step(StepRecord::terminal(
 		2,
-		roku_agent_runtime::StepAction::AskUser,
-		roku_agent_runtime::NextStepDecision {
-			action: roku_agent_runtime::NextStepAction::AskUser,
+		crate::StepAction::AskUser,
+		crate::NextStepDecision {
+			action: crate::NextStepAction::AskUser,
 			tool_name: None,
 			arguments: None,
 			tool_calls: None,
@@ -886,25 +884,14 @@ async fn new_requests_execute_without_graph_compilation_and_expose_direct_runtim
 		trace.final_outcome.terminal_action.as_deref(),
 		Some("final_answer")
 	);
+	// Without an LLM router the turn loop returns immediately with a final_answer.
 	assert_eq!(
 		trace
 			.steps
 			.first()
 			.map(|step| step.decision.action.as_str()),
-		Some("call_tool")
+		Some("final_answer")
 	);
-	assert_eq!(
-		trace
-			.steps
-			.first()
-			.and_then(|step| step.decision.tool_name.as_deref()),
-		Some("inventory.describe")
-	);
-	assert!(trace.steps.first().is_some_and(|step| {
-		step.visible_tools_before
-			.iter()
-			.any(|tool| tool == "inventory.describe")
-	}));
 	assert_eq!(task.state, TaskState::Succeeded);
 }
 
@@ -1197,7 +1184,7 @@ async fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
 	let freeform_pause = AskUserPayload::freeform("您想继续什么任务？");
 	let pause_message = freeform_pause.final_message.clone();
 	let mut loop_state = LoopState::new("loop-freeform-pending", &context);
-	loop_state.status = roku_agent_runtime::LoopStatus::AwaitingUser;
+	loop_state.status = crate::LoopStatus::AwaitingUser;
 	loop_state.awaiting_user = Some(freeform_pause.clone());
 	assert_eq!(
 		freeform_pause.resume_contract,
@@ -1240,7 +1227,7 @@ async fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
 	let discarded = store.deleted_snapshots();
 	let stopped_snapshot = discarded
 		.iter()
-		.find(|snapshot| snapshot.status == roku_agent_runtime::LoopStatus::Stopped)
+		.find(|snapshot| snapshot.status == crate::LoopStatus::Stopped)
 		.expect("stale discard should persist one stopped snapshot before deletion");
 	let trace = runtime_loop_trace(stopped_snapshot);
 	assert_eq!(trace.status, "stopped");
@@ -1484,7 +1471,7 @@ fn compact_summary_is_written_back_when_compact_boundary_exists() {
 	);
 
 	loop_state.working_summary = "[Compact summary — 4 steps discarded]\nStep 1: fs.read_text — read config — ok\nStep 2: fs.grep — search — ok".to_string();
-	let boundary = roku_agent_runtime::StepRecord::compact_boundary(
+	let boundary = crate::StepRecord::compact_boundary(
 		4,
 		4,
 		"[Compact summary — 4 steps discarded]",

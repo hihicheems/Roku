@@ -26,8 +26,8 @@ use roku_common_types::{
 };
 use serde_json::{Value, json};
 
-use crate::helpers::{approval_artifact, failure_message, result_message};
-use crate::{RuntimeService, compact_approval_id};
+use super::helpers::{approval_artifact, failure_message, result_message};
+use super::{RuntimeService, compact_approval_id};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PendingExecutionApprovalFact {
@@ -110,7 +110,7 @@ impl RuntimeService {
 
 		task.compensation_records = self.plan_compensation_records(&task);
 		let has_compensation_work = !task.compensation_records.is_empty();
-		let disposition = crate::state_machine::Orchestrator::default().request_cancellation(
+		let disposition = super::state_machine::Orchestrator::default().request_cancellation(
 			&mut task,
 			format!("cancel requested by {actor}"),
 			has_compensation_work,
@@ -152,7 +152,7 @@ impl RuntimeService {
 		reason: &str,
 		error_class: roku_common_types::ErrorClass,
 	) -> Result<TaskState, RuntimeError> {
-		let disposition = crate::state_machine::Orchestrator::default().register_failure(
+		let disposition = super::state_machine::Orchestrator::default().register_failure(
 			task,
 			reason,
 			Some(error_class),

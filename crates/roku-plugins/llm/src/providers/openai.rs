@@ -41,8 +41,8 @@ use tokio::sync::mpsc;
 
 use crate::router::{LlmProvider, LlmRouter};
 use crate::types::{
-	GenerationRequest, ModelProfile, ProviderCallError, ProviderResponse, RiskTier, RoutingPolicy,
-	StreamChunk, ToolCallBlock, estimate_prompt_tokens,
+	GenerationRequest, Message, ModelProfile, ProviderCallError, ProviderResponse, RiskTier,
+	RoutingPolicy, StreamChunk, ToolCallBlock, estimate_prompt_tokens,
 };
 
 const OPENAI_PROVIDER: &str = "openai";
@@ -364,7 +364,7 @@ impl OpenAiProvider {
 #[derive(Debug, Serialize)]
 struct ChatCompletionRequest<'a> {
 	model: &'a str,
-	messages: Vec<ChatMessage<'a>>,
+	messages: Vec<Value>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	max_tokens: Option<u64>,
 	#[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -376,10 +376,34 @@ struct ChatCompletionRequest<'a> {
 	stream_options: Option<StreamOptions>,
 }
 
-#[derive(Debug, Serialize)]
-struct ChatMessage<'a> {
-	role: &'static str,
-	content: &'a str,
+fn message_to_openai_value(msg: &Message) -> Value {
+	match msg {
+		Message::User { content } => serde_json::json!({"role": "user", "content": content}),
+		Message::Assistant { text, tool_calls } if tool_calls.is_empty() => {
+			serde_json::json!({"role": "assistant", "content": text})
+		}
+		Message::Assistant { text, tool_calls } => {
+			let tc_array: Vec<Value> = tool_calls
+				.iter()
+				.map(|tc| {
+					serde_json::json!({
+						"id": tc.id,
+						"type": "function",
+						"function": {
+							"name": tc.name,
+							"arguments": tc.arguments.to_string(),
+						}
+					})
+				})
+				.collect();
+			serde_json::json!({"role": "assistant", "content": text, "tool_calls": tc_array})
+		}
+		Message::ToolResult {
+			tool_use_id,
+			content,
+			..
+		} => serde_json::json!({"role": "tool", "tool_call_id": tool_use_id, "content": content}),
+	}
 }
 
 /// OpenAI tool definition: `{type: "function", function: {name, description, parameters}}`
@@ -407,17 +431,17 @@ fn build_request<'a>(
 	stream: bool,
 	max_tokens: u64,
 ) -> ChatCompletionRequest<'a> {
-	let mut messages = Vec::with_capacity(2);
-	if let Some(system_prompt) = request.system_prompt.as_deref() {
-		messages.push(ChatMessage {
-			role: "system",
-			content: system_prompt,
-		});
+	let mut messages: Vec<Value> = Vec::with_capacity(4);
+	if let Some(system_prompt) = &request.system_prompt {
+		messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
 	}
-	messages.push(ChatMessage {
-		role: "user",
-		content: &request.prompt,
-	});
+	if let Some(msgs) = &request.messages {
+		for msg in msgs {
+			messages.push(message_to_openai_value(msg));
+		}
+	} else {
+		messages.push(serde_json::json!({"role": "user", "content": &request.prompt}));
+	}
 
 	let tools = request.tools.as_ref().map(|tool_defs| {
 		tool_defs
@@ -1064,6 +1088,7 @@ mod tests {
 		let request = GenerationRequest {
 			system_prompt: Some("You are helpful.".to_string()),
 			prompt: "Hello".to_string(),
+			messages: None,
 			expected_output_tokens: 1024,
 			risk_tier: crate::types::RiskTier::Low,
 			preferred_provider: None,
@@ -1093,6 +1118,7 @@ mod tests {
 		let request = GenerationRequest {
 			system_prompt: None,
 			prompt: "Hi".to_string(),
+			messages: None,
 			expected_output_tokens: 512,
 			risk_tier: crate::types::RiskTier::Low,
 			preferred_provider: None,

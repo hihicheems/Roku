@@ -12,7 +12,6 @@ members = [
     "crates/roku-memory",
     "crates/roku-agent-runtime",
     "crates/roku-api-gateway",
-    "crates/roku-runtime-service",
     "crates/roku-plugins/host",
     "crates/roku-plugins/tools",
     "crates/roku-plugins/skills",

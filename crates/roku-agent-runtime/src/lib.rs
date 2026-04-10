@@ -19,6 +19,7 @@ mod router;
 mod runtime;
 mod runtime_config;
 mod runtime_loop;
+pub mod service;
 mod tool_config;
 mod tools;
 mod workers;
@@ -51,6 +52,10 @@ pub use runtime_loop::{
 	check_seed_tool_probe, compact_history, estimate_context_tokens,
 	evaluate_runtime_loop_regression_case, interpret_observation, runtime_loop_trace,
 	summarize_discarded_steps,
+};
+pub use service::{
+	ContextBundle, InMemoryPendingLoopSnapshotStore, PendingLoopSnapshotStore, RunMode,
+	RuntimeDataPlane, RuntimeExecutionMode, RuntimeMemoryLayers, RuntimeModeReport, RuntimeService,
 };
 pub use tool_config::{
 	BuiltinToolRole, CommandToolRuntimeConfig, CommandToolRuntimeConfigPatch, ConfiguredTool,

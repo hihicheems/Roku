@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::state_machine::{
+use super::state_machine::{
 	replay_consistency_status, replay_consistency_status_from, replayed_state, replayed_state_from,
 };
 use roku_common_types::{
@@ -21,7 +21,7 @@ use roku_common_types::{
 	TaskNode, TaskReplayCursor, TaskReplayReport, TaskReplaySnapshot, TaskState,
 };
 
-use crate::RuntimeService;
+use super::RuntimeService;
 
 impl RuntimeService {
 	pub fn get_task(&self, task_id: &TaskId) -> Result<Option<Task>, RuntimeError> {
@@ -190,7 +190,7 @@ impl RuntimeService {
 
 	pub(super) fn lock_state(
 		&self,
-	) -> Result<std::sync::MutexGuard<'_, crate::RuntimeState>, RuntimeError> {
+	) -> Result<std::sync::MutexGuard<'_, super::RuntimeState>, RuntimeError> {
 		self.state
 			.lock()
 			.map_err(|_| RuntimeError::new("runtime state lock poisoned"))

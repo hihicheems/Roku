@@ -30,7 +30,7 @@ mod tests;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use roku_agent_runtime::{GenericAgentRuntime, RouteDecisionResult};
+use crate::{GenericAgentRuntime, RouteDecisionResult};
 use roku_common_types::{
 	ApprovalDecision, ApprovalId, ApprovalStatus, ApprovalTicket, ErrorClass, RequestEnvelope,
 	ResponseEnvelope, ResponseStatus, RuntimeError, TaskEventKind, TaskNode, TaskNodeKind,
@@ -46,12 +46,12 @@ use roku_memory::{
 	TaskRepository,
 };
 
-use crate::helpers::{failure_message, ticket_status_label};
-pub use crate::memory_context::{ContextBundle, RuntimeMemoryLayers};
-pub use crate::pending_loop_snapshot_store::{
+use self::helpers::{failure_message, ticket_status_label};
+pub use self::memory_context::{ContextBundle, RuntimeMemoryLayers};
+pub use self::pending_loop_snapshot_store::{
 	InMemoryPendingLoopSnapshotStore, PendingLoopSnapshotStore,
 };
-use crate::runtime_loop_owner::RuntimeLoopOwner;
+use self::runtime_loop_owner::RuntimeLoopOwner;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RunMode {
@@ -152,7 +152,7 @@ pub struct RuntimeDataPlane {
 }
 
 pub struct RuntimeService {
-	orchestrator: crate::state_machine::Orchestrator,
+	orchestrator: crate::service::state_machine::Orchestrator,
 	runtime: GenericAgentRuntime,
 	runtime_mode: RuntimeModeReport,
 	metrics: Arc<Metrics>,
@@ -239,7 +239,7 @@ impl RuntimeService {
 		} = data_plane.control_plane;
 
 		Self {
-			orchestrator: crate::state_machine::Orchestrator::default(),
+			orchestrator: crate::service::state_machine::Orchestrator::default(),
 			runtime,
 			runtime_mode: RuntimeModeReport::deterministic(),
 			metrics,
@@ -321,7 +321,7 @@ impl RuntimeService {
 		&self,
 		request: RequestEnvelope,
 		mode: RunMode,
-		event_sender: Option<&roku_agent_runtime::LoopEventSender>,
+		event_sender: Option<&crate::LoopEventSender>,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		self.metrics.inc_requests();
 		let normalized_request = normalize_request(&request);
@@ -364,7 +364,7 @@ impl RuntimeService {
 			);
 		}
 		let mut task =
-			crate::state_machine::Orchestrator::default().create_task(&normalized_request);
+			crate::service::state_machine::Orchestrator::default().create_task(&normalized_request);
 
 		self.record_transition(&mut task, TaskState::Planning, "classify direct route")?;
 

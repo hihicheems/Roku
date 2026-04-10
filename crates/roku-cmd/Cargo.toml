@@ -26,7 +26,6 @@ roku-plugin-memory-sqlite = { path = "../roku-plugins/memory-sqlite" }
 roku-plugin-tools = { path = "../roku-plugins/tools" }
 roku-plugin-mcp = { path = "../roku-plugins/mcp" }
 roku-plugin-telegram = { path = "../roku-plugins/telegram" }
-roku-runtime-service = { path = "../roku-runtime-service" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 rustyline = "18"

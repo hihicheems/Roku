@@ -29,7 +29,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub use roku_agent_runtime::RunMode;
 use roku_agent_runtime::{GenericAgentRuntime, PluginRegistrySnapshot, ToolCatalogConfig};
+use roku_agent_runtime::{RuntimeModeReport, RuntimeService};
 use roku_api_gateway::{Gateway, RawRequest};
 use roku_common_types::{ApprovalDecision, ApprovalId, ResponseEnvelope, RuntimeError, TaskId};
 use roku_common_types::{InMemoryAuditSink, LogLevel, LogRecord, Metrics, emit_global_log};
@@ -51,8 +53,6 @@ use roku_plugin_llm::{
 };
 use roku_plugin_mcp::{McpConfig, McpConnection, McpTool, mcp_tools_to_catalog_descriptors};
 use roku_plugin_skills::{SkillRegistry, SkillsRuntimeConfig};
-pub use roku_runtime_service::RunMode;
-use roku_runtime_service::{RuntimeModeReport, RuntimeService};
 use serde_json::json;
 
 use crate::CommandError;

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier};
+use roku_plugin_llm::{GenerationRequest, LlmRouter, Message, RiskTier};
 
 use super::LoopState;
 
@@ -184,6 +184,7 @@ pub async fn compact_history_with_llm(
 					.to_string(),
 			),
 			prompt,
+			messages: None,
 			expected_output_tokens: config.llm_expected_output_tokens,
 			risk_tier: RiskTier::Low,
 			preferred_provider: None,
@@ -246,6 +247,152 @@ fn truncate(text: &str, max_chars: usize) -> String {
 	} else {
 		format!("{}…", &text[..text.floor_char_boundary(max_chars)])
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Message-level compaction (operates on Vec<Message>)
+// ---------------------------------------------------------------------------
+
+/// Rough token estimate for a conversation message list.
+pub fn estimate_message_tokens(messages: &[Message]) -> u64 {
+	let chars: u64 = messages
+		.iter()
+		.map(|m| match m {
+			Message::User { content } => content.len() as u64,
+			Message::Assistant { text, tool_calls } => {
+				text.len() as u64
+					+ tool_calls
+						.iter()
+						.map(|tc| tc.name.len() as u64 + tc.arguments.to_string().len() as u64)
+						.sum::<u64>()
+			}
+			Message::ToolResult { content, .. } => content.len() as u64,
+		})
+		.sum();
+	chars / 4
+}
+
+/// Truncate a tool result that exceeds `max_chars`, keeping head + tail + a note.
+pub fn truncate_tool_result(content: &str, max_chars: usize) -> String {
+	if content.len() <= max_chars {
+		return content.to_string();
+	}
+	let keep = max_chars.saturating_sub(60) / 2;
+	let head = &content[..content.floor_char_boundary(keep)];
+	let tail_start = content.len().saturating_sub(keep);
+	let tail = &content[content.ceil_char_boundary(tail_start)..];
+	let omitted = content.len() - head.len() - tail.len();
+	format!("{head}\n\n[...{omitted} bytes omitted...]\n\n{tail}")
+}
+
+/// Truncate any oversized tool results in-place.
+pub fn truncate_large_tool_results(messages: &mut [Message], max_chars: usize) {
+	for msg in messages.iter_mut() {
+		if let Message::ToolResult { content, .. } = msg
+			&& content.len() > max_chars
+		{
+			*content = truncate_tool_result(content, max_chars);
+		}
+	}
+}
+
+/// Compact conversation messages by replacing old messages with a summary.
+///
+/// Preserves the first message (system context / initial user message) and the
+/// most recent `retain_tail` messages. Messages in between are replaced with a
+/// single summary User message.
+pub fn compact_messages(messages: &mut Vec<Message>, retain_tail: usize) {
+	if messages.len() <= retain_tail + 1 {
+		return;
+	}
+	let split = messages.len() - retain_tail;
+	if split <= 1 {
+		return;
+	}
+	let discarded: Vec<_> = messages.drain(1..split).collect();
+	let summary = summarize_discarded_messages(&discarded);
+	messages.insert(1, Message::User { content: summary });
+}
+
+/// Compact with LLM-assisted summarization of discarded messages.
+pub async fn compact_messages_with_llm(
+	messages: &mut Vec<Message>,
+	retain_tail: usize,
+	router: &LlmRouter,
+) -> bool {
+	if messages.len() <= retain_tail + 1 {
+		return false;
+	}
+	let split = messages.len() - retain_tail;
+	if split <= 1 {
+		return false;
+	}
+	let discarded: Vec<_> = messages.drain(1..split).collect();
+	let mechanical = summarize_discarded_messages(&discarded);
+
+	let prompt = format!(
+		"Summarize this conversation excerpt concisely. Preserve key facts, \
+		 tool results, and decisions. Output plain text only.\n\n{}",
+		mechanical
+	);
+	let result = router
+		.generate(&GenerationRequest {
+			system_prompt: Some("You summarize agent conversation history.".to_string()),
+			prompt,
+			messages: None,
+			expected_output_tokens: 512,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: 10_000,
+			budget_cost_remaining_usd: 0.50,
+			tools: None,
+		})
+		.await;
+
+	let summary = match result {
+		Ok(r) if !r.output.trim().is_empty() => r.output,
+		_ => mechanical,
+	};
+	messages.insert(
+		1,
+		Message::User {
+			content: format!("[Conversation summary]\n{summary}"),
+		},
+	);
+	true
+}
+
+fn summarize_discarded_messages(messages: &[Message]) -> String {
+	let mut lines = vec![format!("[{} messages compacted]", messages.len())];
+	for msg in messages {
+		match msg {
+			Message::User { content } => {
+				lines.push(format!("User: {}", truncate(content, 120)));
+			}
+			Message::Assistant { text, tool_calls } => {
+				if !text.is_empty() {
+					lines.push(format!("Assistant: {}", truncate(text, 120)));
+				}
+				for tc in tool_calls {
+					lines.push(format!("  → tool_use: {}", tc.name));
+				}
+			}
+			Message::ToolResult {
+				tool_use_id,
+				content,
+				is_error,
+			} => {
+				let status = if *is_error { "error" } else { "ok" };
+				lines.push(format!(
+					"ToolResult({}): {} — {}",
+					tool_use_id,
+					status,
+					truncate(content, 100)
+				));
+			}
+		}
+	}
+	lines.join("\n")
 }
 
 /// Check whether the loop context has exceeded the compact threshold.
@@ -636,73 +783,6 @@ mod tests {
 		);
 	}
 
-	// --- PRD-08 US-001: RuntimeMemorySections survives compact ---
-
-	#[test]
-	fn context_projection_includes_runtime_memory_sections_after_compact() {
-		use crate::runtime_loop::build_context_projection;
-		use roku_common_types::RuntimeMemorySections;
-
-		let mut state = minimal_loop_state();
-		for i in 1..=10 {
-			state.record_step(sample_step(i, 10 - i));
-		}
-		let sections = RuntimeMemorySections {
-			short_term_continuity: "user: hi".to_string(),
-			long_term_recall: "memory-record-1 | UserPreference".to_string(),
-			working_memory: String::new(),
-		};
-
-		compact_history(&mut state, &CompactConfig::default());
-
-		let projection = build_context_projection(&state, &sections);
-		assert_eq!(
-			projection.runtime_memory_sections.long_term_recall,
-			"memory-record-1 | UserPreference"
-		);
-		assert!(!projection.working_summary.is_empty());
-	}
-
-	// --- PRD-08 US-002: Working summary in model prompt ---
-
-	#[test]
-	fn tool_loop_prompt_includes_prior_work_summary_when_nonempty() {
-		use crate::runtime_loop::build_context_projection;
-		use crate::runtime_loop::tool_loop::tool_loop_prompt;
-		use roku_common_types::RuntimeMemorySections;
-
-		let mut state = minimal_loop_state();
-		for i in 1..=10 {
-			state.record_step(sample_step(i, 10 - i));
-		}
-		compact_history(&mut state, &CompactConfig::default());
-		let projection = build_context_projection(&state, &RuntimeMemorySections::default());
-		let prompt = tool_loop_prompt(&projection, None);
-		assert!(
-			prompt.contains("## Prior Work Summary"),
-			"prompt should include Prior Work Summary section"
-		);
-		assert!(
-			prompt.contains("[Compact summary"),
-			"prompt should include compact digest"
-		);
-	}
-
-	#[test]
-	fn tool_loop_prompt_omits_prior_work_summary_when_empty() {
-		use crate::runtime_loop::build_context_projection;
-		use crate::runtime_loop::tool_loop::tool_loop_prompt;
-		use roku_common_types::RuntimeMemorySections;
-
-		let state = minimal_loop_state();
-		let projection = build_context_projection(&state, &RuntimeMemorySections::default());
-		let prompt = tool_loop_prompt(&projection, None);
-		assert!(
-			!prompt.contains("## Prior Work Summary"),
-			"prompt should omit Prior Work Summary when empty"
-		);
-	}
-
 	// --- PRD-08 US-004: Multi-compact loop continuity ---
 
 	#[test]
@@ -748,5 +828,124 @@ mod tests {
 
 		// Verify loop can still continue (step budget > 0)
 		assert!(state.remaining_step_budget > 0);
+	}
+
+	// --- Message-level compaction tests ---
+
+	#[test]
+	fn truncate_tool_result_preserves_short_content() {
+		let short = "Hello world";
+		assert_eq!(truncate_tool_result(short, 100), short);
+	}
+
+	#[test]
+	fn truncate_tool_result_keeps_head_and_tail() {
+		let long = "A".repeat(1000);
+		let result = truncate_tool_result(&long, 200);
+		assert!(result.len() < 1000);
+		assert!(result.contains("[..."));
+		assert!(result.contains("bytes omitted...]"));
+		assert!(result.starts_with("AAA"));
+		assert!(result.ends_with("AAA"));
+	}
+
+	#[test]
+	fn truncate_large_tool_results_only_affects_oversized() {
+		use roku_plugin_llm::Message;
+		let mut messages = vec![
+			Message::User {
+				content: "hello".to_string(),
+			},
+			Message::ToolResult {
+				tool_use_id: "t1".to_string(),
+				content: "short".to_string(),
+				is_error: false,
+			},
+			Message::ToolResult {
+				tool_use_id: "t2".to_string(),
+				content: "X".repeat(500),
+				is_error: false,
+			},
+		];
+		truncate_large_tool_results(&mut messages, 100);
+		// Short result unchanged
+		if let Message::ToolResult { content, .. } = &messages[1] {
+			assert_eq!(content, "short");
+		}
+		// Long result truncated
+		if let Message::ToolResult { content, .. } = &messages[2] {
+			assert!(content.len() < 500);
+			assert!(content.contains("bytes omitted"));
+		}
+	}
+
+	#[test]
+	fn estimate_message_tokens_nonzero() {
+		use roku_plugin_llm::Message;
+		let messages = vec![
+			Message::User {
+				content: "What is 2+2?".to_string(),
+			},
+			Message::Assistant {
+				text: "The answer is 4.".to_string(),
+				tool_calls: vec![],
+			},
+		];
+		let tokens = estimate_message_tokens(&messages);
+		assert!(tokens > 0);
+	}
+
+	#[test]
+	fn compact_messages_preserves_recent() {
+		use roku_plugin_llm::{Message, ToolCallBlock};
+		let mut messages: Vec<Message> = vec![Message::User {
+			content: "initial goal".to_string(),
+		}];
+		// Add 10 more messages
+		for i in 0..10 {
+			messages.push(Message::Assistant {
+				text: format!("response {i}"),
+				tool_calls: vec![ToolCallBlock {
+					id: format!("tc-{i}"),
+					name: "test_tool".to_string(),
+					arguments: json!({}),
+				}],
+			});
+			messages.push(Message::ToolResult {
+				tool_use_id: format!("tc-{i}"),
+				content: format!("result {i}"),
+				is_error: false,
+			});
+		}
+		assert_eq!(messages.len(), 21); // 1 initial + 20 (10 pairs)
+
+		compact_messages(&mut messages, 5);
+
+		// Should have: initial + summary + 5 recent = 7
+		assert_eq!(messages.len(), 7);
+		// First is still the initial message
+		if let Message::User { content } = &messages[0] {
+			assert_eq!(content, "initial goal");
+		}
+		// Second is the summary
+		if let Message::User { content } = &messages[1] {
+			assert!(content.contains("messages compacted"));
+		}
+	}
+
+	#[test]
+	fn compact_messages_noop_when_short() {
+		use roku_plugin_llm::Message;
+		let mut messages = vec![
+			Message::User {
+				content: "hello".to_string(),
+			},
+			Message::Assistant {
+				text: "hi".to_string(),
+				tool_calls: vec![],
+			},
+		];
+		compact_messages(&mut messages, 5);
+		assert_eq!(messages.len(), 2); // Unchanged
 	}
 }

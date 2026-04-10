@@ -119,10 +119,36 @@ pub struct ToolCallBlock {
 	pub arguments: Value,
 }
 
+/// A provider-neutral conversation message for the turn loop.
+///
+/// System prompt is NOT a variant here — it stays in `GenerationRequest::system_prompt`
+/// because providers handle it differently (Anthropic: top-level field, OpenAI: system message).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Message {
+	User {
+		content: String,
+	},
+	Assistant {
+		text: String,
+		#[serde(default, skip_serializing_if = "Vec::is_empty")]
+		tool_calls: Vec<ToolCallBlock>,
+	},
+	ToolResult {
+		tool_use_id: String,
+		content: String,
+		#[serde(default)]
+		is_error: bool,
+	},
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenerationRequest {
 	pub system_prompt: Option<String>,
 	pub prompt: String,
+	/// Conversation messages for multi-turn interactions. When present, providers
+	/// use these instead of wrapping `prompt` as a single user message.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub messages: Option<Vec<Message>>,
 	pub expected_output_tokens: u64,
 	pub risk_tier: RiskTier,
 	pub preferred_provider: Option<String>,
@@ -284,12 +310,24 @@ pub(crate) fn estimate_prompt_tokens(prompt: &str) -> u64 {
 }
 
 pub(crate) fn estimate_request_input_tokens(request: &GenerationRequest) -> u64 {
-	request
+	let system_tokens = request
 		.system_prompt
 		.as_deref()
 		.map(estimate_prompt_tokens)
-		.unwrap_or(0)
-		.saturating_add(estimate_prompt_tokens(&request.prompt))
+		.unwrap_or(0);
+	if let Some(messages) = &request.messages {
+		let msg_tokens: u64 = messages
+			.iter()
+			.map(|m| match m {
+				Message::User { content } => estimate_prompt_tokens(content),
+				Message::Assistant { text, .. } => estimate_prompt_tokens(text),
+				Message::ToolResult { content, .. } => estimate_prompt_tokens(content),
+			})
+			.sum();
+		system_tokens.saturating_add(msg_tokens)
+	} else {
+		system_tokens.saturating_add(estimate_prompt_tokens(&request.prompt))
+	}
 }
 
 pub(crate) fn estimate_cost_usd(tokens: u64, cost_per_1k_tokens_usd: f64) -> f64 {

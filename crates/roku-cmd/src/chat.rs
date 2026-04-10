@@ -28,8 +28,8 @@ use std::io::{self, BufRead, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use roku_agent_runtime::LoopEvent;
+use roku_agent_runtime::RuntimeService;
 use roku_common_types::{ConversationRole, ConversationTurn, RequestEnvelope, RequestId};
-use roku_runtime_service::RuntimeService;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
@@ -567,7 +567,7 @@ fn execute_turn(
 
 		let execute_fut = async {
 			service
-				.execute_with_mode(request, roku_runtime_service::RunMode::Normal, Some(&tx))
+				.execute_with_mode(request, roku_agent_runtime::RunMode::Normal, Some(&tx))
 				.await
 		};
 

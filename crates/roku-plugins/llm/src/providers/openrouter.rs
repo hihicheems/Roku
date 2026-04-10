@@ -29,8 +29,8 @@ use tokio::sync::mpsc;
 
 use crate::router::{LlmProvider, LlmRouter};
 use crate::types::{
-	GenerationRequest, ModelProfile, ProviderCallError, ProviderResponse, RiskTier, RoutingPolicy,
-	StreamChunk, ToolCallBlock, estimate_prompt_tokens,
+	GenerationRequest, Message, ModelProfile, ProviderCallError, ProviderResponse, RiskTier,
+	RoutingPolicy, StreamChunk, ToolCallBlock, estimate_prompt_tokens,
 };
 
 const OPENROUTER_PROVIDER: &str = "openrouter";
@@ -759,23 +759,65 @@ fn build_streaming_request_body<'a>(
 	build_request_body_inner(model_id, fallback_models, request, true)
 }
 
+fn message_to_openai_value(msg: &Message) -> Value {
+	match msg {
+		Message::User { content } => serde_json::json!({ "role": "user", "content": content }),
+		Message::Assistant { text, tool_calls } => {
+			if tool_calls.is_empty() {
+				serde_json::json!({ "role": "assistant", "content": text })
+			} else {
+				let calls: Vec<Value> = tool_calls
+					.iter()
+					.map(|tc| {
+						serde_json::json!({
+							"id": tc.id,
+							"type": "function",
+							"function": {
+								"name": tc.name,
+								"arguments": tc.arguments.to_string(),
+							}
+						})
+					})
+					.collect();
+				serde_json::json!({
+					"role": "assistant",
+					"content": text,
+					"tool_calls": calls,
+				})
+			}
+		}
+		Message::ToolResult {
+			tool_use_id,
+			content,
+			..
+		} => {
+			serde_json::json!({
+				"role": "tool",
+				"tool_call_id": tool_use_id,
+				"content": content,
+			})
+		}
+	}
+}
+
 fn build_request_body_inner<'a>(
 	model_id: &'a str,
 	fallback_models: &'a [String],
 	request: &'a GenerationRequest,
 	stream: bool,
 ) -> OpenAiChatCompletionRequest<'a> {
-	let mut messages = Vec::with_capacity(2);
+	let mut messages: Vec<Value> = Vec::with_capacity(2);
 	if let Some(system_prompt) = request.system_prompt.as_deref() {
-		messages.push(OpenAiChatCompletionMessage {
-			role: "system",
-			content: system_prompt,
-		});
+		messages.push(serde_json::json!({ "role": "system", "content": system_prompt }));
 	}
-	messages.push(OpenAiChatCompletionMessage {
-		role: "user",
-		content: &request.prompt,
-	});
+
+	if let Some(turns) = request.messages.as_deref() {
+		for msg in turns {
+			messages.push(message_to_openai_value(msg));
+		}
+	} else {
+		messages.push(serde_json::json!({ "role": "user", "content": &request.prompt }));
+	}
 
 	let tools = request.tools.as_ref().map(|tool_defs| {
 		tool_defs
@@ -947,7 +989,7 @@ struct OpenAiChatCompletionRequest<'a> {
 	model: &'a str,
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	models: Vec<String>,
-	messages: Vec<OpenAiChatCompletionMessage<'a>>,
+	messages: Vec<Value>,
 	max_tokens: u64,
 	reasoning: OpenRouterReasoningConfig,
 	/// When `true` the provider returns a server-sent event stream.
@@ -956,12 +998,6 @@ struct OpenAiChatCompletionRequest<'a> {
 	/// Tool definitions for native function calling. Omitted when empty.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	tools: Option<Vec<OpenAiToolDefinition>>,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenAiChatCompletionMessage<'a> {
-	role: &'static str,
-	content: &'a str,
 }
 
 /// OpenAI-format tool definition wrapper sent in the request `tools` array.
@@ -1223,6 +1259,7 @@ mod tests {
 		GenerationRequest {
 			system_prompt: None,
 			prompt: "reply with a short greeting".to_string(),
+			messages: None,
 			expected_output_tokens: 64,
 			risk_tier: RiskTier::Low,
 			preferred_provider: None,

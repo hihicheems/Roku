@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_agent_runtime::{DirectRoutePlan, LoopEventSender, LoopState, RouteEscalationPlan};
+use crate::{DirectRoutePlan, LoopEventSender, LoopState, RouteEscalationPlan};
 use roku_common_types::{
 	ErrorClass, EvidenceItem, RequestEnvelope, ResponseEnvelope, ResponseStatus, ResultEnvelope,
 	ResultStatus, RuntimeError, RuntimeMemorySections, Task, TaskEventKind, TaskNode, TaskState,
 };
 
-use crate::execution::pending_execution_approval_fact;
-use crate::helpers::{failure_message, result_message};
-use crate::{ContextBundle, RuntimeService};
+use super::execution::pending_execution_approval_fact;
+use super::helpers::{failure_message, result_message};
+use super::{ContextBundle, RuntimeService};
 
 impl RuntimeService {
 	pub(super) async fn process_direct_route(
@@ -82,15 +82,13 @@ impl RuntimeService {
 		);
 		let response =
 			self.finalize_direct_path(task, execution.node, execution.result, execution.message)?;
-		if matches!(
-			plan.action,
-			roku_agent_runtime::EscalationAction::AskForMoreInfo
-		) && !plan.decision.missing_arguments.is_empty()
+		if matches!(plan.action, crate::EscalationAction::AskForMoreInfo)
+			&& !plan.decision.missing_arguments.is_empty()
 		{
 			self.record_runtime_loop_ask_user_payload_step(
 				loop_state,
 				response.status,
-				roku_agent_runtime::AskUserPayload::missing_required_input(
+				crate::AskUserPayload::missing_required_input(
 					response.message.clone(),
 					plan.decision.missing_arguments.clone(),
 				),
@@ -120,7 +118,7 @@ impl RuntimeService {
 		let has_compact_boundary = loop_state
 			.history
 			.iter()
-			.any(|step| step.action == roku_agent_runtime::StepAction::CompactBoundary);
+			.any(|step| step.action == crate::StepAction::CompactBoundary);
 		if !has_compact_boundary {
 			return;
 		}
