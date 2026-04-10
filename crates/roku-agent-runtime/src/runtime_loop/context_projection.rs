@@ -126,6 +126,7 @@ pub(crate) fn build_context_projection(
 		runtime_memory_sections: runtime_memory_sections.clone(),
 		environment_context: environment::format_environment_context(
 			environment::probe_environment(),
+			&loop_state.working_directory,
 		),
 		history_digest: history_digest(loop_state, &unresolved_blockers, &working_assumptions),
 		unresolved_blockers,

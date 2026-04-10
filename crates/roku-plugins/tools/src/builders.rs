@@ -36,8 +36,8 @@ use roku_plugin_host::{
 };
 use roku_plugin_llm::{GenerationRequest, LlmRouter, RiskTier};
 use roku_plugin_skills::{InstalledSkillRecord, SkillRegistry};
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 pub(crate) const LEGACY_SKILL_TOOL_NAME: &str = "skill.install";
@@ -1283,7 +1283,9 @@ fn builtin_tool_is_runtime_enabled(tool: &ConfiguredTool, skill_execution_enable
 mod tests {
 	use std::fs;
 
-	use super::{allowed_script_paths, build_resource_catalog, execute_skill_creator, first_url_in_text};
+	use super::{
+		allowed_script_paths, build_resource_catalog, execute_skill_creator, first_url_in_text,
+	};
 	use crate::config::{BuiltinToolRole, ToolCatalogConfig};
 	use crate::runtime_config::ToolWorkerRuntimeConfig;
 	use async_trait::async_trait;

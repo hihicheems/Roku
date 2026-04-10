@@ -52,8 +52,29 @@ pub(crate) fn probe_environment() -> &'static EnvironmentSnapshot {
 }
 
 /// Format the environment snapshot as a compact text section for prompt injection.
-pub(crate) fn format_environment_context(snapshot: &EnvironmentSnapshot) -> String {
+///
+/// `working_directory` is passed explicitly because it may change per step
+/// (via `LoopState`), unlike CLI tools and git context which are static per
+/// process.
+pub(crate) fn format_environment_context(
+	snapshot: &EnvironmentSnapshot,
+	working_directory: &str,
+) -> String {
 	let mut sections = Vec::new();
+
+	sections.push(format!(
+		"Working directory: {}",
+		sanitize_prompt_value(working_directory)
+	));
+
+	if let Some(git) = &snapshot.git_context {
+		sections.push(format!(
+			"Git repository: {} (branch: {}, remote: {})",
+			sanitize_prompt_value(&git.repo_name),
+			sanitize_prompt_value(&git.branch),
+			sanitize_prompt_value(&git.remote_url),
+		));
+	}
 
 	if !snapshot.available_tools.is_empty() {
 		sections.push(format!(
@@ -62,14 +83,19 @@ pub(crate) fn format_environment_context(snapshot: &EnvironmentSnapshot) -> Stri
 		));
 	}
 
-	if let Some(git) = &snapshot.git_context {
-		sections.push(format!(
-			"Git repository: {} (branch: {}, remote: {})",
-			git.repo_name, git.branch, git.remote_url
-		));
-	}
-
 	sections.join("\n")
+}
+
+/// Strip control characters and truncate to prevent prompt injection via
+/// crafted directory names, git remotes, or branch names.
+fn sanitize_prompt_value(value: &str) -> String {
+	const MAX_LEN: usize = 256;
+	let sanitized: String = value
+		.chars()
+		.filter(|c| !c.is_control() || *c == ' ')
+		.take(MAX_LEN)
+		.collect();
+	sanitized
 }
 
 /// Check which CLI tools are available via `which`.
@@ -184,9 +210,26 @@ mod tests {
 				repo_name: "itscheems/Roku".to_string(),
 			}),
 		};
-		let context = format_environment_context(&snapshot);
+		let context = format_environment_context(&snapshot, "/home/user/project");
+		assert!(context.contains("Working directory: /home/user/project"));
 		assert!(context.contains("Available CLI tools: git, gh"));
 		assert!(context.contains("Git repository: itscheems/Roku"));
 		assert!(context.contains("branch: main"));
+	}
+
+	#[test]
+	fn sanitize_strips_control_characters() {
+		assert_eq!(sanitize_prompt_value("normal/path"), "normal/path");
+		assert_eq!(
+			sanitize_prompt_value("path\nwith\nnewlines"),
+			"pathwithnewlines"
+		);
+		assert_eq!(sanitize_prompt_value("has\x00null\x1besc"), "hasnullesc");
+	}
+
+	#[test]
+	fn sanitize_truncates_long_values() {
+		let long = "a".repeat(500);
+		assert_eq!(sanitize_prompt_value(&long).len(), 256);
 	}
 }

@@ -84,9 +84,15 @@ async fn decide_with_router(
 	event_sender: Option<&LoopEventSender>,
 ) -> Option<NextStepDecision> {
 	let tool_definitions = build_tool_definitions(&context_projection.visible_tools, catalog);
-	let system_prompt =
-		"You are Roku's runtime loop decision model. Use the provided tools to accomplish the user's task. Call final_answer when the task is complete."
-			.to_string();
+	let env_context = crate::runtime_loop::environment::format_environment_context(
+		crate::runtime_loop::environment::probe_environment(),
+		&context_projection.working_directory,
+	);
+	let system_prompt = format!(
+		"You are Roku, a coding assistant. Use the provided tools to accomplish the user's task. \
+		 Call final_answer when the task is complete.\n\n\
+		 # Environment\n{env_context}"
+	);
 	let request = GenerationRequest {
 		system_prompt: Some(system_prompt),
 		prompt: tool_loop_prompt(context_projection, user_reply),

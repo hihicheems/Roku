@@ -47,9 +47,9 @@ pub(crate) fn catalog_descriptors_with_config(
 		kind: ResourceKind::Tool,
 		name: "command.run".to_string(),
 		role: Some("core_command".to_string()),
-		description: "Execute a single shell command and return grounded subprocess facts (argv, cwd, exit code, stdout, stderr, truncation, scope metadata). Use this as a general-purpose fallback when no specialized tool fits the task — for example, to run `gh`, `git`, `cargo`, `docker`, `kubectl`, `jq`, or other CLI tools. Prefer specialized tools (`fs.read_text`, `fs.grep`, `fs.list_dir`, `web.fetch`) when they cover the operation. Do not use for multi-step scripts, chained shell expressions, or commands with shell metacharacters."
+		description: "Execute a shell command and return its output (exit code, stdout, stderr). This is your general-purpose tool for running any CLI program — use it freely for `gh`, `git`, `cargo`, `docker`, `kubectl`, `jq`, `curl`, `make`, or any other available command. Prefer specialized tools (`fs.read_text`, `fs.grep`, `fs.list_dir`, `web.fetch`) only when they directly cover the operation; otherwise default to `command.run`. Do not chain multiple commands with `&&` or `|` — run one command per call."
 			.to_string(),
-		selection_hint: "Run a shell command to accomplish a task when no specialized tool fits."
+		selection_hint: "General-purpose shell execution — default tool for any CLI operation."
 			.to_string(),
 		discoverable: true,
 		tags: vec![
@@ -72,7 +72,7 @@ pub(crate) fn catalog_descriptors_with_config(
 			estimated_latency_ms: config.default_timeout_ms,
 		},
 		required_capabilities: vec!["command.run".to_string()],
-		summary: "Run one constrained read-oriented command and return grounded subprocess facts."
+		summary: "Run a shell command and return its output. Default tool for any CLI operation."
 			.to_string(),
 		key_commands: Vec::new(),
 		use_cases: Vec::new(),
