@@ -45,7 +45,13 @@ use roku_plugin_host::{
 	PluginDiscoveryConfig, PluginStartupConfig, build_plugin_registry_snapshot,
 	default_bundled_plugin_descriptors,
 };
-use roku_plugin_llm::build_openrouter_router_with_metrics;
+use roku_plugin_llm::{
+	AnthropicBootstrapError, AnthropicRuntimeConfig, LlmProviderKind, LlmRouter,
+	OpenAiBootstrapError, OpenAiRuntimeConfig, OpenRouterBootstrapError, OpenRouterRuntimeConfig,
+	anthropic_api_key_from_env, build_anthropic_router_with_metrics,
+	build_openai_router_with_metrics, build_openrouter_router_with_metrics,
+	openai_api_key_from_env,
+};
 use roku_plugin_mcp::{McpConfig, McpConnection, McpTool, mcp_tools_to_catalog_descriptors};
 use roku_plugin_skills::{SkillRegistry, SkillsRuntimeConfig};
 pub use roku_runtime_service::RunMode;
@@ -928,9 +934,12 @@ fn build_live_runtime(
 	mut bootstrap: PluginBootstrap,
 	metrics: Arc<Metrics>,
 ) -> Result<(GenericAgentRuntime, RuntimeModeReport), CommandError> {
+	// The `openrouter` plugin identifier still gates the whole live LLM
+	// runtime; the rename to a provider-neutral identifier is out of scope
+	// for this task.
 	if !bootstrap.plugin_snapshot.is_plugin_enabled("openrouter") {
 		let runtime_mode = RuntimeModeReport::live_react_fallback_to_deterministic(
-			"openrouter plugin disabled by startup policy",
+			"live llm runtime disabled by startup policy",
 		);
 		log_runtime_bootstrap_mode(&runtime_mode);
 		return Ok((
@@ -945,14 +954,18 @@ fn build_live_runtime(
 		));
 	}
 
-	let config = match openrouter_api_key_from_env() {
-		Ok(api_key) => bootstrap
-			.runtime_configs
-			.openrouter
-			.clone()
-			.with_api_key(api_key),
-		Err(error) => {
-			let fallback_reason = format!("openrouter bootstrap failed: {error}");
+	let provider_kind = bootstrap.runtime_configs.llm_provider;
+	log_selected_llm_provider(provider_kind);
+
+	let (route_router, execution_router) = match build_live_llm_routers(
+		provider_kind,
+		&bootstrap.runtime_configs.openrouter,
+		&bootstrap.runtime_configs.anthropic,
+		&bootstrap.runtime_configs.openai,
+		&metrics,
+	) {
+		Ok(routers) => routers,
+		Err(LiveLlmBootstrapFailure { fallback_reason }) => {
 			bootstrap.plugin_snapshot = bootstrap.plugin_snapshot.with_runtime_disable(
 				"openrouter",
 				PluginDisableReason::AdmissionRejected {
@@ -974,8 +987,7 @@ fn build_live_runtime(
 			));
 		}
 	};
-	let route_router = build_openrouter_router_with_metrics(config.clone(), metrics.clone())?;
-	let execution_router = build_openrouter_router_with_metrics(config, metrics)?;
+
 	let runtime_mode = RuntimeModeReport::live_react();
 	log_runtime_bootstrap_mode(&runtime_mode);
 
@@ -997,6 +1009,94 @@ fn build_live_runtime(
 		),
 		runtime_mode,
 	))
+}
+
+/// Reason a live LLM provider failed to bootstrap, pre-formatted for the
+/// plugin snapshot's `AdmissionRejected` detail.
+struct LiveLlmBootstrapFailure {
+	fallback_reason: String,
+}
+
+/// Build the (route_router, execution_router) pair for the selected LLM
+/// provider.
+///
+/// The selected provider is the only one whose credentials are hard
+/// requirements; the rest may be unset without affecting startup. The two
+/// routers are separate instances so the route and execution paths have
+/// independent circuit-breaker state.
+fn build_live_llm_routers(
+	kind: LlmProviderKind,
+	openrouter: &OpenRouterRuntimeConfig,
+	anthropic: &AnthropicRuntimeConfig,
+	openai: &OpenAiRuntimeConfig,
+	metrics: &Arc<Metrics>,
+) -> Result<(LlmRouter, LlmRouter), LiveLlmBootstrapFailure> {
+	match kind {
+		LlmProviderKind::Openrouter => {
+			let api_key = openrouter_api_key_from_env().map_err(openrouter_bootstrap_failure)?;
+			let config = openrouter.clone().with_api_key(api_key);
+			let route_router =
+				build_openrouter_router_with_metrics(config.clone(), Arc::clone(metrics))
+					.map_err(openrouter_bootstrap_failure)?;
+			let execution_router =
+				build_openrouter_router_with_metrics(config, Arc::clone(metrics))
+					.map_err(openrouter_bootstrap_failure)?;
+			Ok((route_router, execution_router))
+		}
+		LlmProviderKind::Anthropic => {
+			let api_key = anthropic_api_key_from_env().map_err(anthropic_bootstrap_failure)?;
+			let config = anthropic.clone().with_api_key(api_key);
+			let route_router = build_anthropic_router_with_metrics(
+				config.clone(),
+				anthropic.clone(),
+				Arc::clone(metrics),
+			)
+			.map_err(anthropic_bootstrap_failure)?;
+			let execution_router =
+				build_anthropic_router_with_metrics(config, anthropic.clone(), Arc::clone(metrics))
+					.map_err(anthropic_bootstrap_failure)?;
+			Ok((route_router, execution_router))
+		}
+		LlmProviderKind::Openai => {
+			let api_key = openai_api_key_from_env().map_err(openai_bootstrap_failure)?;
+			let config = openai.clone().with_api_key(api_key);
+			let route_router = build_openai_router_with_metrics(
+				config.clone(),
+				openai.clone(),
+				Arc::clone(metrics),
+			)
+			.map_err(openai_bootstrap_failure)?;
+			let execution_router =
+				build_openai_router_with_metrics(config, openai.clone(), Arc::clone(metrics))
+					.map_err(openai_bootstrap_failure)?;
+			Ok((route_router, execution_router))
+		}
+	}
+}
+
+fn openrouter_bootstrap_failure(error: OpenRouterBootstrapError) -> LiveLlmBootstrapFailure {
+	LiveLlmBootstrapFailure {
+		fallback_reason: format!("openrouter bootstrap failed: {error}"),
+	}
+}
+
+fn anthropic_bootstrap_failure(error: AnthropicBootstrapError) -> LiveLlmBootstrapFailure {
+	LiveLlmBootstrapFailure {
+		fallback_reason: format!("anthropic bootstrap failed: {error}"),
+	}
+}
+
+fn openai_bootstrap_failure(error: OpenAiBootstrapError) -> LiveLlmBootstrapFailure {
+	LiveLlmBootstrapFailure {
+		fallback_reason: format!("openai bootstrap failed: {error}"),
+	}
+}
+
+fn log_selected_llm_provider(kind: LlmProviderKind) {
+	let _ = emit_global_log(
+		LogRecord::new("roku-cmd", LogLevel::Info, "selected live llm provider")
+			.with_field("provider", kind.as_str().to_string()),
+	);
 }
 
 fn log_local_backend(component: &str, path: &Path) {

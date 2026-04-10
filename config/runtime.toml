@@ -86,6 +86,15 @@ max_skill_prompt_context_chars = 16000
 # Maximum characters retained from raw worker output before sanitization/truncation.
 max_skill_execution_output_chars = 4000
 
+[runtime.llm]
+# Which provider backs the live LLM runtime. One of: "openrouter" (default),
+# "anthropic", "openai". Omit to keep the OpenRouter-backed behavior.
+# API keys for every provider remain env-only:
+#   - OPENROUTER_API_KEY         -> openrouter
+#   - ROKU_ANTHROPIC_API_KEY     -> anthropic
+#   - ROKU_OPENAI_API_KEY        -> openai
+# provider = "openrouter"
+
 [runtime.llm.openrouter]
 # Primary model id for live LLM routing.
 primary_model = "deepseek-chat"
@@ -102,6 +111,31 @@ cost_per_1k_tokens_usd = 0.0
 max_request_cost_usd = 1.0
 # Maximum allowed provider latency before the router treats the model as too slow.
 max_latency_ms = 60000
+
+# [runtime.llm.anthropic]
+# # Primary Anthropic model used when provider = "anthropic".
+# primary_model = "claude-sonnet-4-5-20250929"
+# # Ordered fallback chain applied on retryable failures.
+# fallback_models = ["claude-3-5-haiku-20241022"]
+# # Override the base URL only if routing through a proxy.
+# base_url = "https://api.anthropic.com/v1/messages"
+# # Upper bound on output tokens per Anthropic request.
+# max_tokens = 8192
+# max_context_tokens = 200000
+# cost_per_1k_tokens_usd = 0.0
+# max_request_cost_usd = 1.0
+# max_latency_ms = 60000
+
+# [runtime.llm.openai]
+# # Primary OpenAI model used when provider = "openai".
+# primary_model = "gpt-4o"
+# fallback_models = ["gpt-4o-mini"]
+# base_url = "https://api.openai.com/v1/chat/completions"
+# max_tokens = 8192
+# max_context_tokens = 128000
+# cost_per_1k_tokens_usd = 0.0
+# max_request_cost_usd = 1.0
+# max_latency_ms = 60000
 
 [runtime.telegram]
 # API base URL for Telegram HTTP requests.
