@@ -296,6 +296,23 @@ pub fn truncate_large_tool_results(messages: &mut [Message], max_chars: usize) {
 	}
 }
 
+/// Find a valid drain boundary that does not orphan ToolResult messages.
+///
+/// `split` is the initial candidate for the first retained message index.
+/// If `messages[split]` is a `ToolResult`, scan backwards to find the
+/// originating Assistant message so the retained tail starts cleanly.
+/// Returns the adjusted split index (always >= 1).
+fn adjust_split_for_tool_pairs(messages: &[Message], mut split: usize) -> usize {
+	while split > 1 {
+		if matches!(messages[split], Message::ToolResult { .. }) {
+			split -= 1;
+		} else {
+			break;
+		}
+	}
+	split
+}
+
 /// Compact conversation messages by replacing old messages with a summary.
 ///
 /// Preserves the first message (system context / initial user message) and the
@@ -306,6 +323,10 @@ pub fn compact_messages(messages: &mut Vec<Message>, retain_tail: usize) {
 		return;
 	}
 	let split = messages.len() - retain_tail;
+	if split <= 1 {
+		return;
+	}
+	let split = adjust_split_for_tool_pairs(messages, split);
 	if split <= 1 {
 		return;
 	}
@@ -324,6 +345,10 @@ pub async fn compact_messages_with_llm(
 		return false;
 	}
 	let split = messages.len() - retain_tail;
+	if split <= 1 {
+		return false;
+	}
+	let split = adjust_split_for_tool_pairs(messages, split);
 	if split <= 1 {
 		return false;
 	}
@@ -921,8 +946,11 @@ mod tests {
 
 		compact_messages(&mut messages, 5);
 
-		// Should have: initial + summary + 5 recent = 7
-		assert_eq!(messages.len(), 7);
+		// The naive split (21 - 5 = 16) lands on a ToolResult, so the boundary
+		// adjustment pulls it back to index 15 (the owning Assistant), yielding
+		// 6 retained messages instead of 5.
+		// Should have: initial + summary + 6 recent = 8
+		assert_eq!(messages.len(), 8);
 		// First is still the initial message
 		if let Message::User { content } = &messages[0] {
 			assert_eq!(content, "initial goal");
@@ -931,6 +959,11 @@ mod tests {
 		if let Message::User { content } = &messages[1] {
 			assert!(content.contains("messages compacted"));
 		}
+		// Third (first retained) must not be a ToolResult
+		assert!(
+			!matches!(&messages[2], Message::ToolResult { .. }),
+			"first retained message must not be a ToolResult"
+		);
 	}
 
 	#[test]
@@ -947,5 +980,86 @@ mod tests {
 		];
 		compact_messages(&mut messages, 5);
 		assert_eq!(messages.len(), 2); // Unchanged
+	}
+
+	#[test]
+	fn compact_messages_does_not_orphan_tool_results() {
+		use roku_plugin_llm::{Message, ToolCallBlock};
+		// Build a message list where the naive split lands on a ToolResult:
+		//   [0] User (anchor)
+		//   [1] Assistant (old, no tool calls)
+		//   [2] User (old reply)
+		//   [3] Assistant (with tool_calls) ← must NOT be separated from its results
+		//   [4] ToolResult(tc-1)
+		//   [5] ToolResult(tc-2)
+		//   [6] Assistant (final text)
+		//   [7] User (follow-up)
+		//
+		// With retain_tail = 4: naive split = 8 - 4 = 4.
+		// messages[4] is a ToolResult → adjustment walks back to index 3
+		// (the owning Assistant) → drain 1..3 (indices 1 and 2).
+		// Retained tail starts at index 3 (Assistant with tool_calls) — not a ToolResult.
+		let mut messages = vec![
+			Message::User {
+				content: "initial goal".to_string(),
+			},
+			Message::Assistant {
+				text: "some earlier text".to_string(),
+				tool_calls: vec![],
+			},
+			Message::User {
+				content: "old reply".to_string(),
+			},
+			Message::Assistant {
+				text: String::new(),
+				tool_calls: vec![
+					ToolCallBlock {
+						id: "tc-1".to_string(),
+						name: "tool_a".to_string(),
+						arguments: json!({}),
+					},
+					ToolCallBlock {
+						id: "tc-2".to_string(),
+						name: "tool_b".to_string(),
+						arguments: json!({}),
+					},
+				],
+			},
+			Message::ToolResult {
+				tool_use_id: "tc-1".to_string(),
+				content: "result a".to_string(),
+				is_error: false,
+			},
+			Message::ToolResult {
+				tool_use_id: "tc-2".to_string(),
+				content: "result b".to_string(),
+				is_error: false,
+			},
+			Message::Assistant {
+				text: "Final answer.".to_string(),
+				tool_calls: vec![],
+			},
+			Message::User {
+				content: "follow-up".to_string(),
+			},
+		];
+		assert_eq!(messages.len(), 8);
+
+		compact_messages(&mut messages, 4);
+
+		// Drain was 1..3 (2 messages), then summary inserted at index 1.
+		// Layout: [0]=anchor, [1]=summary, [2..6]=retained(5 msgs) → total 7
+		assert_eq!(
+			messages.len(),
+			7,
+			"expected anchor + summary + 5 retained messages"
+		);
+
+		// The first retained message (index 2) must not be a ToolResult.
+		assert!(
+			!matches!(&messages[2], Message::ToolResult { .. }),
+			"retained tail must not start with a ToolResult; first retained = {:?}",
+			&messages[2]
+		);
 	}
 }

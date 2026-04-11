@@ -809,6 +809,11 @@ impl GenericAgentRuntime {
 			content: initial_user_content,
 		});
 
+		// Load project instructions once from the initial working directory.
+		let project_instruction = crate::runtime_loop::system_prompt::load_project_instructions(
+			&loop_state.working_directory,
+		);
+
 		loop {
 			// Refresh visible tools at the start of each turn.
 			self.refresh_tool_loop_visible_tools(loop_state);
@@ -838,10 +843,8 @@ impl GenericAgentRuntime {
 			}
 
 			// Build the modular system prompt with environment + project instructions.
+			// Environment is re-probed each turn; project instruction is stable (loaded once above).
 			let env_snapshot = crate::runtime_loop::environment::probe_environment();
-			let project_instruction = crate::runtime_loop::system_prompt::load_project_instructions(
-				&loop_state.working_directory,
-			);
 			let system_prompt = crate::runtime_loop::system_prompt::build_system_prompt(
 				env_snapshot,
 				&loop_state.working_directory,
@@ -913,11 +916,29 @@ impl GenericAgentRuntime {
 					}
 					(text, tool_calls)
 				});
-				let _llm_result = router.generate_streaming(&gen_request, tx).await;
+				let llm_result = router.generate_streaming(&gen_request, tx).await;
 				let (text, tool_calls) = accumulator.await.unwrap_or_default();
 				let _ = sender.send(crate::runtime_loop::LoopEvent::LlmDecisionComplete {
 					step: current_step_index,
 				});
+				if llm_result.is_err() {
+					let message =
+						format!("LLM streaming call failed for goal: {}", loop_state.goal);
+					self.record_terminal_step(
+						loop_state,
+						StepAction::Fail,
+						"LLM streaming call failed.",
+						Some(message.clone()),
+					);
+					return self.synthetic_loop_terminal_result(
+						task_id,
+						"tool",
+						message,
+						StepAction::Fail,
+						ResultStatus::Error,
+						Some(loop_state),
+					);
+				}
 				(text, tool_calls)
 			} else {
 				// Non-streaming path.
