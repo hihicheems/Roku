@@ -108,6 +108,26 @@ fn project_instruction_section(content: &str) -> String {
 	format!("# Project Instructions\n\n{content}")
 }
 
+/// Maximum byte size for a single instruction file. Files exceeding this limit
+/// are truncated to avoid unbounded context growth.
+const MAX_INSTRUCTION_BYTES: usize = 32 * 1024; // 32KB
+
+/// Truncate `content` at a UTF-8 character boundary not exceeding
+/// `MAX_INSTRUCTION_BYTES` bytes, appending a note when truncation occurs.
+fn cap_instruction_content(content: &str) -> String {
+	if content.len() <= MAX_INSTRUCTION_BYTES {
+		return content.to_string();
+	}
+	// Find the last valid char boundary within the byte limit.
+	let truncated = &content[..content
+		.char_indices()
+		.take_while(|(i, _)| *i < MAX_INSTRUCTION_BYTES)
+		.last()
+		.map(|(i, c)| i + c.len_utf8())
+		.unwrap_or(MAX_INSTRUCTION_BYTES)];
+	format!("{truncated}\n\n[Note: instruction file truncated at 32KB]")
+}
+
 /// Load project instruction content from `.roku.md` (project-level) and
 /// `~/.roku/ROKU.md` (global-level). Project-level takes precedence (appended
 /// after global, so it overrides in case of conflict).
@@ -120,7 +140,7 @@ pub fn load_project_instructions(working_directory: &str) -> Option<String> {
 		if let Ok(content) = std::fs::read_to_string(&global_path) {
 			let trimmed = content.trim();
 			if !trimmed.is_empty() {
-				parts.push(trimmed.to_string());
+				parts.push(cap_instruction_content(trimmed));
 			}
 		}
 	}
@@ -130,7 +150,7 @@ pub fn load_project_instructions(working_directory: &str) -> Option<String> {
 	if let Ok(content) = std::fs::read_to_string(&project_path) {
 		let trimmed = content.trim();
 		if !trimmed.is_empty() {
-			parts.push(trimmed.to_string());
+			parts.push(cap_instruction_content(trimmed));
 		}
 	}
 
@@ -220,6 +240,36 @@ mod tests {
 		std::fs::write(&roku_md, "Use tabs not spaces.").expect("write");
 		let result = load_project_instructions(dir.path().to_str().unwrap());
 		assert_eq!(result.as_deref(), Some("Use tabs not spaces."));
+	}
+
+	#[test]
+	fn large_instruction_file_is_truncated() {
+		let dir = tempfile::tempdir().expect("tempdir");
+		let roku_md = dir.path().join(".roku.md");
+		// Write a file clearly exceeding 32KB.
+		let large_content = "x".repeat(MAX_INSTRUCTION_BYTES + 1024);
+		std::fs::write(&roku_md, &large_content).expect("write");
+		let result =
+			load_project_instructions(dir.path().to_str().unwrap()).expect("should return Some");
+		assert!(
+			result.len() < large_content.len(),
+			"truncated result should be shorter than original"
+		);
+		assert!(
+			result.contains("[Note: instruction file truncated at 32KB]"),
+			"truncated result should contain the truncation note"
+		);
+	}
+
+	#[test]
+	fn small_instruction_file_is_not_truncated() {
+		let dir = tempfile::tempdir().expect("tempdir");
+		let roku_md = dir.path().join(".roku.md");
+		let small_content = "Small content.";
+		std::fs::write(&roku_md, small_content).expect("write");
+		let result =
+			load_project_instructions(dir.path().to_str().unwrap()).expect("should return Some");
+		assert_eq!(result, small_content);
 	}
 
 	#[test]

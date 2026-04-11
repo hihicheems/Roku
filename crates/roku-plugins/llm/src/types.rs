@@ -320,7 +320,18 @@ pub(crate) fn estimate_request_input_tokens(request: &GenerationRequest) -> u64 
 			.iter()
 			.map(|m| match m {
 				Message::User { content } => estimate_prompt_tokens(content),
-				Message::Assistant { text, .. } => estimate_prompt_tokens(text),
+				Message::Assistant { text, tool_calls } => {
+					let text_tokens = estimate_prompt_tokens(text);
+					let tool_tokens: u64 = tool_calls
+						.iter()
+						.map(|tc| {
+							// Estimate: name + serialized arguments
+							let arg_str = tc.arguments.to_string();
+							estimate_prompt_tokens(&tc.name) + estimate_prompt_tokens(&arg_str)
+						})
+						.sum();
+					text_tokens + tool_tokens
+				}
 				Message::ToolResult { content, .. } => estimate_prompt_tokens(content),
 			})
 			.sum();
@@ -332,4 +343,44 @@ pub(crate) fn estimate_request_input_tokens(request: &GenerationRequest) -> u64 
 
 pub(crate) fn estimate_cost_usd(tokens: u64, cost_per_1k_tokens_usd: f64) -> f64 {
 	(tokens as f64 / 1000.0) * cost_per_1k_tokens_usd
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use serde_json::json;
+
+	fn make_request(messages: Vec<Message>) -> GenerationRequest {
+		GenerationRequest {
+			system_prompt: None,
+			prompt: String::new(),
+			messages: Some(messages),
+			expected_output_tokens: 100,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: 100_000,
+			budget_cost_remaining_usd: 10.0,
+			tools: None,
+		}
+	}
+
+	#[test]
+	fn assistant_with_tool_calls_has_higher_token_estimate_than_without() {
+		let without = make_request(vec![Message::Assistant {
+			text: "I will call the tool".to_string(),
+			tool_calls: Vec::new(),
+		}]);
+		let with_calls = make_request(vec![Message::Assistant {
+			text: "I will call the tool".to_string(),
+			tool_calls: vec![ToolCallBlock {
+				id: "call_1".to_string(),
+				name: "fs.read_text".to_string(),
+				arguments: json!({"path": "/some/file.txt"}),
+			}],
+		}]);
+		assert!(
+			estimate_request_input_tokens(&with_calls) > estimate_request_input_tokens(&without),
+			"assistant message with tool_calls should have a higher token estimate"
+		);
+	}
 }
