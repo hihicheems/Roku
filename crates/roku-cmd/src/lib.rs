@@ -250,6 +250,13 @@ enum Commands {
 		/// Enable pipe mode: read from stdin, output JSON to stdout, events to stderr.
 		#[arg(long, default_value_t = false)]
 		pipe: bool,
+
+		/// Output structured JSONL instead of human-readable text.
+		///
+		/// In pipe mode: events move from stderr to stdout as typed JSONL lines.
+		/// In interactive mode: events and results are emitted as JSONL on stdout.
+		#[arg(long, default_value_t = false)]
+		json: bool,
 	},
 
 	/// Run the deterministic in-process pipeline.
@@ -586,8 +593,19 @@ where
 				.map_err(CommandError::Runtime)?;
 			Ok(Some(response.message))
 		}
-		Some(Commands::Chat { session_id, pipe }) => {
-			chat::run_chat(&rt, chat::ChatOptions { session_id, pipe })?;
+		Some(Commands::Chat {
+			session_id,
+			pipe,
+			json,
+		}) => {
+			chat::run_chat(
+				&rt,
+				chat::ChatOptions {
+					session_id,
+					pipe,
+					json,
+				},
+			)?;
 			Ok(None)
 		}
 		Some(Commands::Once(args)) => {

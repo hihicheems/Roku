@@ -45,6 +45,8 @@ use crate::storage::LocalStorageLayout;
 pub(crate) struct ChatOptions {
 	pub session_id: String,
 	pub pipe: bool,
+	/// When true, all output goes to stdout as typed JSONL lines.
+	pub json: bool,
 }
 
 /// Result of a single turn execution.
@@ -66,6 +68,43 @@ pub(crate) fn run_chat(
 		run_pipe(rt, options)
 	} else {
 		run_interactive(rt, options)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// JSONL output helpers
+// ---------------------------------------------------------------------------
+
+/// A typed JSONL envelope wrapping an event or result line.
+#[derive(serde::Serialize)]
+struct JsonLine<T: serde::Serialize> {
+	#[serde(rename = "type")]
+	kind: &'static str,
+	data: T,
+}
+
+/// Write a typed JSONL line to stdout.
+fn write_jsonl_event(event: &LoopEvent) {
+	if let Ok(json) = serde_json::to_string(&JsonLine {
+		kind: "event",
+		data: event,
+	}) {
+		let stdout = io::stdout();
+		let mut handle = stdout.lock();
+		let _ = writeln!(handle, "{json}");
+		let _ = handle.flush();
+	}
+}
+
+fn write_jsonl_result(resp: &PipeResponse) {
+	if let Ok(json) = serde_json::to_string(&JsonLine {
+		kind: "result",
+		data: resp,
+	}) {
+		let stdout = io::stdout();
+		let mut handle = stdout.lock();
+		let _ = writeln!(handle, "{json}");
+		let _ = handle.flush();
 	}
 }
 
@@ -156,6 +195,7 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 					goal,
 					&mut conversation_history,
 					&mut editor,
+					options.json,
 				);
 			}
 			Err(ReadlineError::Interrupted | ReadlineError::Eof) => break,
@@ -178,6 +218,7 @@ fn handle_turn_interactive(
 	goal: String,
 	conversation_history: &mut Vec<ConversationTurn>,
 	editor: &mut DefaultEditor,
+	json_mode: bool,
 ) {
 	let (result, _request_id) = dispatch_and_record(
 		rt,
@@ -187,14 +228,34 @@ fn handle_turn_interactive(
 		goal,
 		conversation_history,
 		false,
+		json_mode,
 	);
+	let emit_response = |msg: &str, status: &str| {
+		if json_mode {
+			let resp = PipeResponse {
+				ok: true,
+				request_id: None,
+				session_id: Some(session_id.to_string()),
+				status: Some(status.to_string()),
+				message: Some(msg.to_string()),
+				error: None,
+				suggestion: None,
+			};
+			write_jsonl_result(&resp);
+		} else {
+			println!("{msg}");
+		}
+	};
+
 	match result {
 		Ok(TurnResult::Completed(response)) => {
-			println!("{response}");
+			emit_response(&response, "succeeded");
 		}
 		Ok(TurnResult::AwaitingUser(question)) => {
-			eprintln!("[agent is asking for input]");
-			println!("{question}");
+			if !json_mode {
+				eprintln!("[agent is asking for input]");
+			}
+			emit_response(&question, "awaiting_user");
 
 			loop {
 				match editor.readline("roku(reply)> ") {
@@ -213,15 +274,18 @@ fn handle_turn_interactive(
 							reply.to_string(),
 							conversation_history,
 							false,
+							json_mode,
 						);
 						match inner_result {
 							Ok(TurnResult::Completed(response)) => {
-								println!("{response}");
+								emit_response(&response, "succeeded");
 								break;
 							}
 							Ok(TurnResult::AwaitingUser(q)) => {
-								eprintln!("[agent is asking for input]");
-								println!("{q}");
+								if !json_mode {
+									eprintln!("[agent is asking for input]");
+								}
+								emit_response(&q, "awaiting_user");
 							}
 							Ok(TurnResult::Cancelled) => {
 								eprintln!("[cancelled]");
@@ -279,6 +343,15 @@ struct PipeResponse {
 }
 
 fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), CommandError> {
+	let json_mode = options.json;
+	let emit_resp = move |resp: &PipeResponse| {
+		if json_mode {
+			write_jsonl_result(resp);
+		} else {
+			write_json_stdout(resp);
+		}
+	};
+
 	let service = match tokio::task::block_in_place(build_live_runtime_service_from_env) {
 		Ok(s) => s,
 		Err(e) => {
@@ -293,7 +366,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 					"Check OPENROUTER_API_KEY or run 'roku memory health'".to_string(),
 				),
 			};
-			write_json_stdout(&resp);
+			emit_resp(&resp);
 			return Err(e);
 		}
 	};
@@ -310,7 +383,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 				error: Some(format!("failed to load session history: {e}")),
 				suggestion: None,
 			};
-			write_json_stdout(&resp);
+			emit_resp(&resp);
 			Vec::new()
 		});
 
@@ -328,7 +401,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 					error: Some(format!("stdin read error: {e}")),
 					suggestion: None,
 				};
-				write_json_stdout(&resp);
+				emit_resp(&resp);
 				break;
 			}
 		};
@@ -354,7 +427,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 					error: None,
 					suggestion: None,
 				};
-				write_json_stdout(&resp);
+				emit_resp(&resp);
 				continue;
 			}
 			_ => {}
@@ -362,6 +435,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 
 		let goal = trimmed.to_string();
 
+		let json_mode = options.json;
 		let (result, request_id) = dispatch_and_record(
 			rt,
 			&service,
@@ -370,6 +444,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 			goal,
 			&mut conversation_history,
 			true,
+			json_mode,
 		);
 
 		match result {
@@ -383,7 +458,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 					error: None,
 					suggestion: None,
 				};
-				write_json_stdout(&resp);
+				emit_resp(&resp);
 			}
 			Ok(TurnResult::AwaitingUser(message)) => {
 				let resp = PipeResponse {
@@ -395,7 +470,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 					error: None,
 					suggestion: None,
 				};
-				write_json_stdout(&resp);
+				emit_resp(&resp);
 			}
 			Ok(TurnResult::Cancelled) => {
 				let resp = PipeResponse {
@@ -407,7 +482,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 					error: None,
 					suggestion: None,
 				};
-				write_json_stdout(&resp);
+				emit_resp(&resp);
 			}
 			Err(e) => {
 				let resp = PipeResponse {
@@ -419,7 +494,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 					error: Some(e.to_string()),
 					suggestion: None,
 				};
-				write_json_stdout(&resp);
+				emit_resp(&resp);
 			}
 		}
 	}
@@ -453,6 +528,7 @@ fn dispatch_and_record(
 	goal: String,
 	conversation_history: &mut Vec<ConversationTurn>,
 	pipe_mode: bool,
+	json_mode: bool,
 ) -> (Result<TurnResult, CommandError>, String) {
 	let seq = next_cli_request_sequence();
 	let request_id = format!("req-{seq}");
@@ -464,6 +540,7 @@ fn dispatch_and_record(
 		goal.clone(),
 		conversation_history,
 		pipe_mode,
+		json_mode,
 		&request_id,
 	) {
 		Ok(r) => r,
@@ -505,13 +582,21 @@ fn execute_turn(
 	goal: String,
 	conversation_history: &[ConversationTurn],
 	pipe_mode: bool,
+	json_mode: bool,
 	request_id: &str,
 ) -> Result<TurnResult, CommandError> {
 	rt.block_on(async {
 		let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LoopEvent>();
 
-		let render_task = if pipe_mode {
-			// Pipe mode: serialize events as JSONL to stderr.
+		let render_task = if json_mode {
+			// JSON mode: emit typed JSONL event lines to stdout; stderr is logs only.
+			tokio::spawn(async move {
+				while let Some(event) = rx.recv().await {
+					write_jsonl_event(&event);
+				}
+			})
+		} else if pipe_mode {
+			// Pipe mode (no --json): serialize events as JSONL to stderr.
 			tokio::spawn(async move {
 				while let Some(event) = rx.recv().await {
 					if let Ok(json) = serde_json::to_string(&event) {

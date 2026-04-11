@@ -28,6 +28,11 @@ use crate::models::{
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
 	cfg.route("/health", web::get().to(health_handler));
 	cfg.route("/v1/requests", web::post().to(submit_handler));
+	// TODO(issue-170): Add GET /v1/requests/{id}/events SSE endpoint for LoopEvent streaming.
+	// Requires: per-request event channel store in GatewayAppState so that a submit call can
+	// publish LoopEvents and the SSE endpoint can stream them to the caller.
+	// The RequestExecutor trait must expose an event sender alongside execute(), or GatewayAppState
+	// must own a DashMap<RequestId, broadcast::Sender<LoopEvent>> populated by the submit handler.
 	cfg.route(
 		"/v1/tasks/{task_id}/artifacts",
 		web::get().to(get_task_artifacts_handler),
