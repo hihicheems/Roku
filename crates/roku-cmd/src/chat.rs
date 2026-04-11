@@ -37,6 +37,7 @@ use crate::CommandError;
 use crate::conversation::compact_conversation_history;
 use crate::runtime::{
 	build_live_runtime_service_from_env, cli_approval_gate, next_cli_request_sequence,
+	pipe_approval_gate,
 };
 use crate::session_store::SessionStore;
 use crate::storage::LocalStorageLayout;
@@ -60,10 +61,12 @@ enum TurnResult {
 }
 
 /// Per-turn token counts captured from the LoopEvent stream.
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 struct TurnTokens {
 	prompt: u64,
 	output: u64,
+	/// Model that served the request (from the last TokenUsage event).
+	model_id: Option<String>,
 }
 
 /// Runs the chat in the appropriate mode.
@@ -254,12 +257,18 @@ fn handle_turn_interactive(
 		let turn_cost = (turn_tokens.prompt as f64 / 1_000_000.0) * 3.0
 			+ (turn_tokens.output as f64 / 1_000_000.0) * 15.0;
 		let session_total = session_prompt_tokens.saturating_add(*session_output_tokens);
+		let model_tag = turn_tokens
+			.model_id
+			.as_deref()
+			.map(|m| format!(" model: {m}"))
+			.unwrap_or_default();
 		eprintln!(
-			"[tokens: {}/{}, cost: ~${turn_cost:.4}] [session: {}]",
+			"[tokens: {}/{}, cost: ~${turn_cost:.4}] [session: {}]{model_tag}",
 			turn_tokens.prompt, turn_tokens.output, session_total,
 		);
 	}
 
+	let turn_model = turn_tokens.model_id.clone();
 	let emit_response = |msg: &str, status: &str| {
 		if json_mode {
 			let resp = PipeResponse {
@@ -270,6 +279,7 @@ fn handle_turn_interactive(
 				message: Some(msg.to_string()),
 				error: None,
 				suggestion: None,
+				model: turn_model.clone(),
 			};
 			write_jsonl_result(&resp);
 		} else {
@@ -383,6 +393,9 @@ struct PipeResponse {
 	error: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	suggestion: Option<String>,
+	/// Model that served this request (populated from TokenUsage event).
+	#[serde(skip_serializing_if = "Option::is_none")]
+	model: Option<String>,
 }
 
 fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), CommandError> {
@@ -408,11 +421,17 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 				suggestion: Some(
 					"Check OPENROUTER_API_KEY or run 'roku memory health'".to_string(),
 				),
+				model: None,
 			};
 			emit_resp(&resp);
 			return Err(e);
 		}
 	};
+	// Pipe mode: stdin is consumed by the message stream, so interactive
+	// approval prompts are impossible. Install a gate that auto-approves
+	// read-only tools and denies write-risk tools.
+	let catalog = std::sync::Arc::new(service.resource_catalog().clone());
+	let service = service.with_approval_gate(pipe_approval_gate(catalog));
 	let store = session_store();
 
 	let mut conversation_history: Vec<ConversationTurn> =
@@ -425,6 +444,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 				message: None,
 				error: Some(format!("failed to load session history: {e}")),
 				suggestion: None,
+				model: None,
 			};
 			emit_resp(&resp);
 			Vec::new()
@@ -443,6 +463,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 					message: None,
 					error: Some(format!("stdin read error: {e}")),
 					suggestion: None,
+					model: None,
 				};
 				emit_resp(&resp);
 				break;
@@ -451,6 +472,17 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 
 		let trimmed = line.trim();
 		if trimmed.is_empty() {
+			let resp = PipeResponse {
+				ok: false,
+				request_id: None,
+				session_id: Some(options.session_id.clone()),
+				status: None,
+				message: None,
+				error: Some("empty input".to_string()),
+				suggestion: None,
+				model: None,
+			};
+			emit_resp(&resp);
 			continue;
 		}
 
@@ -469,6 +501,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 					message: Some("Conversation history cleared.".to_string()),
 					error: None,
 					suggestion: None,
+					model: None,
 				};
 				emit_resp(&resp);
 				continue;
@@ -479,7 +512,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 		let goal = trimmed.to_string();
 
 		let json_mode = options.json;
-		let (result, request_id, _tokens) = dispatch_and_record(
+		let (result, request_id, tokens) = dispatch_and_record(
 			rt,
 			&service,
 			&store,
@@ -489,6 +522,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 			true,
 			json_mode,
 		);
+		let model = tokens.model_id;
 
 		match result {
 			Ok(TurnResult::Completed(message)) => {
@@ -500,6 +534,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 					message: Some(message),
 					error: None,
 					suggestion: None,
+					model: model.clone(),
 				};
 				emit_resp(&resp);
 			}
@@ -512,6 +547,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 					message: Some(message),
 					error: None,
 					suggestion: None,
+					model: model.clone(),
 				};
 				emit_resp(&resp);
 			}
@@ -524,6 +560,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 					message: None,
 					error: None,
 					suggestion: None,
+					model,
 				};
 				emit_resp(&resp);
 			}
@@ -536,6 +573,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 					message: None,
 					error: Some(e.to_string()),
 					suggestion: None,
+					model,
 				};
 				emit_resp(&resp);
 			}
@@ -646,11 +684,15 @@ fn execute_turn(
 					if let LoopEvent::TokenUsage {
 						prompt_tokens,
 						output_tokens,
+						model_id,
 						..
 					} = &event && let Ok(mut guard) = captured_tokens_task.lock()
 					{
 						guard.prompt = guard.prompt.saturating_add(*prompt_tokens);
 						guard.output = guard.output.saturating_add(*output_tokens);
+						if let Some(id) = model_id {
+							guard.model_id = Some(id.clone());
+						}
 					}
 					write_jsonl_event(&event);
 				}
@@ -662,11 +704,15 @@ fn execute_turn(
 					if let LoopEvent::TokenUsage {
 						prompt_tokens,
 						output_tokens,
+						model_id,
 						..
 					} = &event && let Ok(mut guard) = captured_tokens_task.lock()
 					{
 						guard.prompt = guard.prompt.saturating_add(*prompt_tokens);
 						guard.output = guard.output.saturating_add(*output_tokens);
+						if let Some(id) = model_id {
+							guard.model_id = Some(id.clone());
+						}
 					}
 					if let Ok(json) = serde_json::to_string(&event) {
 						eprintln!("{json}");
@@ -712,11 +758,15 @@ fn execute_turn(
 						LoopEvent::TokenUsage {
 							prompt_tokens,
 							output_tokens,
+							model_id,
 							..
 						} => {
 							if let Ok(mut guard) = captured_tokens_task.lock() {
 								guard.prompt = guard.prompt.saturating_add(prompt_tokens);
 								guard.output = guard.output.saturating_add(output_tokens);
+								if let Some(id) = model_id {
+									guard.model_id = Some(id);
+								}
 							}
 						}
 					}
@@ -744,7 +794,7 @@ fn execute_turn(
 				drop(tx);
 				render_task.await.ok();
 
-				let tokens = captured_tokens.lock().map(|g| *g).unwrap_or_default();
+				let tokens = captured_tokens.lock().map(|g| g.clone()).unwrap_or_default();
 				if let Ok(Some(_pending)) = service.pending_loop(session_id) {
 					Ok((TurnResult::AwaitingUser(response.message), tokens))
 				} else {

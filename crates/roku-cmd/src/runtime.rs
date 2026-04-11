@@ -1196,8 +1196,8 @@ fn build_request(
 
 /// Build an interactive CLI approval gate that prompts via stderr/stdin.
 ///
-/// For pipe mode (`--pipe`) pass `None` (auto-approve) since there is no interactive
-/// stdin available for approval prompts.
+/// Only for interactive mode. Pipe mode must use [`pipe_approval_gate`] instead
+/// because stdin is consumed by the message stream.
 pub(crate) fn cli_approval_gate(
 	catalog: Arc<roku_plugin_tools::ResourceCatalog>,
 ) -> Arc<dyn roku_agent_runtime::ToolApprovalGate> {
@@ -1222,6 +1222,25 @@ pub(crate) fn cli_approval_gate(
 					"User denied the operation.".to_string(),
 				)
 			}
+		},
+		catalog,
+	))
+}
+
+/// Build an approval gate for pipe mode where stdin is unavailable.
+///
+/// Safe/read-only tools are auto-approved. Write-risk and unknown tools are
+/// denied with an actionable message — the caller cannot be prompted for
+/// confirmation in non-interactive mode.
+pub(crate) fn pipe_approval_gate(
+	catalog: Arc<roku_plugin_tools::ResourceCatalog>,
+) -> Arc<dyn roku_agent_runtime::ToolApprovalGate> {
+	Arc::new(roku_agent_runtime::RiskBasedGate::new(
+		|tool_name: &str, _arguments: &serde_json::Value| {
+			roku_agent_runtime::ToolApprovalDecision::Deny(format!(
+				"Tool `{tool_name}` requires approval but pipe mode has no interactive stdin. \
+				 Use interactive mode (`roku chat`) to approve write operations."
+			))
 		},
 		catalog,
 	))
