@@ -34,10 +34,11 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
 use crate::CommandError;
+use crate::auth::{AuthStore, CredentialEntry};
 use crate::conversation::compact_conversation_history;
 use crate::runtime::{
-	build_live_runtime_service_from_env, cli_approval_gate, next_cli_request_sequence,
-	pipe_approval_gate,
+	build_live_runtime_service_from_env, cli_approval_gate, load_oauth_client_id,
+	next_cli_request_sequence, pipe_approval_gate,
 };
 use crate::session_store::SessionStore;
 use crate::storage::LocalStorageLayout;
@@ -123,9 +124,28 @@ fn write_jsonl_result(resp: &PipeResponse) {
 // ---------------------------------------------------------------------------
 
 fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), CommandError> {
-	let service = tokio::task::block_in_place(build_live_runtime_service_from_env)?;
-	let catalog = std::sync::Arc::new(service.resource_catalog().clone());
-	let service = service.with_approval_gate(cli_approval_gate(catalog));
+	// Try building the service. If credentials are missing, run first-time setup.
+	let mut service = match tokio::task::block_in_place(build_live_runtime_service_from_env) {
+		Ok(s) => {
+			let catalog = std::sync::Arc::new(s.resource_catalog().clone());
+			s.with_approval_gate(cli_approval_gate(catalog))
+		}
+		Err(ref e) if has_no_credentials() => {
+			// No credentials available — try first-run setup flow.
+			eprintln!("No API key or OAuth token found. Starting first-time setup...");
+			eprintln!("(bootstrap error: {e})\n");
+			if let Err(e) = rt.block_on(run_first_time_setup()) {
+				return Err(CommandError::Io(io::Error::other(format!(
+					"first-time setup failed: {e}"
+				))));
+			}
+			// Retry after setup.
+			let s = tokio::task::block_in_place(build_live_runtime_service_from_env)?;
+			let catalog = std::sync::Arc::new(s.resource_catalog().clone());
+			s.with_approval_gate(cli_approval_gate(catalog))
+		}
+		Err(e) => return Err(e),
+	};
 	let store = session_store();
 
 	let mut editor =
@@ -139,6 +159,7 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 		});
 
 	print_banner(&options.session_id, conversation_history.len());
+	print_auth_status();
 
 	// Session-level cumulative token counters.
 	let mut session_prompt_tokens: u64 = 0;
@@ -152,15 +173,15 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 					continue;
 				}
 
-				let _ = editor.add_history_entry(trimmed);
-
 				match trimmed {
 					"/quit" | "/exit" => break,
 					"/help" => {
+						let _ = editor.add_history_entry(trimmed);
 						print_help();
 						continue;
 					}
 					"/clear" => {
+						let _ = editor.add_history_entry(trimmed);
 						conversation_history.clear();
 						if let Err(e) = store.clear(&options.session_id) {
 							eprintln!("[warn] failed to clear session file: {e}");
@@ -172,9 +193,9 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 						continue;
 					}
 					"/compact" => {
+						let _ = editor.add_history_entry(trimmed);
 						match compact_conversation_history(&mut conversation_history) {
 							Some(result) => {
-								// Rewrite file with compacted history.
 								if let Err(e) = rewrite_history(
 									&store,
 									&options.session_id,
@@ -194,11 +215,55 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 						}
 						continue;
 					}
+					"/login" => {
+						let _ = editor.add_history_entry(trimmed);
+						match rt.block_on(run_first_time_setup()) {
+							Ok(()) => match rebuild_service() {
+								Ok(s) => {
+									service = s;
+									eprintln!("[login] Service rebuilt with new credentials.");
+									print_auth_status();
+								}
+								Err(e) => eprintln!("[login] Failed to rebuild service: {e}"),
+							},
+							Err(e) => eprintln!("[login] {e}"),
+						}
+						continue;
+					}
+					"/logout" => {
+						let _ = editor.add_history_entry(trimmed);
+						let auth_store = AuthStore::from_env();
+						if let Ok(Some(auth)) = auth_store.load() {
+							if let Some(provider) = auth.active_provider.as_deref() {
+								if let Err(e) = auth_store.delete_credential(provider) {
+									eprintln!("[logout] Failed to clear credentials: {e}");
+								} else {
+									eprintln!(
+										"[logout] Credentials cleared for {provider}. Use /login to sign in again."
+									);
+								}
+							} else {
+								eprintln!("[logout] No active provider found.");
+							}
+						} else {
+							eprintln!("[logout] No credentials found.");
+						}
+						continue;
+					}
+					"/switch" => {
+						let _ = editor.add_history_entry(trimmed);
+						handle_switch_command(&mut service, &mut editor);
+						continue;
+					}
 					input if input.starts_with('/') => {
+						// Don't add invalid commands to history.
 						eprintln!("Unknown command: {input}. Type /help for available commands.");
 						continue;
 					}
-					_ => {}
+					_ => {
+						// Valid user message — add to history.
+						let _ = editor.add_history_entry(trimmed);
+					}
 				}
 
 				let goal = trimmed.to_string();
@@ -887,5 +952,228 @@ fn print_help() {
 	eprintln!("  /help     Show this help message");
 	eprintln!("  /clear    Reset conversation history and pending state");
 	eprintln!("  /compact  Compress older conversation turns into a summary");
+	eprintln!("  /login    Sign in with a new provider or account");
+	eprintln!("  /logout   Clear current credentials");
+	eprintln!("  /switch   Switch between stored credentials");
 	eprintln!("  /quit     Exit the REPL (also: /exit, Ctrl+C, Ctrl+D)");
+}
+
+// ---------------------------------------------------------------------------
+// Auth helpers (Unit 02 + 03)
+// ---------------------------------------------------------------------------
+
+/// Check whether the system has no credentials at all (no env vars, no auth.json).
+/// Used to distinguish "missing credentials" from other bootstrap failures.
+fn has_no_credentials() -> bool {
+	// Check env vars for any provider.
+	let has_env_key = std::env::var("OPENROUTER_API_KEY")
+		.or_else(|_| std::env::var("ROKU_OPENAI_API_KEY"))
+		.or_else(|_| std::env::var("ROKU_ANTHROPIC_API_KEY"))
+		.map(|v| !v.trim().is_empty())
+		.unwrap_or(false);
+	if has_env_key {
+		return false;
+	}
+	// Check auth.json for any credential.
+	let store = AuthStore::from_env();
+	match store.load() {
+		Ok(Some(auth)) => auth.credentials.is_empty(),
+		_ => true,
+	}
+}
+
+/// Display the current authentication status.
+fn print_auth_status() {
+	let store = AuthStore::from_env();
+	let auth = match store.load() {
+		Ok(Some(a)) => a,
+		_ => {
+			eprintln!("[auth] Not authenticated. Use /login to sign in.");
+			return;
+		}
+	};
+	let provider = auth.active_provider.as_deref().unwrap_or("none");
+	let detail = auth
+		.credentials
+		.get(provider)
+		.map(credential_summary)
+		.unwrap_or_default();
+	if detail.is_empty() {
+		eprintln!("[auth] provider: {provider}");
+	} else {
+		eprintln!("[auth] provider: {provider} ({detail})");
+	}
+}
+
+/// One-line summary of a credential entry (email or key prefix).
+fn credential_summary(entry: &CredentialEntry) -> String {
+	match entry {
+		CredentialEntry::ApiKey { api_key } => {
+			// Show only the last 4 characters to minimize key exposure.
+			let suffix: String = api_key
+				.chars()
+				.rev()
+				.take(4)
+				.collect::<Vec<_>>()
+				.into_iter()
+				.rev()
+				.collect();
+			format!("...{suffix}")
+		}
+		CredentialEntry::OAuth {
+			id_token_claims, ..
+		} => id_token_claims
+			.email
+			.as_deref()
+			.unwrap_or("oauth")
+			.to_string(),
+	}
+}
+
+/// Rebuild `RuntimeService` from environment + auth.json.
+fn rebuild_service() -> Result<RuntimeService, CommandError> {
+	let s = tokio::task::block_in_place(build_live_runtime_service_from_env)?;
+	let catalog = std::sync::Arc::new(s.resource_catalog().clone());
+	Ok(s.with_approval_gate(cli_approval_gate(catalog)))
+}
+
+/// First-time setup: choose provider and authenticate.
+async fn run_first_time_setup() -> Result<(), String> {
+	let auth_store = AuthStore::from_env();
+
+	eprintln!("Choose a provider:");
+	eprintln!("  1) OpenRouter (API key)");
+	eprintln!("  2) OpenAI (OAuth — opens browser)");
+	eprint!("Selection [1/2]: ");
+	let _ = io::stderr().flush();
+
+	let mut input = String::new();
+	io::stdin()
+		.read_line(&mut input)
+		.map_err(|e| format!("read input: {e}"))?;
+	let choice = input.trim();
+
+	match choice {
+		"1" => {
+			eprint!("Enter your OpenRouter API key: ");
+			let _ = io::stderr().flush();
+			let mut key = String::new();
+			io::stdin()
+				.read_line(&mut key)
+				.map_err(|e| format!("read key: {e}"))?;
+			let key = key.trim().to_string();
+			if key.is_empty() {
+				return Err("empty API key".to_string());
+			}
+			let mut auth = auth_store.load().ok().flatten().unwrap_or_default();
+			auth.active_provider = Some("openrouter".to_string());
+			auth.credentials.insert(
+				"openrouter".to_string(),
+				CredentialEntry::ApiKey { api_key: key },
+			);
+			auth_store.save(&auth).map_err(|e| format!("save: {e}"))?;
+			eprintln!("[setup] OpenRouter API key saved.");
+			Ok(())
+		}
+		"2" => {
+			let client_id = load_oauth_client_id().ok_or_else(|| {
+				"No oauth_client_id configured. Set it in config/runtime.toml under [runtime.llm]."
+					.to_string()
+			})?;
+			eprintln!("[setup] Opening browser for OpenAI authorization...");
+			let result = crate::auth::run_openai_oauth(&client_id)
+				.await
+				.map_err(|e| format!("oauth: {e}"))?;
+			let now_ms = std::time::SystemTime::now()
+				.duration_since(std::time::UNIX_EPOCH)
+				.map(|d| d.as_millis() as i64)
+				.unwrap_or(0);
+			let mut auth = auth_store.load().ok().flatten().unwrap_or_default();
+			auth.active_provider = Some("openai".to_string());
+			auth.credentials.insert(
+				"openai".to_string(),
+				CredentialEntry::OAuth {
+					access_token: result.api_key,
+					refresh_token: result.refresh_token,
+					id_token_claims: result.id_token_claims,
+					last_refresh_unix_ms: now_ms,
+				},
+			);
+			auth_store.save(&auth).map_err(|e| format!("save: {e}"))?;
+			eprintln!("[setup] OpenAI OAuth credentials saved.");
+			Ok(())
+		}
+		_ => Err(format!("invalid selection: {choice}")),
+	}
+}
+
+/// Handle /switch command — list stored credentials, pick one.
+fn handle_switch_command(service: &mut RuntimeService, editor: &mut DefaultEditor) {
+	let auth_store = AuthStore::from_env();
+	let auth = match auth_store.load() {
+		Ok(Some(a)) if !a.credentials.is_empty() => a,
+		_ => {
+			eprintln!("[switch] No stored credentials. Use /login first.");
+			return;
+		}
+	};
+
+	let mut providers: Vec<&String> = auth.credentials.keys().collect();
+	providers.sort();
+	if providers.len() < 2 {
+		eprintln!(
+			"[switch] Only one credential stored ({}). Use /login to add another.",
+			providers.first().map(|s| s.as_str()).unwrap_or("?")
+		);
+		return;
+	}
+
+	eprintln!("[switch] Available providers:");
+	for (i, provider) in providers.iter().enumerate() {
+		let active = if auth.active_provider.as_deref() == Some(provider.as_str()) {
+			" (active)"
+		} else {
+			""
+		};
+		let summary = auth
+			.credentials
+			.get(*provider)
+			.map(credential_summary)
+			.unwrap_or_default();
+		eprintln!("  {}) {provider}{active} — {summary}", i + 1);
+	}
+	eprint!("Selection: ");
+	let _ = io::stderr().flush();
+
+	match editor.readline("") {
+		Ok(line) => {
+			let idx: usize = match line.trim().parse::<usize>() {
+				Ok(n) if n >= 1 && n <= providers.len() => n - 1,
+				_ => {
+					eprintln!("[switch] Invalid selection.");
+					return;
+				}
+			};
+			let target = providers[idx].clone();
+			let mut updated = auth.clone();
+			updated.active_provider = Some(target.clone());
+			if let Err(e) = auth_store.save(&updated) {
+				eprintln!("[switch] Failed to update active provider: {e}");
+				return;
+			}
+			match rebuild_service() {
+				Ok(s) => {
+					*service = s;
+					eprintln!("[switch] Switched to {target}.");
+					print_auth_status();
+				}
+				Err(e) => {
+					eprintln!("[switch] Failed to rebuild service: {e}");
+					// Revert active_provider on failure.
+					let _ = auth_store.save(&auth);
+				}
+			}
+		}
+		Err(_) => eprintln!("[switch] Cancelled."),
+	}
 }
