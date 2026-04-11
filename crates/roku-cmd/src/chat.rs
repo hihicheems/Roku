@@ -124,27 +124,22 @@ fn write_jsonl_result(resp: &PipeResponse) {
 // ---------------------------------------------------------------------------
 
 fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), CommandError> {
-	// Try building the service. If credentials are missing, run first-time setup.
-	let mut service = match tokio::task::block_in_place(build_live_runtime_service_from_env) {
-		Ok(s) => {
-			let catalog = std::sync::Arc::new(s.resource_catalog().clone());
-			s.with_approval_gate(cli_approval_gate(catalog))
+	// Check for credentials BEFORE bootstrap. The bootstrap function falls back
+	// to deterministic mode (returns Ok) when credentials are missing, so we
+	// cannot detect "no credentials" from its return value.
+	if has_no_credentials() {
+		eprintln!("No API key or OAuth token found. Starting first-time setup...\n");
+		if let Err(e) = rt.block_on(run_first_time_setup()) {
+			return Err(CommandError::Io(io::Error::other(format!(
+				"first-time setup failed: {e}"
+			))));
 		}
-		Err(ref e) if has_no_credentials() => {
-			// No credentials available — try first-run setup flow.
-			eprintln!("No API key or OAuth token found. Starting first-time setup...");
-			eprintln!("(bootstrap error: {e})\n");
-			if let Err(e) = rt.block_on(run_first_time_setup()) {
-				return Err(CommandError::Io(io::Error::other(format!(
-					"first-time setup failed: {e}"
-				))));
-			}
-			// Retry after setup.
-			let s = tokio::task::block_in_place(build_live_runtime_service_from_env)?;
-			let catalog = std::sync::Arc::new(s.resource_catalog().clone());
-			s.with_approval_gate(cli_approval_gate(catalog))
-		}
-		Err(e) => return Err(e),
+	}
+
+	let mut service = {
+		let s = tokio::task::block_in_place(build_live_runtime_service_from_env)?;
+		let catalog = std::sync::Arc::new(s.resource_catalog().clone());
+		s.with_approval_gate(cli_approval_gate(catalog))
 	};
 	let store = session_store();
 
