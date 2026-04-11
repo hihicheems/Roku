@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::{
 	AskUserPayload, AskUserResumeContract, AskUserResumeDirective, DirectRoutePlan, IntentFamily,
-	LoopContext, LoopState, RouteDecision, RouteDecisionResult, RouteRisk, StepObservation,
-	StepRecord, ToolObservation, runtime_loop_trace,
+	LoopContext, LoopState, RouteDecision, RouteRisk, StepObservation, StepRecord, ToolObservation,
+	runtime_loop_trace,
 };
 use roku_common_types::ResourceSelector;
 use roku_common_types::{
@@ -814,7 +814,7 @@ fn direct_routes_project_bound_resources_into_context_bundle() {
 			false,
 		)
 		.expect("context bundle should build");
-	let route = RouteDecisionResult::Direct(DirectRoutePlan {
+	let plan = DirectRoutePlan {
 		decision: RouteDecision::new(
 			IntentFamily::FilesystemRead,
 			0.96,
@@ -829,9 +829,9 @@ fn direct_routes_project_bound_resources_into_context_bundle() {
 			ResourceSelector::tool("fs.read_text".to_string()),
 			ResourceSelector::tool("fs.find".to_string()),
 		],
-	});
+	};
 
-	service.attach_visible_resources(&mut bundle, &route);
+	service.attach_visible_resources_for_plan(&mut bundle, &plan);
 
 	assert_eq!(
 		bundle.visible_resources,

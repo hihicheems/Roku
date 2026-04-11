@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{
-	AskUserPayload, EscalationAction, LoopState, RouteDecisionResult, StepAction, StepRecord,
-};
+use crate::{AskUserPayload, DirectRoutePlan, LoopState, StepAction, StepRecord};
 use roku_common_types::LogLevel;
 use roku_common_types::{RequestEnvelope, ResponseStatus};
 
@@ -73,18 +71,16 @@ impl RuntimeService {
 		}
 	}
 
-	pub(super) fn initialize_runtime_loop_for_route(
+	pub(super) fn initialize_runtime_loop_for_plan(
 		&self,
 		request: &RequestEnvelope,
-		route: &RouteDecisionResult,
+		plan: &DirectRoutePlan,
 	) -> LoopState {
-		let decision = route_decision(route);
-		let bound_resources = route_bound_resources(route);
 		let loop_state = self.runtime.initialize_runtime_loop(
 			request,
 			&request.session_id,
-			decision,
-			bound_resources,
+			&plan.decision,
+			plan.bound_resources.clone(),
 		);
 		log_runtime(
 			LogLevel::Info,
@@ -158,48 +154,6 @@ impl RuntimeService {
 		step
 	}
 
-	pub(super) fn record_runtime_loop_escalation_step(
-		&self,
-		loop_state: &mut LoopState,
-		action: EscalationAction,
-		response_status: ResponseStatus,
-		message: &str,
-	) -> StepRecord {
-		let step_action = match action {
-			EscalationAction::AskForMoreInfo => StepAction::AskUser,
-			EscalationAction::FallbackAnswer | EscalationAction::EnterLimitedPlanning => {
-				match response_status {
-					ResponseStatus::Succeeded | ResponseStatus::PendingApproval => {
-						StepAction::FinalAnswer
-					}
-					ResponseStatus::Failed => StepAction::Fail,
-				}
-			}
-		};
-		self.record_runtime_loop_step_with_action(loop_state, step_action, response_status, message)
-	}
-
-	pub(super) fn record_runtime_loop_ask_user_payload_step(
-		&self,
-		loop_state: &mut LoopState,
-		response_status: ResponseStatus,
-		payload: AskUserPayload,
-	) -> StepRecord {
-		let reason = match response_status {
-			ResponseStatus::Succeeded => "runtime loop captured direct route completion",
-			ResponseStatus::PendingApproval => {
-				"runtime loop captured pending approval terminal state"
-			}
-			ResponseStatus::Failed => "runtime loop captured direct route failure",
-		};
-		let step = self
-			.runtime
-			.record_ask_user_step(loop_state, reason, payload);
-		self.record_runtime_loop_history(loop_state, loop_state.history.len().saturating_sub(1));
-		self.log_runtime_loop_terminated(loop_state);
-		step
-	}
-
 	fn record_runtime_loop_step_with_action(
 		&self,
 		loop_state: &mut LoopState,
@@ -262,25 +216,10 @@ impl RuntimeService {
 	}
 }
 
-fn route_decision(route: &RouteDecisionResult) -> &crate::RouteDecision {
-	match route {
-		RouteDecisionResult::Direct(plan) => &plan.decision,
-		RouteDecisionResult::Escalate(plan) => &plan.decision,
-	}
-}
-
-fn route_bound_resources(route: &RouteDecisionResult) -> Vec<roku_common_types::ResourceSelector> {
-	match route {
-		RouteDecisionResult::Direct(plan) => plan.bound_resources.clone(),
-		RouteDecisionResult::Escalate(_) => Vec::new(),
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use crate::{
-		AskUserPayload, DirectRoutePlan, IntentFamily, RouteDecision, RouteRisk, StepAction,
-		runtime_loop_trace,
+		DirectRoutePlan, IntentFamily, RouteDecision, RouteRisk, StepAction, runtime_loop_trace,
 	};
 	use roku_common_types::{RequestEnvelope, RequestId, ResourceSelector, ResponseStatus};
 
@@ -296,8 +235,8 @@ mod tests {
 		}
 	}
 
-	fn direct_route() -> RouteDecisionResult {
-		RouteDecisionResult::Direct(DirectRoutePlan {
+	fn direct_route() -> DirectRoutePlan {
+		DirectRoutePlan {
 			decision: RouteDecision::new(
 				IntentFamily::CodeExec,
 				0.95,
@@ -309,12 +248,12 @@ mod tests {
 				"direct route terminal trace test",
 			),
 			bound_resources: vec![ResourceSelector::tool("command.run".to_string())],
-		})
+		}
 	}
 
 	fn direct_route_loop_state(service: &RuntimeService, goal: &str) -> LoopState {
 		let request = direct_route_request(goal);
-		service.initialize_runtime_loop_for_route(&request, &direct_route())
+		service.initialize_runtime_loop_for_plan(&request, &direct_route())
 	}
 
 	#[test]
@@ -354,52 +293,6 @@ mod tests {
 			trace.final_outcome.final_message.as_deref(),
 			Some(approval_message)
 		);
-	}
-
-	#[test]
-	fn direct_route_awaiting_user_trace_is_explicit() {
-		let service = RuntimeService::default();
-		let mut loop_state = direct_route_loop_state(
-			&service,
-			"Clarify which task to continue before resuming execution.",
-		);
-		let payload = AskUserPayload::freeform("您想继续什么任务？");
-		let pause_message = payload.final_message.clone();
-
-		service.record_runtime_loop_ask_user_payload_step(
-			&mut loop_state,
-			ResponseStatus::Succeeded,
-			payload.clone(),
-		);
-
-		let trace = runtime_loop_trace(&loop_state);
-		let step = &trace.steps[0];
-
-		assert_eq!(trace.status, "awaiting_user");
-		assert_eq!(trace.step_count, 1);
-		assert_eq!(step.decision.action, "ask_user");
-		assert_eq!(
-			step.visible_resources_before,
-			Some(vec![ResourceSelector::tool("command.run".to_string())])
-		);
-		assert_eq!(
-			step.decision.reason,
-			"runtime loop captured direct route completion"
-		);
-		assert_eq!(
-			step.decision.final_message.as_deref(),
-			Some(pause_message.as_str())
-		);
-		assert_eq!(trace.final_outcome.status, "awaiting_user");
-		assert_eq!(
-			trace.final_outcome.terminal_action.as_deref(),
-			Some("ask_user")
-		);
-		assert_eq!(
-			trace.final_outcome.final_message.as_deref(),
-			Some(pause_message.as_str())
-		);
-		assert_eq!(loop_state.awaiting_user.as_ref(), Some(&payload));
 	}
 
 	#[test]

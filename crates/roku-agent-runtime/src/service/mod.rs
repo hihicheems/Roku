@@ -30,7 +30,7 @@ mod tests;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::{GenericAgentRuntime, RouteDecisionResult};
+use crate::GenericAgentRuntime;
 use roku_common_types::{
 	ApprovalDecision, ApprovalId, ApprovalStatus, ApprovalTicket, ErrorClass, RequestEnvelope,
 	ResponseEnvelope, ResponseStatus, RuntimeError, TaskEventKind, TaskNode, TaskNodeKind,
@@ -541,38 +541,6 @@ fn log_runtime(
 		LogRecord::new("roku-runtime-service", level, message),
 		|record, (key, value)| record.with_field(key, value),
 	);
-	let _ = emit_global_log(record);
-}
-
-fn log_route_decision(request: &RequestEnvelope, route: &RouteDecisionResult) {
-	let record = match route {
-		RouteDecisionResult::Direct(plan) => LogRecord::new(
-			"roku-runtime-service",
-			LogLevel::Info,
-			"selected direct route",
-		)
-		.with_field("request_id", request.request_id.0.clone())
-		.with_field("session_id", request.session_id.clone())
-		.with_field(
-			"intent_family",
-			format!("{:?}", plan.decision.intent_family),
-		)
-		.with_field("candidate_tools", plan.decision.candidate_tools.join(","))
-		.with_field("reason", plan.decision.reason.clone()),
-		RouteDecisionResult::Escalate(plan) => LogRecord::new(
-			"roku-runtime-service",
-			LogLevel::Info,
-			"escalated route decision",
-		)
-		.with_field("request_id", request.request_id.0.clone())
-		.with_field("session_id", request.session_id.clone())
-		.with_field(
-			"intent_family",
-			format!("{:?}", plan.decision.intent_family),
-		)
-		.with_field("action", format!("{:?}", plan.action))
-		.with_field("reason", plan.decision.reason.clone()),
-	};
 	let _ = emit_global_log(record);
 }
 

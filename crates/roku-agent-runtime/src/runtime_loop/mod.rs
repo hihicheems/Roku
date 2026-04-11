@@ -25,10 +25,10 @@ mod observation;
 mod probe_check;
 mod regression;
 mod request_intake;
-mod route_classifier;
 mod state_update;
 mod step_record;
 mod summarizer;
+pub(crate) mod system_prompt;
 mod tool_loop;
 mod trace;
 
@@ -41,14 +41,6 @@ pub use compact::{
 };
 pub use context_assembly::LoopContext;
 pub(crate) use context_assembly::build_loop_context;
-pub(crate) use grounding::{
-	explanatory_python_code_request, explanatory_shell_command_request,
-	extract_concrete_path_candidates, extract_concrete_table_path,
-	extract_explicit_path_candidates, extract_explicit_shell_command, extract_explicit_table_path,
-	extract_glob_pattern, extract_skill_source_url, extract_web_query,
-	goal_requests_python_execution, goal_requests_web_lookup,
-	grounded_python_code_allows_execution, grounded_shell_command_allows_execution,
-};
 pub use loop_event::{LoopEvent, LoopEventSender};
 pub use loop_state::{LoopState, LoopStatus};
 pub use next_step::{NextStepAction, NextStepDecision, NextStepDecisionSchemaError};
@@ -60,12 +52,11 @@ pub use regression::{
 };
 pub use request_intake::LoopRequest;
 pub(crate) use request_intake::intake_request;
-pub(crate) use route_classifier::classify_existing_route;
 pub use state_update::{InterpretedObservation, interpret_observation};
 pub use step_record::{StepAction, StepRecord};
 pub use summarizer::FinalAnswerPayload;
 pub(crate) use tool_loop::{
 	attachments_for_tool, build_tool_definitions, ground_tool_arguments,
-	next_working_directory_from_observation, tool_required_argument_keys,
+	next_working_directory_from_observation,
 };
 pub use trace::{RuntimeLoopTraceCheckReport, check_runtime_loop_trace, runtime_loop_trace};

@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{EscalationAction, EscalationReason, LoopEventSender, RouteDecisionResult};
+use crate::{DirectRoutePlan, IntentFamily, LoopEventSender, RouteDecision, RouteRisk};
 use roku_common_types::{
 	RequestEnvelope, ResponseEnvelope, RuntimeError, RuntimeMemorySections, Task,
 };
 
-use super::{ContextBundle, RuntimeMemoryLayers, RuntimeService, log_route_decision};
+use super::{ContextBundle, RuntimeMemoryLayers, RuntimeService};
 
 pub(super) struct RuntimeLoopOwner<'a> {
 	service: &'a RuntimeService,
@@ -72,26 +72,28 @@ impl<'a> RuntimeLoopOwner<'a> {
 				.await;
 		}
 
-		let route = self
-			.service
-			.runtime
-			.classify_route(request, &request.session_id)
-			.await;
-		log_route_decision(request, &route);
+		// Direct route — no classifier. All requests go straight into the turn
+		// loop. The model decides which tools to use via system prompt guidance.
+		let plan = default_direct_route();
 		self.service
-			.attach_visible_resources(&mut prepared.context_bundle, &route);
+			.attach_visible_resources_for_plan(&mut prepared.context_bundle, &plan);
 		let mut loop_state = self
 			.service
-			.initialize_runtime_loop_for_route(request, &route);
-		self.dispatch_route(
-			task,
-			request,
-			&route,
-			&mut loop_state,
-			&prepared,
-			event_sender,
-		)
-		.await
+			.initialize_runtime_loop_for_plan(request, &plan);
+
+		let runtime_memory_sections = prepared.runtime_memory_sections();
+		self.service.metrics.inc_direct_route_hits();
+		self.service
+			.process_direct_route(
+				task,
+				request,
+				&plan,
+				&mut loop_state,
+				&prepared.context_bundle,
+				&runtime_memory_sections,
+				event_sender,
+			)
+			.await
 	}
 
 	fn prepare_request_context(
@@ -113,81 +115,22 @@ impl<'a> RuntimeLoopOwner<'a> {
 			runtime_memory_layers,
 		})
 	}
+}
 
-	async fn dispatch_route(
-		&self,
-		task: &mut Task,
-		request: &RequestEnvelope,
-		route: &RouteDecisionResult,
-		loop_state: &mut crate::LoopState,
-		prepared: &PreparedRuntimeLoopRequest,
-		event_sender: Option<&LoopEventSender>,
-	) -> Result<ResponseEnvelope, RuntimeError> {
-		let runtime_memory_sections = prepared.runtime_memory_sections();
-		match route {
-			RouteDecisionResult::Direct(plan) => {
-				self.service.metrics.inc_direct_route_hits();
-				self.service
-					.process_direct_route(
-						task,
-						request,
-						plan,
-						loop_state,
-						&prepared.context_bundle,
-						&runtime_memory_sections,
-						event_sender,
-					)
-					.await
-			}
-			RouteDecisionResult::Escalate(plan) => {
-				self.service.metrics.inc_route_escalations();
-				match plan.reason {
-					EscalationReason::RouteClassifierFailure => {
-						self.service.metrics.inc_route_classifier_failures();
-					}
-					EscalationReason::RouteParseGuardFailure => {
-						self.service.metrics.inc_route_parse_guard_failures();
-					}
-					EscalationReason::MissingArguments
-					| EscalationReason::RequiresMultiStep
-					| EscalationReason::NoEnabledRouteTarget
-					| EscalationReason::RouteModelUnavailable
-					| EscalationReason::LowConfidence => {}
-				}
-				match plan.action {
-					EscalationAction::AskForMoreInfo => self.service.process_direct_escalation(
-						task,
-						request,
-						plan,
-						loop_state,
-						&prepared.context_bundle,
-						&runtime_memory_sections,
-					),
-					EscalationAction::FallbackAnswer => {
-						self.service.metrics.inc_direct_route_fallbacks();
-						self.service.process_direct_escalation(
-							task,
-							request,
-							plan,
-							loop_state,
-							&prepared.context_bundle,
-							&runtime_memory_sections,
-						)
-					}
-					EscalationAction::EnterLimitedPlanning => {
-						self.service.metrics.inc_route_limited_planning();
-						self.service.metrics.inc_direct_route_fallbacks();
-						self.service.process_direct_escalation(
-							task,
-							request,
-							plan,
-							loop_state,
-							&prepared.context_bundle,
-							&runtime_memory_sections,
-						)
-					}
-				}
-			}
-		}
+/// Default direct route used for all requests. Empty candidate_tools causes
+/// `compose_visible_tools()` to return all enabled tools — the model picks.
+fn default_direct_route() -> DirectRoutePlan {
+	DirectRoutePlan {
+		decision: RouteDecision::new(
+			IntentFamily::Chat,
+			1.0,
+			false,
+			RouteRisk::Low,
+			vec![],
+			vec![],
+			vec![],
+			"direct route (no classifier)",
+		),
+		bound_resources: vec![],
 	}
 }

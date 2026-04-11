@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use crate::RouteDecisionResult;
 use roku_common_types::LogLevel;
 use roku_common_types::{
 	ConversationRole, ConversationTurn, RequestEnvelope, ResourceSelector, ResponseEnvelope,
@@ -223,15 +222,12 @@ impl RuntimeService {
 		context_bundle.visible_resources = loop_state.bound_resources.clone();
 	}
 
-	pub(crate) fn attach_visible_resources(
+	pub(crate) fn attach_visible_resources_for_plan(
 		&self,
 		context_bundle: &mut ContextBundle,
-		route: &RouteDecisionResult,
+		plan: &crate::DirectRoutePlan,
 	) {
-		context_bundle.visible_resources = match route {
-			RouteDecisionResult::Direct(plan) => plan.bound_resources.clone(),
-			RouteDecisionResult::Escalate(_) => Vec::new(),
-		};
+		context_bundle.visible_resources = plan.bound_resources.clone();
 	}
 
 	pub(crate) fn apply_memory_write_back(

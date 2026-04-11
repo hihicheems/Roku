@@ -182,29 +182,6 @@ pub(crate) fn goal_requests_web_lookup(goal: &str) -> bool {
 	.any(|marker| lower.contains(marker))
 }
 
-pub(crate) fn goal_requests_python_execution(goal: &str) -> bool {
-	let lower = goal.trim().to_ascii_lowercase();
-	if contains_blocked_execution_marker(&lower) {
-		return false;
-	}
-	[
-		"run this python code",
-		"execute this python code",
-		"run the python code",
-		"execute the python code",
-		"run this code",
-		"execute this code",
-		"run this snippet",
-		"execute this snippet",
-		"运行这段python代码",
-		"执行这段python代码",
-		"运行这段代码",
-		"执行这段代码",
-	]
-	.iter()
-	.any(|marker| lower.contains(marker))
-}
-
 pub(crate) fn extract_sheet_name(goal: &str) -> Option<String> {
 	let lower = goal.to_ascii_lowercase();
 	let marker = "sheet ";
@@ -276,17 +253,6 @@ pub(crate) fn extract_explicit_python_code(goal: &str) -> Option<String> {
 	extract_line_or_block_python_code(goal)
 }
 
-pub(crate) fn grounded_python_code_allows_execution(goal: &str) -> bool {
-	if extract_explicit_python_code(goal).is_none() {
-		return false;
-	}
-	goal_requests_python_execution(goal)
-}
-
-pub(crate) fn explanatory_python_code_request(goal: &str) -> bool {
-	extract_explicit_python_code(goal).is_some() && !grounded_python_code_allows_execution(goal)
-}
-
 pub(crate) fn extract_explicit_shell_command(goal: &str) -> Option<String> {
 	if let Some(command) = extract_fenced_shell_command(goal) {
 		return Some(command);
@@ -301,30 +267,6 @@ pub(crate) fn extract_explicit_shell_command(goal: &str) -> Option<String> {
 		return Some(command);
 	}
 	extract_command_suffix_after_separator(goal)
-}
-
-pub(crate) fn grounded_shell_command_allows_execution(goal: &str) -> bool {
-	if extract_explicit_shell_command(goal).is_none() {
-		return false;
-	}
-	let lower = goal.trim().to_ascii_lowercase();
-	if contains_blocked_execution_marker(&lower) {
-		return false;
-	}
-	![
-		"explain what the shell command",
-		"explain what the command",
-		"what does the shell command",
-		"what does the command",
-		"describe what the shell command",
-		"describe what the command",
-	]
-	.iter()
-	.any(|prefix| lower.starts_with(prefix))
-}
-
-pub(crate) fn explanatory_shell_command_request(goal: &str) -> bool {
-	extract_explicit_shell_command(goal).is_some() && !grounded_shell_command_allows_execution(goal)
 }
 
 pub(crate) fn extract_skill_source_url(goal: &str) -> Option<String> {
@@ -506,20 +448,6 @@ fn embedded_path_fragments(token: &str, workspace_entries: &[String]) -> Vec<Str
 	}
 	push_grounded_path_fragment(&mut fragments, &mut current, workspace_entries);
 	fragments
-}
-
-fn contains_blocked_execution_marker(lower_goal: &str) -> bool {
-	[
-		"do not run",
-		"don't run",
-		"dont run",
-		"without running",
-		"without executing",
-		"不要运行",
-		"不要执行",
-	]
-	.iter()
-	.any(|marker| lower_goal.contains(marker))
 }
 
 fn candidate_reply_fragments(reply: &str, candidates: &[String]) -> Vec<String> {
