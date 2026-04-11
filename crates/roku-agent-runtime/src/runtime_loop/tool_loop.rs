@@ -168,8 +168,7 @@ pub(crate) fn ground_tool_arguments(tool_name: &str, grounding_input: &str) -> O
 		extract_explicit_shell_command(grounding_input).map(|command| json!({ "command": command }))
 	} else if tool_name == TOOL_PYTHON {
 		extract_explicit_python_code(grounding_input).map(|code| json!({ "code": code }))
-	} else if tool_name == TOOL_SKILL_INSTALL || tool_name == "skill.install" {
-		// Keep legacy alias "skill.install" for in-flight approval tickets.
+	} else if tool_name == TOOL_SKILL_INSTALL {
 		extract_skill_source_url(grounding_input)
 			.map(|source_url| json!({ "source_url": source_url }))
 	} else {

@@ -24,10 +24,31 @@ use roku_common_types::{
 	TaskEventKind, TaskId, TaskNode, TaskNodeKind, TaskState, ToolOutputEnvelope,
 	project_execution_preview,
 };
+use roku_plugin_tools::{
+	TOOL_BASH, TOOL_EDIT, TOOL_EXISTS, TOOL_FIND, TOOL_GLOB, TOOL_GREP, TOOL_INSPECT, TOOL_LISTDIR,
+	TOOL_READ, TOOL_WRITE,
+};
 use serde_json::{Value, json};
 
 use super::helpers::{approval_artifact, failure_message, result_message};
 use super::{RuntimeService, compact_approval_id};
+
+/// PascalCase tool names allowed in execution approval resume.
+///
+/// `TOOL_BASH` is intentionally absent — Bash tickets are handled by a
+/// dedicated guard branch that enforces `DirectExec` + `InheritSelected`
+/// constraints.
+const APPROVED_TOOL_NAMES: &[&str] = &[
+	TOOL_READ,
+	TOOL_WRITE,
+	TOOL_EDIT,
+	TOOL_GREP,
+	TOOL_GLOB,
+	TOOL_FIND,
+	TOOL_EXISTS,
+	TOOL_INSPECT,
+	TOOL_LISTDIR,
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PendingExecutionApprovalFact {
@@ -300,7 +321,7 @@ impl RuntimeService {
 			));
 		}
 		let approved_tool_name = pending_execution.canonical_execution.tool_name.as_str();
-		if approved_tool_name == "Bash" {
+		if approved_tool_name == TOOL_BASH {
 			if pending_execution.canonical_execution.invocation_mode != InvocationMode::DirectExec
 				|| pending_execution
 					.canonical_execution
@@ -318,14 +339,7 @@ impl RuntimeService {
 					"execution approval resume requires an inherit_selected env policy",
 				));
 			}
-		} else if !matches!(
-			approved_tool_name,
-			// Current PascalCase names.
-			"Read" | "Write" | "Edit" | "Grep" | "Glob" | "Find" | "Exists" | "Inspect" | "ListDir"
-			// Legacy dotted names for in-flight approval tickets created before the rename.
-			| "fs.read_text" | "fs.write" | "fs.edit" | "fs.grep" | "fs.glob" | "fs.find"
-			| "fs.exists" | "fs.inspect" | "fs.list_dir"
-		) {
+		} else if !APPROVED_TOOL_NAMES.contains(&approved_tool_name) {
 			return Err(RuntimeError::new(format!(
 				"execution approval resume does not support `{approved_tool_name}`",
 			)));
@@ -401,33 +415,13 @@ impl RuntimeService {
 		self.record_transition(task, TaskState::Executing, "approval granted")?;
 		self.save_task(task.clone())?;
 
-		// Use the normalized name for dispatch so legacy dotted names resolve to the
-		// registered PascalCase tools.
-		let dispatch_tool_name = match resume
+		let dispatch_tool_name = resume
 			.pending_execution
 			.canonical_execution
 			.tool_name
-			.as_str()
-		{
-			"fs.read_text" => "Read",
-			"fs.write" => "Write",
-			"fs.edit" => "Edit",
-			"fs.grep" => "Grep",
-			"fs.glob" => "Glob",
-			"fs.find" => "Find",
-			"fs.exists" => "Exists",
-			"fs.inspect" => "Inspect",
-			"fs.list_dir" => "ListDir",
-			"command.run" => "Bash",
-			other => other,
-		};
-		// Sync canonical_execution.tool_name with the normalized dispatch name
-		// so ToolRuntime::invoke doesn't reject the mismatch.
-		let mut canonical = resume.pending_execution.canonical_execution.clone();
-		if canonical.tool_name != dispatch_tool_name {
-			canonical.tool_name = dispatch_tool_name.to_string();
-		}
-		let mut result = if dispatch_tool_name == "Bash" {
+			.as_str();
+		let canonical = resume.pending_execution.canonical_execution.clone();
+		let mut result = if dispatch_tool_name == TOOL_BASH {
 			execute_frozen_command_result(task, &resume.node, &resume.pending_execution)
 		} else {
 			self.runtime.execute_approved_tool_invocation(
