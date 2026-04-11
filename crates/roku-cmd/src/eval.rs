@@ -144,7 +144,17 @@ pub(crate) fn run_eval(
 		results.push(result);
 	}
 
-	Ok(Some(format_report(&results)))
+	let report = format_report(&results);
+	let any_failed = results
+		.iter()
+		.any(|r| matches!(r.outcome, ScenarioOutcome::Fail { .. }));
+	if any_failed {
+		// Return Err so the process exits with a non-zero code, making eval failures
+		// visible to CI and scripted callers.
+		Err(CommandError::Usage(report))
+	} else {
+		Ok(Some(report))
+	}
 }
 
 fn load_scenarios(dir: &Path) -> Result<Vec<EvalScenarioFile>, CommandError> {
@@ -204,8 +214,14 @@ fn run_single_scenario(
 
 	let start = Instant::now();
 
+	// Each scenario gets a unique session ID so concurrent or repeated runs do not
+	// share memory or conversation history.
+	let session_ts = std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.map(|d| d.as_millis())
+		.unwrap_or(0);
 	let options = ExecutionRequestOptions {
-		session_id: format!("eval-{}", &name),
+		session_id: format!("eval-{}-{}", &name, session_ts),
 		goal: scenario_file.scenario.query.clone(),
 		generated_skill_root: None,
 	};
@@ -213,6 +229,9 @@ fn run_single_scenario(
 	let outcome = rt.block_on(async {
 		let (tx, mut rx) = mpsc::unbounded_channel::<LoopEvent>();
 
+		// Eval runs without an interactive approval gate (like pipe mode) because
+		// scenarios are developer-defined inputs, not arbitrary user queries.
+		// Risky tool calls are intentional when present in a scenario.
 		let service = match tokio::task::block_in_place(build_live_runtime_service_from_env) {
 			Ok(s) => s,
 			Err(e) => {
@@ -247,6 +266,11 @@ fn run_single_scenario(
 						tool_names.insert(tool_name);
 					}
 					LoopEvent::StepComplete { step } => {
+						steps = steps.max(step);
+					}
+					// Count LLM decisions as steps too: final-answer turns don't emit
+					// StepComplete, so this ensures every LLM call is counted.
+					LoopEvent::LlmDecisionComplete { step } => {
 						steps = steps.max(step);
 					}
 					LoopEvent::TokenUsage {
