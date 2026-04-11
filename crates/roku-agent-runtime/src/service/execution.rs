@@ -33,27 +33,11 @@ use serde_json::{Value, json};
 use super::helpers::{approval_artifact, failure_message, result_message};
 use super::{RuntimeService, compact_approval_id};
 
-/// Legacy dotted tool names from before the PascalCase rename (PR #178).
-/// In-flight approval tickets may contain these names. This map normalizes
-/// them to the current PascalCase registry names for dispatch.
-const LEGACY_TOOL_NAME_MAP: &[(&str, &str)] = &[
-	("fs.read_text", TOOL_READ),
-	("fs.write", TOOL_WRITE),
-	("fs.edit", TOOL_EDIT),
-	("fs.grep", TOOL_GREP),
-	("fs.glob", TOOL_GLOB),
-	("fs.find", TOOL_FIND),
-	("fs.exists", TOOL_EXISTS),
-	("fs.inspect", TOOL_INSPECT),
-	("fs.list_dir", TOOL_LISTDIR),
-	("command.run", TOOL_BASH),
-];
-
 /// PascalCase tool names allowed in execution approval resume.
 ///
-/// `TOOL_BASH` is intentionally absent — Bash tickets (and legacy
-/// `"command.run"`) are handled by a dedicated guard branch that
-/// enforces `DirectExec` + `InheritSelected` constraints.
+/// `TOOL_BASH` is intentionally absent — Bash tickets are handled by a
+/// dedicated guard branch that enforces `DirectExec` + `InheritSelected`
+/// constraints.
 const APPROVED_TOOL_NAMES: &[&str] = &[
 	TOOL_READ,
 	TOOL_WRITE,
@@ -337,8 +321,7 @@ impl RuntimeService {
 			));
 		}
 		let approved_tool_name = pending_execution.canonical_execution.tool_name.as_str();
-		// Bash (and its legacy alias "command.run") requires stricter validation.
-		if approved_tool_name == TOOL_BASH || approved_tool_name == "command.run" {
+		if approved_tool_name == TOOL_BASH {
 			if pending_execution.canonical_execution.invocation_mode != InvocationMode::DirectExec
 				|| pending_execution
 					.canonical_execution
@@ -356,11 +339,7 @@ impl RuntimeService {
 					"execution approval resume requires an inherit_selected env policy",
 				));
 			}
-		} else if !APPROVED_TOOL_NAMES.contains(&approved_tool_name)
-			&& !LEGACY_TOOL_NAME_MAP
-				.iter()
-				.any(|(legacy, _)| *legacy == approved_tool_name)
-		{
+		} else if !APPROVED_TOOL_NAMES.contains(&approved_tool_name) {
 			return Err(RuntimeError::new(format!(
 				"execution approval resume does not support `{approved_tool_name}`",
 			)));
@@ -436,23 +415,12 @@ impl RuntimeService {
 		self.record_transition(task, TaskState::Executing, "approval granted")?;
 		self.save_task(task.clone())?;
 
-		// Normalize legacy dotted names to PascalCase for dispatch.
-		let raw_tool_name = resume
+		let dispatch_tool_name = resume
 			.pending_execution
 			.canonical_execution
 			.tool_name
 			.as_str();
-		let dispatch_tool_name = LEGACY_TOOL_NAME_MAP
-			.iter()
-			.find(|(legacy, _)| *legacy == raw_tool_name)
-			.map(|(_, current)| *current)
-			.unwrap_or(raw_tool_name);
-		// Sync canonical_execution.tool_name with the normalized dispatch name
-		// so ToolRuntime::invoke doesn't reject the mismatch.
-		let mut canonical = resume.pending_execution.canonical_execution.clone();
-		if canonical.tool_name != dispatch_tool_name {
-			canonical.tool_name = dispatch_tool_name.to_string();
-		}
+		let canonical = resume.pending_execution.canonical_execution.clone();
 		let mut result = if dispatch_tool_name == TOOL_BASH {
 			execute_frozen_command_result(task, &resume.node, &resume.pending_execution)
 		} else {
