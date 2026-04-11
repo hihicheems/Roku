@@ -1073,7 +1073,11 @@ impl GenericAgentRuntime {
 
 			// Execute regular tool calls and collect ToolResult messages.
 			for tc in &accumulated_tool_calls {
-				let tool_name = &tc.name;
+				// Resolve the tool name — some models drop the namespace prefix
+				// (e.g. returning "run" instead of "command.run"). Match against
+				// visible tools by suffix if exact match fails.
+				let resolved_name = resolve_tool_name(&tc.name, &loop_state.visible_tools);
+				let tool_name = &resolved_name;
 				let arguments = tc.arguments.clone();
 
 				// Check approval gate before executing the tool.
@@ -1775,6 +1779,57 @@ fn terminal_decision(
 		reason: reason.to_string(),
 		final_message,
 	}
+}
+
+/// Resolve a tool name against the visible tools list.
+///
+/// Some models drop the namespace prefix when using dot-separated tool names
+/// in OpenAI function calling format (e.g., returning `"run"` instead of
+/// `"command.run"`, or `"list_dir"` instead of `"fs.list_dir"`).
+///
+/// This function first tries an exact match, then falls back to suffix matching
+/// (looking for a tool that ends with `.{name}`). If exactly one tool matches,
+/// the full name is returned. Otherwise, the original name is returned unchanged.
+/// Known short name → full tool name mappings for common ambiguous cases.
+/// When models drop the namespace prefix, these resolve the ambiguity.
+const TOOL_NAME_ALIASES: &[(&str, &str)] = &[
+	("run", "command.run"),
+	("search", "web.search"),
+	("fetch", "web.fetch"),
+	("edit", "fs.edit"),
+	("write", "fs.write"),
+	("read", "fs.read_text"),
+	("read_text", "fs.read_text"),
+	("list_dir", "fs.list_dir"),
+	("grep", "fs.grep"),
+	("glob", "fs.glob"),
+	("find", "fs.find"),
+	("exists", "fs.exists"),
+	("inspect", "fs.inspect"),
+];
+
+fn resolve_tool_name(name: &str, visible_tools: &[String]) -> String {
+	// Exact match.
+	if visible_tools.iter().any(|t| t == name) {
+		return name.to_string();
+	}
+	// Check known aliases first (handles ambiguous cases like "run").
+	for &(alias, full_name) in TOOL_NAME_ALIASES {
+		if name == alias && visible_tools.iter().any(|t| t == full_name) {
+			return full_name.to_string();
+		}
+	}
+	// Suffix match: find tools ending with ".{name}".
+	let suffix = format!(".{name}");
+	let candidates: Vec<&String> = visible_tools
+		.iter()
+		.filter(|t| t.ends_with(&suffix))
+		.collect();
+	if candidates.len() == 1 {
+		return candidates[0].clone();
+	}
+	// No match — return original, execute_loop_tool_invocation will handle the error.
+	name.to_string()
 }
 
 fn normalize_tool_loop_observation(observation: ToolObservation) -> ToolObservation {
