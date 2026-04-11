@@ -96,8 +96,8 @@ pub enum ToolRiskLevel {
 ///
 /// - Pseudo-tools (final_answer, ask_user, fail) → Safe
 /// - Bash → classified by command content (special case)
+/// - Tools with `risk:write` tag → RequiresApproval (checked first — fail closed)
 /// - Tools with `risk:safe` tag → Safe
-/// - Tools with `risk:write` tag → RequiresApproval
 /// - Unknown → RequiresApproval (safe default)
 pub fn classify_tool_risk(
 	tool_name: &str,
@@ -114,12 +114,12 @@ pub fn classify_tool_risk(
 		return classify_command_risk(arguments);
 	}
 
-	// Tag-based classification.
-	if catalog.tool_has_tag(tool_name, TAG_RISK_SAFE) {
-		return ToolRiskLevel::Safe;
-	}
+	// Tag-based classification — check write first so conflicting tags fail closed.
 	if catalog.tool_has_tag(tool_name, TAG_RISK_WRITE) {
 		return ToolRiskLevel::RequiresApproval;
+	}
+	if catalog.tool_has_tag(tool_name, TAG_RISK_SAFE) {
+		return ToolRiskLevel::Safe;
 	}
 
 	// Unknown tool → require approval (safe default).
