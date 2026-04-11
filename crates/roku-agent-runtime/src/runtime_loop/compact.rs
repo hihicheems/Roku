@@ -336,21 +336,23 @@ pub fn compact_messages(messages: &mut Vec<Message>, retain_tail: usize) {
 }
 
 /// Compact with LLM-assisted summarization of discarded messages.
+/// Returns `(compacted, prompt_tokens_used, output_tokens_used)` so callers
+/// can include compaction LLM cost in their token usage totals.
 pub async fn compact_messages_with_llm(
 	messages: &mut Vec<Message>,
 	retain_tail: usize,
 	router: &LlmRouter,
-) -> bool {
+) -> (bool, u64, u64) {
 	if messages.len() <= retain_tail + 1 {
-		return false;
+		return (false, 0, 0);
 	}
 	let split = messages.len() - retain_tail;
 	if split <= 1 {
-		return false;
+		return (false, 0, 0);
 	}
 	let split = adjust_split_for_tool_pairs(messages, split);
 	if split <= 1 {
-		return false;
+		return (false, 0, 0);
 	}
 	let discarded: Vec<_> = messages.drain(1..split).collect();
 	let mechanical = summarize_discarded_messages(&discarded);
@@ -374,9 +376,9 @@ pub async fn compact_messages_with_llm(
 		})
 		.await;
 
-	let summary = match result {
-		Ok(r) if !r.output.trim().is_empty() => r.output,
-		_ => mechanical,
+	let (summary, prompt_tokens, output_tokens) = match result {
+		Ok(r) if !r.output.trim().is_empty() => (r.output, r.prompt_tokens, r.output_tokens),
+		_ => (mechanical, 0, 0),
 	};
 	messages.insert(
 		1,
@@ -384,7 +386,7 @@ pub async fn compact_messages_with_llm(
 			content: format!("[Conversation summary]\n{summary}"),
 		},
 	);
-	true
+	(true, prompt_tokens, output_tokens)
 }
 
 fn summarize_discarded_messages(messages: &[Message]) -> String {
