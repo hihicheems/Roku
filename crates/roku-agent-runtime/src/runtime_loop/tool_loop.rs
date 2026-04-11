@@ -104,32 +104,32 @@ pub(crate) fn build_tool_definitions(
 
 pub(crate) fn ground_tool_arguments(tool_name: &str, grounding_input: &str) -> Option<Value> {
 	match tool_name {
-		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => {
+		"Exists" | "Inspect" | "ListDir" | "Read" => {
 			extract_concrete_path_candidates(grounding_input)
 				.into_iter()
 				.next()
 				.map(|path| json!({ "path": path }))
 		}
-		"fs.find" => extract_explicit_path_candidates(grounding_input)
+		"Find" => extract_explicit_path_candidates(grounding_input)
 			.into_iter()
 			.next()
 			.map(|name| json!({ "name": name, "kind": "any" })),
-		"fs.glob" => {
+		"Glob" => {
 			extract_glob_pattern(grounding_input).map(|pattern| json!({ "pattern": pattern }))
 		}
 		// The following arms are temporary hardcoded integrations added by EPIC-0.
 		// They will be migrated to descriptor-driven grounding under EPIC-5.
-		"fs.grep" => {
+		"Grep" => {
 			extract_grep_pattern(grounding_input).map(|pattern| json!({ "pattern": pattern }))
 		}
-		"fs.edit" | "fs.write" => extract_concrete_path_candidates(grounding_input)
+		"Edit" | "Write" => extract_concrete_path_candidates(grounding_input)
 			.into_iter()
 			.next()
 			.map(|path| json!({ "file_path": path })),
-		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => {
+		"TableInspect" | "TableSheets" | "TablePreview" | "TableSchema" => {
 			let path = extract_concrete_table_path(grounding_input)?;
 			let mut arguments = json!({ "path": path });
-			if tool_name == "table.preview" {
+			if tool_name == "TablePreview" {
 				arguments["rows"] =
 					Value::from(extract_row_limit(grounding_input).unwrap_or(5_u64));
 			}
@@ -138,15 +138,15 @@ pub(crate) fn ground_tool_arguments(tool_name: &str, grounding_input: &str) -> O
 			}
 			Some(arguments)
 		}
-		"web.search" => extract_web_query(grounding_input)
+		"WebSearch" => extract_web_query(grounding_input)
 			.map(|query| json!({ "query": query, "top_k": 5_u64 })),
-		"web.fetch" => extract_fetch_url(grounding_input).map(|url| json!({ "url": url })),
-		"command.run" => extract_explicit_shell_command(grounding_input)
+		"WebFetch" => extract_fetch_url(grounding_input).map(|url| json!({ "url": url })),
+		"Bash" => extract_explicit_shell_command(grounding_input)
 			.map(|command| json!({ "command": command })),
-		"python.run" => {
+		"Python" => {
 			extract_explicit_python_code(grounding_input).map(|code| json!({ "code": code }))
 		}
-		"skill.install" | "skill.ensure_installed" => extract_skill_source_url(grounding_input)
+		"skill.install" | "SkillInstall" => extract_skill_source_url(grounding_input)
 			.map(|source_url| json!({ "source_url": source_url })),
 		_ => None,
 	}
@@ -156,7 +156,7 @@ pub(crate) fn next_working_directory_from_observation(
 	observation: &ToolObservation,
 	current_working_directory: &str,
 ) -> Option<String> {
-	if observation.ok && observation.tool_name == "fs.inspect" {
+	if observation.ok && observation.tool_name == "Inspect" {
 		let is_directory = observation
 			.data
 			.get("kind")
@@ -179,7 +179,7 @@ pub(crate) fn attachments_for_tool(
 	grounding_input: &str,
 ) -> Vec<std::path::PathBuf> {
 	match tool_name {
-		"python.run" => extract_path_candidates(grounding_input)
+		"Python" => extract_path_candidates(grounding_input)
 			.into_iter()
 			.map(std::path::PathBuf::from)
 			.collect(),

@@ -121,7 +121,7 @@ pub struct TableToolRuntimeConfigPatch {
 pub struct WebToolRuntimeConfig {
 	pub endpoint: Option<String>,
 	/// Tavily Search API key. When set and `endpoint` is not configured,
-	/// `web.search` uses the Tavily API as a built-in search provider.
+	/// `WebSearch` uses the Tavily API as a built-in search provider.
 	pub tavily_api_key: Option<String>,
 	pub default_top_k: usize,
 	pub max_fetch_bytes: usize,

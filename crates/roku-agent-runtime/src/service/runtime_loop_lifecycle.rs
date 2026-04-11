@@ -242,12 +242,12 @@ mod tests {
 				0.95,
 				false,
 				RouteRisk::Low,
-				vec!["command.run".to_string()],
+				vec!["Bash".to_string()],
 				vec!["core-command".to_string()],
 				Vec::new(),
 				"direct route terminal trace test",
 			),
-			bound_resources: vec![ResourceSelector::tool("command.run".to_string())],
+			bound_resources: vec![ResourceSelector::tool("Bash".to_string())],
 		}
 	}
 
@@ -261,7 +261,7 @@ mod tests {
 		let service = RuntimeService::default();
 		let mut loop_state =
 			direct_route_loop_state(&service, "Run pwd after approval so I can inspect the cwd.");
-		let approval_message = "🛡️ Approval Request\n\nTool: command.run\nAction: Run command pwd from /workspace\nRisk: medium\nReason: the command is outside the constrained built-in allowlist";
+		let approval_message = "🛡️ Approval Request\n\nTool: Bash\nAction: Run command pwd from /workspace\nRisk: medium\nReason: the command is outside the constrained built-in allowlist";
 
 		service.record_runtime_loop_terminal_step_with_action(
 			&mut loop_state,
@@ -277,7 +277,7 @@ mod tests {
 		assert_eq!(step.decision.action, "fail");
 		assert_eq!(
 			step.visible_resources_before,
-			Some(vec![ResourceSelector::tool("command.run".to_string())])
+			Some(vec![ResourceSelector::tool("Bash".to_string())])
 		);
 		assert_eq!(
 			step.decision.reason,
@@ -318,7 +318,7 @@ mod tests {
 		assert_eq!(step.decision.action, "final_answer");
 		assert_eq!(
 			step.visible_resources_before,
-			Some(vec![ResourceSelector::tool("command.run".to_string())])
+			Some(vec![ResourceSelector::tool("Bash".to_string())])
 		);
 		assert_eq!(
 			step.decision.reason,

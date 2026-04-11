@@ -220,9 +220,9 @@ fn resume_directive_for_observation(
 	observation: &ToolObservation,
 ) -> Option<AskUserResumeDirective> {
 	let argument_key = match observation.tool_name.as_str() {
-		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => "path",
-		"table.inspect" | "table.list_sheets" | "table.preview" | "table.schema" => "path",
-		"fs.glob" => "pattern",
+		"Exists" | "Inspect" | "ListDir" | "Read" => "path",
+		"TableInspect" | "TableSheets" | "TablePreview" | "TableSchema" => "path",
+		"Glob" => "pattern",
 		_ => return None,
 	};
 	Some(AskUserResumeDirective::RepeatToolWithSelectedCandidate {
@@ -245,7 +245,7 @@ mod tests {
 	fn effective_ask_user_payload_prefers_structured_observation_over_model_text() {
 		let observation = ToolObservation {
 			ok: false,
-			tool_name: "fs.find".to_string(),
+			tool_name: "Find".to_string(),
 			error_type: Some("multiple_candidates".to_string()),
 			terminal: false,
 			data: json!({

@@ -44,9 +44,9 @@ pub(crate) fn catalog_descriptors_with_config(
 ) -> Vec<CatalogDescriptor> {
 	let contract = python_contract(config.default_timeout_ms);
 	vec![CatalogDescriptor {
-		selector: roku_common_types::ResourceSelector::tool("python.run"),
+		selector: roku_common_types::ResourceSelector::tool("Python"),
 		kind: ResourceKind::Tool,
-		name: "python.run".to_string(),
+		name: "Python".to_string(),
 		role: Some("core_python".to_string()),
 		description: "Use this only when the request already contains explicit Python code to run or a clearly bounded snippet the agent has produced as code. Do not dump raw natural-language tasks into it and do not use it for shell commands. It returns stdout/stderr and exit facts from a constrained subprocess, which can be interpreted or summarized later."
 			.to_string(),
@@ -71,7 +71,7 @@ pub(crate) fn catalog_descriptors_with_config(
 			estimated_tokens: 0,
 			estimated_latency_ms: config.default_timeout_ms,
 		},
-		required_capabilities: vec!["python.run".to_string()],
+		required_capabilities: vec!["Python".to_string()],
 		summary: "Run explicit Python code and return grounded subprocess output.".to_string(),
 		key_commands: Vec::new(),
 		use_cases: Vec::new(),
@@ -112,7 +112,7 @@ impl Tool for PythonRunTool {
 		};
 		let contract = python_contract(self.config.default_timeout_ms);
 		ToolDescriptor {
-			name: "python.run".to_string(),
+			name: "Python".to_string(),
 			version: "1.0.0".to_string(),
 			input_schema: contract_tool_schema(
 				Some(&contract),
@@ -127,7 +127,7 @@ impl Tool for PythonRunTool {
 				],
 			),
 			output_schema: contract.output.observation_schema.clone(),
-			required_capabilities: vec!["python.run".to_string()],
+			required_capabilities: vec!["Python".to_string()],
 			runtime_constraints,
 			contract: Some(contract),
 		}
@@ -285,7 +285,7 @@ fn timeout_output(
 		false,
 		Some("tool_timeout"),
 		true,
-		format!("python.run exceeded its {}ms timeout.", timeout_ms),
+		format!("Python exceeded its {}ms timeout.", timeout_ms),
 		json!({
 			"code": code,
 			"stdout": stdout,
@@ -347,7 +347,7 @@ fn python_contract(timeout_ms: u64) -> ToolContract {
 				"Do not use when the user only wants an explanation of the Python code rather than execution.",
 			],
 			&[
-				"Commonly confused with command.run for inline code fences that are actually shell commands.",
+				"Commonly confused with Bash for inline code fences that are actually shell commands.",
 				"Commonly confused with a direct final_answer for requests that ask to explain code rather than run it.",
 			],
 		),
@@ -362,7 +362,7 @@ fn python_contract(timeout_ms: u64) -> ToolContract {
 				input_field(
 					"timeout_ms",
 					false,
-					"Optional per-call timeout capped by the configured python.run timeout ceiling.",
+					"Optional per-call timeout capped by the configured Python timeout ceiling.",
 					&["Reject when zero or larger than the configured hard timeout ceiling."],
 				),
 			],
@@ -432,9 +432,9 @@ mod tests {
 			.invoke(invocation_request(json!({
 				"code": "raise SystemExit(3)"
 			})))
-			.expect("python.run should return a structured observation");
+			.expect("Python should return a structured observation");
 		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
-			.expect("python.run should emit ToolOutputEnvelope");
+			.expect("Python should emit ToolOutputEnvelope");
 
 		assert!(!envelope.ok);
 		assert_eq!(envelope.error_type.as_deref(), Some("non_zero_exit"));
@@ -453,9 +453,9 @@ mod tests {
 			.invoke(invocation_request(json!({
 				"code": "import time\ntime.sleep(1)"
 			})))
-			.expect("python.run timeout should still surface as a structured observation");
+			.expect("Python timeout should still surface as a structured observation");
 		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
-			.expect("python.run timeout should emit ToolOutputEnvelope");
+			.expect("Python timeout should emit ToolOutputEnvelope");
 
 		assert!(!envelope.ok);
 		assert_eq!(envelope.error_type.as_deref(), Some("tool_timeout"));

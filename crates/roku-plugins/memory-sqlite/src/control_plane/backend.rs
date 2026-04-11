@@ -1052,7 +1052,7 @@ mod tests {
 				approval_id: approval_id.clone(),
 				digest: digest.clone(),
 				canonical_execution: CanonicalExecution {
-					tool_name: "command.run".to_string(),
+					tool_name: "Bash".to_string(),
 					program: "rm".to_string(),
 					argv: vec!["rm".to_string(), "-rf".to_string(), "tmp".to_string()],
 					invocation_mode: InvocationMode::DirectExec,

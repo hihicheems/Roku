@@ -151,17 +151,17 @@ fn pending_filesystem_candidate_loop_state() -> LoopState {
 		workspace_root: cwd.display().to_string(),
 		working_directory: cwd.display().to_string(),
 		visible_tools: vec![
-			"fs.read_text".to_string(),
-			"fs.find".to_string(),
-			"fs.inspect".to_string(),
+			"Read".to_string(),
+			"Find".to_string(),
+			"Inspect".to_string(),
 		],
-		bound_resources: vec![ResourceSelector::tool("fs.read_text".to_string())],
+		bound_resources: vec![ResourceSelector::tool("Read".to_string())],
 		route_decision: RouteDecision::new(
 			IntentFamily::FilesystemRead,
 			0.94,
 			false,
 			RouteRisk::Low,
-			vec!["fs.read_text".to_string(), "fs.find".to_string()],
+			vec!["Read".to_string(), "Find".to_string()],
 			Vec::new(),
 			Vec::new(),
 			"filesystem request",
@@ -171,7 +171,7 @@ fn pending_filesystem_candidate_loop_state() -> LoopState {
 	let mut loop_state = LoopState::new("loop-pending-tool-loop", &context);
 	let observation = ToolObservation {
 		ok: false,
-		tool_name: "fs.read_text".to_string(),
+		tool_name: "Read".to_string(),
 		error_type: Some("multiple_candidates".to_string()),
 		terminal: false,
 		data: serde_json::json!({
@@ -185,7 +185,7 @@ fn pending_filesystem_candidate_loop_state() -> LoopState {
 		1,
 		crate::NextStepDecision {
 			action: crate::NextStepAction::CallTool,
-			tool_name: Some("fs.read_text".to_string()),
+			tool_name: Some("Read".to_string()),
 			arguments: Some(serde_json::json!({ "path": "Cargo.toml" })),
 			tool_calls: None,
 			reason: "Read the grounded workspace manifest first.".to_string(),
@@ -239,7 +239,7 @@ fn pending_filesystem_candidate_loop_state() -> LoopState {
 			],
 		},
 		resume_directive: Some(AskUserResumeDirective::RepeatToolWithSelectedCandidate {
-			tool_name: "fs.read_text".to_string(),
+			tool_name: "Read".to_string(),
 			argument_key: "path".to_string(),
 		}),
 	});
@@ -397,7 +397,7 @@ fn sample_execution_policy_decision() -> PolicyDecision {
 
 fn sample_frozen_command_execution(cwd: &str, digest: &str) -> CanonicalExecution {
 	CanonicalExecution {
-		tool_name: "command.run".to_string(),
+		tool_name: "Bash".to_string(),
 		program: "pwd".to_string(),
 		argv: vec!["pwd".to_string()],
 		invocation_mode: InvocationMode::DirectExec,
@@ -777,14 +777,14 @@ fn resumed_pending_loops_project_bound_resources_into_context_bundle() {
 		goal: "继续".to_string(),
 		workspace_root: cwd.display().to_string(),
 		working_directory: cwd.display().to_string(),
-		visible_tools: vec!["fs.read_text".to_string()],
-		bound_resources: vec![ResourceSelector::tool("fs.read_text".to_string())],
+		visible_tools: vec!["Read".to_string()],
+		bound_resources: vec![ResourceSelector::tool("Read".to_string())],
 		route_decision: RouteDecision::new(
 			IntentFamily::FilesystemRead,
 			0.91,
 			false,
 			RouteRisk::Low,
-			vec!["fs.read_text".to_string()],
+			vec!["Read".to_string()],
 			Vec::new(),
 			Vec::new(),
 			"resume request",
@@ -800,7 +800,7 @@ fn resumed_pending_loops_project_bound_resources_into_context_bundle() {
 
 	assert_eq!(
 		bundle.visible_resources,
-		vec![ResourceSelector::tool("fs.read_text".to_string())]
+		vec![ResourceSelector::tool("Read".to_string())]
 	);
 	assert!(bundle.pending_loop_active);
 }
@@ -820,14 +820,14 @@ fn direct_routes_project_bound_resources_into_context_bundle() {
 			0.96,
 			false,
 			RouteRisk::Low,
-			vec!["fs.read_text".to_string(), "fs.find".to_string()],
+			vec!["Read".to_string(), "Find".to_string()],
 			Vec::new(),
 			Vec::new(),
 			"direct resource projection request",
 		),
 		bound_resources: vec![
-			ResourceSelector::tool("fs.read_text".to_string()),
-			ResourceSelector::tool("fs.find".to_string()),
+			ResourceSelector::tool("Read".to_string()),
+			ResourceSelector::tool("Find".to_string()),
 		],
 	};
 
@@ -836,8 +836,8 @@ fn direct_routes_project_bound_resources_into_context_bundle() {
 	assert_eq!(
 		bundle.visible_resources,
 		vec![
-			ResourceSelector::tool("fs.read_text".to_string()),
-			ResourceSelector::tool("fs.find".to_string()),
+			ResourceSelector::tool("Read".to_string()),
+			ResourceSelector::tool("Find".to_string()),
 		]
 	);
 	assert!(!bundle.pending_loop_active);
@@ -1167,7 +1167,7 @@ async fn stale_freeform_pending_loops_are_discarded_before_new_intake() {
 		goal: "继续".to_string(),
 		workspace_root: cwd.display().to_string(),
 		working_directory: cwd.display().to_string(),
-		visible_tools: vec!["inventory.describe".to_string(), "fs.find".to_string()],
+		visible_tools: vec!["inventory.describe".to_string(), "Find".to_string()],
 		bound_resources: vec![ResourceSelector::tool("inventory.describe".to_string())],
 		route_decision: RouteDecision::new(
 			IntentFamily::Chat,
@@ -1470,7 +1470,7 @@ fn compact_summary_is_written_back_when_compact_boundary_exists() {
 		2,
 	);
 
-	loop_state.working_summary = "[Compact summary — 4 steps discarded]\nStep 1: fs.read_text — read config — ok\nStep 2: fs.grep — search — ok".to_string();
+	loop_state.working_summary = "[Compact summary — 4 steps discarded]\nStep 1: Read — read config — ok\nStep 2: Grep — search — ok".to_string();
 	let boundary = crate::StepRecord::compact_boundary(
 		4,
 		4,

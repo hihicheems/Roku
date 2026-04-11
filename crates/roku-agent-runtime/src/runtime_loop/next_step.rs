@@ -271,12 +271,12 @@ mod tests {
 	fn from_tool_calls_regular_tool() {
 		let calls = vec![ToolCallBlock {
 			id: "call_5".to_string(),
-			name: "fs.read_text".to_string(),
+			name: "Read".to_string(),
 			arguments: json!({ "path": "Cargo.toml" }),
 		}];
 		let decision = NextStepDecision::from_tool_calls(&calls).expect("should produce decision");
 		assert_eq!(decision.action, NextStepAction::CallTool);
-		assert_eq!(decision.tool_name.as_deref(), Some("fs.read_text"));
+		assert_eq!(decision.tool_name.as_deref(), Some("Read"));
 		assert_eq!(decision.arguments, Some(json!({ "path": "Cargo.toml" })));
 	}
 
@@ -284,7 +284,7 @@ mod tests {
 	fn from_tool_calls_regular_tool_uses_reason_from_arguments() {
 		let calls = vec![ToolCallBlock {
 			id: "call_6".to_string(),
-			name: "fs.read_text".to_string(),
+			name: "Read".to_string(),
 			arguments: json!({ "path": "Cargo.toml", "reason": "need manifest" }),
 		}];
 		let decision = NextStepDecision::from_tool_calls(&calls).expect("should produce decision");
@@ -295,7 +295,7 @@ mod tests {
 	fn from_tool_calls_regular_tool_default_reason() {
 		let calls = vec![ToolCallBlock {
 			id: "call_7".to_string(),
-			name: "fs.write_text".to_string(),
+			name: "Write".to_string(),
 			arguments: json!({ "path": "out.txt", "content": "hello" }),
 		}];
 		let decision = NextStepDecision::from_tool_calls(&calls).expect("should produce decision");
@@ -307,12 +307,12 @@ mod tests {
 		let calls = vec![
 			ToolCallBlock {
 				id: "call_8a".to_string(),
-				name: "fs.read_text".to_string(),
+				name: "Read".to_string(),
 				arguments: json!({ "path": "a.txt" }),
 			},
 			ToolCallBlock {
 				id: "call_8b".to_string(),
-				name: "fs.read_text".to_string(),
+				name: "Read".to_string(),
 				arguments: json!({ "path": "b.txt" }),
 			},
 		];
@@ -320,8 +320,8 @@ mod tests {
 		assert_eq!(decision.action, NextStepAction::CallTools);
 		let entries = decision.tool_calls.expect("tool_calls should be set");
 		assert_eq!(entries.len(), 2);
-		assert_eq!(entries[0].tool_name, "fs.read_text");
-		assert_eq!(entries[1].tool_name, "fs.read_text");
+		assert_eq!(entries[0].tool_name, "Read");
+		assert_eq!(entries[1].tool_name, "Read");
 		assert_eq!(entries[0].arguments, Some(json!({ "path": "a.txt" })));
 		assert_eq!(entries[1].arguments, Some(json!({ "path": "b.txt" })));
 	}

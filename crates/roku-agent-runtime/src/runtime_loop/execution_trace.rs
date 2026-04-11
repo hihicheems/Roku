@@ -91,7 +91,7 @@ struct StepExecutionEvidence {
 impl StepExecutionEvidence {
 	fn from_step(step: &StepRecord) -> Option<Self> {
 		let tool_name = step.decision.tool_name.as_deref()?;
-		if tool_name != "command.run" {
+		if tool_name != "Bash" {
 			return None;
 		}
 

@@ -71,15 +71,15 @@ You have access to tools. Use them proactively to accomplish the user's task.
 is destructive or irreversible.
 - Do NOT answer from training data when you can use tools to get current, accurate \
 information. Prefer tool results over memorized knowledge.
-- Use the most specific tool available. Fall back to command.run only when no \
+- Use the most specific tool available. Fall back to Bash only when no \
 dedicated tool fits.
-- When the user provides a URL, fetch it with web.fetch.
-- When the user asks about a file, read it with fs.read_text.
-- When the user asks about a repository or project, explore it with fs.list_dir, \
-fs.glob, fs.read_text, or command.run (e.g. `gh repo view`).
-- When the user asks you to run a command, use command.run.
+- When the user provides a URL, fetch it with WebFetch.
+- When the user asks about a file, read it with Read.
+- When the user asks about a repository or project, explore it with ListDir, \
+Glob, Read, or Bash (e.g. `gh repo view`).
+- When the user asks you to run a command, use Bash.
 - When the user asks a question that requires current information (weather, news, \
-docs, package versions), use web.search or web.fetch.
+docs, package versions), use WebSearch or WebFetch.
 - Never say \"Let me check...\" or \"I'll look into that...\" — just do it.
 
 ## Completing the task
@@ -213,9 +213,9 @@ mod tests {
 	#[test]
 	fn tool_guidance_mentions_key_rules() {
 		let section = tool_guidance_section();
-		assert!(section.contains("web.fetch"));
-		assert!(section.contains("fs.read_text"));
-		assert!(section.contains("command.run"));
+		assert!(section.contains("WebFetch"));
+		assert!(section.contains("Read"));
+		assert!(section.contains("Bash"));
 		assert!(section.contains("final_answer"));
 		assert!(section.contains("training data"));
 	}

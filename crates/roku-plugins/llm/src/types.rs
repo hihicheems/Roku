@@ -374,7 +374,7 @@ mod tests {
 			text: "I will call the tool".to_string(),
 			tool_calls: vec![ToolCallBlock {
 				id: "call_1".to_string(),
-				name: "fs.read_text".to_string(),
+				name: "Read".to_string(),
 				arguments: json!({"path": "/some/file.txt"}),
 			}],
 		}]);

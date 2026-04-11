@@ -742,7 +742,7 @@ pub(crate) fn extract_grep_pattern(goal: &str) -> Option<String> {
 	None
 }
 
-/// Extracts a URL from the goal text for web.fetch grounding.
+/// Extracts a URL from the goal text for WebFetch grounding.
 pub(crate) fn extract_fetch_url(goal: &str) -> Option<String> {
 	goal.split_whitespace().find_map(|token| {
 		let cleaned = token.trim_matches(|c: char| {

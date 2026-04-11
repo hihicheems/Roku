@@ -492,9 +492,9 @@ mod tests {
 	#[test]
 	fn selection_index_excludes_cold_examples_and_full_contract_text() {
 		let descriptor = CatalogDescriptor {
-			selector: ResourceSelector::tool("command.run"),
+			selector: ResourceSelector::tool("Bash"),
 			kind: ResourceKind::Tool,
-			name: "command.run".to_string(),
+			name: "Bash".to_string(),
 			role: Some("core_command".to_string()),
 			description: "Canonical descriptor with long prose that should stay off the hot path."
 				.to_string(),
@@ -543,9 +543,9 @@ mod tests {
 	#[test]
 	fn lookup_grounding_metadata_returns_metadata_for_known_tool() {
 		let entries = vec![CatalogDescriptor {
-			selector: crate::ResourceSelector::tool("fs.read_text"),
+			selector: crate::ResourceSelector::tool("Read"),
 			kind: ResourceKind::Tool,
-			name: "fs.read_text".to_string(),
+			name: "Read".to_string(),
 			role: None,
 			description: String::new(),
 			selection_hint: String::new(),
@@ -574,7 +574,7 @@ mod tests {
 			}),
 		}];
 		let catalog = ResourceCatalog::new(entries);
-		let grounding = catalog.lookup_grounding_metadata("fs.read_text");
+		let grounding = catalog.lookup_grounding_metadata("Read");
 		assert!(grounding.is_some());
 		let g = grounding.unwrap();
 		assert_eq!(g.grounding_strategy, crate::GroundingStrategy::PathBased);

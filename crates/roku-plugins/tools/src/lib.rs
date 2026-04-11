@@ -62,23 +62,23 @@ static BUILTIN_TOOL_NAMES: LazyLock<BTreeSet<String>> = LazyLock::new(|| {
 		.collect::<BTreeSet<_>>();
 	names.extend(
 		[
-			"command.run",
-			"fs.edit",
-			"fs.exists",
-			"fs.find",
-			"fs.glob",
-			"fs.inspect",
-			"fs.list_dir",
-			"fs.read_text",
-			"fs.write",
-			"fs.grep",
-			"python.run",
-			"table.inspect",
-			"table.list_sheets",
-			"table.preview",
-			"table.schema",
-			"web.fetch",
-			"web.search",
+			"Bash",
+			"Edit",
+			"Exists",
+			"Find",
+			"Glob",
+			"Inspect",
+			"ListDir",
+			"Read",
+			"Write",
+			"Grep",
+			"Python",
+			"TableInspect",
+			"TableSheets",
+			"TablePreview",
+			"TableSchema",
+			"WebFetch",
+			"WebSearch",
 		]
 		.into_iter()
 		.map(str::to_string),
@@ -99,8 +99,8 @@ pub fn canonical_execution_for_builtin_tool_input(
 	input: &Value,
 ) -> Option<CanonicalExecution> {
 	match tool_name {
-		"command.run" => builtin::command::canonical_execution_from_runtime_input(input),
-		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" | "fs.edit" | "fs.write" => {
+		"Bash" => builtin::command::canonical_execution_from_runtime_input(input),
+		"Exists" | "Inspect" | "ListDir" | "Read" | "Edit" | "Write" => {
 			builtin::fs::canonical_execution_from_runtime_input(tool_name, input)
 		}
 		_ => None,

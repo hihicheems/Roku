@@ -142,7 +142,7 @@ mod tests {
 		let error = ToolCatalogConfig::from_toml(
 			r#"
 [[tools]]
-name = "skill.ensure_installed"
+name = "SkillInstall"
 role = "skill_install"
 description = "Install a skill."
 selection_hint = "Install a skill."
@@ -160,7 +160,7 @@ extra = "not-allowed"
 		let config = ToolCatalogConfig::from_toml(
 			r#"
 [[tools]]
-name = "skill.ensure_installed"
+name = "SkillInstall"
 role = "skill_install"
 description = "Install a skill."
 "#,

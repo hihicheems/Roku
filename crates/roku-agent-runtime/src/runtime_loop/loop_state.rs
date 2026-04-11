@@ -432,8 +432,8 @@ mod tests {
 			3,
 			StepAction::FinalAnswer,
 			decision_final,
-			vec!["inventory.describe".to_string(), "web.search".to_string()],
-			vec![ResourceSelector::tool("web.search".to_string())],
+			vec!["inventory.describe".to_string(), "WebSearch".to_string()],
+			vec![ResourceSelector::tool("WebSearch".to_string())],
 			Some(StepObservation::FinalMessage {
 				final_message: "Done.".to_string(),
 			}),
@@ -451,11 +451,11 @@ mod tests {
 		state.visible_tools = vec![
 			"inventory.describe".to_string(),
 			"shell.exec".to_string(),
-			"web.search".to_string(),
+			"WebSearch".to_string(),
 		];
 		state.bound_resources = vec![
 			ResourceSelector::tool("inventory.describe".to_string()),
-			ResourceSelector::tool("web.search".to_string()),
+			ResourceSelector::tool("WebSearch".to_string()),
 		];
 		state.awaiting_user = Some(AskUserPayload {
 			final_message: "Which file did you mean?".to_string(),

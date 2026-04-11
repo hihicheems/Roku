@@ -469,21 +469,21 @@ fn deterministic_hook_trace_ids_follow_stable_order() {
 #[test]
 fn command_run_allow_policy_invokes_tool() {
 	let mut runtime = ToolRuntime::default();
-	let (tool, invocations) = PolicyAwareTool::new("command.run", Some(allow_decision()));
+	let (tool, invocations) = PolicyAwareTool::new("Bash", Some(allow_decision()));
 	runtime.register_tool(tool).expect("register tool");
 
 	let result = runtime
 		.invoke(ToolInvocation {
-			tool_name: "command.run".to_string(),
+			tool_name: "Bash".to_string(),
 			input: json!({}),
-			canonical_execution: Some(sample_canonical_execution("command.run", "pwd")),
+			canonical_execution: Some(sample_canonical_execution("Bash", "pwd")),
 			approved_scope: None,
 			skip_policy_check: false,
 			granted_capabilities: Vec::new(),
 			invocation_key: Some("command-allow".to_string()),
 			attachments: Vec::new(),
 		})
-		.expect("invoke command.run");
+		.expect("invoke Bash");
 
 	assert_eq!(result.output["status"], "ok");
 	assert_eq!(*invocations.lock().expect("poisoned lock"), 1);
@@ -495,23 +495,23 @@ fn command_run_deny_policy_rejects_before_invoke() {
 	let hook = Arc::new(RecordingHook::default());
 	runtime.register_hook(hook.clone());
 	let (tool, invocations) = PolicyAwareTool::new(
-		"command.run",
+		"Bash",
 		Some(deny_decision(PolicyReasonCode::DeniedByCommandPolicy)),
 	);
 	runtime.register_tool(tool).expect("register tool");
 
 	let error = runtime
 		.invoke(ToolInvocation {
-			tool_name: "command.run".to_string(),
+			tool_name: "Bash".to_string(),
 			input: json!({}),
-			canonical_execution: Some(sample_canonical_execution("command.run", "pwd")),
+			canonical_execution: Some(sample_canonical_execution("Bash", "pwd")),
 			approved_scope: None,
 			skip_policy_check: false,
 			granted_capabilities: Vec::new(),
 			invocation_key: Some("command-deny".to_string()),
 			attachments: Vec::new(),
 		})
-		.expect_err("command.run should be rejected");
+		.expect_err("Bash should be rejected");
 
 	match &error {
 		ToolRuntimeError::ExecutionFailed {
@@ -521,7 +521,7 @@ fn command_run_deny_policy_rejects_before_invoke() {
 			policy_decision,
 			..
 		} => {
-			assert_eq!(tool, "command.run");
+			assert_eq!(tool, "Bash");
 			assert_eq!(*attempts, 0);
 			assert!(!retriable);
 			assert_eq!(
@@ -544,18 +544,16 @@ fn command_run_deny_policy_rejects_before_invoke() {
 
 	let bypassed = runtime
 		.invoke(ToolInvocation {
-			tool_name: "command.run".to_string(),
+			tool_name: "Bash".to_string(),
 			input: json!({}),
-			canonical_execution: Some(sample_canonical_execution("command.run", "pwd")),
+			canonical_execution: Some(sample_canonical_execution("Bash", "pwd")),
 			approved_scope: None,
 			skip_policy_check: true,
 			granted_capabilities: Vec::new(),
 			invocation_key: Some("command-deny-policy-bypassed".to_string()),
 			attachments: Vec::new(),
 		})
-		.expect(
-			"registered command.run should still invoke when invocation-time policy is skipped",
-		);
+		.expect("registered Bash should still invoke when invocation-time policy is skipped");
 	assert_eq!(bypassed.output["status"], "ok");
 	assert_eq!(*invocations.lock().expect("poisoned lock"), 1);
 }
@@ -566,7 +564,7 @@ fn command_run_require_approval_rejects_before_invoke() {
 	let hook = Arc::new(RecordingHook::default());
 	runtime.register_hook(hook.clone());
 	let (tool, invocations) = PolicyAwareTool::new(
-		"command.run",
+		"Bash",
 		Some(require_approval_decision(
 			PolicyReasonCode::ApprovalRequiredByWriteScope,
 		)),
@@ -575,16 +573,16 @@ fn command_run_require_approval_rejects_before_invoke() {
 
 	let error = runtime
 		.invoke(ToolInvocation {
-			tool_name: "command.run".to_string(),
+			tool_name: "Bash".to_string(),
 			input: json!({}),
-			canonical_execution: Some(sample_canonical_execution("command.run", "pwd")),
+			canonical_execution: Some(sample_canonical_execution("Bash", "pwd")),
 			approved_scope: None,
 			skip_policy_check: false,
 			granted_capabilities: Vec::new(),
 			invocation_key: Some("command-approval".to_string()),
 			attachments: Vec::new(),
 		})
-		.expect_err("command.run should require approval");
+		.expect_err("Bash should require approval");
 
 	match &error {
 		ToolRuntimeError::ExecutionFailed {
@@ -594,7 +592,7 @@ fn command_run_require_approval_rejects_before_invoke() {
 			policy_decision,
 			..
 		} => {
-			assert_eq!(tool, "command.run");
+			assert_eq!(tool, "Bash");
 			assert_eq!(*attempts, 0);
 			assert!(!retriable);
 			assert_eq!(
@@ -621,9 +619,9 @@ fn command_run_require_approval_rejects_before_invoke() {
 
 	let bypassed = runtime
 		.invoke(ToolInvocation {
-			tool_name: "command.run".to_string(),
+			tool_name: "Bash".to_string(),
 			input: json!({}),
-			canonical_execution: Some(sample_canonical_execution("command.run", "pwd")),
+			canonical_execution: Some(sample_canonical_execution("Bash", "pwd")),
 			approved_scope: None,
 			skip_policy_check: true,
 			granted_capabilities: Vec::new(),
@@ -631,7 +629,7 @@ fn command_run_require_approval_rejects_before_invoke() {
 			attachments: Vec::new(),
 		})
 		.expect(
-			"registered command.run should still invoke when invocation-time approval policy is skipped",
+			"registered Bash should still invoke when invocation-time approval policy is skipped",
 		);
 	assert_eq!(bypassed.output["status"], "ok");
 	assert_eq!(*invocations.lock().expect("poisoned lock"), 1);
@@ -664,14 +662,14 @@ fn non_command_tool_with_canonical_execution_does_not_trigger_command_policy() {
 fn command_run_without_canonical_execution_skips_policy_gate() {
 	let mut runtime = ToolRuntime::default();
 	let (tool, invocations) = PolicyAwareTool::new(
-		"command.run",
+		"Bash",
 		Some(deny_decision(PolicyReasonCode::DeniedByCommandPolicy)),
 	);
 	runtime.register_tool(tool).expect("register tool");
 
 	let result = runtime
 		.invoke(ToolInvocation {
-			tool_name: "command.run".to_string(),
+			tool_name: "Bash".to_string(),
 			input: json!({}),
 			canonical_execution: None,
 			approved_scope: None,

@@ -100,11 +100,11 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 				enabled_by_default: true,
 				capabilities: PluginCapabilities {
 					provides_tools: vec![
-						"fs.inspect".to_string(),
-						"fs.list_dir".to_string(),
-						"fs.read_text".to_string(),
-						"fs.glob".to_string(),
-						"fs.exists".to_string(),
+						"Inspect".to_string(),
+						"ListDir".to_string(),
+						"Read".to_string(),
+						"Glob".to_string(),
+						"Exists".to_string(),
 					],
 					..PluginCapabilities::default()
 				},
@@ -118,7 +118,7 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 				kind: crate::PluginKind::Toolset,
 				enabled_by_default: true,
 				capabilities: PluginCapabilities {
-					provides_tools: vec!["command.run".to_string()],
+					provides_tools: vec!["Bash".to_string()],
 					has_side_effects: true,
 					..PluginCapabilities::default()
 				},
@@ -133,10 +133,10 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 				enabled_by_default: true,
 				capabilities: PluginCapabilities {
 					provides_tools: vec![
-						"table.inspect".to_string(),
-						"table.list_sheets".to_string(),
-						"table.preview".to_string(),
-						"table.schema".to_string(),
+						"TableInspect".to_string(),
+						"TableSheets".to_string(),
+						"TablePreview".to_string(),
+						"TableSchema".to_string(),
 					],
 					..PluginCapabilities::default()
 				},
@@ -150,10 +150,10 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 				kind: crate::PluginKind::Toolset,
 				enabled_by_default: true,
 				capabilities: PluginCapabilities {
-					provides_tools: vec!["web.search".to_string()],
+					provides_tools: vec!["WebSearch".to_string()],
 					..PluginCapabilities::default()
 				},
-				// No env requirements: web.fetch always works; web.search handles
+				// No env requirements: WebFetch always works; WebSearch handles
 				// missing search config at invoke time with an actionable error.
 				requirements: PluginRequirements::default(),
 			},
@@ -165,7 +165,7 @@ pub fn default_bundled_plugin_descriptors(tool_names: &[String]) -> Vec<BundledP
 				kind: crate::PluginKind::Toolset,
 				enabled_by_default: true,
 				capabilities: PluginCapabilities {
-					provides_tools: vec!["python.run".to_string()],
+					provides_tools: vec!["Python".to_string()],
 					has_side_effects: true,
 					..PluginCapabilities::default()
 				},

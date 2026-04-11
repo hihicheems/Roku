@@ -300,7 +300,7 @@ impl RuntimeService {
 			));
 		}
 		let approved_tool_name = pending_execution.canonical_execution.tool_name.as_str();
-		if approved_tool_name == "command.run" {
+		if approved_tool_name == "Bash" {
 			if pending_execution.canonical_execution.invocation_mode != InvocationMode::DirectExec
 				|| pending_execution
 					.canonical_execution
@@ -318,7 +318,14 @@ impl RuntimeService {
 					"execution approval resume requires an inherit_selected env policy",
 				));
 			}
-		} else if !approved_tool_name.starts_with("fs.") {
+		} else if !matches!(
+			approved_tool_name,
+			// Current PascalCase names.
+			"Read" | "Write" | "Edit" | "Grep" | "Glob" | "Find" | "Exists" | "Inspect" | "ListDir"
+			// Legacy dotted names for in-flight approval tickets created before the rename.
+			| "fs.read_text" | "fs.write" | "fs.edit" | "fs.grep" | "fs.glob" | "fs.find"
+			| "fs.exists" | "fs.inspect" | "fs.list_dir"
+		) {
 			return Err(RuntimeError::new(format!(
 				"execution approval resume does not support `{approved_tool_name}`",
 			)));
@@ -394,8 +401,7 @@ impl RuntimeService {
 		self.record_transition(task, TaskState::Executing, "approval granted")?;
 		self.save_task(task.clone())?;
 
-		let mut result = if resume.pending_execution.canonical_execution.tool_name == "command.run"
-		{
+		let mut result = if resume.pending_execution.canonical_execution.tool_name == "Bash" {
 			execute_frozen_command_result(task, &resume.node, &resume.pending_execution)
 		} else {
 			self.runtime.execute_approved_tool_invocation(
@@ -815,7 +821,7 @@ fn execution_approval_message(pending_execution: &PendingExecutionApproval) -> S
 }
 
 fn approval_action_text(execution: &CanonicalExecution) -> String {
-	if execution.tool_name == "command.run" {
+	if execution.tool_name == "Bash" {
 		if let Some(preview) = projected_execution_preview(execution) {
 			return preview.summary;
 		}
@@ -829,10 +835,10 @@ fn approval_action_text(execution: &CanonicalExecution) -> String {
 		.cloned()
 		.unwrap_or_else(|| execution.cwd.clone());
 	match execution.tool_name.as_str() {
-		"fs.inspect" => format!("Inspect path {target}"),
-		"fs.list_dir" => format!("List directory {target}"),
-		"fs.read_text" => format!("Read text from {target}"),
-		"fs.exists" => format!("Check whether {target} exists"),
+		"Inspect" => format!("Inspect path {target}"),
+		"ListDir" => format!("List directory {target}"),
+		"Read" => format!("Read text from {target}"),
+		"Exists" => format!("Check whether {target} exists"),
 		other => format!("Execute {other} against {target}"),
 	}
 }
@@ -911,7 +917,7 @@ mod tests {
 
 	fn sample_canonical_execution() -> CanonicalExecution {
 		CanonicalExecution {
-			tool_name: "command.run".to_string(),
+			tool_name: "Bash".to_string(),
 			program: "rm".to_string(),
 			argv: vec!["rm".to_string(), "-rf".to_string(), "tmp".to_string()],
 			invocation_mode: InvocationMode::DirectExec,
@@ -934,9 +940,9 @@ mod tests {
 
 	fn sample_fs_execution() -> CanonicalExecution {
 		CanonicalExecution {
-			tool_name: "fs.list_dir".to_string(),
-			program: "fs.list_dir".to_string(),
-			argv: vec!["fs.list_dir".to_string(), "/Users/jojo".to_string()],
+			tool_name: "ListDir".to_string(),
+			program: "ListDir".to_string(),
+			argv: vec!["ListDir".to_string(), "/Users/jojo".to_string()],
 			invocation_mode: InvocationMode::DirectExec,
 			shell_context: None,
 			cwd: "/workspace".to_string(),
@@ -975,7 +981,7 @@ mod tests {
 					}
 				},
 				"canonical_execution": {
-					"tool_name": "command.run",
+					"tool_name": "Bash",
 					"program": "rm",
 					"argv": ["rm", "-rf", "tmp"],
 					"invocation_mode": "direct_exec",
@@ -1062,7 +1068,7 @@ mod tests {
 		let frozen_payload = serde_json::json!({
 			"error_code": "approval_required",
 			"message": "approval required",
-			"tool_name": "command.run",
+			"tool_name": "Bash",
 			"tool_input": {
 				"command": "rm -rf tmp",
 				"cwd": "/workspace"
@@ -1089,7 +1095,7 @@ mod tests {
 		assert_eq!(response.status, ResponseStatus::PendingApproval);
 		assert_eq!(
 			response.message,
-			"🛡️ Approval Request\n\nTool: command.run\nAction: Run command rm -rf tmp from /workspace\nRisk: medium\nReason: the command is outside the constrained built-in allowlist"
+			"🛡️ Approval Request\n\nTool: Bash\nAction: Run command rm -rf tmp from /workspace\nRisk: medium\nReason: the command is outside the constrained built-in allowlist"
 		);
 		assert_eq!(task.state, TaskState::WaitingApproval);
 		let approval_id = task
@@ -1166,7 +1172,7 @@ mod tests {
 
 		assert_eq!(
 			pending_approval_message(&ticket),
-			"🛡️ Approval Request\n\nTool: fs.list_dir\nAction: List directory /Users/jojo\nRisk: high\nReason: the requested path is outside the current allowed workspace roots"
+			"🛡️ Approval Request\n\nTool: ListDir\nAction: List directory /Users/jojo\nRisk: high\nReason: the requested path is outside the current allowed workspace roots"
 		);
 	}
 }

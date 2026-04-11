@@ -85,23 +85,23 @@ pub enum ToolRiskLevel {
 /// Classify a tool invocation by risk level.
 ///
 /// Default classification:
-/// - Safe: fs.read_text, fs.glob, fs.exists, fs.inspect, fs.list_dir, fs.find,
-///   fs.grep, web.search, web.fetch, table.*, final_answer, ask_user, fail
-/// - RequiresApproval: fs.write, fs.edit, command.run, python.run, skill.*
-/// - command.run is further classified by the command content:
+/// - Safe: Read, Glob, Exists, Inspect, ListDir, Find,
+///   Grep, WebSearch, WebFetch, table.*, final_answer, ask_user, fail
+/// - RequiresApproval: Write, Edit, Bash, Python, skill.*
+/// - Bash is further classified by the command content:
 ///   destructive patterns (rm -rf /, dd if=, etc.) → Denied
 pub fn classify_tool_risk(tool_name: &str, arguments: &Value) -> ToolRiskLevel {
 	match tool_name {
 		// Read-only tools — always safe
-		"fs.read_text" | "fs.glob" | "fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.find"
-		| "fs.grep" | "web.search" | "web.fetch" | "table.inspect" | "table.list_sheets"
-		| "table.preview" | "table.schema" | "final_answer" | "ask_user" | "fail" => ToolRiskLevel::Safe,
+		"Read" | "Glob" | "Exists" | "Inspect" | "ListDir" | "Find" | "Grep" | "WebSearch"
+		| "WebFetch" | "TableInspect" | "TableSheets" | "TablePreview" | "TableSchema"
+		| "final_answer" | "ask_user" | "fail" => ToolRiskLevel::Safe,
 
-		// command.run — classify by command content
-		"command.run" => classify_command_risk(arguments),
+		// Bash — classify by command content
+		"Bash" => classify_command_risk(arguments),
 
 		// Write tools — require approval
-		"fs.write" | "fs.edit" | "python.run" | "skill.ensure_installed" | "skill.execute" => {
+		"Write" | "Edit" | "Python" | "SkillInstall" | "SkillRun" => {
 			ToolRiskLevel::RequiresApproval
 		}
 
@@ -110,7 +110,7 @@ pub fn classify_tool_risk(tool_name: &str, arguments: &Value) -> ToolRiskLevel {
 	}
 }
 
-/// Classify command.run risk by inspecting the command text.
+/// Classify Bash risk by inspecting the command text.
 fn classify_command_risk(arguments: &Value) -> ToolRiskLevel {
 	let command = arguments
 		.get("command")
@@ -203,19 +203,19 @@ mod tests {
 	#[test]
 	fn classify_safe_read_tools() {
 		for tool in &[
-			"fs.read_text",
-			"fs.glob",
-			"fs.exists",
-			"fs.inspect",
-			"fs.list_dir",
-			"fs.find",
-			"fs.grep",
-			"web.search",
-			"web.fetch",
-			"table.inspect",
-			"table.list_sheets",
-			"table.preview",
-			"table.schema",
+			"Read",
+			"Glob",
+			"Exists",
+			"Inspect",
+			"ListDir",
+			"Find",
+			"Grep",
+			"WebSearch",
+			"WebFetch",
+			"TableInspect",
+			"TableSheets",
+			"TablePreview",
+			"TableSchema",
 			"final_answer",
 			"ask_user",
 			"fail",
@@ -230,13 +230,7 @@ mod tests {
 
 	#[test]
 	fn classify_write_tools_require_approval() {
-		for tool in &[
-			"fs.write",
-			"fs.edit",
-			"python.run",
-			"skill.ensure_installed",
-			"skill.execute",
-		] {
+		for tool in &["Write", "Edit", "Python", "SkillInstall", "SkillRun"] {
 			assert_eq!(
 				classify_tool_risk(tool, &Value::Null),
 				ToolRiskLevel::RequiresApproval,
@@ -267,7 +261,7 @@ mod tests {
 		for cmd in safe_commands {
 			let args = json!({ "command": cmd });
 			assert_eq!(
-				classify_tool_risk("command.run", &args),
+				classify_tool_risk("Bash", &args),
 				ToolRiskLevel::Safe,
 				"expected Safe for command: {cmd}"
 			);
@@ -285,7 +279,7 @@ mod tests {
 		for cmd in risky_commands {
 			let args = json!({ "command": cmd });
 			assert_eq!(
-				classify_tool_risk("command.run", &args),
+				classify_tool_risk("Bash", &args),
 				ToolRiskLevel::RequiresApproval,
 				"expected RequiresApproval for command: {cmd}"
 			);
@@ -302,7 +296,7 @@ mod tests {
 		for cmd in denied_commands {
 			let args = json!({ "command": cmd });
 			assert_eq!(
-				classify_tool_risk("command.run", &args),
+				classify_tool_risk("Bash", &args),
 				ToolRiskLevel::Denied,
 				"expected Denied for command: {cmd}"
 			);
@@ -314,10 +308,10 @@ mod tests {
 	#[test]
 	fn auto_approve_gate_always_approves() {
 		let gate = AutoApproveGate;
-		let result = gate.check("fs.write", &json!({ "path": "/tmp/test" }));
+		let result = gate.check("Write", &json!({ "path": "/tmp/test" }));
 		assert!(matches!(result, ApprovalDecision::Approve));
 
-		let result = gate.check("command.run", &json!({ "command": "rm -rf /" }));
+		let result = gate.check("Bash", &json!({ "command": "rm -rf /" }));
 		assert!(matches!(result, ApprovalDecision::Approve));
 	}
 
@@ -328,7 +322,7 @@ mod tests {
 		let gate = RiskBasedGate::new(|_tool, _args| {
 			panic!("prompt_fn should not be called for safe tools");
 		});
-		let result = gate.check("fs.read_text", &json!({ "path": "/tmp/foo" }));
+		let result = gate.check("Read", &json!({ "path": "/tmp/foo" }));
 		assert!(matches!(result, ApprovalDecision::Approve));
 	}
 
@@ -337,12 +331,9 @@ mod tests {
 		let gate = RiskBasedGate::new(|tool_name, _args| {
 			ApprovalDecision::Deny(format!("denied {tool_name}"))
 		});
-		let result = gate.check(
-			"fs.write",
-			&json!({ "path": "/tmp/test", "content": "hello" }),
-		);
+		let result = gate.check("Write", &json!({ "path": "/tmp/test", "content": "hello" }));
 		match result {
-			ApprovalDecision::Deny(msg) => assert!(msg.contains("fs.write")),
+			ApprovalDecision::Deny(msg) => assert!(msg.contains("Write")),
 			ApprovalDecision::Approve => panic!("expected Deny for write tool"),
 		}
 	}
@@ -352,10 +343,10 @@ mod tests {
 		let gate = RiskBasedGate::new(|_tool, _args| {
 			panic!("prompt_fn should not be called for denied tools");
 		});
-		let result = gate.check("command.run", &json!({ "command": "rm -rf /var" }));
+		let result = gate.check("Bash", &json!({ "command": "rm -rf /var" }));
 		match result {
 			ApprovalDecision::Deny(msg) => {
-				assert!(msg.contains("command.run") && msg.contains("security policy"))
+				assert!(msg.contains("Bash") && msg.contains("security policy"))
 			}
 			ApprovalDecision::Approve => panic!("expected Deny for denied command"),
 		}

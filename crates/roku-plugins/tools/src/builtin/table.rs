@@ -34,7 +34,7 @@ use roku_plugin_host::{
 };
 use serde_json::{Value, json};
 
-/// Returns catalog metadata for all table builtin tools (table.inspect, table.list_sheets, table.preview, table.schema).
+/// Returns catalog metadata for all table builtin tools (TableInspect, TableSheets, TablePreview, TableSchema).
 ///
 /// Used when the core-table plugin is enabled: [`build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities`]
 /// in `builders` extends its tool entries with this list, then builds a [`ResourceCatalog`]. That catalog is
@@ -52,40 +52,40 @@ pub(crate) fn catalog_descriptors_with_config(
 ) -> Vec<CatalogDescriptor> {
 	vec![
 		descriptor_catalog(
-			"table.inspect",
-			"Use this first when you have a concrete table file and need high-level facts such as format, size, sheet count, or rough structure. Do not use it when the user specifically asked for row samples or column types; `table.preview` and `table.schema` are more precise. It returns bounded metadata for choosing the next table step.",
+			"TableInspect",
+			"Use this first when you have a concrete table file and need high-level facts such as format, size, sheet count, or rough structure. Do not use it when the user specifically asked for row samples or column types; `TablePreview` and `TableSchema` are more precise. It returns bounded metadata for choosing the next table step.",
 			"Inspect a data file (CSV, Excel, etc.) to understand its format and structure.",
 			&["table", "inspect", "xlsx", "csv", "tsv"],
 			&["Inspect tmp/test-excel.xlsx."],
 			&["path"],
-			&["table.inspect"],
+			&["TableInspect"],
 		),
 		descriptor_catalog(
-			"table.list_sheets",
+			"TableSheets",
 			"Use this only when the main question is which sheet names exist in a known XLSX workbook. Do not use it for CSV/TSV preview or schema inspection. It returns workbook sheet names, or explains that flat files do not expose named sheets.",
 			"List sheet names in an Excel workbook to find the right data.",
 			&["table", "sheet", "xlsx"],
 			&["List the sheets in tmp/test-excel.xlsx."],
 			&["path"],
-			&["table.list_sheets"],
+			&["TableSheets"],
 		),
 		descriptor_catalog(
-			"table.preview",
-			"Use this when the user wants actual sample rows from a known table or sheet. Do not use it just to learn column names or inferred types; `table.schema` is better for that. It returns a bounded row preview suitable for direct display or downstream summarization.",
+			"TablePreview",
+			"Use this when the user wants actual sample rows from a known table or sheet. Do not use it just to learn column names or inferred types; `TableSchema` is better for that. It returns a bounded row preview suitable for direct display or downstream summarization.",
 			"Preview sample rows from a table to understand the data.",
 			&["table", "preview", "rows", "xlsx", "csv"],
 			&["Preview the first few rows of tmp/test-excel.xlsx."],
 			&["path", "sheet", "rows"],
-			&["table.preview"],
+			&["TablePreview"],
 		),
 		descriptor_catalog(
-			"table.schema",
-			"Use this when the user wants column names and inferred types from a known table or sheet. Do not use it for row samples or sheet enumeration. It returns structural schema facts that are better for reasoning about the data than `table.inspect` or `table.preview`.",
+			"TableSchema",
+			"Use this when the user wants column names and inferred types from a known table or sheet. Do not use it for row samples or sheet enumeration. It returns structural schema facts that are better for reasoning about the data than `TableInspect` or `TablePreview`.",
 			"Show column names and types in a table for data analysis planning.",
 			&["table", "schema", "columns", "xlsx", "csv"],
 			&["Show the schema of tmp/test-excel.xlsx."],
 			&["path", "sheet"],
-			&["table.schema"],
+			&["TableSchema"],
 		),
 	]
 }
@@ -153,7 +153,7 @@ impl TableKind {
 
 impl Tool for TableInspectTool {
 	fn descriptor(&self) -> ToolDescriptor {
-		tool_descriptor("table.inspect", &["path"], &["table.inspect"])
+		tool_descriptor("TableInspect", &["path"], &["TableInspect"])
 	}
 
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
@@ -204,7 +204,7 @@ impl Tool for TableInspectTool {
 
 impl Tool for TableListSheetsTool {
 	fn descriptor(&self) -> ToolDescriptor {
-		tool_descriptor("table.list_sheets", &["path"], &["table.list_sheets"])
+		tool_descriptor("TableSheets", &["path"], &["TableSheets"])
 	}
 
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
@@ -246,7 +246,7 @@ impl Tool for TableListSheetsTool {
 
 impl Tool for TablePreviewTool {
 	fn descriptor(&self) -> ToolDescriptor {
-		tool_descriptor("table.preview", &["path"], &["table.preview"])
+		tool_descriptor("TablePreview", &["path"], &["TablePreview"])
 	}
 
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
@@ -287,7 +287,7 @@ impl Tool for TablePreviewTool {
 
 impl Tool for TableSchemaTool {
 	fn descriptor(&self) -> ToolDescriptor {
-		tool_descriptor("table.schema", &["path"], &["table.schema"])
+		tool_descriptor("TableSchema", &["path"], &["TableSchema"])
 	}
 
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
@@ -357,7 +357,7 @@ fn table_tool_contract(name: &str) -> Option<ToolContract> {
 		ToolRetryPolicy::Never,
 	);
 	match name {
-		"table.preview" => Some(ToolContract {
+		"TablePreview" => Some(ToolContract {
 			selection: selection_contract(
 				&[
 					"Use when the table path is already grounded and the user needs sample rows from a table or one sheet.",
@@ -367,8 +367,8 @@ fn table_tool_contract(name: &str) -> Option<ToolContract> {
 					"Do not use for sheet enumeration without row samples.",
 				],
 				&[
-					"Commonly confused with table.schema for structure-only questions.",
-					"Commonly confused with table.list_sheets when the user only wants workbook tabs.",
+					"Commonly confused with TableSchema for structure-only questions.",
+					"Commonly confused with TableSheets when the user only wants workbook tabs.",
 				],
 			),
 			input: input_contract(
@@ -416,7 +416,7 @@ fn table_tool_contract(name: &str) -> Option<ToolContract> {
 				serde_json::Map::from_iter([("rows".to_string(), json!(5))]),
 			),
 		}),
-		"table.inspect" => Some(ToolContract {
+		"TableInspect" => Some(ToolContract {
 			grounding: grounding_contract_simple(
 				GroundingStrategy::PathBased,
 				&["path"],
@@ -426,7 +426,7 @@ fn table_tool_contract(name: &str) -> Option<ToolContract> {
 			),
 			..ToolContract::default()
 		}),
-		"table.list_sheets" => Some(ToolContract {
+		"TableSheets" => Some(ToolContract {
 			grounding: grounding_contract_simple(
 				GroundingStrategy::PathBased,
 				&["path"],
@@ -436,7 +436,7 @@ fn table_tool_contract(name: &str) -> Option<ToolContract> {
 			),
 			..ToolContract::default()
 		}),
-		"table.schema" => Some(ToolContract {
+		"TableSchema" => Some(ToolContract {
 			grounding: grounding_contract_simple(
 				GroundingStrategy::PathBased,
 				&["path"],

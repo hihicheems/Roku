@@ -31,7 +31,7 @@ pub struct ExecutionPreview {
 }
 
 pub fn project_execution_preview(execution: &CanonicalExecution) -> Option<ExecutionPreview> {
-	if execution.tool_name != "command.run" {
+	if execution.tool_name != "Bash" {
 		return None;
 	}
 	if execution.invocation_mode != InvocationMode::DirectExec || execution.shell_context.is_some()
@@ -79,7 +79,7 @@ mod tests {
 
 	fn sample_command_execution(argv: &[&str]) -> CanonicalExecution {
 		CanonicalExecution {
-			tool_name: "command.run".to_string(),
+			tool_name: "Bash".to_string(),
 			program: argv[0].to_string(),
 			argv: argv.iter().map(|value| value.to_string()).collect(),
 			invocation_mode: InvocationMode::DirectExec,
@@ -103,7 +103,7 @@ mod tests {
 	#[test]
 	fn projects_command_run_preview_from_canonical_execution() {
 		let preview = project_execution_preview(&sample_command_execution(&["pwd"]))
-			.expect("command.run preview should project");
+			.expect("Bash preview should project");
 
 		assert_eq!(preview.command_text, "pwd");
 		assert_eq!(preview.summary, "Run command pwd from /workspace");
@@ -114,7 +114,7 @@ mod tests {
 	fn quotes_preview_command_arguments_consistently() {
 		let preview =
 			project_execution_preview(&sample_command_execution(&["printf", "hello world"]))
-				.expect("command.run preview should project");
+				.expect("Bash preview should project");
 
 		assert_eq!(preview.command_text, "printf 'hello world'");
 		assert_eq!(
@@ -126,7 +126,7 @@ mod tests {
 	#[test]
 	fn skips_non_command_preview_projection() {
 		let mut execution = sample_command_execution(&["pwd"]);
-		execution.tool_name = "python.run".to_string();
+		execution.tool_name = "Python".to_string();
 
 		assert!(project_execution_preview(&execution).is_none());
 	}

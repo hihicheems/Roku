@@ -147,7 +147,7 @@ pub(crate) fn skill_worker_with_config(
 	ToolBackedWorker::new(
 		"skill-worker",
 		tool_name_for_role(tool_config, BuiltinToolRole::SkillInstall),
-		&["skill."],
+		&["Skill"],
 		tool_runtime,
 		0.94,
 	)
@@ -160,7 +160,7 @@ pub(crate) fn skill_execute_worker_with_config(
 	ToolBackedWorker::new(
 		"skill-execute-worker",
 		tool_name_for_role(tool_config, BuiltinToolRole::SkillExecute),
-		&["skill.execute"],
+		&["SkillRun"],
 		tool_runtime,
 		0.97,
 	)
@@ -188,10 +188,10 @@ mod tests {
 			"command": "pwd",
 		});
 
-		let execution = canonical_execution_for_builtin_tool_input("command.run", &input)
-			.expect("command.run canonical execution should build");
+		let execution = canonical_execution_for_builtin_tool_input("Bash", &input)
+			.expect("Bash canonical execution should build");
 
-		assert_eq!(execution.tool_name, "command.run");
+		assert_eq!(execution.tool_name, "Bash");
 		assert_eq!(execution.program, "pwd");
 		assert_eq!(execution.argv, vec!["pwd".to_string()]);
 		assert_eq!(execution.digest.0.len(), 64);

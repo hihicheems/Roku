@@ -119,14 +119,14 @@ mod tests {
 			goal: "Run `pwd`".to_string(),
 			workspace_root: "/workspace".to_string(),
 			working_directory: "/workspace".to_string(),
-			visible_tools: vec!["command.run".to_string(), "inventory.describe".to_string()],
-			bound_resources: vec![ResourceSelector::tool("command.run".to_string())],
+			visible_tools: vec!["Bash".to_string(), "inventory.describe".to_string()],
+			bound_resources: vec![ResourceSelector::tool("Bash".to_string())],
 			route_decision: RouteDecision::new(
 				IntentFamily::CodeExec,
 				0.95,
 				false,
 				RouteRisk::Medium,
-				vec!["command.run".to_string()],
+				vec!["Bash".to_string()],
 				Vec::new(),
 				Vec::new(),
 				"explicit command",
@@ -141,7 +141,7 @@ mod tests {
 		let mut state = loop_state();
 		let observation = ToolObservation {
 			ok: true,
-			tool_name: "command.run".to_string(),
+			tool_name: "Bash".to_string(),
 			error_type: None,
 			terminal: false,
 			data: json!({"stdout": "/workspace\n"}),
@@ -159,13 +159,13 @@ mod tests {
 			remaining_step_budget: 3,
 			remaining_recovery_budget: 2,
 			new_working_directory: None,
-			visible_tools: vec!["command.run".to_string(), "inventory.describe".to_string()],
+			visible_tools: vec!["Bash".to_string(), "inventory.describe".to_string()],
 		};
 		state.record_step(StepRecord::tool_call(
 			1,
 			NextStepDecision {
 				action: NextStepAction::CallTool,
-				tool_name: Some("command.run".to_string()),
+				tool_name: Some("Bash".to_string()),
 				arguments: Some(json!({ "command": "pwd" })),
 				tool_calls: None,
 				reason: "run explicit command".to_string(),
@@ -202,7 +202,7 @@ mod tests {
 			"/workspace",
 		));
 
-		let report = check_seed_tool_probe(&state, "command.run");
+		let report = check_seed_tool_probe(&state, "Bash");
 		assert!(report.issues.is_empty(), "unexpected issues: {report:?}");
 		assert!(report.tool_selected_correctly);
 		assert!(report.raw_output_captured);

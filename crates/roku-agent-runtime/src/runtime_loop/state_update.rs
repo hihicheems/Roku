@@ -211,7 +211,7 @@ mod tests {
 			&state,
 			ToolObservation {
 				ok: false,
-				tool_name: "command.run".to_string(),
+				tool_name: "Bash".to_string(),
 				error_type: Some("non_zero_exit".to_string()),
 				terminal: false,
 				data: json!({}),
@@ -240,7 +240,7 @@ mod tests {
 			&state,
 			ToolObservation {
 				ok: false,
-				tool_name: "fs.find".to_string(),
+				tool_name: "Find".to_string(),
 				error_type: Some("multiple_candidates".to_string()),
 				terminal: false,
 				data: json!({
@@ -265,7 +265,7 @@ mod tests {
 			&state,
 			ToolObservation {
 				ok: false,
-				tool_name: "fs.find".to_string(),
+				tool_name: "Find".to_string(),
 				error_type: Some("multiple_candidates".to_string()),
 				terminal: false,
 				data: json!({

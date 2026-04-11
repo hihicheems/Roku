@@ -132,7 +132,7 @@ pub fn check_runtime_loop_trace(trace: &RuntimeLoopTrace) -> RuntimeLoopTraceChe
 		.all(|step| step.interpreted_observation.is_some());
 	let command_tool_steps = tool_steps
 		.iter()
-		.filter(|step| step.decision.tool_name.as_deref() == Some("command.run"))
+		.filter(|step| step.decision.tool_name.as_deref() == Some("Bash"))
 		.collect::<Vec<_>>();
 	let command_execution_traces_captured = command_tool_steps
 		.iter()
@@ -186,7 +186,7 @@ pub fn check_runtime_loop_trace(trace: &RuntimeLoopTrace) -> RuntimeLoopTraceChe
 	}
 	if !command_execution_traces_captured {
 		issues.push(
-			"at least one command.run tool step is missing structured execution trace evidence"
+			"at least one Bash tool step is missing structured execution trace evidence"
 				.to_string(),
 		);
 	}
@@ -383,14 +383,14 @@ mod tests {
 			goal: "Run `pwd`".to_string(),
 			workspace_root: "/workspace".to_string(),
 			working_directory: "/workspace".to_string(),
-			visible_tools: vec!["command.run".to_string(), "inventory.describe".to_string()],
-			bound_resources: vec![ResourceSelector::tool("command.run".to_string())],
+			visible_tools: vec!["Bash".to_string(), "inventory.describe".to_string()],
+			bound_resources: vec![ResourceSelector::tool("Bash".to_string())],
 			route_decision: RouteDecision::new(
 				IntentFamily::CodeExec,
 				0.95,
 				false,
 				RouteRisk::Medium,
-				vec!["command.run".to_string()],
+				vec!["Bash".to_string()],
 				Vec::new(),
 				Vec::new(),
 				"explicit command",
@@ -405,7 +405,7 @@ mod tests {
 		let mut state = loop_state();
 		let observation = ToolObservation {
 			ok: true,
-			tool_name: "command.run".to_string(),
+			tool_name: "Bash".to_string(),
 			error_type: None,
 			terminal: false,
 			data: json!({"stdout": "/workspace\n"}),
@@ -423,19 +423,19 @@ mod tests {
 			remaining_step_budget: 3,
 			remaining_recovery_budget: 2,
 			new_working_directory: None,
-			visible_tools: vec!["command.run".to_string(), "inventory.describe".to_string()],
+			visible_tools: vec!["Bash".to_string(), "inventory.describe".to_string()],
 		};
 		state.record_step(StepRecord::tool_call(
 			1,
 			NextStepDecision {
 				action: NextStepAction::CallTool,
-				tool_name: Some("command.run".to_string()),
+				tool_name: Some("Bash".to_string()),
 				arguments: Some(json!({ "command": "pwd" })),
 				tool_calls: None,
 				reason: "run explicit command".to_string(),
 				final_message: None,
 			},
-			vec!["command.run".to_string(), "inventory.describe".to_string()],
+			vec!["Bash".to_string(), "inventory.describe".to_string()],
 			state.bound_resources.clone(),
 			json!({"ok": true}),
 			StepObservation::Tool(observation),
@@ -456,7 +456,7 @@ mod tests {
 				reason: "answer from grounded command".to_string(),
 				final_message: Some("/workspace".to_string()),
 			},
-			vec!["command.run".to_string(), "inventory.describe".to_string()],
+			vec!["Bash".to_string(), "inventory.describe".to_string()],
 			state.bound_resources.clone(),
 			Some(StepObservation::FinalMessage {
 				final_message: "/workspace".to_string(),
@@ -472,11 +472,11 @@ mod tests {
 		assert_eq!(trace.steps[0].decision.action, "call_tool");
 		assert_eq!(
 			trace.steps[0].visible_tools_before,
-			vec!["command.run".to_string(), "inventory.describe".to_string()]
+			vec!["Bash".to_string(), "inventory.describe".to_string()]
 		);
 		assert_eq!(
 			trace.steps[0].visible_resources_before,
-			Some(vec![ResourceSelector::tool("command.run".to_string())])
+			Some(vec![ResourceSelector::tool("Bash".to_string())])
 		);
 		assert!(trace.steps[0].execution_trace.is_some());
 		assert!(report.command_execution_traces_captured);
@@ -501,8 +501,8 @@ mod tests {
 			"cwd": current_directory.clone(),
 		});
 		let canonical_execution =
-			canonical_execution_for_builtin_tool_input("command.run", &decision_arguments)
-				.expect("command.run arguments should canonicalize");
+			canonical_execution_for_builtin_tool_input("Bash", &decision_arguments)
+				.expect("Bash arguments should canonicalize");
 		let digest = canonical_execution.digest.0.clone();
 		let approval_payload = json!({
 			"error_code": "approval_required",
@@ -520,7 +520,7 @@ mod tests {
 		});
 		let approval_observation = ToolObservation {
 			ok: false,
-			tool_name: "command.run".to_string(),
+			tool_name: "Bash".to_string(),
 			error_type: Some("approval_required".to_string()),
 			terminal: false,
 			data: json!({
@@ -540,13 +540,13 @@ mod tests {
 			remaining_step_budget: 3,
 			remaining_recovery_budget: 2,
 			new_working_directory: None,
-			visible_tools: vec!["command.run".to_string()],
+			visible_tools: vec!["Bash".to_string()],
 		};
 		state.record_step(StepRecord::tool_call(
 			1,
 			NextStepDecision {
 				action: NextStepAction::CallTool,
-				tool_name: Some("command.run".to_string()),
+				tool_name: Some("Bash".to_string()),
 				arguments: Some(decision_arguments.clone()),
 				tool_calls: None,
 				reason: "request approval".to_string(),
@@ -582,7 +582,7 @@ mod tests {
 		.into_value();
 		let resumed_observation = ToolObservation {
 			ok: true,
-			tool_name: "command.run".to_string(),
+			tool_name: "Bash".to_string(),
 			error_type: None,
 			terminal: false,
 			data: json!({
@@ -604,13 +604,13 @@ mod tests {
 			remaining_step_budget: 2,
 			remaining_recovery_budget: 2,
 			new_working_directory: None,
-			visible_tools: vec!["command.run".to_string()],
+			visible_tools: vec!["Bash".to_string()],
 		};
 		state.record_step(StepRecord::tool_call(
 			2,
 			NextStepDecision {
 				action: NextStepAction::CallTool,
-				tool_name: Some("command.run".to_string()),
+				tool_name: Some("Bash".to_string()),
 				arguments: Some(decision_arguments),
 				tool_calls: None,
 				reason: "resume approved command".to_string(),
@@ -706,7 +706,7 @@ mod tests {
 		let mut state = loop_state();
 		let observation = ToolObservation {
 			ok: true,
-			tool_name: "command.run".to_string(),
+			tool_name: "Bash".to_string(),
 			error_type: None,
 			terminal: false,
 			data: json!({"stdout": "/workspace\n", "digest": "digest-other"}),
@@ -724,19 +724,19 @@ mod tests {
 			remaining_step_budget: 3,
 			remaining_recovery_budget: 2,
 			new_working_directory: None,
-			visible_tools: vec!["command.run".to_string(), "inventory.describe".to_string()],
+			visible_tools: vec!["Bash".to_string(), "inventory.describe".to_string()],
 		};
 		state.record_step(StepRecord::tool_call(
 			1,
 			NextStepDecision {
 				action: NextStepAction::CallTool,
-				tool_name: Some("command.run".to_string()),
+				tool_name: Some("Bash".to_string()),
 				arguments: Some(json!({ "command": "pwd" })),
 				tool_calls: None,
 				reason: "run explicit command".to_string(),
 				final_message: None,
 			},
-			vec!["command.run".to_string(), "inventory.describe".to_string()],
+			vec!["Bash".to_string(), "inventory.describe".to_string()],
 			state.bound_resources.clone(),
 			json!({
 				"ok": true,
@@ -762,7 +762,7 @@ mod tests {
 				reason: "answer from grounded command".to_string(),
 				final_message: Some("/workspace".to_string()),
 			},
-			vec!["command.run".to_string(), "inventory.describe".to_string()],
+			vec!["Bash".to_string(), "inventory.describe".to_string()],
 			state.bound_resources.clone(),
 			Some(StepObservation::FinalMessage {
 				final_message: "/workspace".to_string(),

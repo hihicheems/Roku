@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 /// rebuilding separate availability views from the catalog.
 ///
 /// Invocation-time deny / approval policy stays outside this snapshot. High-risk tools such as
-/// `command.run` remain runtime-visible here whenever they are enabled; the policy bridge is
+/// `Bash` remain runtime-visible here whenever they are enabled; the policy bridge is
 /// responsible for surfacing `policy_denied` or `approval_required` after invocation is attempted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeVisibleToolAvailabilitySnapshot {
@@ -171,26 +171,23 @@ mod tests {
 		let snapshot = build_runtime_visible_tool_availability_snapshot(
 			&runtime_catalog(false),
 			&[
-				"skill.execute",
-				"skill.ensure_installed",
-				"fs.read_text",
-				"skill.ensure_installed",
+				"SkillRun",
+				"SkillInstall",
+				"Read",
+				"SkillInstall",
 				"not.enabled",
 			],
 		);
 
-		assert!(!snapshot.is_tool_enabled("skill.execute"));
-		assert!(snapshot.is_tool_enabled("skill.ensure_installed"));
+		assert!(!snapshot.is_tool_enabled("SkillRun"));
+		assert!(snapshot.is_tool_enabled("SkillInstall"));
 		assert!(
-			snapshot.is_tool_enabled("command.run"),
+			snapshot.is_tool_enabled("Bash"),
 			"policy-gated tools must remain enabled in the visibility contract"
 		);
 		assert_eq!(
 			snapshot.baseline_visible_tools,
-			vec![
-				"skill.ensure_installed".to_string(),
-				"fs.read_text".to_string()
-			]
+			vec!["SkillInstall".to_string(), "Read".to_string()]
 		);
 	}
 
@@ -198,30 +195,27 @@ mod tests {
 	fn snapshot_filters_shortlist_candidates_and_compose_returns_all_enabled_tools() {
 		let snapshot = RuntimeVisibleToolAvailabilitySnapshot::from_resource_catalog(
 			&runtime_catalog(false),
-			&["skill.ensure_installed", "table.preview"],
+			&["SkillInstall", "TablePreview"],
 		);
 
 		assert_eq!(
 			snapshot.filter_candidate_tools(
-				Some("skill.execute"),
+				Some("SkillRun"),
 				&[
 					"not.enabled".to_string(),
-					"fs.read_text".to_string(),
-					"skill.ensure_installed".to_string(),
-					"fs.read_text".to_string(),
+					"Read".to_string(),
+					"SkillInstall".to_string(),
+					"Read".to_string(),
 				],
 			),
-			vec![
-				"fs.read_text".to_string(),
-				"skill.ensure_installed".to_string()
-			]
+			vec!["Read".to_string(), "SkillInstall".to_string()]
 		);
 
 		// compose_visible_tools now always returns ALL enabled tools.
 		// Seed tools appear first; remaining enabled tools follow in BTreeSet order.
-		let visible = snapshot.compose_visible_tools(["not.enabled", "fs.read_text"]);
-		// fs.read_text is the only valid seed tool, so it must be first.
-		assert_eq!(visible[0], "fs.read_text");
+		let visible = snapshot.compose_visible_tools(["not.enabled", "Read"]);
+		// Read is the only valid seed tool, so it must be first.
+		assert_eq!(visible[0], "Read");
 		// All enabled tools must be present.
 		assert_eq!(
 			{

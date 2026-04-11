@@ -235,7 +235,7 @@ mod tests {
 
 	fn fake_execution(argv: &[&str]) -> CanonicalExecution {
 		CanonicalExecution {
-			tool_name: "command.run".to_string(),
+			tool_name: "Bash".to_string(),
 			program: argv[0].to_string(),
 			argv: argv.iter().map(|s| s.to_string()).collect(),
 			invocation_mode: InvocationMode::DirectExec,

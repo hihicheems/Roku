@@ -204,7 +204,10 @@ fn tool_error_code(error: &ToolRuntimeError) -> &'static str {
 }
 
 fn classify_tool_error(tool_name: &str, error_code: &str, message: &str) -> (String, bool) {
-	if tool_name.starts_with("fs.") {
+	if matches!(
+		tool_name,
+		"Read" | "Write" | "Edit" | "Grep" | "Glob" | "Find" | "Exists" | "Inspect" | "ListDir"
+	) {
 		let lower = message.to_ascii_lowercase();
 		if lower.contains("outside the allowed read roots") {
 			return ("workspace_violation".to_string(), true);
@@ -424,7 +427,7 @@ mod tests {
 
 	#[test]
 	fn fs_exists_observation_path_uses_envelope_without_legacy_fallback() {
-		assert!(!super::allows_migration_legacy_output_fallback("fs.exists"));
+		assert!(!super::allows_migration_legacy_output_fallback("Exists"));
 		assert!(super::allows_migration_legacy_output_fallback(
 			"custom.legacy"
 		));
@@ -436,7 +439,7 @@ mod tests {
 			build_builtin_tool_runtime(SkillRegistry::disabled(), &ToolCatalogConfig::default());
 		let output = invoke_tool(
 			&runtime,
-			"fs.exists",
+			"Exists",
 			json!({
 				"task_id": "task-fs-exists",
 				"node_id": "node-fs-exists",
@@ -447,7 +450,7 @@ mod tests {
 				"time_budget_ms": 45_000_u64,
 				"path": "note.txt"
 			}),
-			vec!["fs.exists".to_string()],
+			vec!["Exists".to_string()],
 			Some(ExecutionResourceScope {
 				working_directory: fs_root.path().display().to_string(),
 				resolved_targets: vec![fs_root.path().join("note.txt").display().to_string()],
@@ -459,13 +462,13 @@ mod tests {
 
 		assert_eq!(output_contract_kind(&output), "envelope");
 
-		let observation = ToolObservation::from_output_value("fs.exists", &output);
+		let observation = ToolObservation::from_output_value("Exists", &output);
 		assert!(observation.ok);
 		assert_eq!(observation.error_type, None);
 		assert!(!observation.terminal);
 		let observed_path = observation.data["path"]
 			.as_str()
-			.expect("fs.exists data.path should be a string");
+			.expect("Exists data.path should be a string");
 		assert!(observed_path.ends_with("/note.txt"));
 		assert_eq!(
 			observation.message,
@@ -477,9 +480,7 @@ mod tests {
 
 	#[test]
 	fn skill_execute_observation_path_uses_envelope_without_legacy_fallback() {
-		assert!(!super::allows_migration_legacy_output_fallback(
-			"skill.execute"
-		));
+		assert!(!super::allows_migration_legacy_output_fallback("SkillRun"));
 		assert!(super::allows_migration_legacy_output_fallback(
 			"custom.legacy"
 		));
@@ -491,26 +492,26 @@ mod tests {
 		let _skill_root = ScopedSkillRoot::set(skill_root.path().join("generated").as_path());
 		let output = invoke_tool(
 			&skill_runtime,
-			"skill.execute",
+			"SkillRun",
 			json!({
 				"task_id": "task-skill-execute",
 				"node_id": "node-skill-execute",
 				"goal": "Run the demo skill now.",
 				"summary": "Execute the installed demo skill script.",
 				"conversation_history": "",
-				"granted_capabilities": ["skill.execute"],
+				"granted_capabilities": ["SkillRun"],
 				"resource_selectors": ["skill:demo-skill"],
 				"budget_tokens": 4096_u64,
 				"time_budget_ms": 120_000_u64
 			}),
-			vec!["skill.execute".to_string()],
+			vec!["SkillRun".to_string()],
 			None,
 		)
 		.output;
 
 		assert_eq!(output_contract_kind(&output), "envelope");
 
-		let observation = ToolObservation::from_output_value("skill.execute", &output);
+		let observation = ToolObservation::from_output_value("SkillRun", &output);
 		assert!(observation.ok);
 		assert_eq!(observation.error_type, None);
 		assert!(observation.terminal);
@@ -596,7 +597,7 @@ mod tests {
 		let runtime = build_builtin_tool_runtime(registry, &ToolCatalogConfig::default());
 		let output = invoke_tool(
 			&runtime,
-			"skill.ensure_installed",
+			"SkillInstall",
 			json!({
 				"task_id": "task-3",
 				"node_id": "node-3",
@@ -607,14 +608,14 @@ mod tests {
 				"time_budget_ms": 120_000_u64,
 				"source_url": "https://github.com/example/skills/tree/main/skills/archived-demo-skill"
 			}),
-			vec!["skill.ensure_installed".to_string()],
+			vec!["SkillInstall".to_string()],
 			None,
 		)
 		.output;
 
 		assert_eq!(output_contract_kind(&output), "envelope");
 		assert_eq!(
-			ToolObservation::from_output_value("skill.ensure_installed", &output).data["skill_name"],
+			ToolObservation::from_output_value("SkillInstall", &output).data["skill_name"],
 			"archived-demo-skill"
 		);
 	}

@@ -44,9 +44,9 @@ pub(crate) fn catalog_descriptors_with_config(
 	let contract = web_contract();
 	vec![
 		CatalogDescriptor {
-			selector: roku_common_types::ResourceSelector::tool("web.search"),
+			selector: roku_common_types::ResourceSelector::tool("WebSearch"),
 			kind: ResourceKind::Tool,
-			name: "web.search".to_string(),
+			name: "WebSearch".to_string(),
 			role: Some("core_web".to_string()),
 			description: "Use this when you have a concrete search query and need fresh external search results from the configured backend. Do not use it for filesystem questions, broad research planning without a query, or as a substitute for final synthesis. It returns structured result summaries that usually need a follow-up explanation or comparison before the final answer."
 				.to_string(),
@@ -70,16 +70,16 @@ pub(crate) fn catalog_descriptors_with_config(
 					500
 				},
 			},
-			required_capabilities: vec!["web.search".to_string()],
+			required_capabilities: vec!["WebSearch".to_string()],
 			summary: "Run a concrete web query and return structured search results.".to_string(),
 			key_commands: Vec::new(),
 			use_cases: Vec::new(),
 			contract: Some(contract),
 		},
 		CatalogDescriptor {
-			selector: roku_common_types::ResourceSelector::tool("web.fetch"),
+			selector: roku_common_types::ResourceSelector::tool("WebFetch"),
 			kind: ResourceKind::Tool,
-			name: "web.fetch".to_string(),
+			name: "WebFetch".to_string(),
 			role: Some("core_web".to_string()),
 			description: "Use this when you have a specific URL and need to read its content. Do not use it for searching the web or when a URL is not yet known. It fetches the page and returns extracted text content."
 				.to_string(),
@@ -98,7 +98,7 @@ pub(crate) fn catalog_descriptors_with_config(
 				estimated_tokens: 0,
 				estimated_latency_ms: 3_000,
 			},
-			required_capabilities: vec!["web.fetch".to_string()],
+			required_capabilities: vec!["WebFetch".to_string()],
 			summary: "Fetch a URL and return its text content.".to_string(),
 			key_commands: Vec::new(),
 			use_cases: Vec::new(),
@@ -152,7 +152,7 @@ impl Tool for WebSearchTool {
 		};
 		let contract = web_contract();
 		ToolDescriptor {
-			name: "web.search".to_string(),
+			name: "WebSearch".to_string(),
 			version: "1.0.0".to_string(),
 			input_schema: contract_tool_schema(
 				Some(&contract),
@@ -167,7 +167,7 @@ impl Tool for WebSearchTool {
 				],
 			),
 			output_schema: contract.output.observation_schema.clone(),
-			required_capabilities: vec!["web.search".to_string()],
+			required_capabilities: vec!["WebSearch".to_string()],
 			runtime_constraints,
 			contract: Some(contract),
 		}
@@ -356,7 +356,7 @@ impl WebSearchTool {
 }
 
 // ---------------------------------------------------------------------------
-// web.fetch
+// WebFetch
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -386,11 +386,11 @@ impl Tool for WebFetchTool {
 			..ToolContract::default()
 		};
 		ToolDescriptor {
-			name: "web.fetch".to_string(),
+			name: "WebFetch".to_string(),
 			version: "1.0.0".to_string(),
 			input_schema: contract_tool_schema(Some(&contract), &["url"]),
 			output_schema: "tool_observation.v1".to_string(),
-			required_capabilities: vec!["web.fetch".to_string()],
+			required_capabilities: vec!["WebFetch".to_string()],
 			runtime_constraints,
 			contract: Some(contract),
 		}
@@ -800,7 +800,7 @@ fn web_contract() -> ToolContract {
 			],
 			&[
 				"Commonly confused with a direct final_answer for knowledge questions that do not actually require fresh web results.",
-				"Commonly confused with fs.find when the word `search` refers to workspace files rather than the public web.",
+				"Commonly confused with Find when the word `search` refers to workspace files rather than the public web.",
 			],
 		),
 		input: input_contract(
@@ -814,7 +814,7 @@ fn web_contract() -> ToolContract {
 				input_field(
 					"top_k",
 					false,
-					"Optional result count capped by the configured web.search maximum.",
+					"Optional result count capped by the configured WebSearch maximum.",
 					&["Reject when zero or larger than the hard maximum result count."],
 				),
 			],
@@ -907,9 +907,9 @@ mod tests {
 			.invoke(invocation_request(json!({
 				"query": "latest Rust edition",
 			})))
-			.expect("web.search should return a structured observation");
+			.expect("WebSearch should return a structured observation");
 		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
-			.expect("web.search should emit ToolOutputEnvelope");
+			.expect("WebSearch should emit ToolOutputEnvelope");
 
 		assert!(!envelope.ok);
 		assert_eq!(
@@ -941,9 +941,9 @@ mod tests {
 				"query": "latest Rust edition",
 				"top_k": 3,
 			})))
-			.expect("web.search success should return a structured observation");
+			.expect("WebSearch success should return a structured observation");
 		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
-			.expect("web.search success should emit ToolOutputEnvelope");
+			.expect("WebSearch success should emit ToolOutputEnvelope");
 
 		assert!(envelope.ok);
 		assert!(!envelope.terminal);
@@ -1022,9 +1022,9 @@ mod tests {
 		};
 		let output = tool
 			.invoke(invocation_request(json!({ "query": "test query" })))
-			.expect("web.search should return a structured observation");
+			.expect("WebSearch should return a structured observation");
 		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
-			.expect("web.search should emit ToolOutputEnvelope");
+			.expect("WebSearch should emit ToolOutputEnvelope");
 		assert!(envelope.ok);
 		// Response should carry "endpoint" key, not "provider": "tavily"
 		assert!(envelope.data.get("endpoint").is_some());
@@ -1039,7 +1039,7 @@ mod tests {
 	}
 
 	// -----------------------------------------------------------------------
-	// web.fetch tests
+	// WebFetch tests
 	// -----------------------------------------------------------------------
 
 	fn spawn_mock_http_server(
@@ -1078,9 +1078,9 @@ mod tests {
 		let url = spawn_mock_http_server(200, "text/plain", "Hello, World!");
 		let output = fetch_tool()
 			.invoke(invocation_request(json!({ "url": url })))
-			.expect("web.fetch should succeed");
+			.expect("WebFetch should succeed");
 		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
-			.expect("web.fetch should emit ToolOutputEnvelope");
+			.expect("WebFetch should emit ToolOutputEnvelope");
 		assert!(envelope.ok);
 		assert!(!envelope.terminal);
 		assert_eq!(envelope.data["content"], "Hello, World!");
@@ -1092,9 +1092,9 @@ mod tests {
 		let url = spawn_mock_http_server(404, "text/plain", "Not Found");
 		let output = fetch_tool()
 			.invoke(invocation_request(json!({ "url": url })))
-			.expect("web.fetch should return structured error");
+			.expect("WebFetch should return structured error");
 		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
-			.expect("web.fetch should emit ToolOutputEnvelope");
+			.expect("WebFetch should emit ToolOutputEnvelope");
 		assert!(!envelope.ok);
 		assert_eq!(envelope.error_type.as_deref(), Some("http_error"));
 		assert!(
@@ -1111,9 +1111,9 @@ mod tests {
 		let url = spawn_mock_http_server(200, "text/html", html);
 		let output = fetch_tool()
 			.invoke(invocation_request(json!({ "url": url })))
-			.expect("web.fetch should succeed");
+			.expect("WebFetch should succeed");
 		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
-			.expect("web.fetch should emit ToolOutputEnvelope");
+			.expect("WebFetch should emit ToolOutputEnvelope");
 		assert!(envelope.ok);
 		let content = envelope.data["content"].as_str().unwrap();
 		assert!(!content.contains('<'));
@@ -1207,9 +1207,9 @@ mod tests {
 		};
 		let output = tool
 			.invoke(invocation_request(json!({ "url": url })))
-			.expect("web.fetch should succeed with truncation");
+			.expect("WebFetch should succeed with truncation");
 		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
-			.expect("web.fetch should emit ToolOutputEnvelope");
+			.expect("WebFetch should emit ToolOutputEnvelope");
 		assert!(envelope.ok);
 		assert_eq!(envelope.data["truncated"], true);
 		let content = envelope.data["content"].as_str().unwrap();
@@ -1230,9 +1230,9 @@ mod tests {
 		};
 		let output = tool
 			.invoke(invocation_request(json!({ "url": url })))
-			.expect("web.fetch should not panic on multi-byte boundary");
+			.expect("WebFetch should not panic on multi-byte boundary");
 		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
-			.expect("web.fetch should emit ToolOutputEnvelope");
+			.expect("WebFetch should emit ToolOutputEnvelope");
 		assert!(envelope.ok);
 		assert_eq!(envelope.data["truncated"], true);
 		let content = envelope.data["content"].as_str().unwrap();

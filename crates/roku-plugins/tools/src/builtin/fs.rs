@@ -39,8 +39,8 @@ use roku_plugin_host::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-/// Returns catalog metadata for all fs builtin tools (`fs.find`, `fs.inspect`, `fs.list_dir`,
-/// `fs.read_text`, `fs.glob`, `fs.exists`).
+/// Returns catalog metadata for all fs builtin tools (`Find`, `Inspect`, `ListDir`,
+/// `Read`, `Glob`, `Exists`).
 ///
 /// Used when the core-fs plugin is enabled: [`build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities`]
 /// in `builders` extends its tool entries with this list, then builds a [`ResourceCatalog`]. That catalog is
@@ -58,8 +58,8 @@ pub(crate) fn catalog_descriptors_with_config(
 ) -> Vec<CatalogDescriptor> {
 	vec![
 		descriptor_catalog(
-			"fs.find",
-			"Use this when you only know one basename or fuzzy filesystem reference inside the workspace and need grounded candidates before doing anything else. Do not use it when you already have a concrete path, when you expect many repeated matches, or when the task is counting files across directories; `fs.glob` is the right tool for that. It returns zero, one, or many candidate paths that the agent can disambiguate or feed into a later tool call.",
+			"Find",
+			"Use this when you only know one basename or fuzzy filesystem reference inside the workspace and need grounded candidates before doing anything else. Do not use it when you already have a concrete path, when you expect many repeated matches, or when the task is counting files across directories; `Glob` is the right tool for that. It returns zero, one, or many candidate paths that the agent can disambiguate or feed into a later tool call.",
 			"Find a file or directory by fuzzy name when you don't know the exact path.",
 			&[
 				"find file",
@@ -70,7 +70,7 @@ pub(crate) fn catalog_descriptors_with_config(
 			],
 			&["Find pr-check-ci.yml", "Find the directory named docs"],
 			&["name", "kind"],
-			&["fs.find"],
+			&["Find"],
 			&["find <name>"],
 			&[
 				"resolve a basename before reading a file",
@@ -79,7 +79,7 @@ pub(crate) fn catalog_descriptors_with_config(
 			],
 		),
 		descriptor_catalog(
-			"fs.inspect",
+			"Inspect",
 			"Use this when you need metadata about a known path or need to ground the current working directory. Do not use it to list directory entries or read file contents. It returns bounded path facts like kind, size, and timestamps.",
 			"Check file metadata (size, type, permissions) for a known path.",
 			&[
@@ -98,7 +98,7 @@ pub(crate) fn catalog_descriptors_with_config(
 			],
 			&["pwd", "stat Cargo.toml"],
 			&["path"],
-			&["fs.inspect"],
+			&["Inspect"],
 			&["pwd", "stat <path>"],
 			&[
 				"inspect the current working directory",
@@ -108,7 +108,7 @@ pub(crate) fn catalog_descriptors_with_config(
 			],
 		),
 		descriptor_catalog(
-			"fs.list_dir",
+			"ListDir",
 			"Use this when you already know the directory path and need its immediate entries, including hidden ones, in bounded form. Do not use it when the path is still fuzzy or when you need file contents instead of a listing. It returns a truncated-safe entry list plus enough metadata to answer listing questions or choose a follow-up path.",
 			"List files in a directory to explore project structure or find files.",
 			&[
@@ -125,7 +125,7 @@ pub(crate) fn catalog_descriptors_with_config(
 			],
 			&["ls .", "ls .cursor", "ls crates/roku-plugins"],
 			&["path"],
-			&["fs.list_dir"],
+			&["ListDir"],
 			&["ls <path>", "ll <path>", "dir <path>"],
 			&[
 				"list the current directory",
@@ -135,8 +135,8 @@ pub(crate) fn catalog_descriptors_with_config(
 			],
 		),
 		descriptor_catalog(
-			"fs.read_text",
-			"Use this when you already have a concrete text file path and need its contents or the first bounded chunk of it. Do not use it for directories, binary inspection, or fuzzy names; resolve those first with `fs.find` or `fs.inspect`. It returns lossy UTF-8 text plus truncation metadata that can be quoted, summarized, or passed to another worker.",
+			"Read",
+			"Use this when you already have a concrete text file path and need its contents or the first bounded chunk of it. Do not use it for directories, binary inspection, or fuzzy names; resolve those first with `Find` or `Inspect`. It returns lossy UTF-8 text plus truncation metadata that can be quoted, summarized, or passed to another worker.",
 			"Read file contents. Use when the user mentions a file, asks about code, or you need to understand existing code before making changes.",
 			&[
 				"read file",
@@ -148,7 +148,7 @@ pub(crate) fn catalog_descriptors_with_config(
 			],
 			&["cat Cargo.toml", "cat .env.example"],
 			&["path", "max_bytes"],
-			&["fs.read_text"],
+			&["Read"],
 			&["cat <path>", "more <path>"],
 			&[
 				"read a file from the current directory",
@@ -157,8 +157,8 @@ pub(crate) fn catalog_descriptors_with_config(
 			],
 		),
 		descriptor_catalog(
-			"fs.glob",
-			"Use this when the task is about many matching paths at once, especially wildcard searches, repeated filenames across directories, or counts like 'how many Cargo.toml files are there'. Do not use it for a single fuzzy basename or a path you expect to resolve to one best candidate; `fs.find` is better for that. It returns a bounded match set that is good for counting, enumerating, or selecting follow-up files.",
+			"Glob",
+			"Use this when the task is about many matching paths at once, especially wildcard searches, repeated filenames across directories, or counts like 'how many Cargo.toml files are there'. Do not use it for a single fuzzy basename or a path you expect to resolve to one best candidate; `Find` is better for that. It returns a bounded match set that is good for counting, enumerating, or selecting follow-up files.",
 			"Find files matching a pattern (e.g. `**/*.rs`, `src/**/*.ts`). Use when searching for files by extension or naming convention.",
 			&["glob", "pattern match", "find matching files"],
 			&[
@@ -166,7 +166,7 @@ pub(crate) fn catalog_descriptors_with_config(
 				"Count all Cargo.toml files in the workspace.",
 			],
 			&["pattern"],
-			&["fs.glob"],
+			&["Glob"],
 			&["glob <pattern>"],
 			&[
 				"find files that match a glob pattern inside the workspace",
@@ -174,25 +174,25 @@ pub(crate) fn catalog_descriptors_with_config(
 			],
 		),
 		descriptor_catalog(
-			"fs.exists",
+			"Exists",
 			"Use this for a yes/no existence check on a concrete path. Do not use it when you also need metadata, directory contents, or file contents. It returns existence plus kind when present.",
 			"Check if a specific file or directory exists before reading or writing.",
 			&["path exists", "does file exist", "check directory", "存在"],
 			&["Does tmp/test-excel.xlsx exist?"],
 			&["path"],
-			&["fs.exists"],
+			&["Exists"],
 			&["test -e <path>", "exists <path>"],
 			&["check whether a grounded file or directory exists"],
 		),
 		{
 			let mut desc = descriptor_catalog(
-				"fs.edit",
-				"Use this when you need to make a precise string replacement in an existing file. Provide a unique old_string that appears exactly once in the file, along with the new_string to replace it. Do not use it for creating new files or overwriting entire files; use fs.write for that.",
+				"Edit",
+				"Use this when you need to make a precise string replacement in an existing file. Provide a unique old_string that appears exactly once in the file, along with the new_string to replace it. Do not use it for creating new files or overwriting entire files; use Write for that.",
 				"Replace a specific string in an existing file. Use for targeted edits.",
 				&["edit", "replace", "modify", "file mutation"],
 				&["Replace 'foo' with 'bar' in config.toml"],
 				&["file_path", "old_string", "new_string"],
-				&["fs.edit"],
+				&["Edit"],
 				&["edit <path>"],
 				&[
 					"replace a unique string in an existing file",
@@ -204,13 +204,13 @@ pub(crate) fn catalog_descriptors_with_config(
 		},
 		{
 			let mut desc = descriptor_catalog(
-				"fs.write",
-				"Use this when you need to create a new file or overwrite an existing one entirely. Do not use it for targeted edits within an existing file; use fs.edit for that.",
+				"Write",
+				"Use this when you need to create a new file or overwrite an existing one entirely. Do not use it for targeted edits within an existing file; use Edit for that.",
 				"Create a new file or completely overwrite an existing one. Use for new files or full rewrites.",
 				&["write", "create", "overwrite", "file mutation"],
 				&["Create a new README.md with content"],
 				&["file_path", "content"],
-				&["fs.write"],
+				&["Write"],
 				&["write <path>"],
 				&[
 					"create a new file with specified content",
@@ -221,8 +221,8 @@ pub(crate) fn catalog_descriptors_with_config(
 			desc
 		},
 		descriptor_catalog(
-			"fs.grep",
-			"Use this when you need to search for a pattern in file contents across the workspace. Returns matched lines with file paths and line numbers. Do not use it for filename-based search; use fs.find or fs.glob for that.",
+			"Grep",
+			"Use this when you need to search for a pattern in file contents across the workspace. Returns matched lines with file paths and line numbers. Do not use it for filename-based search; use Find or Glob for that.",
 			"Search file contents for a pattern. Use when looking for specific code, functions, variables, or text across files.",
 			&[
 				"grep",
@@ -236,7 +236,7 @@ pub(crate) fn catalog_descriptors_with_config(
 				"Find function definitions matching 'fn main'.",
 			],
 			&["pattern"],
-			&["fs.grep"],
+			&["Grep"],
 			&["grep <pattern>"],
 			&[
 				"search for a pattern in file contents",
@@ -290,7 +290,7 @@ pub(crate) fn canonical_execution_from_runtime_input(
 	input: &Value,
 ) -> Option<CanonicalExecution> {
 	match tool_name {
-		"fs.exists" | "fs.inspect" | "fs.list_dir" | "fs.read_text" => {
+		"Exists" | "Inspect" | "ListDir" | "Read" => {
 			let request = ToolInvocationRequest {
 				invocation_key: format!("{tool_name}:agent-runtime-canonicalization"),
 				attempt: 1,
@@ -302,7 +302,7 @@ pub(crate) fn canonical_execution_from_runtime_input(
 			};
 			canonical_fs_execution(tool_name, &request).ok()
 		}
-		"fs.edit" | "fs.write" => {
+		"Edit" | "Write" => {
 			let request = ToolInvocationRequest {
 				invocation_key: format!("{tool_name}:agent-runtime-canonicalization"),
 				attempt: 1,
@@ -362,7 +362,7 @@ struct FsWriteTool {
 
 impl Tool for FsFindTool {
 	fn descriptor(&self) -> ToolDescriptor {
-		tool_descriptor("fs.find", &["name"], &["fs.find"])
+		tool_descriptor("Find", &["name"], &["Find"])
 	}
 
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
@@ -412,7 +412,7 @@ impl Tool for FsFindTool {
 
 impl Tool for FsInspectTool {
 	fn descriptor(&self) -> ToolDescriptor {
-		tool_descriptor("fs.inspect", &["path"], &["fs.inspect"])
+		tool_descriptor("Inspect", &["path"], &["Inspect"])
 	}
 
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
@@ -437,13 +437,13 @@ impl Tool for FsInspectTool {
 	}
 
 	fn policy_decision(&self, execution: &CanonicalExecution) -> Option<PolicyDecision> {
-		(execution.tool_name == "fs.inspect").then(|| evaluate_fs_policy(execution))
+		(execution.tool_name == "Inspect").then(|| evaluate_fs_policy(execution))
 	}
 }
 
 impl Tool for FsListDirTool {
 	fn descriptor(&self) -> ToolDescriptor {
-		tool_descriptor("fs.list_dir", &["path"], &["fs.list_dir"])
+		tool_descriptor("ListDir", &["path"], &["ListDir"])
 	}
 
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
@@ -489,13 +489,13 @@ impl Tool for FsListDirTool {
 	}
 
 	fn policy_decision(&self, execution: &CanonicalExecution) -> Option<PolicyDecision> {
-		(execution.tool_name == "fs.list_dir").then(|| evaluate_fs_policy(execution))
+		(execution.tool_name == "ListDir").then(|| evaluate_fs_policy(execution))
 	}
 }
 
 impl Tool for FsReadTextTool {
 	fn descriptor(&self) -> ToolDescriptor {
-		tool_descriptor("fs.read_text", &["path"], &["fs.read_text"])
+		tool_descriptor("Read", &["path"], &["Read"])
 	}
 
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
@@ -554,13 +554,13 @@ impl Tool for FsReadTextTool {
 	}
 
 	fn policy_decision(&self, execution: &CanonicalExecution) -> Option<PolicyDecision> {
-		(execution.tool_name == "fs.read_text").then(|| evaluate_fs_policy(execution))
+		(execution.tool_name == "Read").then(|| evaluate_fs_policy(execution))
 	}
 }
 
 impl Tool for FsGlobTool {
 	fn descriptor(&self) -> ToolDescriptor {
-		tool_descriptor("fs.glob", &["pattern"], &["fs.glob"])
+		tool_descriptor("Glob", &["pattern"], &["Glob"])
 	}
 
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
@@ -601,7 +601,7 @@ impl Tool for FsGlobTool {
 
 impl Tool for FsExistsTool {
 	fn descriptor(&self) -> ToolDescriptor {
-		tool_descriptor("fs.exists", &["path"], &["fs.exists"])
+		tool_descriptor("Exists", &["path"], &["Exists"])
 	}
 
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
@@ -643,16 +643,16 @@ impl Tool for FsExistsTool {
 	}
 
 	fn policy_decision(&self, execution: &CanonicalExecution) -> Option<PolicyDecision> {
-		(execution.tool_name == "fs.exists").then(|| evaluate_fs_policy(execution))
+		(execution.tool_name == "Exists").then(|| evaluate_fs_policy(execution))
 	}
 }
 
 impl Tool for FsEditTool {
 	fn descriptor(&self) -> ToolDescriptor {
 		write_tool_descriptor(
-			"fs.edit",
+			"Edit",
 			&["file_path", "old_string", "new_string"],
-			&["fs.edit"],
+			&["Edit"],
 		)
 	}
 
@@ -749,13 +749,13 @@ impl Tool for FsEditTool {
 	}
 
 	fn policy_decision(&self, execution: &CanonicalExecution) -> Option<PolicyDecision> {
-		(execution.tool_name == "fs.edit").then(|| evaluate_fs_write_policy(execution))
+		(execution.tool_name == "Edit").then(|| evaluate_fs_write_policy(execution))
 	}
 }
 
 impl Tool for FsWriteTool {
 	fn descriptor(&self) -> ToolDescriptor {
-		write_tool_descriptor("fs.write", &["file_path", "content"], &["fs.write"])
+		write_tool_descriptor("Write", &["file_path", "content"], &["Write"])
 	}
 
 	fn invoke(&self, request: ToolInvocationRequest) -> Result<Value, ToolFailure> {
@@ -815,7 +815,7 @@ impl Tool for FsWriteTool {
 	}
 
 	fn policy_decision(&self, execution: &CanonicalExecution) -> Option<PolicyDecision> {
-		(execution.tool_name == "fs.write").then(|| evaluate_fs_write_policy(execution))
+		(execution.tool_name == "Write").then(|| evaluate_fs_write_policy(execution))
 	}
 }
 
@@ -845,7 +845,7 @@ fn fs_tool_contract(name: &str) -> Option<ToolContract> {
 		ToolRetryPolicy::Never,
 	);
 	match name {
-		"fs.find" => Some(ToolContract {
+		"Find" => Some(ToolContract {
 			selection: selection_contract(
 				&[
 					"Use when only a basename or fuzzy workspace reference is known and a grounded path must be resolved first.",
@@ -855,8 +855,8 @@ fn fs_tool_contract(name: &str) -> Option<ToolContract> {
 					"Do not use for recursive file counting or glob-style pattern expansion.",
 				],
 				&[
-					"Commonly confused with fs.glob when the request already contains a wildcard pattern.",
-					"Commonly confused with fs.read_text when the path is already concrete.",
+					"Commonly confused with Glob when the request already contains a wildcard pattern.",
+					"Commonly confused with Read when the path is already concrete.",
 				],
 			),
 			input: input_contract(
@@ -896,18 +896,18 @@ fn fs_tool_contract(name: &str) -> Option<ToolContract> {
 				serde_json::Map::from_iter([("kind".to_string(), json!("any"))]),
 			),
 		}),
-		"fs.read_text" => Some(ToolContract {
+		"Read" => Some(ToolContract {
 			selection: selection_contract(
 				&[
 					"Use when the path is already grounded and the user needs textual file contents.",
 				],
 				&[
 					"Do not use for binary files or directory listings.",
-					"Do not use when the path is still fuzzy and fs.find should run first.",
+					"Do not use when the path is still fuzzy and Find should run first.",
 				],
 				&[
-					"Commonly confused with fs.inspect when the user wants metadata instead of contents.",
-					"Commonly confused with command.run for shell-based cat requests that a direct read can answer safely.",
+					"Commonly confused with Inspect when the user wants metadata instead of contents.",
+					"Commonly confused with Bash for shell-based cat requests that a direct read can answer safely.",
 				],
 			),
 			input: input_contract(
@@ -948,7 +948,7 @@ fn fs_tool_contract(name: &str) -> Option<ToolContract> {
 				ExtractionHint::ConcretePath,
 			),
 		}),
-		"fs.list_dir" => Some(ToolContract {
+		"ListDir" => Some(ToolContract {
 			grounding: grounding_contract_simple(
 				GroundingStrategy::PathBased,
 				&["path"],
@@ -958,7 +958,7 @@ fn fs_tool_contract(name: &str) -> Option<ToolContract> {
 			),
 			..ToolContract::default()
 		}),
-		"fs.inspect" => Some(ToolContract {
+		"Inspect" => Some(ToolContract {
 			grounding: grounding_contract_simple(
 				GroundingStrategy::PathBased,
 				&["path"],
@@ -968,7 +968,7 @@ fn fs_tool_contract(name: &str) -> Option<ToolContract> {
 			),
 			..ToolContract::default()
 		}),
-		"fs.exists" => Some(ToolContract {
+		"Exists" => Some(ToolContract {
 			grounding: grounding_contract_simple(
 				GroundingStrategy::PathBased,
 				&["path"],
@@ -978,7 +978,7 @@ fn fs_tool_contract(name: &str) -> Option<ToolContract> {
 			),
 			..ToolContract::default()
 		}),
-		"fs.glob" => Some(ToolContract {
+		"Glob" => Some(ToolContract {
 			grounding: grounding_contract_simple(
 				GroundingStrategy::PatternBased,
 				&["pattern"],
@@ -988,7 +988,7 @@ fn fs_tool_contract(name: &str) -> Option<ToolContract> {
 			),
 			..ToolContract::default()
 		}),
-		"fs.edit" => Some(ToolContract {
+		"Edit" => Some(ToolContract {
 			grounding: grounding_contract_simple(
 				GroundingStrategy::PathBased,
 				&["file_path", "old_string", "new_string"],
@@ -998,7 +998,7 @@ fn fs_tool_contract(name: &str) -> Option<ToolContract> {
 			),
 			..ToolContract::default()
 		}),
-		"fs.write" => Some(ToolContract {
+		"Write" => Some(ToolContract {
 			grounding: grounding_contract_simple(
 				GroundingStrategy::PathBased,
 				&["file_path", "content"],
@@ -1008,7 +1008,7 @@ fn fs_tool_contract(name: &str) -> Option<ToolContract> {
 			),
 			..ToolContract::default()
 		}),
-		"fs.grep" => Some(ToolContract {
+		"Grep" => Some(ToolContract {
 			grounding: grounding_contract_simple(
 				GroundingStrategy::PatternBased,
 				&["pattern"],
@@ -1856,7 +1856,7 @@ fn render_directory_message(path: &Path, entries: &[Value], truncated: bool) -> 
 }
 
 // ---------------------------------------------------------------------------
-// fs.grep
+// Grep
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -1876,11 +1876,11 @@ impl Tool for FsGrepTool {
 			allowed_write_roots: Vec::new(),
 		};
 		ToolDescriptor {
-			name: "fs.grep".to_string(),
+			name: "Grep".to_string(),
 			version: "1.0.0".to_string(),
 			input_schema: contract_tool_schema(None, &base_required_field_names(&["pattern"])),
 			output_schema: "tool_observation.v1".to_string(),
-			required_capabilities: vec!["fs.grep".to_string()],
+			required_capabilities: vec!["Grep".to_string()],
 			runtime_constraints,
 			contract: None,
 		}
@@ -2142,12 +2142,12 @@ mod tests {
 			.expect("tempdir should canonicalize");
 
 		let execution = canonical_execution_from_runtime_input(
-			"fs.list_dir",
+			"ListDir",
 			&json!({ "path": target.display().to_string() }),
 		)
 		.expect("filesystem canonical execution should project");
 
-		assert_eq!(execution.tool_name, "fs.list_dir");
+		assert_eq!(execution.tool_name, "ListDir");
 		assert_eq!(
 			execution.resource_scope.resolved_targets,
 			vec![target.display().to_string()]
@@ -2157,9 +2157,9 @@ mod tests {
 	#[test]
 	fn fs_policy_requires_approval_for_out_of_scope_paths() {
 		let execution = CanonicalExecution {
-			tool_name: "fs.list_dir".to_string(),
-			program: "fs.list_dir".to_string(),
-			argv: vec!["fs.list_dir".to_string(), "/tmp/outside".to_string()],
+			tool_name: "ListDir".to_string(),
+			program: "ListDir".to_string(),
+			argv: vec!["ListDir".to_string(), "/tmp/outside".to_string()],
 			invocation_mode: InvocationMode::DirectExec,
 			shell_context: None,
 			cwd: "/workspace".to_string(),
@@ -2195,7 +2195,7 @@ mod tests {
 
 		let output = tool
 			.invoke(ToolInvocationRequest {
-				invocation_key: "fs.exists:test".to_string(),
+				invocation_key: "Exists:test".to_string(),
 				attempt: 1,
 				input: json!({ "path": "note.txt" }),
 				sandbox_profile: SandboxProfile::ReadOnlyFs,
@@ -2203,16 +2203,16 @@ mod tests {
 				allowed_read_roots: vec![directory.path().to_path_buf()],
 				allowed_write_roots: Vec::new(),
 			})
-			.expect("fs.exists invocation should succeed");
+			.expect("Exists invocation should succeed");
 
 		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
-			.expect("fs.exists output should deserialize as ToolOutputEnvelope");
+			.expect("Exists output should deserialize as ToolOutputEnvelope");
 		assert!(envelope.ok);
 		assert!(!envelope.terminal);
 		assert_eq!(envelope.error_type, None);
 		let observed_path = envelope.data["path"]
 			.as_str()
-			.expect("fs.exists data.path should be a string");
+			.expect("Exists data.path should be a string");
 		assert!(observed_path.ends_with("/note.txt"));
 		assert_eq!(
 			envelope.message,
@@ -2223,7 +2223,7 @@ mod tests {
 	}
 
 	// -----------------------------------------------------------------------
-	// fs.grep tests
+	// Grep tests
 	// -----------------------------------------------------------------------
 
 	fn grep_tool() -> FsGrepTool {
@@ -2234,7 +2234,7 @@ mod tests {
 
 	fn grep_request(input: Value, root: &Path) -> ToolInvocationRequest {
 		ToolInvocationRequest {
-			invocation_key: "fs.grep:test".to_string(),
+			invocation_key: "Grep:test".to_string(),
 			attempt: 1,
 			input,
 			sandbox_profile: SandboxProfile::ReadOnlyFs,
@@ -2475,7 +2475,7 @@ mod tests {
 	}
 
 	// -----------------------------------------------------------------------
-	// fs.edit tests
+	// Edit tests
 	// -----------------------------------------------------------------------
 
 	fn write_request(input: Value, write_roots: Vec<PathBuf>) -> ToolInvocationRequest {
@@ -2508,10 +2508,10 @@ mod tests {
 				}),
 				vec![directory.path().to_path_buf()],
 			))
-			.expect("fs.edit invocation should succeed");
+			.expect("Edit invocation should succeed");
 
 		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
-			.expect("fs.edit output should deserialize as ToolOutputEnvelope");
+			.expect("Edit output should deserialize as ToolOutputEnvelope");
 		assert!(envelope.ok);
 		assert_eq!(envelope.error_type, None);
 		assert_eq!(envelope.data["match_count"], 1);
@@ -2540,10 +2540,10 @@ mod tests {
 				}),
 				vec![directory.path().to_path_buf()],
 			))
-			.expect("fs.edit invocation should succeed even for zero matches");
+			.expect("Edit invocation should succeed even for zero matches");
 
 		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
-			.expect("fs.edit output should deserialize as ToolOutputEnvelope");
+			.expect("Edit output should deserialize as ToolOutputEnvelope");
 		assert!(!envelope.ok);
 		assert_eq!(envelope.error_type.as_deref(), Some("string_not_found"));
 	}
@@ -2566,10 +2566,10 @@ mod tests {
 				}),
 				vec![directory.path().to_path_buf()],
 			))
-			.expect("fs.edit invocation should succeed even for multiple matches");
+			.expect("Edit invocation should succeed even for multiple matches");
 
 		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
-			.expect("fs.edit output should deserialize as ToolOutputEnvelope");
+			.expect("Edit output should deserialize as ToolOutputEnvelope");
 		assert!(!envelope.ok);
 		assert_eq!(envelope.error_type.as_deref(), Some("multiple_matches"));
 		assert_eq!(envelope.data["match_count"], 2);
@@ -2594,16 +2594,16 @@ mod tests {
 				}),
 				vec![directory.path().to_path_buf()],
 			))
-			.expect("fs.edit invocation should succeed even for missing file");
+			.expect("Edit invocation should succeed even for missing file");
 
 		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
-			.expect("fs.edit output should deserialize as ToolOutputEnvelope");
+			.expect("Edit output should deserialize as ToolOutputEnvelope");
 		assert!(!envelope.ok);
 		assert_eq!(envelope.error_type.as_deref(), Some("file_not_found"));
 	}
 
 	// -----------------------------------------------------------------------
-	// fs.write tests
+	// Write tests
 	// -----------------------------------------------------------------------
 
 	#[test]
@@ -2622,10 +2622,10 @@ mod tests {
 				}),
 				vec![directory.path().to_path_buf()],
 			))
-			.expect("fs.write invocation should succeed");
+			.expect("Write invocation should succeed");
 
 		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
-			.expect("fs.write output should deserialize as ToolOutputEnvelope");
+			.expect("Write output should deserialize as ToolOutputEnvelope");
 		assert!(envelope.ok);
 		assert_eq!(envelope.data["created"], true);
 		assert_eq!(envelope.data["bytes_written"], 17);
@@ -2651,10 +2651,10 @@ mod tests {
 				}),
 				vec![directory.path().to_path_buf()],
 			))
-			.expect("fs.write invocation should succeed");
+			.expect("Write invocation should succeed");
 
 		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
-			.expect("fs.write output should deserialize as ToolOutputEnvelope");
+			.expect("Write output should deserialize as ToolOutputEnvelope");
 		assert!(envelope.ok);
 		assert_eq!(envelope.data["created"], false);
 
@@ -2678,10 +2678,10 @@ mod tests {
 				}),
 				vec![directory.path().to_path_buf()],
 			))
-			.expect("fs.write invocation should succeed");
+			.expect("Write invocation should succeed");
 
 		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
-			.expect("fs.write output should deserialize as ToolOutputEnvelope");
+			.expect("Write output should deserialize as ToolOutputEnvelope");
 		assert!(envelope.ok);
 		assert_eq!(envelope.data["created"], true);
 
@@ -2705,10 +2705,10 @@ mod tests {
 				}),
 				vec![directory.path().to_path_buf()],
 			))
-			.expect("fs.write invocation should succeed");
+			.expect("Write invocation should succeed");
 
 		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
-			.expect("fs.write output should deserialize as ToolOutputEnvelope");
+			.expect("Write output should deserialize as ToolOutputEnvelope");
 		assert!(envelope.ok);
 		assert_eq!(envelope.data["created"], true);
 		assert_eq!(envelope.data["bytes_written"], 0);
@@ -2724,9 +2724,9 @@ mod tests {
 	#[test]
 	fn fs_write_policy_requires_approval_for_out_of_scope_paths() {
 		let execution = CanonicalExecution {
-			tool_name: "fs.edit".to_string(),
-			program: "fs.edit".to_string(),
-			argv: vec!["fs.edit".to_string(), "/tmp/outside".to_string()],
+			tool_name: "Edit".to_string(),
+			program: "Edit".to_string(),
+			argv: vec!["Edit".to_string(), "/tmp/outside".to_string()],
 			invocation_mode: InvocationMode::DirectExec,
 			shell_context: None,
 			cwd: "/workspace".to_string(),
@@ -2755,12 +2755,9 @@ mod tests {
 	#[test]
 	fn fs_write_policy_allows_in_scope_paths() {
 		let execution = CanonicalExecution {
-			tool_name: "fs.write".to_string(),
-			program: "fs.write".to_string(),
-			argv: vec![
-				"fs.write".to_string(),
-				"/workspace/new_file.txt".to_string(),
-			],
+			tool_name: "Write".to_string(),
+			program: "Write".to_string(),
+			argv: vec!["Write".to_string(), "/workspace/new_file.txt".to_string()],
 			invocation_mode: InvocationMode::DirectExec,
 			shell_context: None,
 			cwd: "/workspace".to_string(),
@@ -2786,10 +2783,10 @@ mod tests {
 	#[test]
 	fn fs_write_overwrite_execution_detected_via_argv() {
 		let overwrite = CanonicalExecution {
-			tool_name: "fs.write".to_string(),
-			program: "fs.write".to_string(),
+			tool_name: "Write".to_string(),
+			program: "Write".to_string(),
 			argv: vec![
-				"fs.write".to_string(),
+				"Write".to_string(),
 				"/workspace/existing.txt".to_string(),
 				"--overwrite".to_string(),
 			],
@@ -2813,9 +2810,9 @@ mod tests {
 		assert!(is_overwrite_execution(&overwrite));
 
 		let create = CanonicalExecution {
-			tool_name: "fs.write".to_string(),
-			program: "fs.write".to_string(),
-			argv: vec!["fs.write".to_string(), "/workspace/new.txt".to_string()],
+			tool_name: "Write".to_string(),
+			program: "Write".to_string(),
+			argv: vec!["Write".to_string(), "/workspace/new.txt".to_string()],
 			invocation_mode: InvocationMode::DirectExec,
 			shell_context: None,
 			cwd: "/workspace".to_string(),
@@ -2837,7 +2834,7 @@ mod tests {
 	}
 
 	// -----------------------------------------------------------------------
-	// fs.read_text tests
+	// Read tests
 	// -----------------------------------------------------------------------
 
 	#[test]
@@ -2855,7 +2852,7 @@ mod tests {
 		};
 		let output = tool
 			.invoke(ToolInvocationRequest {
-				invocation_key: "fs.read_text:test-truncation".to_string(),
+				invocation_key: "Read:test-truncation".to_string(),
 				attempt: 1,
 				input: json!({ "path": "big.txt", "max_bytes": 10 }),
 				sandbox_profile: SandboxProfile::ReadOnlyFs,
@@ -2895,7 +2892,7 @@ mod tests {
 		};
 		let output = tool
 			.invoke(ToolInvocationRequest {
-				invocation_key: "fs.read_text:test-no-truncation".to_string(),
+				invocation_key: "Read:test-no-truncation".to_string(),
 				attempt: 1,
 				input: json!({ "path": "small.txt" }),
 				sandbox_profile: SandboxProfile::ReadOnlyFs,

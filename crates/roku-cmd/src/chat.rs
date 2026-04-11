@@ -646,8 +646,7 @@ fn execute_turn(
 						prompt_tokens,
 						output_tokens,
 						..
-					} = &event
-						&& let Ok(mut guard) = captured_tokens_task.lock()
+					} = &event && let Ok(mut guard) = captured_tokens_task.lock()
 					{
 						guard.prompt = guard.prompt.saturating_add(*prompt_tokens);
 						guard.output = guard.output.saturating_add(*output_tokens);
@@ -663,8 +662,7 @@ fn execute_turn(
 						prompt_tokens,
 						output_tokens,
 						..
-					} = &event
-						&& let Ok(mut guard) = captured_tokens_task.lock()
+					} = &event && let Ok(mut guard) = captured_tokens_task.lock()
 					{
 						guard.prompt = guard.prompt.saturating_add(*prompt_tokens);
 						guard.output = guard.output.saturating_add(*output_tokens);

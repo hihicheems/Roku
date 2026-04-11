@@ -308,7 +308,7 @@ mod tests {
 
 	fn sample_canonical_execution(cwd: &str) -> CanonicalExecution {
 		CanonicalExecution {
-			tool_name: "command.run".to_string(),
+			tool_name: "Bash".to_string(),
 			program: "pwd".to_string(),
 			argv: vec!["pwd".to_string()],
 			invocation_mode: InvocationMode::DirectExec,
@@ -339,7 +339,7 @@ mod tests {
 			payload: json!({
 				"error_code": "approval_required",
 				"message": "approval required",
-				"tool_name": "command.run",
+				"tool_name": "Bash",
 				"tool_input": {
 					"command": "pwd",
 					"cwd": cwd
@@ -371,7 +371,7 @@ mod tests {
 			payload: json!({
 				"error_code": "approval_required",
 				"message": "approval required",
-				"tool_name": "fs.list_dir",
+				"tool_name": "ListDir",
 				"tool_input": {
 					"task_id": task_id.0,
 					"node_id": node_id.0,
@@ -384,9 +384,9 @@ mod tests {
 				},
 				"policy_decision": sample_fs_policy_decision(),
 				"canonical_execution": {
-					"tool_name": "fs.list_dir",
-					"program": "fs.list_dir",
-					"argv": ["fs.list_dir", target_path],
+					"tool_name": "ListDir",
+					"program": "ListDir",
+					"argv": ["ListDir", target_path],
 					"invocation_mode": "direct_exec",
 					"shell_context": null,
 					"cwd": workspace_cwd,
@@ -461,7 +461,7 @@ mod tests {
 		assert_eq!(
 			response.message,
 			format!(
-				"🛡️ Approval Request\n\nTool: command.run\nAction: Run command pwd from {cwd_text}\nRisk: medium\nReason: the command is outside the constrained built-in allowlist"
+				"🛡️ Approval Request\n\nTool: Bash\nAction: Run command pwd from {cwd_text}\nRisk: medium\nReason: the command is outside the constrained built-in allowlist"
 			)
 		);
 		assert_eq!(task.state, TaskState::WaitingApproval);
@@ -540,7 +540,7 @@ mod tests {
 		);
 		let payload = serde_json::from_str::<serde_json::Value>(&result.payload)
 			.expect("payload should decode");
-		assert_eq!(payload["tool_name"], "command.run");
+		assert_eq!(payload["tool_name"], "Bash");
 		assert_eq!(payload["output"]["data"]["command"], "pwd");
 		assert_eq!(payload["output"]["data"]["digest"], "direct-route-digest");
 	}
@@ -570,8 +570,8 @@ mod tests {
 			node_id: NodeId("direct-route".to_string()),
 			kind: TaskNodeKind::Execution,
 			description: "direct route filesystem review".to_string(),
-			resources: vec![ResourceSelector::tool("fs.list_dir".to_string())],
-			capabilities: vec!["fs.list_dir".to_string()],
+			resources: vec![ResourceSelector::tool("ListDir".to_string())],
+			capabilities: vec!["ListDir".to_string()],
 			retry_policy: RetryPolicy::default(),
 			..TaskNode::default()
 		};
@@ -590,7 +590,7 @@ mod tests {
 		assert_eq!(
 			response.message,
 			format!(
-				"🛡️ Approval Request\n\nTool: fs.list_dir\nAction: List directory {target_path_text}\nRisk: high\nReason: the requested path is outside the current allowed workspace roots"
+				"🛡️ Approval Request\n\nTool: ListDir\nAction: List directory {target_path_text}\nRisk: high\nReason: the requested path is outside the current allowed workspace roots"
 			)
 		);
 
@@ -618,7 +618,7 @@ mod tests {
 			.expect("execution result should be persisted");
 		let payload = serde_json::from_str::<serde_json::Value>(&result.payload)
 			.expect("payload should decode");
-		assert_eq!(payload["tool_name"], "fs.list_dir");
+		assert_eq!(payload["tool_name"], "ListDir");
 		assert_eq!(payload["output"]["data"]["path"], target_path_text);
 	}
 }

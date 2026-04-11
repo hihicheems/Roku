@@ -135,7 +135,7 @@ pub(super) fn prepare_command(
 			&working_directory,
 			&scope_root,
 			"invalid_command_syntax",
-			"command.run could not parse the explicit command string.",
+			"Bash could not parse the explicit command string.",
 			true,
 		)));
 	};
@@ -147,7 +147,7 @@ pub(super) fn prepare_command(
 			&working_directory,
 			&scope_root,
 			"empty_command",
-			"command.run requires a non-empty command.",
+			"Bash requires a non-empty command.",
 			true,
 		)));
 	}
@@ -173,13 +173,9 @@ pub(super) fn prepare_command(
 	};
 
 	if policy.level == CommandPolicyLevel::AllowWithLog {
-		let record = LogRecord::new(
-			"command.run",
-			LogLevel::Info,
-			"executing allow_with_log command",
-		)
-		.with_field("program", program.as_str())
-		.with_field("args", format!("{arguments:?}"));
+		let record = LogRecord::new("Bash", LogLevel::Info, "executing allow_with_log command")
+			.with_field("program", program.as_str())
+			.with_field("args", format!("{arguments:?}"));
 		let _ = emit_global_log(record);
 	}
 
@@ -193,7 +189,7 @@ pub(super) fn prepare_command(
 			&working_directory,
 			&scope_root,
 			"path_out_of_scope",
-			&format!("`{argument}` resolves outside the allowed workspace roots for command.run."),
+			&format!("`{argument}` resolves outside the allowed workspace roots for Bash."),
 			true,
 		)));
 	}
@@ -255,7 +251,7 @@ pub(crate) fn evaluate_command_policy(
 	}
 
 	Err(format!(
-		"`{program}` is outside the allowed command policy for command.run."
+		"`{program}` is outside the allowed command policy for Bash."
 	))
 }
 
@@ -513,13 +509,12 @@ fn deny_reason_git(arguments: &[String]) -> Option<String> {
 pub(super) fn validate_shell_syntax(command_text: &str) -> Result<(), String> {
 	if command_text.contains('\n') || command_text.contains('\r') {
 		return Err(
-			"command.run does not accept multi-line commands. Use a single explicit command."
-				.to_string(),
+			"Bash does not accept multi-line commands. Use a single explicit command.".to_string(),
 		);
 	}
 	if command_text.contains("$(") {
 		return Err(
-			"command.run does not accept command substitution `$(...)`. Pass values explicitly."
+			"Bash does not accept command substitution `$(...)`. Pass values explicitly."
 				.to_string(),
 		);
 	}
@@ -529,7 +524,7 @@ pub(super) fn validate_shell_syntax(command_text: &str) -> Result<(), String> {
 	for &token in &['|', '&', ';', '>', '<'] {
 		if command_text.contains(token) {
 			return Err(format!(
-				"command.run does not accept shell operator `{token}`. \
+				"Bash does not accept shell operator `{token}`. \
 				 The executor uses direct exec without a shell. \
 				 Run each command separately instead."
 			));
@@ -558,7 +553,7 @@ fn build_canonical_execution(
 	};
 	let action_class = ExecutionActionClass::Exec;
 	let digest = compute_digest(
-		"command.run",
+		"Bash",
 		&argv[0],
 		argv,
 		working_directory,
@@ -568,7 +563,7 @@ fn build_canonical_execution(
 	)?;
 
 	Ok(CanonicalExecution {
-		tool_name: "command.run".to_string(),
+		tool_name: "Bash".to_string(),
 		program: argv[0].clone(),
 		argv: argv.to_vec(),
 		invocation_mode: InvocationMode::DirectExec,
@@ -714,7 +709,7 @@ fn resolve_working_directory(
 		.map_err(|error| format!("failed to resolve command working directory: {error}"))?;
 	if !canonical.is_dir() {
 		return Err(format!(
-			"`{}` is not a directory for command.run.",
+			"`{}` is not a directory for Bash.",
 			canonical.display()
 		));
 	}
@@ -725,7 +720,7 @@ fn resolve_working_directory(
 	});
 	if !within_scope {
 		return Err(format!(
-			"`{}` is outside the allowed workspace roots for command.run.",
+			"`{}` is outside the allowed workspace roots for Bash.",
 			canonical.display()
 		));
 	}

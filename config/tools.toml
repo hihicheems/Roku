@@ -4,7 +4,7 @@
 # follow-up routing.
 
 [[tools]]
-name = "skill.ensure_installed"
+name = "SkillInstall"
 role = "skill_install"
 discoverable = false
 description = "Use this when the user wants a skill installed from a concrete supported source URL so it becomes available locally. Do not use it to run a skill or explain what an already installed skill does. The result is an installation report you can use to confirm availability and source details."
@@ -14,10 +14,10 @@ examples = ["Install the claude-api skill from a GitHub URL."]
 input_schema = ["source_url"]
 risk = "Medium"
 cost = { estimated_tokens = 0, estimated_latency_ms = 120000 }
-required_capabilities = ["skill.ensure_installed"]
+required_capabilities = ["SkillInstall"]
 
 [[tools]]
-name = "skill.execute"
+name = "SkillRun"
 role = "skill_execute"
 discoverable = false
 description = "Run an already installed script-backed skill when the user wants that skill to actually do work in the workspace. Do not use it to explain what a skill does or summarize its local docs; use a conversational worker for that. The result is grounded execution evidence, not just advisory prose."
@@ -27,7 +27,7 @@ examples = ["Use the skill-creator skill to generate a new Python skill in the p
 input_schema = ["goal", "summary", "conversation_history"]
 risk = "Medium"
 cost = { estimated_tokens = 12000, estimated_latency_ms = 120000 }
-required_capabilities = ["skill.execute"]
+required_capabilities = ["SkillRun"]
 
 ## inventory.describe, research.synthesize, data.execute, review.assess, and general.execute removed
 ## — the LLM answers directly instead of nesting another LLM call through a role-specific system prompt.

@@ -293,7 +293,7 @@ mod tests {
 
 	fn sample_execution() -> CanonicalExecution {
 		CanonicalExecution {
-			tool_name: "command.run".to_string(),
+			tool_name: "Bash".to_string(),
 			program: "rm".to_string(),
 			argv: vec!["rm".to_string(), "-rf".to_string(), "tmp".to_string()],
 			invocation_mode: InvocationMode::DirectExec,
@@ -316,7 +316,7 @@ mod tests {
 
 	fn require_approval_error() -> ToolRuntimeError {
 		ToolRuntimeError::ExecutionFailed {
-			tool: "command.run".to_string(),
+			tool: "Bash".to_string(),
 			attempts: 0,
 			message:
 				"policy_outcome=require_approval reason_code=approval_required_by_untrusted_program"
@@ -335,7 +335,7 @@ mod tests {
 
 	fn command_not_allowed_error() -> ToolRuntimeError {
 		ToolRuntimeError::ExecutionFailed {
-			tool: "command.run".to_string(),
+			tool: "Bash".to_string(),
 			attempts: 0,
 			message: "command_not_allowed: metacharacters are not allowed".to_string(),
 			retriable: false,
@@ -349,7 +349,7 @@ mod tests {
 			&sample_spec(),
 			&sample_node(),
 			"worker-1",
-			"command.run",
+			"Bash",
 			Some(json!({ "command": "rm -rf tmp" })),
 			Some(sample_execution()),
 			require_approval_error(),
@@ -373,7 +373,7 @@ mod tests {
 			&sample_spec(),
 			&sample_node(),
 			"worker-1",
-			"command.run",
+			"Bash",
 			Some(json!({ "command": "rm -rf tmp" })),
 			Some(sample_execution()),
 			command_not_allowed_error(),

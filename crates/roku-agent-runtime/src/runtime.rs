@@ -1156,11 +1156,7 @@ impl GenericAgentRuntime {
 
 			// Execute regular tool calls and collect ToolResult messages.
 			for tc in &accumulated_tool_calls {
-				// Resolve the tool name — some models drop the namespace prefix
-				// (e.g. returning "run" instead of "command.run"). Match against
-				// visible tools by suffix if exact match fails.
-				let resolved_name = resolve_tool_name(&tc.name, &loop_state.visible_tools);
-				let tool_name = &resolved_name;
+				let tool_name = &tc.name;
 				let arguments = tc.arguments.clone();
 
 				// Check approval gate before executing the tool.
@@ -1896,57 +1892,6 @@ fn terminal_decision(
 	}
 }
 
-/// Resolve a tool name against the visible tools list.
-///
-/// Some models drop the namespace prefix when using dot-separated tool names
-/// in OpenAI function calling format (e.g., returning `"run"` instead of
-/// `"command.run"`, or `"list_dir"` instead of `"fs.list_dir"`).
-///
-/// This function first tries an exact match, then falls back to suffix matching
-/// (looking for a tool that ends with `.{name}`). If exactly one tool matches,
-/// the full name is returned. Otherwise, the original name is returned unchanged.
-/// Known short name → full tool name mappings for common ambiguous cases.
-/// When models drop the namespace prefix, these resolve the ambiguity.
-const TOOL_NAME_ALIASES: &[(&str, &str)] = &[
-	("run", "command.run"),
-	("search", "web.search"),
-	("fetch", "web.fetch"),
-	("edit", "fs.edit"),
-	("write", "fs.write"),
-	("read", "fs.read_text"),
-	("read_text", "fs.read_text"),
-	("list_dir", "fs.list_dir"),
-	("grep", "fs.grep"),
-	("glob", "fs.glob"),
-	("find", "fs.find"),
-	("exists", "fs.exists"),
-	("inspect", "fs.inspect"),
-];
-
-fn resolve_tool_name(name: &str, visible_tools: &[String]) -> String {
-	// Exact match.
-	if visible_tools.iter().any(|t| t == name) {
-		return name.to_string();
-	}
-	// Check known aliases first (handles ambiguous cases like "run").
-	for &(alias, full_name) in TOOL_NAME_ALIASES {
-		if name == alias && visible_tools.iter().any(|t| t == full_name) {
-			return full_name.to_string();
-		}
-	}
-	// Suffix match: find tools ending with ".{name}".
-	let suffix = format!(".{name}");
-	let candidates: Vec<&String> = visible_tools
-		.iter()
-		.filter(|t| t.ends_with(&suffix))
-		.collect();
-	if candidates.len() == 1 {
-		return candidates[0].clone();
-	}
-	// No match — return original, execute_loop_tool_invocation will handle the error.
-	name.to_string()
-}
-
 fn normalize_tool_loop_observation(observation: ToolObservation) -> ToolObservation {
 	// general.execute has been removed; observations from all tools are returned as-is.
 	observation
@@ -2121,8 +2066,8 @@ mod tests {
 			working_directory: "/workspace".to_string(),
 			visible_tools: vec![
 				"inventory.describe".to_string(),
-				"fs.find".to_string(),
-				"web.search".to_string(),
+				"Find".to_string(),
+				"WebSearch".to_string(),
 			],
 			bound_resources: vec![ResourceSelector::tool("inventory.describe".to_string())],
 			route_decision: crate::router::RouteDecision::new(
@@ -2316,8 +2261,8 @@ mod tests {
 			}),
 		);
 		let runtime = GenericAgentRuntime::with_skill_registry(registry);
-		let node = node_with_capability("skill.ensure_installed");
-		let mut spec = spec_with_capabilities(vec!["skill.ensure_installed"]);
+		let node = node_with_capability("SkillInstall");
+		let mut spec = spec_with_capabilities(vec!["SkillInstall"]);
 		spec.context.summary =
 			"Goal: install skill\nStep: Ensure requested skill from source URL is installed"
 				.to_string();
@@ -2330,7 +2275,7 @@ mod tests {
 		let result = runtime.execute(&spec, &node);
 		assert_eq!(result.status, ResultStatus::Ok);
 		assert_eq!(result.evidence[0].value, "skill-worker");
-		assert_eq!(result.evidence[1].value, "skill.ensure_installed");
+		assert_eq!(result.evidence[1].value, "SkillInstall");
 		assert!(
 			payload_value(&result)["message"]
 				.as_str()
@@ -2593,7 +2538,7 @@ mod tests {
 		let (route_router, prompts) = router_with_json_responses(vec![
 			serde_json::json!({
 				"action": "call_tool",
-				"tool_name": "fs.inspect",
+				"tool_name": "Inspect",
 				"arguments": { "path": cwd },
 				"reason": "Inspect the grounded workspace path before answering.",
 				"final_message": null
@@ -2630,7 +2575,7 @@ mod tests {
 			0.95,
 			false,
 			crate::router::RouteRisk::Low,
-			vec!["fs.inspect".to_string()],
+			vec!["Inspect".to_string()],
 			Vec::new(),
 			Vec::new(),
 			"filesystem request",
@@ -2665,10 +2610,7 @@ mod tests {
 			"Loop concluded after a non-terminal filesystem observation."
 		);
 		assert_eq!(loop_state.history.len(), 2);
-		assert_eq!(
-			loop_state.history[0].tool_name.as_deref(),
-			Some("fs.inspect")
-		);
+		assert_eq!(loop_state.history[0].tool_name.as_deref(), Some("Inspect"));
 		assert_eq!(loop_state.history[1].action, StepAction::FinalAnswer);
 		assert_eq!(
 			loop_state.status,
@@ -2676,7 +2618,7 @@ mod tests {
 		);
 		assert_eq!(
 			loop_state.visible_tools.first().map(String::as_str),
-			Some("fs.inspect")
+			Some("Inspect")
 		);
 		assert!(
 			loop_state
@@ -2692,11 +2634,11 @@ mod tests {
 
 		let prompts = prompts.lock().expect("prompt lock should succeed");
 		assert_eq!(prompts.len(), 2);
-		// First LLM call: tool definitions include fs.inspect.
-		assert!(prompts[0].contains("\"fs.inspect\""));
-		// Second LLM call: messages include the ToolResult from the first fs.inspect call,
-		// so the fs.inspect name should appear in the captured messages JSON.
-		assert!(prompts[1].contains("fs.inspect"));
+		// First LLM call: tool definitions include Inspect.
+		assert!(prompts[0].contains("\"Inspect\""));
+		// Second LLM call: messages include the ToolResult from the first Inspect call,
+		// so the Inspect name should appear in the captured messages JSON.
+		assert!(prompts[1].contains("Inspect"));
 	}
 
 	#[test]
@@ -2771,7 +2713,7 @@ mod tests {
 		let (route_router, _prompts) = router_with_json_responses(vec![
 			serde_json::json!({
 				"action": "call_tool",
-				"tool_name": "command.run",
+				"tool_name": "Bash",
 				"arguments": {
 					"command": "dd if=/dev/zero of=/dev/null"
 				},
@@ -2783,7 +2725,7 @@ mod tests {
 			// second response so the LLM router does not panic on the follow-up call.
 			serde_json::json!({
 				"action": "fail",
-				"reason": "Cannot proceed: command.run requires approval.",
+				"reason": "Cannot proceed: Bash requires approval.",
 				"final_message": null
 			}),
 		]);
@@ -2810,7 +2752,7 @@ mod tests {
 			0.95,
 			false,
 			crate::router::RouteRisk::Low,
-			vec!["command.run".to_string()],
+			vec!["Bash".to_string()],
 			vec!["core-command".to_string()],
 			Vec::new(),
 			"command execution request",
@@ -2868,7 +2810,7 @@ mod tests {
 			0.92,
 			false,
 			crate::router::RouteRisk::Low,
-			vec!["fs.read_text".to_string(), "not.enabled".to_string()],
+			vec!["Read".to_string(), "not.enabled".to_string()],
 			vec!["core-fs".to_string()],
 			Vec::new(),
 			"filesystem request",
@@ -2880,7 +2822,7 @@ mod tests {
 		assert_eq!(loop_state.run_id, "loop-req-loop");
 		assert_eq!(
 			loop_state.visible_tools.first().map(String::as_str),
-			Some("fs.read_text")
+			Some("Read")
 		);
 		assert!(
 			!loop_state
@@ -2897,14 +2839,14 @@ mod tests {
 		assert!(
 			loop_state
 				.visible_tools
-				.contains(&"skill.ensure_installed".to_string())
+				.contains(&"SkillInstall".to_string())
 		);
 		assert!(
 			loop_state
 				.visible_tools
-				.contains(&"table.preview".to_string())
+				.contains(&"TablePreview".to_string())
 		);
-		assert!(loop_state.visible_tools.contains(&"python.run".to_string()));
+		assert!(loop_state.visible_tools.contains(&"Python".to_string()));
 		assert_eq!(loop_state.history.len(), 0);
 	}
 
@@ -2912,12 +2854,9 @@ mod tests {
 	fn initialize_runtime_loop_seeds_visible_tools_from_shared_availability_snapshot() {
 		let runtime = GenericAgentRuntime {
 			runtime_visible_tool_availability_snapshot: RuntimeVisibleToolAvailabilitySnapshot {
-				enabled_tools: [
-					"inventory.describe".to_string(),
-					"table.preview".to_string(),
-				]
-				.into_iter()
-				.collect(),
+				enabled_tools: ["inventory.describe".to_string(), "TablePreview".to_string()]
+					.into_iter()
+					.collect(),
 				baseline_visible_tools: vec!["inventory.describe".to_string()],
 			},
 			..GenericAgentRuntime::default()
@@ -2934,7 +2873,7 @@ mod tests {
 			0.88,
 			false,
 			crate::router::RouteRisk::Low,
-			vec!["fs.read_text".to_string(), "table.preview".to_string()],
+			vec!["Read".to_string(), "TablePreview".to_string()],
 			vec!["core-table".to_string()],
 			Vec::new(),
 			"table preview request",
@@ -2945,10 +2884,7 @@ mod tests {
 
 		assert_eq!(
 			loop_state.visible_tools,
-			vec![
-				"table.preview".to_string(),
-				"inventory.describe".to_string(),
-			]
+			vec!["TablePreview".to_string(), "inventory.describe".to_string(),]
 		);
 	}
 
@@ -2960,19 +2896,19 @@ mod tests {
 			.and_then(|value| value.to_str())
 			.expect("fixture file name should resolve")
 			.to_string();
-		// Supply a two-turn mock: first call fs.find (which finds and returns a path),
-		// then read the located path with fs.read_text, then emit final_answer.
+		// Supply a two-turn mock: first call Find (which finds and returns a path),
+		// then read the located path with Read, then emit final_answer.
 		let (route_router, _prompts) = router_with_json_responses(vec![
 			serde_json::json!({
 				"action": "call_tool",
-				"tool_name": "fs.find",
+				"tool_name": "Find",
 				"arguments": { "name": file_name },
 				"reason": "find the file first",
 				"final_message": null
 			}),
 			serde_json::json!({
 				"action": "call_tool",
-				"tool_name": "fs.read_text",
+				"tool_name": "Read",
 				"arguments": { "path": text_path },
 				"reason": "read the located file",
 				"final_message": null
@@ -3007,7 +2943,7 @@ mod tests {
 			0.8,
 			false,
 			crate::router::RouteRisk::Low,
-			vec!["fs.find".to_string(), "fs.read_text".to_string()],
+			vec!["Find".to_string(), "Read".to_string()],
 			vec!["core-fs".to_string()],
 			Vec::new(),
 			"seed the loop with a lookup-first filesystem hint",
@@ -3038,10 +2974,7 @@ mod tests {
 			.filter_map(|step| step.tool_name.clone())
 			.collect::<Vec<_>>();
 
-		assert_eq!(
-			tool_sequence,
-			vec!["fs.find".to_string(), "fs.read_text".to_string()]
-		);
+		assert_eq!(tool_sequence, vec!["Find".to_string(), "Read".to_string()]);
 		assert_eq!(result.terminal_step_action, Some(StepAction::FinalAnswer));
 		cleanup_fixture(&text_path);
 	}
@@ -3050,9 +2983,9 @@ mod tests {
 		let runtime = GenericAgentRuntime {
 			runtime_visible_tool_availability_snapshot: RuntimeVisibleToolAvailabilitySnapshot {
 				enabled_tools: [
-					"fs.read_text".to_string(),
+					"Read".to_string(),
 					"inventory.describe".to_string(),
-					"table.preview".to_string(),
+					"TablePreview".to_string(),
 				]
 				.into_iter()
 				.collect(),
@@ -3072,7 +3005,7 @@ mod tests {
 			0.94,
 			false,
 			crate::router::RouteRisk::Low,
-			vec!["fs.read_text".to_string()],
+			vec!["Read".to_string()],
 			vec!["core-fs".to_string()],
 			Vec::new(),
 			"filesystem request",
@@ -3080,11 +3013,7 @@ mod tests {
 		let mut loop_state =
 			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
 		// With all-tools-always-visible, visible_tools includes all enabled tools
-		assert!(
-			loop_state
-				.visible_tools
-				.contains(&"fs.read_text".to_string())
-		);
+		assert!(loop_state.visible_tools.contains(&"Read".to_string()));
 		assert!(
 			loop_state
 				.visible_tools
@@ -3093,11 +3022,11 @@ mod tests {
 		assert!(
 			loop_state
 				.visible_tools
-				.contains(&"table.preview".to_string())
+				.contains(&"TablePreview".to_string())
 		);
 		let observation = ToolObservation {
 			ok: true,
-			tool_name: "fs.read_text".to_string(),
+			tool_name: "Read".to_string(),
 			error_type: None,
 			terminal: false,
 			data: serde_json::json!({
@@ -3112,7 +3041,7 @@ mod tests {
 			1,
 			crate::runtime_loop::NextStepDecision {
 				action: crate::runtime_loop::NextStepAction::CallTool,
-				tool_name: Some("fs.read_text".to_string()),
+				tool_name: Some("Read".to_string()),
 				arguments: Some(serde_json::json!({ "path": "Cargo.toml" })),
 				tool_calls: None,
 				reason: "Read the grounded workspace manifest first.".to_string(),
@@ -3137,9 +3066,9 @@ mod tests {
 		let visible_tools = runtime.visible_tools_for_loop_state(&loop_state);
 
 		// With all-tools-always-visible, visible_tools includes all enabled tools
-		assert!(visible_tools.contains(&"fs.read_text".to_string()));
+		assert!(visible_tools.contains(&"Read".to_string()));
 		assert!(visible_tools.contains(&"inventory.describe".to_string()));
-		assert!(visible_tools.contains(&"table.preview".to_string()));
+		assert!(visible_tools.contains(&"TablePreview".to_string()));
 		assert!(
 			!visible_tools.contains(&"general.execute".to_string()),
 			"recompute must not reintroduce removed tools"
