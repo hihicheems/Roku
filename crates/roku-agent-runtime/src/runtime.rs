@@ -1155,9 +1155,59 @@ impl GenericAgentRuntime {
 			}
 
 			// Execute regular tool calls and collect ToolResult messages.
+			// Agent is intercepted here before the normal tool dispatch path.
 			for tc in &accumulated_tool_calls {
 				let tool_name = &tc.name;
 				let arguments = tc.arguments.clone();
+
+				// Intercept Agent before the normal tool dispatch path.
+				// Agent is a pseudo-tool: it spawns a sub-agent and returns the result as a
+				// ToolResult. Budget is deducted from the parent before the sub-agent runs so that
+				// a failing sub-agent still consumes budget (Class G: skip path resource accounting).
+				if tool_name == "Agent" {
+					// Deduct one step from parent budget unconditionally (Class G).
+					loop_state.remaining_step_budget =
+						loop_state.remaining_step_budget.saturating_sub(1);
+
+					// Emit ToolStart for symmetry with other tools (Class C).
+					if let Some(sender) = event_sender {
+						let _ = sender.send(crate::runtime_loop::LoopEvent::ToolStart {
+							step: current_step_index,
+							tool_name: tool_name.clone(),
+						});
+					}
+					let start_ms = std::time::Instant::now();
+
+					let sub_result = self
+						.execute_sub_agent(
+							task_id,
+							request,
+							loop_state,
+							&arguments,
+							runtime_memory_sections,
+							event_sender,
+							approval_gate,
+						)
+						.await;
+
+					let elapsed_ms = start_ms.elapsed().as_millis() as u64;
+
+					// Emit ToolEnd for symmetry with other tools (Class C).
+					if let Some(sender) = event_sender {
+						let _ = sender.send(crate::runtime_loop::LoopEvent::ToolEnd {
+							step: current_step_index,
+							tool_name: tool_name.clone(),
+							elapsed_ms: Some(elapsed_ms),
+						});
+					}
+
+					messages.push(Message::ToolResult {
+						tool_use_id: tc.id.clone(),
+						content: sub_result,
+						is_error: false,
+					});
+					continue;
+				}
 
 				// Check approval gate before executing the tool.
 				if let Some(gate) = approval_gate {
@@ -1298,6 +1348,114 @@ impl GenericAgentRuntime {
 					step: current_step_index,
 				});
 			}
+		}
+	}
+
+	/// Execute a sub-agent for an `Agent` tool call.
+	///
+	/// The sub-agent runs with a fresh message history and an independent budget drawn
+	/// from the parent loop's remaining budget. The parent budget is deducted **before**
+	/// this method is called (caller responsibility, Class G guard).
+	///
+	/// Recursion is blocked at depth 1: a sub-agent cannot spawn further sub-agents.
+	async fn execute_sub_agent(
+		&self,
+		parent_task_id: &TaskId,
+		parent_request: &RequestEnvelope,
+		parent_loop_state: &mut LoopState,
+		arguments: &Value,
+		runtime_memory_sections: &RuntimeMemorySections,
+		event_sender: Option<&crate::runtime_loop::LoopEventSender>,
+		approval_gate: Option<&dyn crate::runtime_loop::approval::ToolApprovalGate>,
+	) -> String {
+		// Recursion guard: sub-agents cannot spawn sub-sub-agents.
+		if parent_loop_state.sub_agent_depth >= 1 {
+			return "[Sub-agent error] Sub-agents cannot spawn further sub-agents.".to_string();
+		}
+
+		let task = arguments
+			.get("task")
+			.and_then(Value::as_str)
+			.unwrap_or("")
+			.trim()
+			.to_string();
+		if task.is_empty() {
+			return "[Sub-agent error] No task provided.".to_string();
+		}
+
+		// Allocate budget for the sub-agent from the parent's remaining budget.
+		// The parent budget was already decremented by 1 in the caller (Class G).
+		// Give the sub-agent up to 10 steps, capped at what the parent has left.
+		let sub_budget = parent_loop_state.remaining_step_budget.min(10);
+		// Deduct sub-agent budget from parent so total consumption is bounded.
+		parent_loop_state.remaining_step_budget = parent_loop_state
+			.remaining_step_budget
+			.saturating_sub(sub_budget);
+
+		// Build a fresh sub-request with independent message history.
+		let sub_request = RequestEnvelope {
+			request_id: roku_common_types::RequestId(format!(
+				"{}-sub",
+				parent_request.request_id.0
+			)),
+			session_id: parent_request.session_id.clone(),
+			goal: task.clone(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+		};
+
+		// Build a minimal LoopContext for the sub-agent.
+		let sub_route_decision = parent_loop_state.route_decision.clone();
+		let sub_context = crate::runtime_loop::LoopContext {
+			request_id: sub_request.request_id.0.clone(),
+			session_id: sub_request.session_id.clone(),
+			goal: task.clone(),
+			workspace_root: parent_loop_state.working_directory.clone(),
+			working_directory: parent_loop_state.working_directory.clone(),
+			visible_tools: parent_loop_state.visible_tools.clone(),
+			bound_resources: parent_loop_state.bound_resources.clone(),
+			route_decision: sub_route_decision,
+			last_observation: None,
+		};
+
+		let recovery_budget = self.agent_runtime_config.r#loop.initial_recovery_budget;
+		let mut sub_loop_state = LoopState::with_budgets(
+			format!("sub-{}", sub_request.request_id.0),
+			&sub_context,
+			sub_budget,
+			recovery_budget,
+		);
+		sub_loop_state.sub_agent_depth = parent_loop_state.sub_agent_depth + 1;
+
+		let result = Box::pin(self.execute_tool_loop(
+			parent_task_id,
+			&sub_request,
+			&mut sub_loop_state,
+			runtime_memory_sections,
+			None,
+			event_sender,
+			approval_gate, // inherit parent's approval gate
+		))
+		.await;
+
+		// Truncate to avoid bloating the parent's context window.
+		// Use char_indices for safe UTF-8 truncation (CJK/emoji safe).
+		const MAX_SUB_AGENT_RESULT_CHARS: usize = 4000;
+		let message = result.message;
+		let char_count = message.chars().count();
+		if char_count > MAX_SUB_AGENT_RESULT_CHARS {
+			let byte_end = message
+				.char_indices()
+				.nth(MAX_SUB_AGENT_RESULT_CHARS)
+				.map(|(i, _)| i)
+				.unwrap_or(message.len());
+			format!(
+				"{}...\n[Sub-agent response truncated to {} chars]",
+				&message[..byte_end],
+				MAX_SUB_AGENT_RESULT_CHARS
+			)
+		} else {
+			message
 		}
 	}
 

@@ -98,6 +98,18 @@ pub(crate) fn build_tool_definitions(
 			"required": ["reason"]
 		}),
 	});
+	definitions.push(ToolDefinition {
+		name: "Agent".to_string(),
+		description: "Spawn a sub-agent to handle a complex sub-task independently. Use when the task can be decomposed into parallel or isolated work. The sub-agent has independent message history and returns a compacted result. Sub-agents cannot spawn further sub-agents.".to_string(),
+		parameters: json!({
+			"type": "object",
+			"properties": {
+				"task": {"type": "string", "description": "The prompt/goal for the sub-agent."},
+				"tools": {"type": "string", "description": "Optional comma-separated tool names the sub-agent can use. Defaults to all available tools."}
+			},
+			"required": ["task"]
+		}),
+	});
 
 	definitions
 }

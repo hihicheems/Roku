@@ -104,6 +104,10 @@ pub struct LoopState {
 	pub(crate) latest_explicit_grounding_fingerprint: String,
 	#[serde(default)]
 	pub(crate) ambiguity_stagnation: Option<AmbiguityStagnation>,
+	/// Depth counter for sub-agent nesting. 0 = top-level agent, 1 = sub-agent.
+	/// Sub-agents are not permitted to spawn further sub-agents (max depth = 1).
+	#[serde(default)]
+	pub sub_agent_depth: u32,
 }
 
 impl LoopState {
@@ -142,6 +146,7 @@ impl LoopState {
 			awaiting_user: None,
 			latest_explicit_grounding_fingerprint: explicit_grounding_fingerprint(&context.goal),
 			ambiguity_stagnation: None,
+			sub_agent_depth: 0,
 		}
 	}
 
