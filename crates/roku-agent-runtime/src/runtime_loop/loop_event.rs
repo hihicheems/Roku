@@ -50,6 +50,10 @@ pub enum LoopEvent {
 		output_tokens: u64,
 		total_tokens: u64,
 		estimated_cost_usd: f64,
+		/// The model that served this request. For OpenRouter this is the
+		/// actually-served model, which may differ from the configured primary.
+		#[serde(skip_serializing_if = "Option::is_none")]
+		model_id: Option<String>,
 	},
 }
 
