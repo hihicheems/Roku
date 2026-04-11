@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_common_types::GroundingStrategy;
 use roku_plugin_llm::ToolDefinition;
 use roku_plugin_tools::ResourceCatalog;
 use serde_json::{Value, json};
@@ -150,25 +149,6 @@ pub(crate) fn ground_tool_arguments(tool_name: &str, grounding_input: &str) -> O
 		"skill.install" | "skill.ensure_installed" => extract_skill_source_url(grounding_input)
 			.map(|source_url| json!({ "source_url": source_url })),
 		_ => None,
-	}
-}
-
-pub(crate) fn tool_required_argument_keys(
-	tool_name: &str,
-	catalog: Option<&ResourceCatalog>,
-) -> Vec<String> {
-	if let Some(grounding) = catalog.and_then(|c| c.lookup_grounding_metadata(tool_name))
-		&& grounding.grounding_strategy != GroundingStrategy::None
-	{
-		return grounding
-			.grounding_argument
-			.as_ref()
-			.map(|arg| vec![arg.clone()])
-			.unwrap_or_default();
-	}
-	match tool_name {
-		"skill.install" | "skill.ensure_installed" => vec!["source_url".to_string()],
-		_ => Vec::new(),
 	}
 }
 

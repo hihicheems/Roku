@@ -51,7 +51,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		description: "Use this only when the request already contains explicit Python code to run or a clearly bounded snippet the agent has produced as code. Do not dump raw natural-language tasks into it and do not use it for shell commands. It returns stdout/stderr and exit facts from a constrained subprocess, which can be interpreted or summarized later."
 			.to_string(),
 		selection_hint:
-			"Run explicit Python code from the request or one clearly bounded snippet for local computation."
+			"Run Python code for data processing, calculations, or scripting tasks. Use when the user provides Python code or needs computation."
 				.to_string(),
 		discoverable: true,
 		tags: vec![

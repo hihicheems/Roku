@@ -60,7 +60,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		descriptor_catalog(
 			"fs.find",
 			"Use this when you only know one basename or fuzzy filesystem reference inside the workspace and need grounded candidates before doing anything else. Do not use it when you already have a concrete path, when you expect many repeated matches, or when the task is counting files across directories; `fs.glob` is the right tool for that. It returns zero, one, or many candidate paths that the agent can disambiguate or feed into a later tool call.",
-			"Resolve one fuzzy workspace file or directory name before a follow-up filesystem step.",
+			"Find a file or directory by fuzzy name when you don't know the exact path.",
 			&[
 				"find file",
 				"basename grounding",
@@ -81,7 +81,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		descriptor_catalog(
 			"fs.inspect",
 			"Use this when you need metadata about a known path or need to ground the current working directory. Do not use it to list directory entries or read file contents. It returns bounded path facts like kind, size, and timestamps.",
-			"Inspect metadata for a known path or the current working directory.",
+			"Check file metadata (size, type, permissions) for a known path.",
 			&[
 				"file metadata",
 				"path inspection",
@@ -110,7 +110,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		descriptor_catalog(
 			"fs.list_dir",
 			"Use this when you already know the directory path and need its immediate entries, including hidden ones, in bounded form. Do not use it when the path is still fuzzy or when you need file contents instead of a listing. It returns a truncated-safe entry list plus enough metadata to answer listing questions or choose a follow-up path.",
-			"List the immediate entries in a known directory.",
+			"List files in a directory to explore project structure or find files.",
 			&[
 				"list files",
 				"directory contents",
@@ -137,7 +137,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		descriptor_catalog(
 			"fs.read_text",
 			"Use this when you already have a concrete text file path and need its contents or the first bounded chunk of it. Do not use it for directories, binary inspection, or fuzzy names; resolve those first with `fs.find` or `fs.inspect`. It returns lossy UTF-8 text plus truncation metadata that can be quoted, summarized, or passed to another worker.",
-			"Read text content from a known file path.",
+			"Read file contents. Use when the user mentions a file, asks about code, or you need to understand existing code before making changes.",
 			&[
 				"read file",
 				"open text",
@@ -159,7 +159,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		descriptor_catalog(
 			"fs.glob",
 			"Use this when the task is about many matching paths at once, especially wildcard searches, repeated filenames across directories, or counts like 'how many Cargo.toml files are there'. Do not use it for a single fuzzy basename or a path you expect to resolve to one best candidate; `fs.find` is better for that. It returns a bounded match set that is good for counting, enumerating, or selecting follow-up files.",
-			"Find many workspace paths that match one glob pattern.",
+			"Find files matching a pattern (e.g. `**/*.rs`, `src/**/*.ts`). Use when searching for files by extension or naming convention.",
 			&["glob", "pattern match", "find matching files"],
 			&[
 				"Find all Rust files under crates/roku-plugins/**/*.rs.",
@@ -176,7 +176,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		descriptor_catalog(
 			"fs.exists",
 			"Use this for a yes/no existence check on a concrete path. Do not use it when you also need metadata, directory contents, or file contents. It returns existence plus kind when present.",
-			"Check whether a known path exists.",
+			"Check if a specific file or directory exists before reading or writing.",
 			&["path exists", "does file exist", "check directory", "存在"],
 			&["Does tmp/test-excel.xlsx exist?"],
 			&["path"],
@@ -188,7 +188,7 @@ pub(crate) fn catalog_descriptors_with_config(
 			let mut desc = descriptor_catalog(
 				"fs.edit",
 				"Use this when you need to make a precise string replacement in an existing file. Provide a unique old_string that appears exactly once in the file, along with the new_string to replace it. Do not use it for creating new files or overwriting entire files; use fs.write for that.",
-				"Replace a unique string in an existing file.",
+				"Replace a specific string in an existing file. Use for targeted edits.",
 				&["edit", "replace", "modify", "file mutation"],
 				&["Replace 'foo' with 'bar' in config.toml"],
 				&["file_path", "old_string", "new_string"],
@@ -206,7 +206,7 @@ pub(crate) fn catalog_descriptors_with_config(
 			let mut desc = descriptor_catalog(
 				"fs.write",
 				"Use this when you need to create a new file or overwrite an existing one entirely. Do not use it for targeted edits within an existing file; use fs.edit for that.",
-				"Create a new file or overwrite an existing one.",
+				"Create a new file or completely overwrite an existing one. Use for new files or full rewrites.",
 				&["write", "create", "overwrite", "file mutation"],
 				&["Create a new README.md with content"],
 				&["file_path", "content"],
@@ -223,7 +223,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		descriptor_catalog(
 			"fs.grep",
 			"Use this when you need to search for a pattern in file contents across the workspace. Returns matched lines with file paths and line numbers. Do not use it for filename-based search; use fs.find or fs.glob for that.",
-			"Search file contents for a regex or literal pattern.",
+			"Search file contents for a pattern. Use when looking for specific code, functions, variables, or text across files.",
 			&[
 				"grep",
 				"search content",

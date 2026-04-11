@@ -12,14 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod classifier;
 mod decision;
 mod direct_route;
-mod escalation;
 
-pub(crate) use classifier::{RouteClassifierContext, classify_request};
 pub use decision::{IntentFamily, RouteDecision, RouteRisk};
 pub use direct_route::{DirectRouteExecutionResult, DirectRoutePlan};
-pub use escalation::{
-	EscalationAction, EscalationReason, RouteDecisionResult, RouteEscalationPlan,
-};

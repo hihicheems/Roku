@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{DirectRoutePlan, LoopEventSender, LoopState, RouteEscalationPlan};
+use crate::{DirectRoutePlan, LoopEventSender, LoopState};
 use roku_common_types::{
 	ErrorClass, EvidenceItem, RequestEnvelope, ResponseEnvelope, ResponseStatus, ResultEnvelope,
 	ResultStatus, RuntimeError, RuntimeMemorySections, Task, TaskEventKind, TaskNode, TaskState,
@@ -61,48 +61,6 @@ impl RuntimeService {
 		self.sync_pending_loop(loop_state)?;
 		self.apply_memory_write_back(request, &response, context_bundle);
 		self.write_back_compact_summaries(request, loop_state);
-		self.clear_runtime_memory_layers(&task.task_id);
-		Ok(response)
-	}
-
-	pub(super) fn process_direct_escalation(
-		&self,
-		task: &mut Task,
-		request: &RequestEnvelope,
-		plan: &RouteEscalationPlan,
-		loop_state: &mut LoopState,
-		context_bundle: &ContextBundle,
-		runtime_memory_sections: &RuntimeMemorySections,
-	) -> Result<ResponseEnvelope, RuntimeError> {
-		let execution = self.runtime.execute_escalation_action(
-			&task.task_id,
-			request,
-			plan,
-			runtime_memory_sections,
-		);
-		let response =
-			self.finalize_direct_path(task, execution.node, execution.result, execution.message)?;
-		if matches!(plan.action, crate::EscalationAction::AskForMoreInfo)
-			&& !plan.decision.missing_arguments.is_empty()
-		{
-			self.record_runtime_loop_ask_user_payload_step(
-				loop_state,
-				response.status,
-				crate::AskUserPayload::missing_required_input(
-					response.message.clone(),
-					plan.decision.missing_arguments.clone(),
-				),
-			);
-		} else {
-			self.record_runtime_loop_escalation_step(
-				loop_state,
-				plan.action,
-				response.status,
-				&response.message,
-			);
-		}
-		self.sync_pending_loop(loop_state)?;
-		self.apply_memory_write_back(request, &response, context_bundle);
 		self.clear_runtime_memory_layers(&task.task_id);
 		Ok(response)
 	}

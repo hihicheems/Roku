@@ -49,7 +49,7 @@ pub(crate) fn catalog_descriptors_with_config(
 		role: Some("core_command".to_string()),
 		description: "Execute a shell command and return its output (exit code, stdout, stderr). This is your general-purpose tool for running any CLI program — use it freely for `gh`, `git`, `cargo`, `docker`, `kubectl`, `jq`, `curl`, `make`, or any other available command. Prefer specialized tools (`fs.read_text`, `fs.grep`, `fs.list_dir`, `web.fetch`) only when they directly cover the operation; otherwise default to `command.run`. Do not chain multiple commands with `&&` or `|` — run one command per call."
 			.to_string(),
-		selection_hint: "General-purpose shell execution — default tool for any CLI operation."
+		selection_hint: "Run any shell command. Use this as the default when no specialized tool fits: git operations, package managers, build commands, system commands. Also use for `gh repo view`, `curl`, etc."
 			.to_string(),
 		discoverable: true,
 		tags: vec![

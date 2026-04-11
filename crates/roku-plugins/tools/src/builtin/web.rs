@@ -50,7 +50,7 @@ pub(crate) fn catalog_descriptors_with_config(
 			role: Some("core_web".to_string()),
 			description: "Use this when you have a concrete search query and need fresh external search results from the configured backend. Do not use it for filesystem questions, broad research planning without a query, or as a substitute for final synthesis. It returns structured result summaries that usually need a follow-up explanation or comparison before the final answer."
 				.to_string(),
-			selection_hint: "Run a concrete web search query to gather fresh external results."
+			selection_hint: "Search the web for current information. Use when the user asks about docs, package versions, APIs, news, or anything that requires up-to-date knowledge beyond training data."
 				.to_string(),
 			discoverable: true,
 			tags: vec!["web".to_string(), "search".to_string(), "lookup".to_string()],
@@ -83,7 +83,7 @@ pub(crate) fn catalog_descriptors_with_config(
 			role: Some("core_web".to_string()),
 			description: "Use this when you have a specific URL and need to read its content. Do not use it for searching the web or when a URL is not yet known. It fetches the page and returns extracted text content."
 				.to_string(),
-			selection_hint: "Fetch and read the text content of a specific URL.".to_string(),
+			selection_hint: "Fetch and read content from a URL. Use when the user provides a URL, references a webpage, or you need to read online documentation.".to_string(),
 			discoverable: true,
 			tags: vec![
 				"web".to_string(),
