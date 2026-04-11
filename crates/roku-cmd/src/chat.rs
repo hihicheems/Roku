@@ -35,7 +35,9 @@ use rustyline::error::ReadlineError;
 
 use crate::CommandError;
 use crate::conversation::compact_conversation_history;
-use crate::runtime::{build_live_runtime_service_from_env, next_cli_request_sequence};
+use crate::runtime::{
+	build_live_runtime_service_from_env, cli_approval_gate, next_cli_request_sequence,
+};
 use crate::session_store::SessionStore;
 use crate::storage::LocalStorageLayout;
 
@@ -72,7 +74,8 @@ pub(crate) fn run_chat(
 // ---------------------------------------------------------------------------
 
 fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), CommandError> {
-	let service = tokio::task::block_in_place(build_live_runtime_service_from_env)?;
+	let service = tokio::task::block_in_place(build_live_runtime_service_from_env)?
+		.with_approval_gate(cli_approval_gate());
 	let store = session_store();
 
 	let mut editor =

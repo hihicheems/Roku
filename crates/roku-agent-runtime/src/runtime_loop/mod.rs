@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod approval;
 mod ask_user;
 mod compact;
 mod context_assembly;
@@ -32,6 +33,10 @@ pub(crate) mod system_prompt;
 mod tool_loop;
 mod trace;
 
+pub use approval::{
+	ApprovalDecision as ToolApprovalDecision, AutoApproveGate, RiskBasedGate, ToolApprovalGate,
+	ToolRiskLevel, classify_tool_risk,
+};
 pub(crate) use ask_user::effective_ask_user_payload;
 pub use ask_user::{AskUserPayload, AskUserResumeContract, AskUserResumeDirective};
 pub use compact::{
