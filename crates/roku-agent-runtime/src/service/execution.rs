@@ -25,8 +25,8 @@ use roku_common_types::{
 	project_execution_preview,
 };
 use roku_plugin_tools::{
-	TOOL_BASH, TOOL_EDIT, TOOL_EXISTS, TOOL_FIND, TOOL_GLOB, TOOL_GREP, TOOL_INSPECT,
-	TOOL_LISTDIR, TOOL_READ, TOOL_WRITE,
+	TOOL_BASH, TOOL_EDIT, TOOL_EXISTS, TOOL_FIND, TOOL_GLOB, TOOL_GREP, TOOL_INSPECT, TOOL_LISTDIR,
+	TOOL_READ, TOOL_WRITE,
 };
 use serde_json::{Value, json};
 
@@ -333,7 +333,8 @@ impl RuntimeService {
 			));
 		}
 		let approved_tool_name = pending_execution.canonical_execution.tool_name.as_str();
-		if approved_tool_name == "Bash" {
+		// Bash (and its legacy alias "command.run") requires stricter validation.
+		if approved_tool_name == TOOL_BASH || approved_tool_name == "command.run" {
 			if pending_execution.canonical_execution.invocation_mode != InvocationMode::DirectExec
 				|| pending_execution
 					.canonical_execution
@@ -432,7 +433,11 @@ impl RuntimeService {
 		self.save_task(task.clone())?;
 
 		// Normalize legacy dotted names to PascalCase for dispatch.
-		let raw_tool_name = resume.pending_execution.canonical_execution.tool_name.as_str();
+		let raw_tool_name = resume
+			.pending_execution
+			.canonical_execution
+			.tool_name
+			.as_str();
 		let dispatch_tool_name = LEGACY_TOOL_NAME_MAP
 			.iter()
 			.find(|(legacy, _)| *legacy == raw_tool_name)
