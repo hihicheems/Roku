@@ -702,11 +702,7 @@ impl GenericAgentRuntime {
 		tool_name: &str,
 		error: &ToolRuntimeError,
 	) -> ToolObservation {
-		ToolObservation::from_runtime_error_with_catalog(
-			tool_name,
-			error,
-			Some(&self.resource_catalog),
-		)
+		ToolObservation::from_runtime_error(tool_name, error, &self.resource_catalog)
 	}
 
 	/// Returns `(prompt_tokens, output_tokens)` consumed by compaction LLM calls.
@@ -1810,11 +1806,7 @@ impl GenericAgentRuntime {
 		let observation = if result.status == ResultStatus::Ok {
 			ToolObservation::from_result_payload(tool_name, &payload)
 		} else {
-			ToolObservation::from_error_payload_with_catalog(
-				tool_name,
-				&payload,
-				Some(&self.resource_catalog),
-			)
+			ToolObservation::from_error_payload(tool_name, &payload, &self.resource_catalog)
 		};
 		normalize_tool_loop_observation(observation)
 	}

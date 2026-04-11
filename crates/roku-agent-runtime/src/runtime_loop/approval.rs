@@ -26,6 +26,9 @@ use roku_plugin_tools::{
 };
 use serde_json::Value;
 
+/// Pseudo-tools that are never registered in the catalog but are always safe.
+const PSEUDO_SAFE: &[&str] = &[PSEUDO_FINAL_ANSWER, PSEUDO_ASK_USER, PSEUDO_FAIL];
+
 /// Result of an approval check.
 #[derive(Debug, Clone)]
 pub enum ApprovalDecision {
@@ -57,33 +60,18 @@ impl ToolApprovalGate for AutoApproveGate {
 /// Write operations require explicit approval via a callback.
 pub struct RiskBasedGate<F: Fn(&str, &Value) -> ApprovalDecision + Send + Sync> {
 	prompt_fn: F,
-	catalog: Option<Arc<ResourceCatalog>>,
+	catalog: Arc<ResourceCatalog>,
 }
 
 impl<F: Fn(&str, &Value) -> ApprovalDecision + Send + Sync> RiskBasedGate<F> {
-	pub fn new(prompt_fn: F) -> Self {
-		Self {
-			prompt_fn,
-			catalog: None,
-		}
-	}
-
-	pub fn with_catalog(prompt_fn: F, catalog: Arc<ResourceCatalog>) -> Self {
-		Self {
-			prompt_fn,
-			catalog: Some(catalog),
-		}
+	pub fn new(prompt_fn: F, catalog: Arc<ResourceCatalog>) -> Self {
+		Self { prompt_fn, catalog }
 	}
 }
 
 impl<F: Fn(&str, &Value) -> ApprovalDecision + Send + Sync> ToolApprovalGate for RiskBasedGate<F> {
 	fn check(&self, tool_name: &str, arguments: &Value) -> ApprovalDecision {
-		let risk = if let Some(catalog) = &self.catalog {
-			classify_tool_risk_from_catalog(tool_name, arguments, catalog)
-		} else {
-			classify_tool_risk(tool_name, arguments)
-		};
-		match risk {
+		match classify_tool_risk(tool_name, arguments, &self.catalog) {
 			ToolRiskLevel::Safe => ApprovalDecision::Approve,
 			ToolRiskLevel::RequiresApproval => (self.prompt_fn)(tool_name, arguments),
 			ToolRiskLevel::Denied => ApprovalDecision::Deny(format!(
@@ -111,14 +99,13 @@ pub enum ToolRiskLevel {
 /// - Tools with `risk:safe` tag → Safe
 /// - Tools with `risk:write` tag → RequiresApproval
 /// - Unknown → RequiresApproval (safe default)
-pub fn classify_tool_risk_from_catalog(
+pub fn classify_tool_risk(
 	tool_name: &str,
 	arguments: &Value,
 	catalog: &ResourceCatalog,
 ) -> ToolRiskLevel {
 	// Pseudo-tools are never in the catalog — always safe.
-	if tool_name == PSEUDO_FINAL_ANSWER || tool_name == PSEUDO_ASK_USER || tool_name == PSEUDO_FAIL
-	{
+	if PSEUDO_SAFE.contains(&tool_name) {
 		return ToolRiskLevel::Safe;
 	}
 
@@ -137,34 +124,6 @@ pub fn classify_tool_risk_from_catalog(
 
 	// Unknown tool → require approval (safe default).
 	ToolRiskLevel::RequiresApproval
-}
-
-/// Classify a tool invocation by risk level.
-///
-/// Default classification:
-/// - Safe: Read, Glob, Exists, Inspect, ListDir, Find,
-///   Grep, WebSearch, WebFetch, table.*, final_answer, ask_user, fail
-/// - RequiresApproval: Write, Edit, Bash, Python, skill.*
-/// - Bash is further classified by the command content:
-///   destructive patterns (rm -rf /, dd if=, etc.) → Denied
-pub fn classify_tool_risk(tool_name: &str, arguments: &Value) -> ToolRiskLevel {
-	match tool_name {
-		// Read-only tools — always safe
-		"Read" | "Glob" | "Exists" | "Inspect" | "ListDir" | "Find" | "Grep" | "WebSearch"
-		| "WebFetch" | "TableInspect" | "TableSheets" | "TablePreview" | "TableSchema"
-		| "final_answer" | "ask_user" | "fail" => ToolRiskLevel::Safe,
-
-		// Bash — classify by command content
-		"Bash" => classify_command_risk(arguments),
-
-		// Write tools — require approval
-		"Write" | "Edit" | "Python" | "SkillInstall" | "SkillRun" => {
-			ToolRiskLevel::RequiresApproval
-		}
-
-		// Unknown tools — require approval (safe default)
-		_ => ToolRiskLevel::RequiresApproval,
-	}
 }
 
 /// Classify Bash risk by inspecting the command text.
@@ -253,12 +212,22 @@ const SAFE_COMMAND_PATTERNS: &[&str] = &[
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use roku_plugin_skills::SkillRegistry;
+	use roku_plugin_tools::{ToolCatalogConfig, build_resource_catalog};
 	use serde_json::json;
+
+	fn test_catalog() -> Arc<ResourceCatalog> {
+		Arc::new(build_resource_catalog(
+			&SkillRegistry::disabled(),
+			&ToolCatalogConfig::default(),
+		))
+	}
 
 	// --- classify_tool_risk ---
 
 	#[test]
 	fn classify_safe_read_tools() {
+		let catalog = test_catalog();
 		for tool in &[
 			"Read",
 			"Glob",
@@ -278,7 +247,7 @@ mod tests {
 			"fail",
 		] {
 			assert_eq!(
-				classify_tool_risk(tool, &Value::Null),
+				classify_tool_risk(tool, &Value::Null, &catalog),
 				ToolRiskLevel::Safe,
 				"expected Safe for {tool}"
 			);
@@ -287,9 +256,10 @@ mod tests {
 
 	#[test]
 	fn classify_write_tools_require_approval() {
+		let catalog = test_catalog();
 		for tool in &["Write", "Edit", "Python", "SkillInstall", "SkillRun"] {
 			assert_eq!(
-				classify_tool_risk(tool, &Value::Null),
+				classify_tool_risk(tool, &Value::Null, &catalog),
 				ToolRiskLevel::RequiresApproval,
 				"expected RequiresApproval for {tool}"
 			);
@@ -298,14 +268,16 @@ mod tests {
 
 	#[test]
 	fn classify_unknown_tool_requires_approval() {
+		let catalog = test_catalog();
 		assert_eq!(
-			classify_tool_risk("some.unknown_tool", &Value::Null),
+			classify_tool_risk("some.unknown_tool", &Value::Null, &catalog),
 			ToolRiskLevel::RequiresApproval
 		);
 	}
 
 	#[test]
 	fn classify_command_run_safe_patterns() {
+		let catalog = test_catalog();
 		let safe_commands = &[
 			"git status",
 			"git log --oneline",
@@ -318,7 +290,7 @@ mod tests {
 		for cmd in safe_commands {
 			let args = json!({ "command": cmd });
 			assert_eq!(
-				classify_tool_risk("Bash", &args),
+				classify_tool_risk("Bash", &args, &catalog),
 				ToolRiskLevel::Safe,
 				"expected Safe for command: {cmd}"
 			);
@@ -327,6 +299,7 @@ mod tests {
 
 	#[test]
 	fn classify_command_run_risky_requires_approval() {
+		let catalog = test_catalog();
 		let risky_commands = &[
 			"git commit -m 'test'",
 			"git push",
@@ -336,7 +309,7 @@ mod tests {
 		for cmd in risky_commands {
 			let args = json!({ "command": cmd });
 			assert_eq!(
-				classify_tool_risk("Bash", &args),
+				classify_tool_risk("Bash", &args, &catalog),
 				ToolRiskLevel::RequiresApproval,
 				"expected RequiresApproval for command: {cmd}"
 			);
@@ -345,6 +318,7 @@ mod tests {
 
 	#[test]
 	fn classify_command_run_denied_patterns() {
+		let catalog = test_catalog();
 		let denied_commands = &[
 			"rm -rf /home",
 			"mkfs.ext4 /dev/sda",
@@ -353,7 +327,7 @@ mod tests {
 		for cmd in denied_commands {
 			let args = json!({ "command": cmd });
 			assert_eq!(
-				classify_tool_risk("Bash", &args),
+				classify_tool_risk("Bash", &args, &catalog),
 				ToolRiskLevel::Denied,
 				"expected Denied for command: {cmd}"
 			);
@@ -376,18 +350,22 @@ mod tests {
 
 	#[test]
 	fn risk_based_gate_auto_approves_safe_tools() {
-		let gate = RiskBasedGate::new(|_tool, _args| {
-			panic!("prompt_fn should not be called for safe tools");
-		});
+		let catalog = test_catalog();
+		let gate = RiskBasedGate::new(
+			|_tool, _args| panic!("prompt_fn should not be called for safe tools"),
+			catalog,
+		);
 		let result = gate.check("Read", &json!({ "path": "/tmp/foo" }));
 		assert!(matches!(result, ApprovalDecision::Approve));
 	}
 
 	#[test]
 	fn risk_based_gate_calls_prompt_for_write_tools() {
-		let gate = RiskBasedGate::new(|tool_name, _args| {
-			ApprovalDecision::Deny(format!("denied {tool_name}"))
-		});
+		let catalog = test_catalog();
+		let gate = RiskBasedGate::new(
+			|tool_name, _args| ApprovalDecision::Deny(format!("denied {tool_name}")),
+			catalog,
+		);
 		let result = gate.check("Write", &json!({ "path": "/tmp/test", "content": "hello" }));
 		match result {
 			ApprovalDecision::Deny(msg) => assert!(msg.contains("Write")),
@@ -397,9 +375,11 @@ mod tests {
 
 	#[test]
 	fn risk_based_gate_denies_explicitly_denied_commands() {
-		let gate = RiskBasedGate::new(|_tool, _args| {
-			panic!("prompt_fn should not be called for denied tools");
-		});
+		let catalog = test_catalog();
+		let gate = RiskBasedGate::new(
+			|_tool, _args| panic!("prompt_fn should not be called for denied tools"),
+			catalog,
+		);
 		let result = gate.check("Bash", &json!({ "command": "rm -rf /var" }));
 		match result {
 			ApprovalDecision::Deny(msg) => {

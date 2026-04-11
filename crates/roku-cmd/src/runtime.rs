@@ -156,8 +156,9 @@ pub(crate) async fn run_live_once_with_options_from_env_and_sender(
 	// SkillRegistry::file_backed) which internally constructs and drops a tokio current-thread
 	// runtime. Use block_in_place so both the construction and the internal runtime drop complete
 	// in a blocking-allowed scope rather than inside the async executor.
-	let service = tokio::task::block_in_place(build_live_runtime_service_from_env)?
-		.with_approval_gate(cli_approval_gate());
+	let service = tokio::task::block_in_place(build_live_runtime_service_from_env)?;
+	let catalog = Arc::new(service.resource_catalog().clone());
+	let service = service.with_approval_gate(cli_approval_gate(catalog));
 	let request = build_request(&gateway, options, next_cli_request_sequence());
 	execute_with_service_and_mode(service, request, RunMode::Normal, event_sender)
 		.await
@@ -1197,7 +1198,9 @@ fn build_request(
 ///
 /// For pipe mode (`--pipe`) pass `None` (auto-approve) since there is no interactive
 /// stdin available for approval prompts.
-pub(crate) fn cli_approval_gate() -> Arc<dyn roku_agent_runtime::ToolApprovalGate> {
+pub(crate) fn cli_approval_gate(
+	catalog: Arc<roku_plugin_tools::ResourceCatalog>,
+) -> Arc<dyn roku_agent_runtime::ToolApprovalGate> {
 	Arc::new(roku_agent_runtime::RiskBasedGate::new(
 		|tool_name: &str, arguments: &serde_json::Value| {
 			use std::io::Write as _;
@@ -1220,6 +1223,7 @@ pub(crate) fn cli_approval_gate() -> Arc<dyn roku_agent_runtime::ToolApprovalGat
 				)
 			}
 		},
+		catalog,
 	))
 }
 

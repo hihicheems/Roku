@@ -133,15 +133,7 @@ impl ToolObservation {
 			.unwrap_or_else(|| Self::from_output_value(tool_name, payload))
 	}
 
-	pub fn from_error_payload(tool_name: &str, payload: &Value) -> Self {
-		Self::from_error_payload_with_catalog(tool_name, payload, None)
-	}
-
-	pub fn from_error_payload_with_catalog(
-		tool_name: &str,
-		payload: &Value,
-		catalog: Option<&ResourceCatalog>,
-	) -> Self {
+	pub fn from_error_payload(tool_name: &str, payload: &Value, catalog: &ResourceCatalog) -> Self {
 		let message = payload
 			.get("message")
 			.and_then(Value::as_str)
@@ -170,14 +162,10 @@ impl ToolObservation {
 		Self::from_output_value(&execution.tool_name, &execution.output)
 	}
 
-	pub fn from_runtime_error(tool_name: &str, error: &ToolRuntimeError) -> Self {
-		Self::from_runtime_error_with_catalog(tool_name, error, None)
-	}
-
-	pub fn from_runtime_error_with_catalog(
+	pub fn from_runtime_error(
 		tool_name: &str,
 		error: &ToolRuntimeError,
-		catalog: Option<&ResourceCatalog>,
+		catalog: &ResourceCatalog,
 	) -> Self {
 		let message = error.to_string();
 		let error_code = tool_error_code(error);
@@ -219,24 +207,13 @@ fn tool_error_code(error: &ToolRuntimeError) -> &'static str {
 	}
 }
 
-/// Returns `true` if the tool is a known filesystem tool by name (fallback for when no catalog is available).
-fn is_known_fs_tool(tool_name: &str) -> bool {
-	matches!(
-		tool_name,
-		"Read" | "Write" | "Edit" | "Grep" | "Glob" | "Find" | "Exists" | "Inspect" | "ListDir"
-	)
-}
-
 fn classify_tool_error(
 	tool_name: &str,
 	error_code: &str,
 	message: &str,
-	catalog: Option<&ResourceCatalog>,
+	catalog: &ResourceCatalog,
 ) -> (String, bool) {
-	// Check if this is a filesystem tool via catalog tags, with name-based fallback.
-	let is_fs_tool = catalog
-		.map(|c| c.tool_has_tag(tool_name, TAG_CATEGORY_FILESYSTEM))
-		.unwrap_or_else(|| is_known_fs_tool(tool_name));
+	let is_fs_tool = catalog.tool_has_tag(tool_name, TAG_CATEGORY_FILESYSTEM);
 
 	if is_fs_tool {
 		let lower = message.to_ascii_lowercase();

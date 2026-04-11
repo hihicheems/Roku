@@ -19,6 +19,17 @@ use roku_plugin_tools::{
 	TOOL_PYTHON, TOOL_READ, TOOL_SKILL_INSTALL, TOOL_TABLE_INSPECT, TOOL_TABLE_PREVIEW,
 	TOOL_TABLE_SCHEMA, TOOL_TABLE_SHEETS, TOOL_WEB_FETCH, TOOL_WEB_SEARCH, TOOL_WRITE,
 };
+
+/// Read-only path tools that accept a `path` parameter.
+const PATH_READ_TOOLS: &[&str] = &[TOOL_EXISTS, TOOL_INSPECT, TOOL_LISTDIR, TOOL_READ];
+
+/// Table tools that accept a `path` parameter.
+const TABLE_TOOLS: &[&str] = &[
+	TOOL_TABLE_INSPECT,
+	TOOL_TABLE_SHEETS,
+	TOOL_TABLE_PREVIEW,
+	TOOL_TABLE_SCHEMA,
+];
 use serde_json::{Value, json};
 
 use crate::runtime_loop::ToolObservation;
@@ -120,67 +131,49 @@ pub(crate) fn build_tool_definitions(
 }
 
 pub(crate) fn ground_tool_arguments(tool_name: &str, grounding_input: &str) -> Option<Value> {
-	match tool_name {
-		_ if tool_name == TOOL_EXISTS
-			|| tool_name == TOOL_INSPECT
-			|| tool_name == TOOL_LISTDIR
-			|| tool_name == TOOL_READ =>
-		{
-			extract_concrete_path_candidates(grounding_input)
-				.into_iter()
-				.next()
-				.map(|path| json!({ "path": path }))
-		}
-		_ if tool_name == TOOL_FIND => extract_explicit_path_candidates(grounding_input)
+	if PATH_READ_TOOLS.contains(&tool_name) {
+		extract_concrete_path_candidates(grounding_input)
 			.into_iter()
 			.next()
-			.map(|name| json!({ "name": name, "kind": "any" })),
-		_ if tool_name == TOOL_GLOB => {
-			extract_glob_pattern(grounding_input).map(|pattern| json!({ "pattern": pattern }))
+			.map(|path| json!({ "path": path }))
+	} else if tool_name == TOOL_FIND {
+		extract_explicit_path_candidates(grounding_input)
+			.into_iter()
+			.next()
+			.map(|name| json!({ "name": name, "kind": "any" }))
+	} else if tool_name == TOOL_GLOB {
+		extract_glob_pattern(grounding_input).map(|pattern| json!({ "pattern": pattern }))
+	} else if tool_name == TOOL_GREP {
+		extract_grep_pattern(grounding_input).map(|pattern| json!({ "pattern": pattern }))
+	} else if tool_name == TOOL_EDIT || tool_name == TOOL_WRITE {
+		extract_concrete_path_candidates(grounding_input)
+			.into_iter()
+			.next()
+			.map(|path| json!({ "file_path": path }))
+	} else if TABLE_TOOLS.contains(&tool_name) {
+		let path = extract_concrete_table_path(grounding_input)?;
+		let mut arguments = json!({ "path": path });
+		if tool_name == TOOL_TABLE_PREVIEW {
+			arguments["rows"] = Value::from(extract_row_limit(grounding_input).unwrap_or(5_u64));
 		}
-		// The following arms are temporary hardcoded integrations added by EPIC-0.
-		// They will be migrated to descriptor-driven grounding under EPIC-5.
-		_ if tool_name == TOOL_GREP => {
-			extract_grep_pattern(grounding_input).map(|pattern| json!({ "pattern": pattern }))
+		if let Some(sheet) = extract_sheet_name(grounding_input) {
+			arguments["sheet"] = Value::String(sheet);
 		}
-		_ if tool_name == TOOL_EDIT || tool_name == TOOL_WRITE => {
-			extract_concrete_path_candidates(grounding_input)
-				.into_iter()
-				.next()
-				.map(|path| json!({ "file_path": path }))
-		}
-		_ if tool_name == TOOL_TABLE_INSPECT
-			|| tool_name == TOOL_TABLE_SHEETS
-			|| tool_name == TOOL_TABLE_PREVIEW
-			|| tool_name == TOOL_TABLE_SCHEMA =>
-		{
-			let path = extract_concrete_table_path(grounding_input)?;
-			let mut arguments = json!({ "path": path });
-			if tool_name == TOOL_TABLE_PREVIEW {
-				arguments["rows"] =
-					Value::from(extract_row_limit(grounding_input).unwrap_or(5_u64));
-			}
-			if let Some(sheet) = extract_sheet_name(grounding_input) {
-				arguments["sheet"] = Value::String(sheet);
-			}
-			Some(arguments)
-		}
-		_ if tool_name == TOOL_WEB_SEARCH => extract_web_query(grounding_input)
-			.map(|query| json!({ "query": query, "top_k": 5_u64 })),
-		_ if tool_name == TOOL_WEB_FETCH => {
-			extract_fetch_url(grounding_input).map(|url| json!({ "url": url }))
-		}
-		_ if tool_name == TOOL_BASH => extract_explicit_shell_command(grounding_input)
-			.map(|command| json!({ "command": command })),
-		_ if tool_name == TOOL_PYTHON => {
-			extract_explicit_python_code(grounding_input).map(|code| json!({ "code": code }))
-		}
-		// Keep legacy alias "skill.install" for in-flight approval tickets (CC pattern).
-		"skill.install" => extract_skill_source_url(grounding_input)
-			.map(|source_url| json!({ "source_url": source_url })),
-		_ if tool_name == TOOL_SKILL_INSTALL => extract_skill_source_url(grounding_input)
-			.map(|source_url| json!({ "source_url": source_url })),
-		_ => None,
+		Some(arguments)
+	} else if tool_name == TOOL_WEB_SEARCH {
+		extract_web_query(grounding_input).map(|query| json!({ "query": query, "top_k": 5_u64 }))
+	} else if tool_name == TOOL_WEB_FETCH {
+		extract_fetch_url(grounding_input).map(|url| json!({ "url": url }))
+	} else if tool_name == TOOL_BASH {
+		extract_explicit_shell_command(grounding_input).map(|command| json!({ "command": command }))
+	} else if tool_name == TOOL_PYTHON {
+		extract_explicit_python_code(grounding_input).map(|code| json!({ "code": code }))
+	} else if tool_name == TOOL_SKILL_INSTALL || tool_name == "skill.install" {
+		// Keep legacy alias "skill.install" for in-flight approval tickets.
+		extract_skill_source_url(grounding_input)
+			.map(|source_url| json!({ "source_url": source_url }))
+	} else {
+		None
 	}
 }
 

@@ -133,21 +133,71 @@ pub fn is_builtin_tool_name(tool_name: &str) -> bool {
 	builtin_tool_names().contains(tool_name)
 }
 
+/// Tools whose canonical execution is handled by the filesystem module.
+const FS_CANONICAL_TOOLS: &[&str] = &[
+	TOOL_EXISTS,
+	TOOL_INSPECT,
+	TOOL_LISTDIR,
+	TOOL_READ,
+	TOOL_EDIT,
+	TOOL_WRITE,
+];
+
 pub fn canonical_execution_for_builtin_tool_input(
 	tool_name: &str,
 	input: &Value,
 ) -> Option<CanonicalExecution> {
 	if tool_name == TOOL_BASH {
 		builtin::command::canonical_execution_from_runtime_input(input)
-	} else if tool_name == TOOL_EXISTS
-		|| tool_name == TOOL_INSPECT
-		|| tool_name == TOOL_LISTDIR
-		|| tool_name == TOOL_READ
-		|| tool_name == TOOL_EDIT
-		|| tool_name == TOOL_WRITE
-	{
+	} else if FS_CANONICAL_TOOLS.contains(&tool_name) {
 		builtin::fs::canonical_execution_from_runtime_input(tool_name, input)
 	} else {
 		None
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use roku_plugin_skills::SkillRegistry;
+
+	use super::*;
+
+	/// Every builtin tool in the catalog must have exactly one `risk:*` tag and
+	/// at least one `category:*` tag. This catches missing metadata when new
+	/// tools are added — the tag-based risk classification silently defaults to
+	/// `RequiresApproval` for tools without `risk:*` tags.
+	#[test]
+	fn all_builtin_tools_have_required_tags() {
+		let catalog =
+			build_resource_catalog(&SkillRegistry::disabled(), &ToolCatalogConfig::default());
+
+		for name in builtin_tool_names() {
+			let selector = roku_common_types::ResourceSelector::tool(name);
+			let descriptor = catalog
+				.descriptor(&selector)
+				.unwrap_or_else(|| panic!("builtin tool `{name}` must have a catalog descriptor"));
+
+			let risk_tags: Vec<_> = descriptor
+				.tags
+				.iter()
+				.filter(|t| t.starts_with("risk:"))
+				.collect();
+			assert_eq!(
+				risk_tags.len(),
+				1,
+				"tool `{name}` must have exactly 1 risk:* tag, found {}: {risk_tags:?}",
+				risk_tags.len()
+			);
+
+			let category_tags: Vec<_> = descriptor
+				.tags
+				.iter()
+				.filter(|t| t.starts_with("category:"))
+				.collect();
+			assert!(
+				!category_tags.is_empty(),
+				"tool `{name}` must have at least 1 category:* tag, found none"
+			);
+		}
 	}
 }
