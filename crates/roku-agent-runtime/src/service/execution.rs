@@ -401,15 +401,41 @@ impl RuntimeService {
 		self.record_transition(task, TaskState::Executing, "approval granted")?;
 		self.save_task(task.clone())?;
 
-		let mut result = if resume.pending_execution.canonical_execution.tool_name == "Bash" {
+		// Use the normalized name for dispatch so legacy dotted names resolve to the
+		// registered PascalCase tools.
+		let dispatch_tool_name = match resume
+			.pending_execution
+			.canonical_execution
+			.tool_name
+			.as_str()
+		{
+			"fs.read_text" => "Read",
+			"fs.write" => "Write",
+			"fs.edit" => "Edit",
+			"fs.grep" => "Grep",
+			"fs.glob" => "Glob",
+			"fs.find" => "Find",
+			"fs.exists" => "Exists",
+			"fs.inspect" => "Inspect",
+			"fs.list_dir" => "ListDir",
+			"command.run" => "Bash",
+			other => other,
+		};
+		// Sync canonical_execution.tool_name with the normalized dispatch name
+		// so ToolRuntime::invoke doesn't reject the mismatch.
+		let mut canonical = resume.pending_execution.canonical_execution.clone();
+		if canonical.tool_name != dispatch_tool_name {
+			canonical.tool_name = dispatch_tool_name.to_string();
+		}
+		let mut result = if dispatch_tool_name == "Bash" {
 			execute_frozen_command_result(task, &resume.node, &resume.pending_execution)
 		} else {
 			self.runtime.execute_approved_tool_invocation(
 				task,
 				&resume.node,
-				&resume.pending_execution.canonical_execution.tool_name,
+				dispatch_tool_name,
 				resume.frozen_tool_input.clone(),
-				resume.pending_execution.canonical_execution.clone(),
+				canonical,
 			)
 		};
 		result.evidence.push(EvidenceItem {

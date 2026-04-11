@@ -1155,12 +1155,34 @@ impl GenericAgentRuntime {
 			}
 
 			// Execute regular tool calls and collect ToolResult messages.
-			// Agent is intercepted here before the normal tool dispatch path.
 			for tc in &accumulated_tool_calls {
 				let tool_name = &tc.name;
 				let arguments = tc.arguments.clone();
 
-				// Intercept Agent before the normal tool dispatch path.
+				// Check approval gate before dispatching any tool, including Agent.
+				// This ensures the approval gate can deny sub-agent spawning just as it
+				// can deny any other tool call.
+				if let Some(gate) = approval_gate {
+					let decision =
+						tokio::task::block_in_place(|| gate.check(tool_name, &arguments));
+					match decision {
+						crate::runtime_loop::approval::ApprovalDecision::Approve => {}
+						crate::runtime_loop::approval::ApprovalDecision::Deny(reason) => {
+							// Count denied calls against step budget to prevent
+							// unbounded retries if the model keeps requesting denied tools.
+							loop_state.remaining_step_budget =
+								loop_state.remaining_step_budget.saturating_sub(1);
+							messages.push(Message::ToolResult {
+								tool_use_id: tc.id.clone(),
+								content: format!("[Tool denied] {reason}"),
+								is_error: true,
+							});
+							continue;
+						}
+					}
+				}
+
+				// Intercept Agent after the approval gate check.
 				// Agent is a pseudo-tool: it spawns a sub-agent and returns the result as a
 				// ToolResult. Budget is deducted from the parent before the sub-agent runs so that
 				// a failing sub-agent still consumes budget (Class G: skip path resource accounting).
@@ -1201,33 +1223,13 @@ impl GenericAgentRuntime {
 						});
 					}
 
+					let (sub_content, sub_is_error) = sub_result;
 					messages.push(Message::ToolResult {
 						tool_use_id: tc.id.clone(),
-						content: sub_result,
-						is_error: false,
+						content: sub_content,
+						is_error: sub_is_error,
 					});
 					continue;
-				}
-
-				// Check approval gate before executing the tool.
-				if let Some(gate) = approval_gate {
-					let decision =
-						tokio::task::block_in_place(|| gate.check(tool_name, &arguments));
-					match decision {
-						crate::runtime_loop::approval::ApprovalDecision::Approve => {}
-						crate::runtime_loop::approval::ApprovalDecision::Deny(reason) => {
-							// Count denied calls against step budget to prevent
-							// unbounded retries if the model keeps requesting denied tools.
-							loop_state.remaining_step_budget =
-								loop_state.remaining_step_budget.saturating_sub(1);
-							messages.push(Message::ToolResult {
-								tool_use_id: tc.id.clone(),
-								content: format!("[Tool denied] {reason}"),
-								is_error: true,
-							});
-							continue;
-						}
-					}
 				}
 
 				// Emit ToolStart.
@@ -1367,10 +1369,13 @@ impl GenericAgentRuntime {
 		runtime_memory_sections: &RuntimeMemorySections,
 		event_sender: Option<&crate::runtime_loop::LoopEventSender>,
 		approval_gate: Option<&dyn crate::runtime_loop::approval::ToolApprovalGate>,
-	) -> String {
+	) -> (String, bool) {
 		// Recursion guard: sub-agents cannot spawn sub-sub-agents.
 		if parent_loop_state.sub_agent_depth >= 1 {
-			return "[Sub-agent error] Sub-agents cannot spawn further sub-agents.".to_string();
+			return (
+				"[Sub-agent error] Sub-agents cannot spawn further sub-agents.".to_string(),
+				true,
+			);
 		}
 
 		let task = arguments
@@ -1380,7 +1385,7 @@ impl GenericAgentRuntime {
 			.trim()
 			.to_string();
 		if task.is_empty() {
-			return "[Sub-agent error] No task provided.".to_string();
+			return ("[Sub-agent error] No task provided.".to_string(), true);
 		}
 
 		// Allocate budget for the sub-agent from the parent's remaining budget.
@@ -1438,12 +1443,15 @@ impl GenericAgentRuntime {
 		))
 		.await;
 
+		// Determine error status from the structured result, not message text.
+		let is_error = result.result.status == ResultStatus::Error;
+
 		// Truncate to avoid bloating the parent's context window.
 		// Use char_indices for safe UTF-8 truncation (CJK/emoji safe).
 		const MAX_SUB_AGENT_RESULT_CHARS: usize = 4000;
 		let message = result.message;
 		let char_count = message.chars().count();
-		if char_count > MAX_SUB_AGENT_RESULT_CHARS {
+		let content = if char_count > MAX_SUB_AGENT_RESULT_CHARS {
 			let byte_end = message
 				.char_indices()
 				.nth(MAX_SUB_AGENT_RESULT_CHARS)
@@ -1456,7 +1464,8 @@ impl GenericAgentRuntime {
 			)
 		} else {
 			message
-		}
+		};
+		(content, is_error)
 	}
 
 	pub fn register_worker<W>(&mut self, priority: u8, worker: W)
