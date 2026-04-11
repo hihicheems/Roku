@@ -2,6 +2,69 @@
 
 # Changelog
 
+## [unreleased]
+### Features
+
+- **(roku-agent-runtime)** modular system prompt with tool guidance and project instructions (by @[itscheems](https://github.com/itscheems)) - ([a595acf](https://github.com/itscheems/Roku/commit/a595acfba642d63b46fed6d098d63a5365ae616e))
+- **(roku-agent-runtime)** port compaction to conversation message model (by @[itscheems](https://github.com/itscheems)) - ([8f4f544](https://github.com/itscheems/Roku/commit/8f4f544ad3b2914dd0da0e22f71fb35569c64b50))
+- **(roku-agent-runtime)** inject environment context into system prompt and strengthen command.run (by @[itscheems](https://github.com/itscheems)) - ([1c01720](https://github.com/itscheems/Roku/commit/1c01720591d265dacdb5c33035eef95b3015c9b9))
+- **(roku-cmd)** wire multi-provider LLM selection via runtime config (by @[itscheems](https://github.com/itscheems)) - ([477c0cb](https://github.com/itscheems/Roku/commit/477c0cb9eb7b8c6fc1b3885f8cd7c6a57415e3fa))
+- **(roku-plugin-llm)** add per-provider runtime config and router builders (by @[itscheems](https://github.com/itscheems)) - ([af2715f](https://github.com/itscheems/Roku/commit/af2715fc88dca6246ebbf5c0aec2e69796f23489))
+- **(roku-plugin-llm)** add OpenAI Chat Completions API provider with streaming tool calls (by @[itscheems](https://github.com/itscheems)) - ([fcdee2b](https://github.com/itscheems/Roku/commit/fcdee2b25b5c56535c4a33ce6ef3a45ea45e17da))
+- **(roku-plugin-llm)** add Anthropic Messages API provider with streaming tool_use (by @[itscheems](https://github.com/itscheems)) - ([6c878ae](https://github.com/itscheems/Roku/commit/6c878ae819c4a58bcc36347a5a484b725fe53c40))
+
+### Bug Fixes
+
+- **(roku-agent-runtime)** guard adjust_split_for_tool_pairs against out-of-bounds (by @[itscheems](https://github.com/itscheems)) - ([db8771b](https://github.com/itscheems/Roku/commit/db8771b35034447c61c5dc8ab09f5dccffd3921f))
+- **(roku-agent-runtime)** stabilize project instructions and improve token estimation (by @[itscheems](https://github.com/itscheems)) - ([3d8cd1f](https://github.com/itscheems/Roku/commit/3d8cd1f0340f28f0ee23e0a16e8d3694f8ada3ac))
+- **(roku-agent-runtime)** validate streaming LLM result and preserve compaction pairing (by @[itscheems](https://github.com/itscheems)) - ([82bac4c](https://github.com/itscheems/Roku/commit/82bac4c3e6e8e5ee95cf9402153171a125ef2e1f))
+- **(roku-agent-runtime)** sanitize environment values and use per-step cwd (by @[itscheems](https://github.com/itscheems)) - ([ad3e6ef](https://github.com/itscheems/Roku/commit/ad3e6ef8a929997635707fdaa97bd06beb70030d))
+- **(roku-agent-runtime)** complete classifier LLM deletion (resolve agent conflict) (by @[itscheems](https://github.com/itscheems)) - ([9fa69c3](https://github.com/itscheems/Roku/commit/9fa69c3cbe2174cd0f6b314120349dd82bc93387))
+
+### Refactor
+
+- **(roku-agent-runtime)** delete deterministic classifier and simplify request pipeline (by @[itscheems](https://github.com/itscheems)) - ([8f829e0](https://github.com/itscheems/Roku/commit/8f829e0f30416210efaf4aeea1e7bb67a731df62))
+- **(roku-agent-runtime)** rewrite turn loop from ContextProjection to conversation messages (by @[itscheems](https://github.com/itscheems)) - ([6825c34](https://github.com/itscheems/Roku/commit/6825c34bc45c3bc375192801452d90a388eacf94))
+- **(roku-agent-runtime)** remove classifier LLM calls and grounding gate (by @[itscheems](https://github.com/itscheems)) - ([5801aeb](https://github.com/itscheems/Roku/commit/5801aeb8eae88a6c0a0cab8e213da39fd7eec384))
+- **(roku-agent-runtime)** delete JSON-in-prompt fallback, native tool_use only (by @[itscheems](https://github.com/itscheems)) - ([90a9d2f](https://github.com/itscheems/Roku/commit/90a9d2f93835931a472381604e08c8feb45504b3))
+- **(roku-plugin-tools)** delete LLM-wrapping meta-tools (by @[itscheems](https://github.com/itscheems)) - ([f989c54](https://github.com/itscheems/Roku/commit/f989c5438dacc66e9d67a6d34f00d067bbf55503))
+- **(workspace)** merge roku-runtime-service into roku-agent-runtime (by @[itscheems](https://github.com/itscheems)) - ([ec273c5](https://github.com/itscheems/Roku/commit/ec273c5505be1eb8d6c1d4194e15c1675f7c7ac8))
+- **(workspace)** merge 3 over-split crates (17 → 14 members) (by @[itscheems](https://github.com/itscheems)) - ([740c6b3](https://github.com/itscheems/Roku/commit/740c6b3d3e9247cc4cd41c5c875c08170ec2cbfb))
+- **(workspace)** delete 6 unused crates (23 → 17 members) (by @[itscheems](https://github.com/itscheems)) - ([d0c5f3a](https://github.com/itscheems/Roku/commit/d0c5f3a806a92f46ebcdb09201d94a5f6eda30cb))
+
+## [v0.0.11] - 2026-04-09
+
+### Features
+
+- **(roku-agent-runtime)** wire native tool_use end-to-end in tool loop (by @[itscheems](https://github.com/itscheems)) - ([ac41cbf](https://github.com/itscheems/Roku/commit/ac41cbff7c900bbdbfb887ec4931f5d53325f7c9))
+- **(roku-agent-runtime)** parse native tool_use into NextStepDecision (by @[itscheems](https://github.com/itscheems)) - ([c40cdb0](https://github.com/itscheems/Roku/commit/c40cdb09168514f07813c31e681c5b87de7183ca))
+- **(roku-agent-runtime)** add Serialize derive to LoopEvent (by @[itscheems](https://github.com/itscheems)) - ([6df0d07](https://github.com/itscheems/Roku/commit/6df0d077c3625d19035b11dd5976947304fbb6bc))
+- **(roku-agent-runtime,roku-plugin-tools)** liberate command.run as general-purpose shell adapter (by @[itscheems](https://github.com/itscheems)) - ([61e3a8f](https://github.com/itscheems/Roku/commit/61e3a8f4f5860ec5af3e336c48a301d43b31554d))
+- **(roku-cmd)** add session-persistent CLI with pipe mode (by @[itscheems](https://github.com/itscheems)) - ([e570db9](https://github.com/itscheems/Roku/commit/e570db9786602b61b0e35186c96f405c0514ce47))
+- **(roku-plugin-llm)** implement OpenRouter tool_use request and response (by @[itscheems](https://github.com/itscheems)) - ([92c4bc4](https://github.com/itscheems/Roku/commit/92c4bc48be242b86c9d16cf95716f84013baf393))
+- **(roku-plugin-llm)** add tool definition and tool_use types to provider layer (by @[itscheems](https://github.com/itscheems)) - ([6c0d123](https://github.com/itscheems/Roku/commit/6c0d123f66da51d088586c9a3201a30a68b0b476))
+- **(roku-plugin-tools)** add context lines and type filter to fs.grep (by @[itscheems](https://github.com/itscheems)) - ([605982b](https://github.com/itscheems/Roku/commit/605982be58fa481623070bd9db0fc497dbdfae28))
+
+### Bug Fixes
+
+- **(roku-agent-runtime)** strip tool definitions from streaming requests (by @[itscheems](https://github.com/itscheems)) - ([73de5e8](https://github.com/itscheems/Roku/commit/73de5e83d800728c0ecfd33ce3f06d02096b3d62))
+- **(roku-agent-runtime)** remove escalation fallback to non-existent general.execute (by @[itscheems](https://github.com/itscheems)) - ([ae4b74d](https://github.com/itscheems/Roku/commit/ae4b74d3d7d1b96f0080a854fcee4327be166352))
+- **(roku-agent-runtime)** prevent GitHub URL from triggering blind skill install route (by @[itscheems](https://github.com/itscheems)) - ([bc8035a](https://github.com/itscheems/Roku/commit/bc8035ad1218435a64ccf5800c90c15f9c6d33da))
+- **(roku-agent-runtime,roku-plugin-tools)** make non-terminal tool errors recoverable by LLM (by @[itscheems](https://github.com/itscheems)) - ([bf8867c](https://github.com/itscheems/Roku/commit/bf8867c422deb445cd798885dfa066a1d42bbd4e))
+- **(roku-agent-runtime,roku-plugin-tools)** harden code-level defaults to match production config (by @[itscheems](https://github.com/itscheems)) - ([048ca20](https://github.com/itscheems/Roku/commit/048ca20397646cd46d6c3bbae7fc0f425035c884))
+- **(roku-plugin-telegram,roku-runtime-service)** clean up progress notice and failure message presentation (by @[itscheems](https://github.com/itscheems)) - ([a69854f](https://github.com/itscheems/Roku/commit/a69854fb3a3ebb24f8acc091bc395fea87f09c0e))
+
+### Refactor
+
+- **(roku-agent-runtime)** convert grounding from gate to hint (by @[itscheems](https://github.com/itscheems)) - ([04e96ad](https://github.com/itscheems/Roku/commit/04e96ad4c8e443773232a40ef7f4e783d3745e08))
+- **(roku-agent-runtime)** demote route classifier to soft context hint (by @[itscheems](https://github.com/itscheems)) - ([548f448](https://github.com/itscheems/Roku/commit/548f448ed67fe945d37d5035ea4feb09dec03bc6))
+- **(roku-plugin-tools)** make all enabled tools always visible to LLM (by @[itscheems](https://github.com/itscheems)) - ([e4dc5e9](https://github.com/itscheems/Roku/commit/e4dc5e9efa2b09ab7a86e8fcd517c85b569023c9))
+- **(roku-plugin-tools,roku-agent-runtime)** remove general.execute and downgrade meta-tools (by @[itscheems](https://github.com/itscheems)) - ([48123ac](https://github.com/itscheems/Roku/commit/48123ace06128543b466eac9df3675c2441ef450))
+
+### Miscellaneous Tasks
+
+- **(config)** exclude gitignored directories from hawkeye format (by @[itscheems](https://github.com/itscheems)) - ([b38cfbb](https://github.com/itscheems/Roku/commit/b38cfbbc2ada0341947410838bbd8d1dfee252fe))
+
 ## [v0.0.10] - 2026-04-08
 
 ### Features
