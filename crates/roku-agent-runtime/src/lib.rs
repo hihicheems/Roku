@@ -42,13 +42,14 @@ pub use runtime_config::{
 	RouteClassifierRuntimeConfigPatch,
 };
 pub use runtime_loop::{
-	AskUserPayload, AskUserResumeContract, AskUserResumeDirective, CompactConfig,
+	AskUserPayload, AskUserResumeContract, AskUserResumeDirective, AutoApproveGate, CompactConfig,
 	FinalAnswerPayload, InterpretedFlagExpectation, InterpretedObservation, LoopContext, LoopEvent,
 	LoopEventSender, LoopRequest, LoopState, LoopStatus, NextStepAction, NextStepDecision,
-	NextStepDecisionSchemaError, RegressionSuiteKind, RuntimeLoopRegressionCaseReport,
-	RuntimeLoopRegressionExpectation, RuntimeLoopTraceCheckReport, StepAction, StepObservation,
-	StepRecord, ToolObservation, ToolProbeCheckReport, check_runtime_loop_trace,
-	check_seed_tool_probe, compact_history, estimate_context_tokens,
+	NextStepDecisionSchemaError, RegressionSuiteKind, RiskBasedGate,
+	RuntimeLoopRegressionCaseReport, RuntimeLoopRegressionExpectation, RuntimeLoopTraceCheckReport,
+	StepAction, StepObservation, StepRecord, ToolApprovalDecision, ToolApprovalGate,
+	ToolObservation, ToolProbeCheckReport, ToolRiskLevel, check_runtime_loop_trace,
+	check_seed_tool_probe, classify_tool_risk, compact_history, estimate_context_tokens,
 	evaluate_runtime_loop_regression_case, interpret_observation, runtime_loop_trace,
 	summarize_discarded_steps,
 };

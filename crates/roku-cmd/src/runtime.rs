@@ -156,7 +156,8 @@ pub(crate) async fn run_live_once_with_options_from_env_and_sender(
 	// SkillRegistry::file_backed) which internally constructs and drops a tokio current-thread
 	// runtime. Use block_in_place so both the construction and the internal runtime drop complete
 	// in a blocking-allowed scope rather than inside the async executor.
-	let service = tokio::task::block_in_place(build_live_runtime_service_from_env)?;
+	let service = tokio::task::block_in_place(build_live_runtime_service_from_env)?
+		.with_approval_gate(cli_approval_gate());
 	let request = build_request(&gateway, options, next_cli_request_sequence());
 	execute_with_service_and_mode(service, request, RunMode::Normal, event_sender)
 		.await
@@ -1190,6 +1191,36 @@ fn build_request(
 		},
 		seq,
 	)
+}
+
+/// Build an interactive CLI approval gate that prompts via stderr/stdin.
+///
+/// For pipe mode (`--pipe`) pass `None` (auto-approve) since there is no interactive
+/// stdin available for approval prompts.
+pub(crate) fn cli_approval_gate() -> Arc<dyn roku_agent_runtime::ToolApprovalGate> {
+	Arc::new(roku_agent_runtime::RiskBasedGate::new(
+		|tool_name: &str, arguments: &serde_json::Value| {
+			use std::io::Write as _;
+			let args_display = serde_json::to_string_pretty(arguments).unwrap_or_default();
+			eprintln!("\n[approval] Tool: {tool_name}");
+			if !args_display.is_empty() && args_display != "null" {
+				let summary: String = args_display.chars().take(200).collect();
+				eprintln!("[approval] Arguments: {summary}");
+			}
+			eprint!("[approval] Allow? [y/N] ");
+			std::io::stderr().flush().ok();
+			let mut input = String::new();
+			if std::io::stdin().read_line(&mut input).is_ok()
+				&& input.trim().eq_ignore_ascii_case("y")
+			{
+				roku_agent_runtime::ToolApprovalDecision::Approve
+			} else {
+				roku_agent_runtime::ToolApprovalDecision::Deny(
+					"User denied the operation.".to_string(),
+				)
+			}
+		},
+	))
 }
 
 pub(crate) fn next_cli_request_sequence() -> u64 {

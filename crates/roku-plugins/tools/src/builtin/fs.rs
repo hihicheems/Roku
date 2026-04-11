@@ -525,6 +525,18 @@ impl Tool for FsReadTextTool {
 			buffer.as_slice()
 		};
 		let content = String::from_utf8_lossy(content_bytes).to_string();
+		let total_bytes = std::fs::metadata(&resolved)
+			.map(|m| m.len() as usize)
+			.unwrap_or(bytes_read);
+		let content = if truncated {
+			format!(
+				"{}\n\n[Truncated: showing first {} bytes of {} total. \
+				 Pass a smaller max_bytes to read a specific portion.]",
+				content, max_bytes, total_bytes
+			)
+		} else {
+			content
+		};
 		let message = if content.trim().is_empty() {
 			format!("`{}` is empty.", resolved.display())
 		} else {
@@ -534,6 +546,7 @@ impl Tool for FsReadTextTool {
 			"path": resolved.display().to_string(),
 			"content": content,
 			"bytes_read": bytes_read.min(max_bytes),
+			"total_bytes": total_bytes,
 			"truncated": truncated,
 			"encoding": "utf-8-lossy",
 		});
@@ -2821,5 +2834,84 @@ mod tests {
 		};
 
 		assert!(!is_overwrite_execution(&create));
+	}
+
+	// -----------------------------------------------------------------------
+	// fs.read_text tests
+	// -----------------------------------------------------------------------
+
+	#[test]
+	fn fs_read_text_truncation_note_appended_to_content() {
+		let dir = tempdir().expect("tempdir");
+		// Write 20 bytes so we can cap at 10 and observe truncation
+		let file = dir.path().join("big.txt");
+		fs::write(&file, "AAAAAAAAAA1234567890").expect("fixture write");
+
+		let tool = FsReadTextTool {
+			config: FsToolRuntimeConfig {
+				default_max_bytes: 10,
+				..FsToolRuntimeConfig::default()
+			},
+		};
+		let output = tool
+			.invoke(ToolInvocationRequest {
+				invocation_key: "fs.read_text:test-truncation".to_string(),
+				attempt: 1,
+				input: json!({ "path": "big.txt", "max_bytes": 10 }),
+				sandbox_profile: SandboxProfile::ReadOnlyFs,
+				attachments: Vec::new(),
+				allowed_read_roots: vec![dir.path().to_path_buf()],
+				allowed_write_roots: Vec::new(),
+			})
+			.expect("invoke should succeed");
+
+		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
+			.expect("output should be ToolOutputEnvelope");
+		assert!(envelope.ok);
+		assert_eq!(envelope.data["truncated"], true);
+		assert!(
+			envelope.message.contains("[Truncated:"),
+			"message should contain truncation note, got: {}",
+			envelope.message
+		);
+		assert!(
+			envelope.message.contains("max_bytes"),
+			"truncation note should mention max_bytes parameter"
+		);
+		let total = envelope.data["total_bytes"]
+			.as_u64()
+			.expect("total_bytes should be present");
+		assert_eq!(total, 20, "total_bytes should reflect the full file size");
+	}
+
+	#[test]
+	fn fs_read_text_no_truncation_note_when_within_limit() {
+		let dir = tempdir().expect("tempdir");
+		let file = dir.path().join("small.txt");
+		fs::write(&file, "hello world").expect("fixture write");
+
+		let tool = FsReadTextTool {
+			config: FsToolRuntimeConfig::default(),
+		};
+		let output = tool
+			.invoke(ToolInvocationRequest {
+				invocation_key: "fs.read_text:test-no-truncation".to_string(),
+				attempt: 1,
+				input: json!({ "path": "small.txt" }),
+				sandbox_profile: SandboxProfile::ReadOnlyFs,
+				attachments: Vec::new(),
+				allowed_read_roots: vec![dir.path().to_path_buf()],
+				allowed_write_roots: Vec::new(),
+			})
+			.expect("invoke should succeed");
+
+		let envelope = serde_json::from_value::<ToolOutputEnvelope>(output)
+			.expect("output should be ToolOutputEnvelope");
+		assert!(envelope.ok);
+		assert_eq!(envelope.data["truncated"], false);
+		assert!(
+			!envelope.message.contains("[Truncated:"),
+			"message should not contain truncation note for small files"
+		);
 	}
 }

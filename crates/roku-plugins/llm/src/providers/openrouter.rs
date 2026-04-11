@@ -376,6 +376,10 @@ impl OpenRouterProvider {
 
 		// Track stream errors to report after sending Done.
 		let mut stream_error: Option<ProviderCallError> = None;
+		// Track index → id mapping for streaming tool_calls.
+		// OpenAI sends id only in the first chunk; subsequent deltas use index.
+		let mut tool_call_index_to_id: std::collections::HashMap<u64, String> =
+			std::collections::HashMap::new();
 
 		while let Some(event_result) = stream.next().await {
 			let event = match event_result {
@@ -426,26 +430,75 @@ impl OpenRouterProvider {
 					finish_reason = Some(reason.to_string());
 				}
 
-				let delta_text = choice
-					.get("delta")
-					.and_then(|delta| delta.get("content"))
-					.and_then(Value::as_str)
-					.unwrap_or("");
+				if let Some(delta) = choice.get("delta") {
+					// Handle text content.
+					let delta_text = delta.get("content").and_then(Value::as_str).unwrap_or("");
 
-				if !delta_text.is_empty() {
-					full_text.push_str(delta_text);
-					// Best-effort send — if the receiver is dropped we stop streaming.
-					if tx
-						.send(StreamChunk::TextDelta {
-							text: delta_text.to_string(),
-						})
-						.await
-						.is_err()
-					{
-						break;
+					if !delta_text.is_empty() {
+						full_text.push_str(delta_text);
+						if tx
+							.send(StreamChunk::TextDelta {
+								text: delta_text.to_string(),
+							})
+							.await
+							.is_err()
+						{
+							break;
+						}
+					}
+
+					// Handle streaming tool_calls (OpenAI format).
+					if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+						for tc_delta in tool_calls {
+							let index = tc_delta.get("index").and_then(Value::as_u64).unwrap_or(0);
+							let id = tc_delta.get("id").and_then(Value::as_str).map(String::from);
+							let function = tc_delta.get("function");
+							let name = function
+								.and_then(|f| f.get("name"))
+								.and_then(Value::as_str)
+								.map(String::from);
+							let arguments_chunk = function
+								.and_then(|f| f.get("arguments"))
+								.and_then(Value::as_str)
+								.unwrap_or("");
+
+							// First chunk for a tool_call has id + name → ToolCallStart.
+							if let (Some(id), Some(name)) = (id, name) {
+								tool_call_index_to_id.insert(index, id.clone());
+								let _ = tx
+									.send(StreamChunk::ToolCallStart {
+										id: id.clone(),
+										name,
+									})
+									.await;
+								if !arguments_chunk.is_empty() {
+									let _ = tx
+										.send(StreamChunk::ToolCallDelta {
+											id,
+											arguments_chunk: arguments_chunk.to_string(),
+										})
+										.await;
+								}
+							} else if !arguments_chunk.is_empty() {
+								// Subsequent chunks use index to correlate.
+								if let Some(id) = tool_call_index_to_id.get(&index) {
+									let _ = tx
+										.send(StreamChunk::ToolCallDelta {
+											id: id.clone(),
+											arguments_chunk: arguments_chunk.to_string(),
+										})
+										.await;
+								}
+							}
+						}
 					}
 				}
 			}
+		}
+
+		// Send ToolCallDone for all pending tool calls when stream ends.
+		for id in tool_call_index_to_id.values() {
+			let _ = tx.send(StreamChunk::ToolCallDone { id: id.clone() }).await;
 		}
 
 		let latency_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -483,6 +536,10 @@ impl OpenRouterProvider {
 				("latency_ms", latency_ms.to_string()),
 				("prompt_tokens", prompt_tokens.to_string()),
 				("output_tokens", output_tokens.to_string()),
+				(
+					"finish_reason",
+					finish_reason.clone().unwrap_or_else(|| "none".to_string()),
+				),
 			],
 		);
 

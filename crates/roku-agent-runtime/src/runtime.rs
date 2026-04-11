@@ -760,6 +760,7 @@ impl GenericAgentRuntime {
 		runtime_memory_sections: &RuntimeMemorySections,
 		user_reply: Option<&str>,
 		event_sender: Option<&crate::runtime_loop::LoopEventSender>,
+		approval_gate: Option<&dyn crate::runtime_loop::approval::ToolApprovalGate>,
 	) -> DirectRouteExecutionResult {
 		// Without an LLM router the message-based loop cannot make decisions.
 		// Return a graceful completion — the runtime still functions for
@@ -1072,8 +1073,33 @@ impl GenericAgentRuntime {
 
 			// Execute regular tool calls and collect ToolResult messages.
 			for tc in &accumulated_tool_calls {
-				let tool_name = &tc.name;
+				// Resolve the tool name — some models drop the namespace prefix
+				// (e.g. returning "run" instead of "command.run"). Match against
+				// visible tools by suffix if exact match fails.
+				let resolved_name = resolve_tool_name(&tc.name, &loop_state.visible_tools);
+				let tool_name = &resolved_name;
 				let arguments = tc.arguments.clone();
+
+				// Check approval gate before executing the tool.
+				if let Some(gate) = approval_gate {
+					let decision =
+						tokio::task::block_in_place(|| gate.check(tool_name, &arguments));
+					match decision {
+						crate::runtime_loop::approval::ApprovalDecision::Approve => {}
+						crate::runtime_loop::approval::ApprovalDecision::Deny(reason) => {
+							// Count denied calls against step budget to prevent
+							// unbounded retries if the model keeps requesting denied tools.
+							loop_state.remaining_step_budget =
+								loop_state.remaining_step_budget.saturating_sub(1);
+							messages.push(Message::ToolResult {
+								tool_use_id: tc.id.clone(),
+								content: format!("[Tool denied] {reason}"),
+								is_error: true,
+							});
+							continue;
+						}
+					}
+				}
 
 				// Emit ToolStart.
 				if let Some(sender) = event_sender {
@@ -1159,6 +1185,8 @@ impl GenericAgentRuntime {
 					serde_json::to_string(&raw_tool_output)
 						.unwrap_or_else(|_| observation.message.clone())
 				};
+				let tool_result_content =
+					truncate_tool_result_for_message(&tool_result_content, MAX_TOOL_RESULT_CHARS);
 				let is_error = !observation.ok;
 				messages.push(Message::ToolResult {
 					tool_use_id: tc.id.clone(),
@@ -1757,9 +1785,93 @@ fn terminal_decision(
 	}
 }
 
+/// Resolve a tool name against the visible tools list.
+///
+/// Some models drop the namespace prefix when using dot-separated tool names
+/// in OpenAI function calling format (e.g., returning `"run"` instead of
+/// `"command.run"`, or `"list_dir"` instead of `"fs.list_dir"`).
+///
+/// This function first tries an exact match, then falls back to suffix matching
+/// (looking for a tool that ends with `.{name}`). If exactly one tool matches,
+/// the full name is returned. Otherwise, the original name is returned unchanged.
+/// Known short name → full tool name mappings for common ambiguous cases.
+/// When models drop the namespace prefix, these resolve the ambiguity.
+const TOOL_NAME_ALIASES: &[(&str, &str)] = &[
+	("run", "command.run"),
+	("search", "web.search"),
+	("fetch", "web.fetch"),
+	("edit", "fs.edit"),
+	("write", "fs.write"),
+	("read", "fs.read_text"),
+	("read_text", "fs.read_text"),
+	("list_dir", "fs.list_dir"),
+	("grep", "fs.grep"),
+	("glob", "fs.glob"),
+	("find", "fs.find"),
+	("exists", "fs.exists"),
+	("inspect", "fs.inspect"),
+];
+
+fn resolve_tool_name(name: &str, visible_tools: &[String]) -> String {
+	// Exact match.
+	if visible_tools.iter().any(|t| t == name) {
+		return name.to_string();
+	}
+	// Check known aliases first (handles ambiguous cases like "run").
+	for &(alias, full_name) in TOOL_NAME_ALIASES {
+		if name == alias && visible_tools.iter().any(|t| t == full_name) {
+			return full_name.to_string();
+		}
+	}
+	// Suffix match: find tools ending with ".{name}".
+	let suffix = format!(".{name}");
+	let candidates: Vec<&String> = visible_tools
+		.iter()
+		.filter(|t| t.ends_with(&suffix))
+		.collect();
+	if candidates.len() == 1 {
+		return candidates[0].clone();
+	}
+	// No match — return original, execute_loop_tool_invocation will handle the error.
+	name.to_string()
+}
+
 fn normalize_tool_loop_observation(observation: ToolObservation) -> ToolObservation {
 	// general.execute has been removed; observations from all tools are returned as-is.
 	observation
+}
+
+/// Maximum characters for a tool result before truncation in the turn loop.
+/// This protects the LLM context window from oversized single tool outputs.
+const MAX_TOOL_RESULT_CHARS: usize = 80_000;
+
+/// Truncate a tool result to head + tail with an informative note.
+fn truncate_tool_result_for_message(content: &str, max_chars: usize) -> String {
+	if content.len() <= max_chars {
+		return content.to_string();
+	}
+	let head_chars = max_chars * 4 / 5;
+	let tail_chars = max_chars / 5;
+	let head_end = content
+		.char_indices()
+		.nth(head_chars)
+		.map(|(i, _)| i)
+		.unwrap_or(content.len());
+	let tail_start = content
+		.char_indices()
+		.rev()
+		.nth(tail_chars.saturating_sub(1))
+		.map(|(i, _)| i)
+		.unwrap_or(0);
+	let total_lines = content.lines().count();
+	format!(
+		"{}\n\n[Output truncated: showing first and last portions of {} total lines ({} chars). \
+		 Ask the user or use a more specific query to narrow results.]\n\n{}",
+		&content[..head_end],
+		total_lines,
+		content.len(),
+		&content[tail_start..],
+	)
 }
 
 fn awaiting_user_resume_prompt(
@@ -2429,6 +2541,7 @@ mod tests {
 				&RuntimeMemorySections::default(),
 				None,
 				None,
+				None,
 			));
 
 		assert_eq!(execution.result.status, ResultStatus::Ok);
@@ -2529,6 +2642,7 @@ mod tests {
 				&RuntimeMemorySections::default(),
 				None,
 				None,
+				None,
 			));
 
 		assert_eq!(execution.result.status, ResultStatus::Ok);
@@ -2605,6 +2719,7 @@ mod tests {
 				&request,
 				&mut loop_state,
 				&RuntimeMemorySections::default(),
+				None,
 				None,
 				None,
 			));
@@ -2801,6 +2916,7 @@ mod tests {
 				&request,
 				&mut loop_state,
 				&RuntimeMemorySections::default(),
+				None,
 				None,
 				None,
 			));

@@ -106,6 +106,10 @@ impl RuntimeService {
 		event_sender: Option<&LoopEventSender>,
 	) -> Result<ResponseEnvelope, RuntimeError> {
 		let initial_history_len = loop_state.history.len();
+		let approval_gate = self
+			.approval_gate
+			.as_deref()
+			.map(|g| g as &dyn crate::runtime_loop::approval::ToolApprovalGate);
 		let execution = self
 			.runtime
 			.execute_tool_loop(
@@ -115,6 +119,7 @@ impl RuntimeService {
 				runtime_memory_sections,
 				Some(&request.goal),
 				event_sender,
+				approval_gate,
 			)
 			.await;
 		self.record_runtime_loop_history(loop_state, initial_history_len);

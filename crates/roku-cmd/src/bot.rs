@@ -77,6 +77,8 @@ pub fn run_telegram_bot_from_env() -> Result<(), CommandError> {
 		TelegramBotClient::new(bot_config.clone()).map_err(CommandError::TelegramTransport)?,
 	);
 	let runner = roku_plugin_telegram::TelegramPollingRunner::new(bot_config)?;
+	// TODO(issue-165): Telegram should use an async inline-keyboard approval gate.
+	// For now it uses None (auto-approve) since there is no interactive stdin available.
 	let handler = RuntimeServiceTelegramHandler {
 		service: Arc::new(build_live_runtime_service_from_layout_and_bootstrap(
 			&layout, bootstrap,

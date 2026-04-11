@@ -162,6 +162,7 @@ pub struct RuntimeService {
 	state: Mutex<RuntimeState>,
 	pending_loop_snapshot_store: Arc<dyn PendingLoopSnapshotStore>,
 	runtime_memory_layers: Mutex<HashMap<String, RuntimeMemoryLayers>>,
+	approval_gate: Option<Arc<dyn crate::runtime_loop::approval::ToolApprovalGate>>,
 }
 
 impl RuntimeService {
@@ -255,6 +256,7 @@ impl RuntimeService {
 			}),
 			pending_loop_snapshot_store: Arc::new(InMemoryPendingLoopSnapshotStore::default()),
 			runtime_memory_layers: Mutex::new(HashMap::new()),
+			approval_gate: None,
 		}
 	}
 
@@ -274,6 +276,14 @@ impl RuntimeService {
 		pending_loop_snapshot_store: Arc<dyn PendingLoopSnapshotStore>,
 	) -> Self {
 		self.pending_loop_snapshot_store = pending_loop_snapshot_store;
+		self
+	}
+
+	pub fn with_approval_gate(
+		mut self,
+		gate: Arc<dyn crate::runtime_loop::approval::ToolApprovalGate>,
+	) -> Self {
+		self.approval_gate = Some(gate);
 		self
 	}
 
