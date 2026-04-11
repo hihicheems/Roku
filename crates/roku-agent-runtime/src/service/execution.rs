@@ -50,6 +50,10 @@ const LEGACY_TOOL_NAME_MAP: &[(&str, &str)] = &[
 ];
 
 /// PascalCase tool names allowed in execution approval resume.
+///
+/// `TOOL_BASH` is intentionally absent — Bash tickets (and legacy
+/// `"command.run"`) are handled by a dedicated guard branch that
+/// enforces `DirectExec` + `InheritSelected` constraints.
 const APPROVED_TOOL_NAMES: &[&str] = &[
 	TOOL_READ,
 	TOOL_WRITE,
