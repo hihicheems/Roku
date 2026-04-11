@@ -673,13 +673,21 @@ fn extract_readable_text(raw: &str) -> String {
 	// Step 7: Collapse 3+ consecutive newlines to 2.
 	let s = RE_MULTI_BLANK.replace_all(&s, "\n\n");
 
-	// Step 8: Trim each line.
-	s.lines()
-		.map(str::trim)
-		.collect::<Vec<_>>()
-		.join("\n")
-		.trim()
-		.to_string()
+	// Step 8: Trim lines outside code blocks, preserve indentation inside.
+	let mut result_lines = Vec::new();
+	let mut in_code_block = false;
+	for line in s.lines() {
+		if line.trim_start().starts_with("```") {
+			in_code_block = !in_code_block;
+			result_lines.push(line.trim().to_string());
+		} else if in_code_block {
+			// Preserve indentation inside code blocks.
+			result_lines.push(line.trim_end().to_string());
+		} else {
+			result_lines.push(line.trim().to_string());
+		}
+	}
+	result_lines.join("\n").trim().to_string()
 }
 
 fn error_output(

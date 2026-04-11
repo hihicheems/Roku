@@ -1087,12 +1087,16 @@ impl GenericAgentRuntime {
 					match decision {
 						crate::runtime_loop::approval::ApprovalDecision::Approve => {}
 						crate::runtime_loop::approval::ApprovalDecision::Deny(reason) => {
+							// Count denied calls against step budget to prevent
+							// unbounded retries if the model keeps requesting denied tools.
+							loop_state.remaining_step_budget =
+								loop_state.remaining_step_budget.saturating_sub(1);
 							messages.push(Message::ToolResult {
 								tool_use_id: tc.id.clone(),
 								content: format!("[Tool denied] {reason}"),
 								is_error: true,
 							});
-							continue; // Skip this tool, process next
+							continue;
 						}
 					}
 				}

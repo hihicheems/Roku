@@ -531,7 +531,7 @@ impl Tool for FsReadTextTool {
 		let content = if truncated {
 			format!(
 				"{}\n\n[Truncated: showing first {} bytes of {} total. \
-				 Use offset parameter to read specific sections.]",
+				 Pass a smaller max_bytes to read a specific portion.]",
 				content, max_bytes, total_bytes
 			)
 		} else {
@@ -2875,8 +2875,8 @@ mod tests {
 			envelope.message
 		);
 		assert!(
-			envelope.message.contains("offset"),
-			"truncation note should mention the offset parameter"
+			envelope.message.contains("max_bytes"),
+			"truncation note should mention max_bytes parameter"
 		);
 		let total = envelope.data["total_bytes"]
 			.as_u64()
