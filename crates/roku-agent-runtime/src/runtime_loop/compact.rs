@@ -303,7 +303,7 @@ pub fn truncate_large_tool_results(messages: &mut [Message], max_chars: usize) {
 /// originating Assistant message so the retained tail starts cleanly.
 /// Returns the adjusted split index (always >= 1).
 fn adjust_split_for_tool_pairs(messages: &[Message], mut split: usize) -> usize {
-	while split > 1 {
+	while split > 1 && split < messages.len() {
 		if matches!(messages[split], Message::ToolResult { .. }) {
 			split -= 1;
 		} else {
@@ -980,6 +980,27 @@ mod tests {
 		];
 		compact_messages(&mut messages, 5);
 		assert_eq!(messages.len(), 2); // Unchanged
+	}
+
+	#[test]
+	fn compact_messages_retain_tail_zero_does_not_panic() {
+		use roku_plugin_llm::Message;
+		let mut messages = vec![
+			Message::User {
+				content: "goal".to_string(),
+			},
+			Message::Assistant {
+				text: "answer".to_string(),
+				tool_calls: vec![],
+			},
+			Message::User {
+				content: "follow-up".to_string(),
+			},
+		];
+		// retain_tail=0 → split = len = 3. Must not panic.
+		compact_messages(&mut messages, 0);
+		// All non-anchor messages compacted: anchor + summary.
+		assert_eq!(messages.len(), 2);
 	}
 
 	#[test]
