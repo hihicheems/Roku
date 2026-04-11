@@ -96,6 +96,11 @@ pub struct CatalogDescriptor {
 }
 
 impl CatalogDescriptor {
+	/// Returns `true` if this descriptor has the given tag.
+	pub fn has_tag(&self, tag: &str) -> bool {
+		self.tags.iter().any(|t| t == tag)
+	}
+
 	/// Compact selection hint consumed by hot-path routing prompts and retrieval.
 	///
 	/// Descriptors should author this explicitly so selection paths do not silently depend on the
@@ -201,6 +206,13 @@ impl ResourceCatalog {
 
 	pub fn entries(&self) -> &[CatalogDescriptor] {
 		&self.entries
+	}
+
+	/// Returns `true` if the named tool has the given tag in this catalog.
+	pub fn tool_has_tag(&self, tool_name: &str, tag: &str) -> bool {
+		self.entries
+			.iter()
+			.any(|e| e.name == tool_name && e.has_tag(tag))
 	}
 
 	pub fn descriptor(&self, selector: &ResourceSelector) -> Option<&CatalogDescriptor> {

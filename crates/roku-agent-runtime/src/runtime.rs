@@ -46,7 +46,7 @@ use roku_plugin_llm::{
 	GenerationRequest, LlmRouter, Message, RiskTier, StreamChunk, ToolCallBlock,
 };
 use roku_plugin_skills::SkillRegistry;
-use roku_plugin_tools::{ResourceCatalog, ResourceKind};
+use roku_plugin_tools::{PSEUDO_AGENT, ResourceCatalog, ResourceKind};
 use roku_plugin_tools::{
 	RuntimeVisibleToolAvailabilitySnapshot, build_runtime_visible_tool_availability_snapshot,
 	canonical_execution_for_builtin_tool_input,
@@ -702,7 +702,11 @@ impl GenericAgentRuntime {
 		tool_name: &str,
 		error: &ToolRuntimeError,
 	) -> ToolObservation {
-		ToolObservation::from_runtime_error(tool_name, error)
+		ToolObservation::from_runtime_error_with_catalog(
+			tool_name,
+			error,
+			Some(&self.resource_catalog),
+		)
 	}
 
 	/// Returns `(prompt_tokens, output_tokens)` consumed by compaction LLM calls.
@@ -1186,7 +1190,7 @@ impl GenericAgentRuntime {
 				// Agent is a pseudo-tool: it spawns a sub-agent and returns the result as a
 				// ToolResult. Budget is deducted from the parent before the sub-agent runs so that
 				// a failing sub-agent still consumes budget (Class G: skip path resource accounting).
-				if tool_name == "Agent" {
+				if tool_name == PSEUDO_AGENT {
 					// Deduct one step from parent budget unconditionally (Class G).
 					loop_state.remaining_step_budget =
 						loop_state.remaining_step_budget.saturating_sub(1);
@@ -1806,7 +1810,11 @@ impl GenericAgentRuntime {
 		let observation = if result.status == ResultStatus::Ok {
 			ToolObservation::from_result_payload(tool_name, &payload)
 		} else {
-			ToolObservation::from_error_payload(tool_name, &payload)
+			ToolObservation::from_error_payload_with_catalog(
+				tool_name,
+				&payload,
+				Some(&self.resource_catalog),
+			)
 		};
 		normalize_tool_loop_observation(observation)
 	}

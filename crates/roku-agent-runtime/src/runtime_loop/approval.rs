@@ -18,6 +18,12 @@
 //! confirmation, or be denied. Callers (CLI, Telegram) provide a gate
 //! implementation that matches their interaction model.
 
+use std::sync::Arc;
+
+use roku_plugin_tools::{
+	PSEUDO_ASK_USER, PSEUDO_FAIL, PSEUDO_FINAL_ANSWER, ResourceCatalog, TAG_RISK_SAFE,
+	TAG_RISK_WRITE, TOOL_BASH,
+};
 use serde_json::Value;
 
 /// Result of an approval check.
@@ -51,17 +57,33 @@ impl ToolApprovalGate for AutoApproveGate {
 /// Write operations require explicit approval via a callback.
 pub struct RiskBasedGate<F: Fn(&str, &Value) -> ApprovalDecision + Send + Sync> {
 	prompt_fn: F,
+	catalog: Option<Arc<ResourceCatalog>>,
 }
 
 impl<F: Fn(&str, &Value) -> ApprovalDecision + Send + Sync> RiskBasedGate<F> {
 	pub fn new(prompt_fn: F) -> Self {
-		Self { prompt_fn }
+		Self {
+			prompt_fn,
+			catalog: None,
+		}
+	}
+
+	pub fn with_catalog(prompt_fn: F, catalog: Arc<ResourceCatalog>) -> Self {
+		Self {
+			prompt_fn,
+			catalog: Some(catalog),
+		}
 	}
 }
 
 impl<F: Fn(&str, &Value) -> ApprovalDecision + Send + Sync> ToolApprovalGate for RiskBasedGate<F> {
 	fn check(&self, tool_name: &str, arguments: &Value) -> ApprovalDecision {
-		match classify_tool_risk(tool_name, arguments) {
+		let risk = if let Some(catalog) = &self.catalog {
+			classify_tool_risk_from_catalog(tool_name, arguments, catalog)
+		} else {
+			classify_tool_risk(tool_name, arguments)
+		};
+		match risk {
 			ToolRiskLevel::Safe => ApprovalDecision::Approve,
 			ToolRiskLevel::RequiresApproval => (self.prompt_fn)(tool_name, arguments),
 			ToolRiskLevel::Denied => ApprovalDecision::Deny(format!(
@@ -80,6 +102,41 @@ pub enum ToolRiskLevel {
 	RequiresApproval,
 	/// Explicitly blocked.
 	Denied,
+}
+
+/// Classify a tool invocation by risk level using catalog tag metadata.
+///
+/// - Pseudo-tools (final_answer, ask_user, fail) → Safe
+/// - Bash → classified by command content (special case)
+/// - Tools with `risk:safe` tag → Safe
+/// - Tools with `risk:write` tag → RequiresApproval
+/// - Unknown → RequiresApproval (safe default)
+pub fn classify_tool_risk_from_catalog(
+	tool_name: &str,
+	arguments: &Value,
+	catalog: &ResourceCatalog,
+) -> ToolRiskLevel {
+	// Pseudo-tools are never in the catalog — always safe.
+	if tool_name == PSEUDO_FINAL_ANSWER || tool_name == PSEUDO_ASK_USER || tool_name == PSEUDO_FAIL
+	{
+		return ToolRiskLevel::Safe;
+	}
+
+	// Bash: special case — classified by command content regardless of catalog tag.
+	if tool_name == TOOL_BASH {
+		return classify_command_risk(arguments);
+	}
+
+	// Tag-based classification.
+	if catalog.tool_has_tag(tool_name, TAG_RISK_SAFE) {
+		return ToolRiskLevel::Safe;
+	}
+	if catalog.tool_has_tag(tool_name, TAG_RISK_WRITE) {
+		return ToolRiskLevel::RequiresApproval;
+	}
+
+	// Unknown tool → require approval (safe default).
+	ToolRiskLevel::RequiresApproval
 }
 
 /// Classify a tool invocation by risk level.

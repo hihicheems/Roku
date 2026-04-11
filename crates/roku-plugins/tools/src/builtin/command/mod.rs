@@ -53,6 +53,8 @@ pub(crate) fn catalog_descriptors_with_config(
 			.to_string(),
 		discoverable: true,
 		tags: vec![
+			crate::TAG_CATEGORY_SHELL.to_string(),
+			crate::TAG_RISK_WRITE.to_string(),
 			"command".to_string(),
 			"execution".to_string(),
 			"probe".to_string(),

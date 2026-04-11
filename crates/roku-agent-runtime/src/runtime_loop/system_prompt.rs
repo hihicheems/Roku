@@ -18,6 +18,11 @@
 //! identity, tool guidance, environment context, and project instructions.
 //! Each fragment is a pure function returning a string section.
 
+use roku_plugin_tools::{
+	PSEUDO_ASK_USER, PSEUDO_FAIL, PSEUDO_FINAL_ANSWER, TOOL_BASH, TOOL_GLOB, TOOL_LISTDIR,
+	TOOL_READ, TOOL_WEB_FETCH, TOOL_WEB_SEARCH,
+};
+
 use super::environment::{EnvironmentSnapshot, format_environment_context};
 
 /// Build the full system prompt from modular fragments.
@@ -60,7 +65,8 @@ and explaining code. You are direct, concise, and action-oriented.\
 
 /// Tool guidance: when and how to use tools.
 fn tool_guidance_section() -> String {
-	"\
+	format!(
+		"\
 # Tool Usage
 
 You have access to tools. Use them proactively to accomplish the user's task.
@@ -71,22 +77,22 @@ You have access to tools. Use them proactively to accomplish the user's task.
 is destructive or irreversible.
 - Do NOT answer from training data when you can use tools to get current, accurate \
 information. Prefer tool results over memorized knowledge.
-- Use the most specific tool available. Fall back to Bash only when no \
+- Use the most specific tool available. Fall back to {TOOL_BASH} only when no \
 dedicated tool fits.
-- When the user provides a URL, fetch it with WebFetch.
-- When the user asks about a file, read it with Read.
-- When the user asks about a repository or project, explore it with ListDir, \
-Glob, Read, or Bash (e.g. `gh repo view`).
-- When the user asks you to run a command, use Bash.
+- When the user provides a URL, fetch it with {TOOL_WEB_FETCH}.
+- When the user asks about a file, read it with {TOOL_READ}.
+- When the user asks about a repository or project, explore it with {TOOL_LISTDIR}, \
+{TOOL_GLOB}, {TOOL_READ}, or {TOOL_BASH} (e.g. `gh repo view`).
+- When the user asks you to run a command, use {TOOL_BASH}.
 - When the user asks a question that requires current information (weather, news, \
-docs, package versions), use WebSearch or WebFetch.
+docs, package versions), use {TOOL_WEB_SEARCH} or {TOOL_WEB_FETCH}.
 - Never say \"Let me check...\" or \"I'll look into that...\" — just do it.
 
 ## Completing the task
 
-- Call final_answer when the task is complete and you have a response for the user.
-- Call ask_user when you need clarification before you can proceed.
-- Call fail only when the task is genuinely impossible after attempting it.
+- Call {PSEUDO_FINAL_ANSWER} when the task is complete and you have a response for the user.
+- Call {PSEUDO_ASK_USER} when you need clarification before you can proceed.
+- Call {PSEUDO_FAIL} only when the task is genuinely impossible after attempting it.
 
 ## Output style
 
@@ -94,7 +100,7 @@ docs, package versions), use WebSearch or WebFetch.
 - Use code blocks with language tags for code.
 - When the user writes in Chinese, respond in Chinese. Match the user's language.\
 "
-	.to_string()
+	)
 }
 
 /// Environment context: working directory, git info, available CLI tools.

@@ -13,7 +13,12 @@
 // limitations under the License.
 
 use roku_plugin_llm::ToolDefinition;
-use roku_plugin_tools::ResourceCatalog;
+use roku_plugin_tools::{
+	PSEUDO_AGENT, PSEUDO_ASK_USER, PSEUDO_FAIL, PSEUDO_FINAL_ANSWER, ResourceCatalog, TOOL_BASH,
+	TOOL_EDIT, TOOL_EXISTS, TOOL_FIND, TOOL_GLOB, TOOL_GREP, TOOL_INSPECT, TOOL_LISTDIR,
+	TOOL_PYTHON, TOOL_READ, TOOL_SKILL_INSTALL, TOOL_TABLE_INSPECT, TOOL_TABLE_PREVIEW,
+	TOOL_TABLE_SCHEMA, TOOL_TABLE_SHEETS, TOOL_WEB_FETCH, TOOL_WEB_SEARCH, TOOL_WRITE,
+};
 use serde_json::{Value, json};
 
 use crate::runtime_loop::ToolObservation;
@@ -66,7 +71,7 @@ pub(crate) fn build_tool_definitions(
 
 	// Special pseudo-tools for non-tool actions.
 	definitions.push(ToolDefinition {
-		name: "final_answer".to_string(),
+		name: PSEUDO_FINAL_ANSWER.to_string(),
 		description: "Provide the final answer to the user when the task is complete.".to_string(),
 		parameters: json!({
 			"type": "object",
@@ -77,7 +82,7 @@ pub(crate) fn build_tool_definitions(
 		}),
 	});
 	definitions.push(ToolDefinition {
-		name: "ask_user".to_string(),
+		name: PSEUDO_ASK_USER.to_string(),
 		description: "Ask the user for clarification or additional information.".to_string(),
 		parameters: json!({
 			"type": "object",
@@ -88,7 +93,7 @@ pub(crate) fn build_tool_definitions(
 		}),
 	});
 	definitions.push(ToolDefinition {
-		name: "fail".to_string(),
+		name: PSEUDO_FAIL.to_string(),
 		description: "Report that the task cannot be completed.".to_string(),
 		parameters: json!({
 			"type": "object",
@@ -99,7 +104,7 @@ pub(crate) fn build_tool_definitions(
 		}),
 	});
 	definitions.push(ToolDefinition {
-		name: "Agent".to_string(),
+		name: PSEUDO_AGENT.to_string(),
 		description: "Spawn a sub-agent to handle a complex sub-task independently. Use when the task can be decomposed into parallel or isolated work. The sub-agent has independent message history and returns a compacted result. Sub-agents cannot spawn further sub-agents.".to_string(),
 		parameters: json!({
 			"type": "object",
@@ -116,32 +121,42 @@ pub(crate) fn build_tool_definitions(
 
 pub(crate) fn ground_tool_arguments(tool_name: &str, grounding_input: &str) -> Option<Value> {
 	match tool_name {
-		"Exists" | "Inspect" | "ListDir" | "Read" => {
+		_ if tool_name == TOOL_EXISTS
+			|| tool_name == TOOL_INSPECT
+			|| tool_name == TOOL_LISTDIR
+			|| tool_name == TOOL_READ =>
+		{
 			extract_concrete_path_candidates(grounding_input)
 				.into_iter()
 				.next()
 				.map(|path| json!({ "path": path }))
 		}
-		"Find" => extract_explicit_path_candidates(grounding_input)
+		_ if tool_name == TOOL_FIND => extract_explicit_path_candidates(grounding_input)
 			.into_iter()
 			.next()
 			.map(|name| json!({ "name": name, "kind": "any" })),
-		"Glob" => {
+		_ if tool_name == TOOL_GLOB => {
 			extract_glob_pattern(grounding_input).map(|pattern| json!({ "pattern": pattern }))
 		}
 		// The following arms are temporary hardcoded integrations added by EPIC-0.
 		// They will be migrated to descriptor-driven grounding under EPIC-5.
-		"Grep" => {
+		_ if tool_name == TOOL_GREP => {
 			extract_grep_pattern(grounding_input).map(|pattern| json!({ "pattern": pattern }))
 		}
-		"Edit" | "Write" => extract_concrete_path_candidates(grounding_input)
-			.into_iter()
-			.next()
-			.map(|path| json!({ "file_path": path })),
-		"TableInspect" | "TableSheets" | "TablePreview" | "TableSchema" => {
+		_ if tool_name == TOOL_EDIT || tool_name == TOOL_WRITE => {
+			extract_concrete_path_candidates(grounding_input)
+				.into_iter()
+				.next()
+				.map(|path| json!({ "file_path": path }))
+		}
+		_ if tool_name == TOOL_TABLE_INSPECT
+			|| tool_name == TOOL_TABLE_SHEETS
+			|| tool_name == TOOL_TABLE_PREVIEW
+			|| tool_name == TOOL_TABLE_SCHEMA =>
+		{
 			let path = extract_concrete_table_path(grounding_input)?;
 			let mut arguments = json!({ "path": path });
-			if tool_name == "TablePreview" {
+			if tool_name == TOOL_TABLE_PREVIEW {
 				arguments["rows"] =
 					Value::from(extract_row_limit(grounding_input).unwrap_or(5_u64));
 			}
@@ -150,15 +165,20 @@ pub(crate) fn ground_tool_arguments(tool_name: &str, grounding_input: &str) -> O
 			}
 			Some(arguments)
 		}
-		"WebSearch" => extract_web_query(grounding_input)
+		_ if tool_name == TOOL_WEB_SEARCH => extract_web_query(grounding_input)
 			.map(|query| json!({ "query": query, "top_k": 5_u64 })),
-		"WebFetch" => extract_fetch_url(grounding_input).map(|url| json!({ "url": url })),
-		"Bash" => extract_explicit_shell_command(grounding_input)
+		_ if tool_name == TOOL_WEB_FETCH => {
+			extract_fetch_url(grounding_input).map(|url| json!({ "url": url }))
+		}
+		_ if tool_name == TOOL_BASH => extract_explicit_shell_command(grounding_input)
 			.map(|command| json!({ "command": command })),
-		"Python" => {
+		_ if tool_name == TOOL_PYTHON => {
 			extract_explicit_python_code(grounding_input).map(|code| json!({ "code": code }))
 		}
-		"skill.install" | "SkillInstall" => extract_skill_source_url(grounding_input)
+		// Keep legacy alias "skill.install" for in-flight approval tickets (CC pattern).
+		"skill.install" => extract_skill_source_url(grounding_input)
+			.map(|source_url| json!({ "source_url": source_url })),
+		_ if tool_name == TOOL_SKILL_INSTALL => extract_skill_source_url(grounding_input)
 			.map(|source_url| json!({ "source_url": source_url })),
 		_ => None,
 	}
@@ -168,7 +188,7 @@ pub(crate) fn next_working_directory_from_observation(
 	observation: &ToolObservation,
 	current_working_directory: &str,
 ) -> Option<String> {
-	if observation.ok && observation.tool_name == "Inspect" {
+	if observation.ok && observation.tool_name == TOOL_INSPECT {
 		let is_directory = observation
 			.data
 			.get("kind")
@@ -190,11 +210,12 @@ pub(crate) fn attachments_for_tool(
 	tool_name: &str,
 	grounding_input: &str,
 ) -> Vec<std::path::PathBuf> {
-	match tool_name {
-		"Python" => extract_path_candidates(grounding_input)
+	if tool_name == TOOL_PYTHON {
+		extract_path_candidates(grounding_input)
 			.into_iter()
 			.map(std::path::PathBuf::from)
-			.collect(),
-		_ => Vec::new(),
+			.collect()
+	} else {
+		Vec::new()
 	}
 }
