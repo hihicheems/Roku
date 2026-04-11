@@ -825,6 +825,8 @@ impl GenericAgentRuntime {
 		// Per-turn token accumulators: summed across all LLM calls in this loop execution.
 		let mut total_prompt_tokens: u64 = 0;
 		let mut total_output_tokens: u64 = 0;
+		// Track the model that served this request (updated on each successful LLM call).
+		let mut last_model_id: Option<String> = None;
 
 		// Cost constants: rough estimate for Claude Sonnet tier.
 		const COST_PER_M_INPUT_TOKENS_USD: f64 = 3.0;
@@ -855,6 +857,7 @@ impl GenericAgentRuntime {
 					total_output_tokens,
 					COST_PER_M_INPUT_TOKENS_USD,
 					COST_PER_M_OUTPUT_TOKENS_USD,
+					last_model_id.as_deref(),
 				);
 				return self.synthetic_loop_terminal_result(
 					task_id,
@@ -951,6 +954,7 @@ impl GenericAgentRuntime {
 							total_prompt_tokens.saturating_add(resp.prompt_tokens);
 						total_output_tokens =
 							total_output_tokens.saturating_add(resp.output_tokens);
+						last_model_id = Some(resp.model_id.clone());
 					}
 					Err(_) => {
 						let message =
@@ -968,6 +972,7 @@ impl GenericAgentRuntime {
 							total_output_tokens,
 							COST_PER_M_INPUT_TOKENS_USD,
 							COST_PER_M_OUTPUT_TOKENS_USD,
+							last_model_id.as_deref(),
 						);
 						return self.synthetic_loop_terminal_result(
 							task_id,
@@ -988,6 +993,7 @@ impl GenericAgentRuntime {
 							total_prompt_tokens.saturating_add(resp.prompt_tokens);
 						total_output_tokens =
 							total_output_tokens.saturating_add(resp.output_tokens);
+						last_model_id = Some(resp.model_id.clone());
 						let tool_calls = resp.tool_calls.unwrap_or_default();
 						(resp.output, tool_calls)
 					}
@@ -1006,6 +1012,7 @@ impl GenericAgentRuntime {
 							total_output_tokens,
 							COST_PER_M_INPUT_TOKENS_USD,
 							COST_PER_M_OUTPUT_TOKENS_USD,
+							last_model_id.as_deref(),
 						);
 						return self.synthetic_loop_terminal_result(
 							task_id,
@@ -1045,6 +1052,7 @@ impl GenericAgentRuntime {
 					total_output_tokens,
 					COST_PER_M_INPUT_TOKENS_USD,
 					COST_PER_M_OUTPUT_TOKENS_USD,
+					last_model_id.as_deref(),
 				);
 				return self.synthetic_loop_terminal_result(
 					task_id,
@@ -1079,6 +1087,7 @@ impl GenericAgentRuntime {
 							total_output_tokens,
 							COST_PER_M_INPUT_TOKENS_USD,
 							COST_PER_M_OUTPUT_TOKENS_USD,
+							last_model_id.as_deref(),
 						);
 						return self.synthetic_loop_terminal_result(
 							task_id,
@@ -1110,6 +1119,7 @@ impl GenericAgentRuntime {
 							total_output_tokens,
 							COST_PER_M_INPUT_TOKENS_USD,
 							COST_PER_M_OUTPUT_TOKENS_USD,
+							last_model_id.as_deref(),
 						);
 						return self.synthetic_loop_terminal_result(
 							task_id,
@@ -1140,6 +1150,7 @@ impl GenericAgentRuntime {
 							total_output_tokens,
 							COST_PER_M_INPUT_TOKENS_USD,
 							COST_PER_M_OUTPUT_TOKENS_USD,
+							last_model_id.as_deref(),
 						);
 						return self.synthetic_loop_terminal_result(
 							task_id,
@@ -1924,6 +1935,7 @@ fn emit_token_usage(
 	output_tokens: u64,
 	cost_per_m_input_usd: f64,
 	cost_per_m_output_usd: f64,
+	model_id: Option<&str>,
 ) {
 	if let Some(sender) = event_sender {
 		let total_tokens = prompt_tokens.saturating_add(output_tokens);
@@ -1935,6 +1947,7 @@ fn emit_token_usage(
 			output_tokens,
 			total_tokens,
 			estimated_cost_usd,
+			model_id: model_id.map(str::to_string),
 		});
 	}
 }
