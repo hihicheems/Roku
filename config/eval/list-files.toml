@@ -1,0 +1,9 @@
+[scenario]
+name = "list-files"
+description = "List directory contents using ListDir"
+query = "列出当前目录的文件"
+
+[expect]
+answer_keywords = ["Cargo.toml", "crates"]
+tool_calls = ["ListDir"]
+max_steps = 5

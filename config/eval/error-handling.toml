@@ -1,0 +1,9 @@
+[scenario]
+name = "error-handling"
+description = "Query that should produce a meaningful response to an impossible request"
+query = "读取一个不存在的文件 /nonexistent/path/that/does/not/exist.txt"
+
+[expect]
+answer_keywords = ["error", "not found", "找不到", "不存在", "failed", "unable"]
+tool_calls = ["Read"]
+max_steps = 5

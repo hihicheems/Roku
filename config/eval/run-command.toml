@@ -1,0 +1,9 @@
+[scenario]
+name = "run-command"
+description = "Execute a shell command using Bash"
+query = "运行 git status 命令并告诉我结果"
+
+[expect]
+answer_keywords = ["git", "branch", "On branch", "Changes", "nothing"]
+tool_calls = ["Bash"]
+max_steps = 5

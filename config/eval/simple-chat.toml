@@ -1,0 +1,9 @@
+[scenario]
+name = "simple-chat"
+description = "Basic greeting without tools"
+query = "你好"
+
+[expect]
+answer_keywords = ["你好", "hello", "帮助", "help"]
+tool_calls = []
+max_steps = 1

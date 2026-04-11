@@ -1,0 +1,9 @@
+[scenario]
+name = "web-fetch"
+description = "Fetch a web page using WebFetch"
+query = "获取 https://example.com 的内容"
+
+[expect]
+answer_keywords = ["example", "Example"]
+tool_calls = ["WebFetch"]
+max_steps = 5

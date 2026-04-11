@@ -1,0 +1,9 @@
+[scenario]
+name = "file-exists"
+description = "Check if a known file exists using Exists"
+query = "检查 Cargo.toml 文件是否存在"
+
+[expect]
+answer_keywords = ["存在", "exists", "yes", "true", "Cargo.toml"]
+tool_calls = ["Exists"]
+max_steps = 5

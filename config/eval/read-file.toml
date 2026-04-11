@@ -1,0 +1,9 @@
+[scenario]
+name = "read-file"
+description = "Read the contents of a known file using Read"
+query = "读取 README.md 文件的内容"
+
+[expect]
+answer_keywords = ["Roku", "roku"]
+tool_calls = ["Read"]
+max_steps = 5

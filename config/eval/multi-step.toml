@@ -1,0 +1,9 @@
+[scenario]
+name = "multi-step"
+description = "Multi-step task combining read and search operations"
+query = "先列出当前目录下的文件，再搜索其中包含 'version' 关键字的内容"
+
+[expect]
+answer_keywords = ["version", "Cargo.toml"]
+tool_calls = ["ListDir", "Grep"]
+max_steps = 8

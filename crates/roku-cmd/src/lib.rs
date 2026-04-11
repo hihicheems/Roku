@@ -29,6 +29,7 @@ mod bot;
 mod chat;
 mod conversation;
 mod entry_registry;
+mod eval;
 mod memory_runtime_config;
 mod pending_loop_substrate;
 mod runtime;
@@ -316,6 +317,16 @@ enum Commands {
 	/// Chat session management commands.
 	#[command(subcommand)]
 	Session(SessionCommand),
+
+	/// Run eval scenarios against the live runtime and report pass/fail.
+	Eval {
+		/// Directory containing eval scenario TOML files.
+		#[arg(long, default_value = "config/eval")]
+		scenarios_dir: String,
+		/// Run only scenarios whose name contains this substring.
+		#[arg(long)]
+		filter: Option<String>,
+	},
 }
 
 #[derive(Subcommand)]
@@ -841,6 +852,10 @@ where
 				}
 			}
 		}
+		Some(Commands::Eval {
+			scenarios_dir,
+			filter,
+		}) => eval::run_eval(&rt, &scenarios_dir, filter.as_deref()),
 	}
 }
 

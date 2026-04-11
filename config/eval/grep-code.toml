@@ -1,0 +1,9 @@
+[scenario]
+name = "grep-code"
+description = "Search for a known pattern in codebase using Grep"
+query = "在代码库中搜索包含 'RuntimeService' 的文件"
+
+[expect]
+answer_keywords = ["RuntimeService", "runtime"]
+tool_calls = ["Grep"]
+max_steps = 5

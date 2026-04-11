@@ -1,0 +1,9 @@
+[scenario]
+name = "glob-files"
+description = "Find Rust source files using Glob"
+query = "找出所有 .rs 文件"
+
+[expect]
+answer_keywords = [".rs", "rust", "Rust"]
+tool_calls = ["Glob"]
+max_steps = 5
