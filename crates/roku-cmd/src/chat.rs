@@ -120,8 +120,9 @@ fn write_jsonl_result(resp: &PipeResponse) {
 // ---------------------------------------------------------------------------
 
 fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), CommandError> {
-	let service = tokio::task::block_in_place(build_live_runtime_service_from_env)?
-		.with_approval_gate(cli_approval_gate());
+	let service = tokio::task::block_in_place(build_live_runtime_service_from_env)?;
+	let catalog = std::sync::Arc::new(service.resource_catalog().clone());
+	let service = service.with_approval_gate(cli_approval_gate(catalog));
 	let store = session_store();
 
 	let mut editor =

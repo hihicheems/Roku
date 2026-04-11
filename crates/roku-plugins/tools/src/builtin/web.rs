@@ -53,7 +53,13 @@ pub(crate) fn catalog_descriptors_with_config(
 			selection_hint: "Search the web for current information. Use when the user asks about docs, package versions, APIs, news, or anything that requires up-to-date knowledge beyond training data."
 				.to_string(),
 			discoverable: true,
-			tags: vec!["web".to_string(), "search".to_string(), "lookup".to_string()],
+			tags: vec![
+				crate::TAG_CATEGORY_WEB.to_string(),
+				crate::TAG_RISK_SAFE.to_string(),
+				"web".to_string(),
+				"search".to_string(),
+				"lookup".to_string(),
+			],
 			examples: vec!["Search the web for the latest Rust edition.".to_string()],
 			input_schema: contract_input_schema(
 				Some(&contract),
@@ -86,6 +92,8 @@ pub(crate) fn catalog_descriptors_with_config(
 			selection_hint: "Fetch and read content from a URL. Use when the user provides a URL, references a webpage, or you need to read online documentation.".to_string(),
 			discoverable: true,
 			tags: vec![
+				crate::TAG_CATEGORY_WEB.to_string(),
+				crate::TAG_RISK_SAFE.to_string(),
 				"web".to_string(),
 				"fetch".to_string(),
 				"url".to_string(),

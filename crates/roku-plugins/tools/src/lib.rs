@@ -17,6 +17,45 @@
 use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
+// Standard tag constants for tool metadata.
+pub const TAG_CATEGORY_FILESYSTEM: &str = "category:filesystem";
+pub const TAG_CATEGORY_SHELL: &str = "category:shell";
+pub const TAG_CATEGORY_WEB: &str = "category:web";
+pub const TAG_CATEGORY_TABLE: &str = "category:table";
+pub const TAG_CATEGORY_PYTHON: &str = "category:python";
+pub const TAG_CATEGORY_SKILL: &str = "category:skill";
+pub const TAG_CATEGORY_META: &str = "category:meta";
+
+pub const TAG_RISK_SAFE: &str = "risk:safe";
+pub const TAG_RISK_WRITE: &str = "risk:write";
+
+// Tool name constants — import instead of using string literals.
+pub const TOOL_BASH: &str = "Bash";
+pub const TOOL_READ: &str = "Read";
+pub const TOOL_WRITE: &str = "Write";
+pub const TOOL_EDIT: &str = "Edit";
+pub const TOOL_GLOB: &str = "Glob";
+pub const TOOL_GREP: &str = "Grep";
+pub const TOOL_FIND: &str = "Find";
+pub const TOOL_EXISTS: &str = "Exists";
+pub const TOOL_INSPECT: &str = "Inspect";
+pub const TOOL_LISTDIR: &str = "ListDir";
+pub const TOOL_PYTHON: &str = "Python";
+pub const TOOL_WEB_SEARCH: &str = "WebSearch";
+pub const TOOL_WEB_FETCH: &str = "WebFetch";
+pub const TOOL_TABLE_INSPECT: &str = "TableInspect";
+pub const TOOL_TABLE_SHEETS: &str = "TableSheets";
+pub const TOOL_TABLE_PREVIEW: &str = "TablePreview";
+pub const TOOL_TABLE_SCHEMA: &str = "TableSchema";
+pub const TOOL_SKILL_INSTALL: &str = "SkillInstall";
+pub const TOOL_SKILL_RUN: &str = "SkillRun";
+
+// Pseudo-tool name constants.
+pub const PSEUDO_FINAL_ANSWER: &str = "final_answer";
+pub const PSEUDO_ASK_USER: &str = "ask_user";
+pub const PSEUDO_FAIL: &str = "fail";
+pub const PSEUDO_AGENT: &str = "Agent";
+
 mod availability;
 mod builders;
 mod builtin;
@@ -62,23 +101,23 @@ static BUILTIN_TOOL_NAMES: LazyLock<BTreeSet<String>> = LazyLock::new(|| {
 		.collect::<BTreeSet<_>>();
 	names.extend(
 		[
-			"Bash",
-			"Edit",
-			"Exists",
-			"Find",
-			"Glob",
-			"Inspect",
-			"ListDir",
-			"Read",
-			"Write",
-			"Grep",
-			"Python",
-			"TableInspect",
-			"TableSheets",
-			"TablePreview",
-			"TableSchema",
-			"WebFetch",
-			"WebSearch",
+			TOOL_BASH,
+			TOOL_EDIT,
+			TOOL_EXISTS,
+			TOOL_FIND,
+			TOOL_GLOB,
+			TOOL_INSPECT,
+			TOOL_LISTDIR,
+			TOOL_READ,
+			TOOL_WRITE,
+			TOOL_GREP,
+			TOOL_PYTHON,
+			TOOL_TABLE_INSPECT,
+			TOOL_TABLE_SHEETS,
+			TOOL_TABLE_PREVIEW,
+			TOOL_TABLE_SCHEMA,
+			TOOL_WEB_FETCH,
+			TOOL_WEB_SEARCH,
 		]
 		.into_iter()
 		.map(str::to_string),
@@ -94,15 +133,71 @@ pub fn is_builtin_tool_name(tool_name: &str) -> bool {
 	builtin_tool_names().contains(tool_name)
 }
 
+/// Tools whose canonical execution is handled by the filesystem module.
+const FS_CANONICAL_TOOLS: &[&str] = &[
+	TOOL_EXISTS,
+	TOOL_INSPECT,
+	TOOL_LISTDIR,
+	TOOL_READ,
+	TOOL_EDIT,
+	TOOL_WRITE,
+];
+
 pub fn canonical_execution_for_builtin_tool_input(
 	tool_name: &str,
 	input: &Value,
 ) -> Option<CanonicalExecution> {
-	match tool_name {
-		"Bash" => builtin::command::canonical_execution_from_runtime_input(input),
-		"Exists" | "Inspect" | "ListDir" | "Read" | "Edit" | "Write" => {
-			builtin::fs::canonical_execution_from_runtime_input(tool_name, input)
+	if tool_name == TOOL_BASH {
+		builtin::command::canonical_execution_from_runtime_input(input)
+	} else if FS_CANONICAL_TOOLS.contains(&tool_name) {
+		builtin::fs::canonical_execution_from_runtime_input(tool_name, input)
+	} else {
+		None
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use roku_plugin_skills::SkillRegistry;
+
+	use super::*;
+
+	/// Every builtin tool in the catalog must have exactly one `risk:*` tag and
+	/// at least one `category:*` tag. This catches missing metadata when new
+	/// tools are added — the tag-based risk classification silently defaults to
+	/// `RequiresApproval` for tools without `risk:*` tags.
+	#[test]
+	fn all_builtin_tools_have_required_tags() {
+		let catalog =
+			build_resource_catalog(&SkillRegistry::disabled(), &ToolCatalogConfig::default());
+
+		for name in builtin_tool_names() {
+			let selector = roku_common_types::ResourceSelector::tool(name);
+			let descriptor = catalog
+				.descriptor(&selector)
+				.unwrap_or_else(|| panic!("builtin tool `{name}` must have a catalog descriptor"));
+
+			let risk_tags: Vec<_> = descriptor
+				.tags
+				.iter()
+				.filter(|t| t.starts_with("risk:"))
+				.collect();
+			assert_eq!(
+				risk_tags.len(),
+				1,
+				"tool `{name}` must have exactly 1 risk:* tag, found {}: {risk_tags:?}",
+				risk_tags.len()
+			);
+
+			let category_tags: Vec<_> = descriptor
+				.tags
+				.iter()
+				.filter(|t| t.starts_with("category:"))
+				.collect();
+			assert!(
+				!category_tags.is_empty(),
+				"tool `{name}` must have at least 1 category:* tag, found none"
+			);
 		}
-		_ => None,
 	}
 }

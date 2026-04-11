@@ -287,6 +287,10 @@ impl RuntimeService {
 		self
 	}
 
+	pub fn resource_catalog(&self) -> &roku_plugin_tools::ResourceCatalog {
+		self.runtime.resource_catalog()
+	}
+
 	pub fn runtime_mode_report(&self) -> RuntimeModeReport {
 		self.runtime_mode.clone()
 	}
