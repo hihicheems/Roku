@@ -760,6 +760,7 @@ impl GenericAgentRuntime {
 		runtime_memory_sections: &RuntimeMemorySections,
 		user_reply: Option<&str>,
 		event_sender: Option<&crate::runtime_loop::LoopEventSender>,
+		approval_gate: Option<&dyn crate::runtime_loop::approval::ToolApprovalGate>,
 	) -> DirectRouteExecutionResult {
 		// Without an LLM router the message-based loop cannot make decisions.
 		// Return a graceful completion — the runtime still functions for
@@ -1075,6 +1076,23 @@ impl GenericAgentRuntime {
 				let tool_name = &tc.name;
 				let arguments = tc.arguments.clone();
 
+				// Check approval gate before executing the tool.
+				if let Some(gate) = approval_gate {
+					let decision =
+						tokio::task::block_in_place(|| gate.check(tool_name, &arguments));
+					match decision {
+						crate::runtime_loop::approval::ApprovalDecision::Approve => {}
+						crate::runtime_loop::approval::ApprovalDecision::Deny(reason) => {
+							messages.push(Message::ToolResult {
+								tool_use_id: tc.id.clone(),
+								content: format!("[Tool denied] {reason}"),
+								is_error: true,
+							});
+							continue; // Skip this tool, process next
+						}
+					}
+				}
+
 				// Emit ToolStart.
 				if let Some(sender) = event_sender {
 					let _ = sender.send(crate::runtime_loop::LoopEvent::ToolStart {
@@ -1159,6 +1177,8 @@ impl GenericAgentRuntime {
 					serde_json::to_string(&raw_tool_output)
 						.unwrap_or_else(|_| observation.message.clone())
 				};
+				let tool_result_content =
+					truncate_tool_result_for_message(&tool_result_content, MAX_TOOL_RESULT_CHARS);
 				let is_error = !observation.ok;
 				messages.push(Message::ToolResult {
 					tool_use_id: tc.id.clone(),
@@ -1760,6 +1780,39 @@ fn terminal_decision(
 fn normalize_tool_loop_observation(observation: ToolObservation) -> ToolObservation {
 	// general.execute has been removed; observations from all tools are returned as-is.
 	observation
+}
+
+/// Maximum characters for a tool result before truncation in the turn loop.
+/// This protects the LLM context window from oversized single tool outputs.
+const MAX_TOOL_RESULT_CHARS: usize = 80_000;
+
+/// Truncate a tool result to head + tail with an informative note.
+fn truncate_tool_result_for_message(content: &str, max_chars: usize) -> String {
+	if content.len() <= max_chars {
+		return content.to_string();
+	}
+	let head_chars = max_chars * 4 / 5;
+	let tail_chars = max_chars / 5;
+	let head_end = content
+		.char_indices()
+		.nth(head_chars)
+		.map(|(i, _)| i)
+		.unwrap_or(content.len());
+	let tail_start = content
+		.char_indices()
+		.rev()
+		.nth(tail_chars.saturating_sub(1))
+		.map(|(i, _)| i)
+		.unwrap_or(0);
+	let total_lines = content.lines().count();
+	format!(
+		"{}\n\n[Output truncated: showing first and last portions of {} total lines ({} chars). \
+		 Ask the user or use a more specific query to narrow results.]\n\n{}",
+		&content[..head_end],
+		total_lines,
+		content.len(),
+		&content[tail_start..],
+	)
 }
 
 fn awaiting_user_resume_prompt(
@@ -2429,6 +2482,7 @@ mod tests {
 				&RuntimeMemorySections::default(),
 				None,
 				None,
+				None,
 			));
 
 		assert_eq!(execution.result.status, ResultStatus::Ok);
@@ -2529,6 +2583,7 @@ mod tests {
 				&RuntimeMemorySections::default(),
 				None,
 				None,
+				None,
 			));
 
 		assert_eq!(execution.result.status, ResultStatus::Ok);
@@ -2605,6 +2660,7 @@ mod tests {
 				&request,
 				&mut loop_state,
 				&RuntimeMemorySections::default(),
+				None,
 				None,
 				None,
 			));
@@ -2801,6 +2857,7 @@ mod tests {
 				&request,
 				&mut loop_state,
 				&RuntimeMemorySections::default(),
+				None,
 				None,
 				None,
 			));

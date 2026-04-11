@@ -461,7 +461,7 @@ impl Tool for WebFetchTool {
 		let raw = std::str::from_utf8(&bytes[..boundary]).unwrap_or("");
 		let is_html = content_type.contains("html");
 		let content = if is_html {
-			strip_html_tags(raw)
+			extract_readable_text(raw)
 		} else {
 			raw.to_string()
 		};
@@ -498,19 +498,188 @@ fn fetch_error_output(error_type: &str, message: impl Into<String>, url: &str) -
 	.into_value()
 }
 
-static HTML_TAG_PATTERN: LazyLock<regex::Regex> =
-	LazyLock::new(|| regex::Regex::new(r"<[^>]+>").expect("HTML tag regex should compile"));
+// Patterns used by extract_readable_text — compiled once at program start.
+static RE_SCRIPT: LazyLock<regex::Regex> = LazyLock::new(|| {
+	regex::Regex::new(r"(?si)<script[^>]*>.*?</script>").expect("script regex should compile")
+});
+static RE_STYLE: LazyLock<regex::Regex> = LazyLock::new(|| {
+	regex::Regex::new(r"(?si)<style[^>]*>.*?</style>").expect("style regex should compile")
+});
+static RE_NOSCRIPT: LazyLock<regex::Regex> = LazyLock::new(|| {
+	regex::Regex::new(r"(?si)<noscript[^>]*>.*?</noscript>").expect("noscript regex should compile")
+});
+static RE_NAV: LazyLock<regex::Regex> = LazyLock::new(|| {
+	regex::Regex::new(r"(?si)<nav[^>]*>.*?</nav>").expect("nav regex should compile")
+});
+static RE_HEADER: LazyLock<regex::Regex> = LazyLock::new(|| {
+	regex::Regex::new(r"(?si)<header[^>]*>.*?</header>").expect("header regex should compile")
+});
+static RE_FOOTER: LazyLock<regex::Regex> = LazyLock::new(|| {
+	regex::Regex::new(r"(?si)<footer[^>]*>.*?</footer>").expect("footer regex should compile")
+});
+static RE_ASIDE: LazyLock<regex::Regex> = LazyLock::new(|| {
+	regex::Regex::new(r"(?si)<aside[^>]*>.*?</aside>").expect("aside regex should compile")
+});
+static RE_MAIN: LazyLock<regex::Regex> = LazyLock::new(|| {
+	regex::Regex::new(r"(?si)<main[^>]*>(.*?)</main>").expect("main regex should compile")
+});
+static RE_ARTICLE: LazyLock<regex::Regex> = LazyLock::new(|| {
+	regex::Regex::new(r"(?si)<article[^>]*>(.*?)</article>").expect("article regex should compile")
+});
+static RE_BODY: LazyLock<regex::Regex> = LazyLock::new(|| {
+	regex::Regex::new(r"(?si)<body[^>]*>(.*?)</body>").expect("body regex should compile")
+});
+// Matches an opening <h1>–<h6> tag with optional attributes, the inner
+// content (non-greedy), and any closing </hN> tag. The regex crate does not
+// support backreferences, so we accept any </hN> closing tag and let Rust
+// code extract the level from the captured opening tag name.
+static RE_HEADING: LazyLock<regex::Regex> = LazyLock::new(|| {
+	regex::Regex::new(r"(?is)<(h[1-6])[^>]*>(.*?)</h[1-6]>").expect("heading regex should compile")
+});
+static RE_BLOCK: LazyLock<regex::Regex> = LazyLock::new(|| {
+	regex::Regex::new(r"(?i)</?(p|div|section)[^>]*>").expect("block element regex should compile")
+});
+static RE_LI: LazyLock<regex::Regex> =
+	LazyLock::new(|| regex::Regex::new(r"(?i)<li[^>]*>").expect("li regex should compile"));
+static RE_BR: LazyLock<regex::Regex> =
+	LazyLock::new(|| regex::Regex::new(r"(?i)<br\s*/?>").expect("br regex should compile"));
+static RE_LINK: LazyLock<regex::Regex> = LazyLock::new(|| {
+	regex::Regex::new(r#"(?is)<a[^>]+href="([^"]*)"[^>]*>(.*?)</a>"#)
+		.expect("anchor regex should compile")
+});
+static RE_PRE_CODE: LazyLock<regex::Regex> = LazyLock::new(|| {
+	regex::Regex::new(r"(?si)<(pre|code)[^>]*>(.*?)</(pre|code)>")
+		.expect("pre/code regex should compile")
+});
+static RE_REMAINING_TAGS: LazyLock<regex::Regex> =
+	LazyLock::new(|| regex::Regex::new(r"<[^>]+>").expect("remaining tags regex should compile"));
+static RE_NUMERIC_ENTITY: LazyLock<regex::Regex> =
+	LazyLock::new(|| regex::Regex::new(r"&#(\d+);").expect("numeric entity regex should compile"));
+static RE_HEX_ENTITY: LazyLock<regex::Regex> = LazyLock::new(|| {
+	regex::Regex::new(r"(?i)&#x([0-9a-f]+);").expect("hex entity regex should compile")
+});
+static RE_MULTI_BLANK: LazyLock<regex::Regex> =
+	LazyLock::new(|| regex::Regex::new(r"\n{3,}").expect("multi-blank regex should compile"));
 
-fn strip_html_tags(raw: &str) -> String {
-	let stripped = HTML_TAG_PATTERN.replace_all(raw, "");
+/// Converts raw HTML into model-friendly plain text. Removes noise elements
+/// (scripts, styles, nav, header, footer, aside), tries to scope down to the
+/// main content area, converts structural tags to readable markers, preserves
+/// links and code blocks, and collapses excess whitespace.
+fn extract_readable_text(raw: &str) -> String {
+	// Step 1: Remove script / style / noscript blocks entirely (including content).
+	let s = RE_SCRIPT.replace_all(raw, "");
+	let s = RE_STYLE.replace_all(&s, "");
+	let s = RE_NOSCRIPT.replace_all(&s, "");
 
-	// Decode common HTML entities
-	stripped
+	// Step 2: Remove nav / header / footer / aside blocks and their content.
+	let s = RE_NAV.replace_all(&s, "");
+	let s = RE_HEADER.replace_all(&s, "");
+	let s = RE_FOOTER.replace_all(&s, "");
+	let s = RE_ASIDE.replace_all(&s, "");
+
+	// Step 3: Extract content from <main>, <article>, or <body> in priority order.
+	let scoped: std::borrow::Cow<str> = if let Some(cap) = RE_MAIN.captures(&s) {
+		cap.get(1)
+			.map(|m| m.as_str())
+			.unwrap_or(&s)
+			.to_owned()
+			.into()
+	} else if let Some(cap) = RE_ARTICLE.captures(&s) {
+		cap.get(1)
+			.map(|m| m.as_str())
+			.unwrap_or(&s)
+			.to_owned()
+			.into()
+	} else if let Some(cap) = RE_BODY.captures(&s) {
+		cap.get(1)
+			.map(|m| m.as_str())
+			.unwrap_or(&s)
+			.to_owned()
+			.into()
+	} else {
+		s
+	};
+
+	// Step 4a: Fence <pre>/<code> blocks before further tag stripping so we
+	// don't lose their whitespace-sensitive content.
+	let s = RE_PRE_CODE.replace_all(&scoped, |caps: &regex::Captures| {
+		let inner = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+		// Strip any tags inside the code block (nested <span> etc.) then fence.
+		let inner_clean = RE_REMAINING_TAGS.replace_all(inner, "");
+		format!("\n```\n{inner_clean}\n```\n")
+	});
+
+	// Step 4b: Convert headings h1-h6 to markdown-style prefix.
+	let s = RE_HEADING.replace_all(&s, |caps: &regex::Captures| {
+		let tag = caps.get(1).map(|m| m.as_str()).unwrap_or("h1");
+		let level: usize = tag
+			.trim_start_matches(['h', 'H'])
+			.parse()
+			.unwrap_or(1)
+			.min(6);
+		let prefix = "#".repeat(level);
+		let inner = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+		// Strip tags inside heading text.
+		let inner_clean = RE_REMAINING_TAGS.replace_all(inner, "");
+		format!("\n\n{prefix} {inner_clean}\n\n")
+	});
+
+	// Step 4c: Convert <p>, <div>, <section> to paragraph breaks.
+	let s = RE_BLOCK.replace_all(&s, "\n\n");
+
+	// Step 4d: Convert <li> to list marker.
+	let s = RE_LI.replace_all(&s, "\n- ");
+
+	// Step 4e: Convert <br> to newline.
+	let s = RE_BR.replace_all(&s, "\n");
+
+	// Step 4f: Expand <a href="URL">text</a> to `text (URL)`.
+	let s = RE_LINK.replace_all(&s, |caps: &regex::Captures| {
+		let href = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+		let text_raw = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+		let text = RE_REMAINING_TAGS.replace_all(text_raw, "");
+		let text = text.trim();
+		if href.is_empty() || href == text {
+			text.to_string()
+		} else {
+			format!("{text} ({href})")
+		}
+	});
+
+	// Step 5: Strip all remaining HTML tags.
+	let s = RE_REMAINING_TAGS.replace_all(&s, "");
+
+	// Step 6: Decode HTML entities.
+	let s = s
 		.replace("&amp;", "&")
 		.replace("&lt;", "<")
 		.replace("&gt;", ">")
 		.replace("&nbsp;", " ")
 		.replace("&quot;", "\"")
+		.replace("&apos;", "'");
+
+	// Decode numeric entities &#NNN;
+	let s = RE_NUMERIC_ENTITY.replace_all(&s, |caps: &regex::Captures| {
+		let n: u32 = caps[1].parse().unwrap_or(0);
+		char::from_u32(n).map(|c| c.to_string()).unwrap_or_default()
+	});
+
+	// Decode hex entities &#xHHH;
+	let s = RE_HEX_ENTITY.replace_all(&s, |caps: &regex::Captures| {
+		let n = u32::from_str_radix(&caps[1], 16).unwrap_or(0);
+		char::from_u32(n).map(|c| c.to_string()).unwrap_or_default()
+	});
+
+	// Step 7: Collapse 3+ consecutive newlines to 2.
+	let s = RE_MULTI_BLANK.replace_all(&s, "\n\n");
+
+	// Step 8: Trim each line.
+	s.lines()
+		.map(str::trim)
+		.collect::<Vec<_>>()
+		.join("\n")
+		.trim()
+		.to_string()
 }
 
 fn error_output(
@@ -928,6 +1097,8 @@ mod tests {
 
 	#[test]
 	fn web_fetch_strips_html_tags() {
+		// Verifies the integration path: HTML content-type triggers extraction,
+		// no raw tags leak into the output, and text + entities are preserved.
 		let html = "<html><body><h1>Title</h1><p>Content &amp; more</p></body></html>";
 		let url = spawn_mock_http_server(200, "text/html", html);
 		let output = fetch_tool()
@@ -940,6 +1111,78 @@ mod tests {
 		assert!(!content.contains('<'));
 		assert!(content.contains("Title"));
 		assert!(content.contains("Content & more"));
+	}
+
+	// -----------------------------------------------------------------------
+	// extract_readable_text unit tests
+	// -----------------------------------------------------------------------
+
+	#[test]
+	fn extract_readable_text_basic_html() {
+		let html = "<html><body><h1>Title</h1><p>Content</p></body></html>";
+		let result = extract_readable_text(html);
+		assert!(result.contains("# Title"), "h1 should become # prefix");
+		assert!(
+			result.contains("Content"),
+			"paragraph text should be present"
+		);
+		assert!(!result.contains('<'), "no raw tags should remain");
+	}
+
+	#[test]
+	fn extract_readable_text_removes_script_and_style() {
+		let html = "<html><body><script>alert('x');</script><style>.foo{color:red}</style><p>Visible</p></body></html>";
+		let result = extract_readable_text(html);
+		assert!(result.contains("Visible"), "visible text should survive");
+		assert!(
+			!result.contains("alert"),
+			"script content should be removed"
+		);
+		assert!(
+			!result.contains("color:red"),
+			"style content should be removed"
+		);
+	}
+
+	#[test]
+	fn extract_readable_text_code_block_preserved() {
+		let html = "<html><body><p>Example:</p><pre>fn main() {}</pre></body></html>";
+		let result = extract_readable_text(html);
+		assert!(result.contains("fn main()"), "code content should survive");
+		assert!(result.contains("```"), "code should be wrapped in fences");
+	}
+
+	#[test]
+	fn extract_readable_text_link_expansion() {
+		let html = r#"<html><body><a href="https://example.com">click here</a></body></html>"#;
+		let result = extract_readable_text(html);
+		assert!(
+			result.contains("click here (https://example.com)"),
+			"link should be expanded to text (URL) format, got: {result}"
+		);
+	}
+
+	#[test]
+	fn extract_readable_text_entity_decoding() {
+		let html = "<html><body><p>&amp; &lt; &gt; &nbsp; &quot; &#65; &#x42;</p></body></html>";
+		let result = extract_readable_text(html);
+		assert!(result.contains('&'), "& entity should decode");
+		assert!(result.contains('<'), "< entity should decode");
+		assert!(result.contains('>'), "> entity should decode");
+		assert!(result.contains('"'), "\" entity should decode");
+		assert!(result.contains('A'), "&#65; should decode to A");
+		assert!(result.contains('B'), "&#x42; should decode to B");
+	}
+
+	#[test]
+	fn extract_readable_text_no_excess_blank_lines() {
+		let html = "<html><body><p>A</p><p>B</p><p>C</p><p>D</p></body></html>";
+		let result = extract_readable_text(html);
+		// Should not have 3+ consecutive newlines anywhere
+		assert!(
+			!result.contains("\n\n\n"),
+			"should not have 3+ consecutive newlines, got: {result:?}"
+		);
 	}
 
 	#[test]
