@@ -705,13 +705,14 @@ impl GenericAgentRuntime {
 		ToolObservation::from_runtime_error(tool_name, error)
 	}
 
+	/// Returns `(prompt_tokens, output_tokens)` consumed by compaction LLM calls.
 	async fn maybe_compact(
 		&self,
 		loop_state: &mut LoopState,
 		messages: &mut Vec<roku_plugin_llm::Message>,
 		current_step_index: u32,
 		event_sender: Option<&crate::runtime_loop::LoopEventSender>,
-	) {
+	) -> (u64, u64) {
 		// Truncate oversized tool results in messages.
 		let tool_result_max_chars = self.agent_runtime_config.r#loop.working_summary_max_chars;
 		crate::runtime_loop::truncate_large_tool_results(messages, tool_result_max_chars);
@@ -741,15 +742,21 @@ impl GenericAgentRuntime {
 			// Compact conversation messages (preserve recent 5).
 			let retain_messages = 5_usize.max(compact_config.retain_tail_steps);
 			if let Some(router) = self.route_router.as_deref() {
-				crate::runtime_loop::compact_messages_with_llm(messages, retain_messages, router)
-					.await;
+				let (_, msg_pt, msg_ot) = crate::runtime_loop::compact_messages_with_llm(
+					messages,
+					retain_messages,
+					router,
+				)
+				.await;
 				crate::runtime_loop::compact_history_with_llm(loop_state, &compact_config, router)
 					.await;
+				return (msg_pt, msg_ot);
 			} else {
 				crate::runtime_loop::compact_messages(messages, retain_messages);
 				crate::runtime_loop::compact_history(loop_state, &compact_config);
 			}
 		}
+		(0, 0)
 	}
 
 	pub async fn execute_tool_loop(
@@ -815,6 +822,14 @@ impl GenericAgentRuntime {
 			&loop_state.working_directory,
 		);
 
+		// Per-turn token accumulators: summed across all LLM calls in this loop execution.
+		let mut total_prompt_tokens: u64 = 0;
+		let mut total_output_tokens: u64 = 0;
+
+		// Cost constants: rough estimate for Claude Sonnet tier.
+		const COST_PER_M_INPUT_TOKENS_USD: f64 = 3.0;
+		const COST_PER_M_OUTPUT_TOKENS_USD: f64 = 15.0;
+
 		loop {
 			// Refresh visible tools at the start of each turn.
 			self.refresh_tool_loop_visible_tools(loop_state);
@@ -832,6 +847,14 @@ impl GenericAgentRuntime {
 					StepAction::Fail,
 					"Step budget exhausted.",
 					Some(message.clone()),
+				);
+				emit_token_usage(
+					event_sender,
+					loop_state.step_index.saturating_add(1),
+					total_prompt_tokens,
+					total_output_tokens,
+					COST_PER_M_INPUT_TOKENS_USD,
+					COST_PER_M_OUTPUT_TOKENS_USD,
 				);
 				return self.synthetic_loop_terminal_result(
 					task_id,
@@ -922,29 +945,49 @@ impl GenericAgentRuntime {
 				let _ = sender.send(crate::runtime_loop::LoopEvent::LlmDecisionComplete {
 					step: current_step_index,
 				});
-				if llm_result.is_err() {
-					let message =
-						format!("LLM streaming call failed for goal: {}", loop_state.goal);
-					self.record_terminal_step(
-						loop_state,
-						StepAction::Fail,
-						"LLM streaming call failed.",
-						Some(message.clone()),
-					);
-					return self.synthetic_loop_terminal_result(
-						task_id,
-						"tool",
-						message,
-						StepAction::Fail,
-						ResultStatus::Error,
-						Some(loop_state),
-					);
+				match llm_result {
+					Ok(ref resp) => {
+						total_prompt_tokens =
+							total_prompt_tokens.saturating_add(resp.prompt_tokens);
+						total_output_tokens =
+							total_output_tokens.saturating_add(resp.output_tokens);
+					}
+					Err(_) => {
+						let message =
+							format!("LLM streaming call failed for goal: {}", loop_state.goal);
+						self.record_terminal_step(
+							loop_state,
+							StepAction::Fail,
+							"LLM streaming call failed.",
+							Some(message.clone()),
+						);
+						emit_token_usage(
+							event_sender,
+							current_step_index,
+							total_prompt_tokens,
+							total_output_tokens,
+							COST_PER_M_INPUT_TOKENS_USD,
+							COST_PER_M_OUTPUT_TOKENS_USD,
+						);
+						return self.synthetic_loop_terminal_result(
+							task_id,
+							"tool",
+							message,
+							StepAction::Fail,
+							ResultStatus::Error,
+							Some(loop_state),
+						);
+					}
 				}
 				(text, tool_calls)
 			} else {
 				// Non-streaming path.
 				match router.generate(&gen_request).await {
 					Ok(resp) => {
+						total_prompt_tokens =
+							total_prompt_tokens.saturating_add(resp.prompt_tokens);
+						total_output_tokens =
+							total_output_tokens.saturating_add(resp.output_tokens);
 						let tool_calls = resp.tool_calls.unwrap_or_default();
 						(resp.output, tool_calls)
 					}
@@ -955,6 +998,14 @@ impl GenericAgentRuntime {
 							StepAction::Fail,
 							"LLM call failed.",
 							Some(message.clone()),
+						);
+						emit_token_usage(
+							event_sender,
+							current_step_index,
+							total_prompt_tokens,
+							total_output_tokens,
+							COST_PER_M_INPUT_TOKENS_USD,
+							COST_PER_M_OUTPUT_TOKENS_USD,
 						);
 						return self.synthetic_loop_terminal_result(
 							task_id,
@@ -987,6 +1038,14 @@ impl GenericAgentRuntime {
 					"LLM produced a text response with no tool calls.",
 					Some(message.clone()),
 				);
+				emit_token_usage(
+					event_sender,
+					current_step_index,
+					total_prompt_tokens,
+					total_output_tokens,
+					COST_PER_M_INPUT_TOKENS_USD,
+					COST_PER_M_OUTPUT_TOKENS_USD,
+				);
 				return self.synthetic_loop_terminal_result(
 					task_id,
 					"tool",
@@ -1013,6 +1072,14 @@ impl GenericAgentRuntime {
 							"LLM called final_answer.",
 							Some(message.clone()),
 						);
+						emit_token_usage(
+							event_sender,
+							current_step_index,
+							total_prompt_tokens,
+							total_output_tokens,
+							COST_PER_M_INPUT_TOKENS_USD,
+							COST_PER_M_OUTPUT_TOKENS_USD,
+						);
 						return self.synthetic_loop_terminal_result(
 							task_id,
 							"tool",
@@ -1036,6 +1103,14 @@ impl GenericAgentRuntime {
 						);
 						let message = payload.final_message.clone();
 						self.record_ask_user_step(loop_state, "LLM called ask_user.", payload);
+						emit_token_usage(
+							event_sender,
+							current_step_index,
+							total_prompt_tokens,
+							total_output_tokens,
+							COST_PER_M_INPUT_TOKENS_USD,
+							COST_PER_M_OUTPUT_TOKENS_USD,
+						);
 						return self.synthetic_loop_terminal_result(
 							task_id,
 							"tool",
@@ -1057,6 +1132,14 @@ impl GenericAgentRuntime {
 							StepAction::Fail,
 							"LLM called fail.",
 							Some(reason.clone()),
+						);
+						emit_token_usage(
+							event_sender,
+							current_step_index,
+							total_prompt_tokens,
+							total_output_tokens,
+							COST_PER_M_INPUT_TOKENS_USD,
+							COST_PER_M_OUTPUT_TOKENS_USD,
 						);
 						return self.synthetic_loop_terminal_result(
 							task_id,
@@ -1207,8 +1290,11 @@ impl GenericAgentRuntime {
 				}
 			}
 
-			self.maybe_compact(loop_state, &mut messages, current_step_index, event_sender)
+			let (compact_pt, compact_ot) = self
+				.maybe_compact(loop_state, &mut messages, current_step_index, event_sender)
 				.await;
+			total_prompt_tokens = total_prompt_tokens.saturating_add(compact_pt);
+			total_output_tokens = total_output_tokens.saturating_add(compact_ot);
 
 			// Emit StepComplete after all tools in this turn are done.
 			if let Some(sender) = event_sender {
@@ -1662,6 +1748,31 @@ impl AgentWorker for GenericAgentRuntime {
 impl Default for GenericAgentRuntime {
 	fn default() -> Self {
 		Self::with_skill_registry(SkillRegistry::disabled())
+	}
+}
+
+/// Emit a `LoopEvent::TokenUsage` event if a sender is present.
+///
+/// Computes estimated cost using the supplied per-million-token rates.
+fn emit_token_usage(
+	event_sender: Option<&crate::runtime_loop::LoopEventSender>,
+	step: u32,
+	prompt_tokens: u64,
+	output_tokens: u64,
+	cost_per_m_input_usd: f64,
+	cost_per_m_output_usd: f64,
+) {
+	if let Some(sender) = event_sender {
+		let total_tokens = prompt_tokens.saturating_add(output_tokens);
+		let estimated_cost_usd = (prompt_tokens as f64 / 1_000_000.0) * cost_per_m_input_usd
+			+ (output_tokens as f64 / 1_000_000.0) * cost_per_m_output_usd;
+		let _ = sender.send(crate::runtime_loop::LoopEvent::TokenUsage {
+			step,
+			prompt_tokens,
+			output_tokens,
+			total_tokens,
+			estimated_cost_usd,
+		});
 	}
 }
 

@@ -59,6 +59,13 @@ enum TurnResult {
 	Cancelled,
 }
 
+/// Per-turn token counts captured from the LoopEvent stream.
+#[derive(Default, Clone, Copy)]
+struct TurnTokens {
+	prompt: u64,
+	output: u64,
+}
+
 /// Runs the chat in the appropriate mode.
 pub(crate) fn run_chat(
 	rt: &tokio::runtime::Runtime,
@@ -129,6 +136,10 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 
 	print_banner(&options.session_id, conversation_history.len());
 
+	// Session-level cumulative token counters.
+	let mut session_prompt_tokens: u64 = 0;
+	let mut session_output_tokens: u64 = 0;
+
 	loop {
 		match editor.readline("roku> ") {
 			Ok(line) => {
@@ -196,6 +207,8 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 					&mut conversation_history,
 					&mut editor,
 					options.json,
+					&mut session_prompt_tokens,
+					&mut session_output_tokens,
 				);
 			}
 			Err(ReadlineError::Interrupted | ReadlineError::Eof) => break,
@@ -210,6 +223,7 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 }
 
 /// Handle a user turn in interactive mode, including AwaitingUser loops.
+#[allow(clippy::too_many_arguments)]
 fn handle_turn_interactive(
 	rt: &tokio::runtime::Runtime,
 	service: &RuntimeService,
@@ -219,8 +233,10 @@ fn handle_turn_interactive(
 	conversation_history: &mut Vec<ConversationTurn>,
 	editor: &mut DefaultEditor,
 	json_mode: bool,
+	session_prompt_tokens: &mut u64,
+	session_output_tokens: &mut u64,
 ) {
-	let (result, _request_id) = dispatch_and_record(
+	let (result, _request_id, turn_tokens) = dispatch_and_record(
 		rt,
 		service,
 		store,
@@ -230,6 +246,19 @@ fn handle_turn_interactive(
 		false,
 		json_mode,
 	);
+	// Accumulate session totals and display token usage after this turn.
+	*session_prompt_tokens = session_prompt_tokens.saturating_add(turn_tokens.prompt);
+	*session_output_tokens = session_output_tokens.saturating_add(turn_tokens.output);
+	if !json_mode && (turn_tokens.prompt > 0 || turn_tokens.output > 0) {
+		let turn_cost = (turn_tokens.prompt as f64 / 1_000_000.0) * 3.0
+			+ (turn_tokens.output as f64 / 1_000_000.0) * 15.0;
+		let session_total = session_prompt_tokens.saturating_add(*session_output_tokens);
+		eprintln!(
+			"[tokens: {}/{}, cost: ~${turn_cost:.4}] [session: {}]",
+			turn_tokens.prompt, turn_tokens.output, session_total,
+		);
+	}
+
 	let emit_response = |msg: &str, status: &str| {
 		if json_mode {
 			let resp = PipeResponse {
@@ -246,7 +275,6 @@ fn handle_turn_interactive(
 			println!("{msg}");
 		}
 	};
-
 	match result {
 		Ok(TurnResult::Completed(response)) => {
 			emit_response(&response, "succeeded");
@@ -266,7 +294,7 @@ fn handle_turn_interactive(
 						}
 						let _ = editor.add_history_entry(reply);
 
-						let (inner_result, _) = dispatch_and_record(
+						let (inner_result, _, inner_tokens) = dispatch_and_record(
 							rt,
 							service,
 							store,
@@ -276,6 +304,20 @@ fn handle_turn_interactive(
 							false,
 							json_mode,
 						);
+						*session_prompt_tokens =
+							session_prompt_tokens.saturating_add(inner_tokens.prompt);
+						*session_output_tokens =
+							session_output_tokens.saturating_add(inner_tokens.output);
+						if inner_tokens.prompt > 0 || inner_tokens.output > 0 {
+							let cost = (inner_tokens.prompt as f64 / 1_000_000.0) * 3.0
+								+ (inner_tokens.output as f64 / 1_000_000.0) * 15.0;
+							let session_total =
+								session_prompt_tokens.saturating_add(*session_output_tokens);
+							eprintln!(
+								"[tokens: {}/{}, cost: ~${cost:.4}] [session: {}]",
+								inner_tokens.prompt, inner_tokens.output, session_total,
+							);
+						}
 						match inner_result {
 							Ok(TurnResult::Completed(response)) => {
 								emit_response(&response, "succeeded");
@@ -436,7 +478,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 		let goal = trimmed.to_string();
 
 		let json_mode = options.json;
-		let (result, request_id) = dispatch_and_record(
+		let (result, request_id, _tokens) = dispatch_and_record(
 			rt,
 			&service,
 			&store,
@@ -518,8 +560,8 @@ fn write_json_stdout(resp: &PipeResponse) {
 /// Execute a turn and record both user message and assistant response in history.
 /// Persists new turns to the session store. On cancel/error, history is not modified.
 ///
-/// Returns `(Result<TurnResult>, request_id)` so pipe-mode callers can correlate
-/// the response with the `RequestEnvelope` sent to the runtime.
+/// Returns `(Result<TurnResult>, request_id, TurnTokens)` so callers can track
+/// token usage and correlate the response with the `RequestEnvelope` sent to the runtime.
 fn dispatch_and_record(
 	rt: &tokio::runtime::Runtime,
 	service: &RuntimeService,
@@ -529,11 +571,11 @@ fn dispatch_and_record(
 	conversation_history: &mut Vec<ConversationTurn>,
 	pipe_mode: bool,
 	json_mode: bool,
-) -> (Result<TurnResult, CommandError>, String) {
+) -> (Result<TurnResult, CommandError>, String, TurnTokens) {
 	let seq = next_cli_request_sequence();
 	let request_id = format!("req-{seq}");
 
-	let result = match execute_turn(
+	let (turn_result, tokens) = match execute_turn(
 		rt,
 		service,
 		session_id,
@@ -543,9 +585,10 @@ fn dispatch_and_record(
 		json_mode,
 		&request_id,
 	) {
-		Ok(r) => r,
-		Err(e) => return (Err(e), request_id),
+		Ok(pair) => pair,
+		Err(e) => return (Err(e), request_id, TurnTokens::default()),
 	};
+	let result = turn_result;
 
 	match &result {
 		TurnResult::Completed(response) | TurnResult::AwaitingUser(response) => {
@@ -571,10 +614,13 @@ fn dispatch_and_record(
 		TurnResult::Cancelled => {}
 	}
 
-	(Ok(result), request_id)
+	(Ok(result), request_id, tokens)
 }
 
 /// Execute a single chat turn with Ctrl+C cancellation support.
+///
+/// Returns `Ok((TurnResult, TurnTokens))` where `TurnTokens` holds the prompt/output
+/// token counts from the `TokenUsage` LoopEvent emitted by the runtime.
 fn execute_turn(
 	rt: &tokio::runtime::Runtime,
 	service: &RuntimeService,
@@ -584,21 +630,45 @@ fn execute_turn(
 	pipe_mode: bool,
 	json_mode: bool,
 	request_id: &str,
-) -> Result<TurnResult, CommandError> {
+) -> Result<(TurnResult, TurnTokens), CommandError> {
 	rt.block_on(async {
 		let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LoopEvent>();
 
+		// Shared token accumulator: the render task writes, execute_turn reads after join.
+		let captured_tokens = std::sync::Arc::new(std::sync::Mutex::new(TurnTokens::default()));
+		let captured_tokens_task = captured_tokens.clone();
+
 		let render_task = if json_mode {
-			// JSON mode: emit typed JSONL event lines to stdout; stderr is logs only.
+			// JSON mode: emit typed JSONL event lines to stdout + capture tokens.
 			tokio::spawn(async move {
 				while let Some(event) = rx.recv().await {
+					if let LoopEvent::TokenUsage {
+						prompt_tokens,
+						output_tokens,
+						..
+					} = &event
+						&& let Ok(mut guard) = captured_tokens_task.lock()
+					{
+						guard.prompt = guard.prompt.saturating_add(*prompt_tokens);
+						guard.output = guard.output.saturating_add(*output_tokens);
+					}
 					write_jsonl_event(&event);
 				}
 			})
 		} else if pipe_mode {
-			// Pipe mode (no --json): serialize events as JSONL to stderr.
+			// Pipe mode (no --json): serialize all events as JSONL to stderr.
 			tokio::spawn(async move {
 				while let Some(event) = rx.recv().await {
+					if let LoopEvent::TokenUsage {
+						prompt_tokens,
+						output_tokens,
+						..
+					} = &event
+						&& let Ok(mut guard) = captured_tokens_task.lock()
+					{
+						guard.prompt = guard.prompt.saturating_add(*prompt_tokens);
+						guard.output = guard.output.saturating_add(*output_tokens);
+					}
 					if let Ok(json) = serde_json::to_string(&event) {
 						eprintln!("{json}");
 					}
@@ -640,6 +710,16 @@ fn execute_turn(
 						LoopEvent::StepComplete { step } => {
 							eprintln!("[step] {step} complete");
 						}
+						LoopEvent::TokenUsage {
+							prompt_tokens,
+							output_tokens,
+							..
+						} => {
+							if let Ok(mut guard) = captured_tokens_task.lock() {
+								guard.prompt = guard.prompt.saturating_add(prompt_tokens);
+								guard.output = guard.output.saturating_add(output_tokens);
+							}
+						}
 					}
 				}
 			})
@@ -665,17 +745,18 @@ fn execute_turn(
 				drop(tx);
 				render_task.await.ok();
 
+				let tokens = captured_tokens.lock().map(|g| *g).unwrap_or_default();
 				if let Ok(Some(_pending)) = service.pending_loop(session_id) {
-					Ok(TurnResult::AwaitingUser(response.message))
+					Ok((TurnResult::AwaitingUser(response.message), tokens))
 				} else {
-					Ok(TurnResult::Completed(response.message))
+					Ok((TurnResult::Completed(response.message), tokens))
 				}
 			}
 			_ = tokio::signal::ctrl_c() => {
 				drop(tx);
 				render_task.await.ok();
 				let _ = service.clear_pending_loop(session_id);
-				Ok(TurnResult::Cancelled)
+				Ok((TurnResult::Cancelled, TurnTokens::default()))
 			}
 		};
 

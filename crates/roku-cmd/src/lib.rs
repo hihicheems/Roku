@@ -654,6 +654,16 @@ where
 							roku_agent_runtime::LoopEvent::StepComplete { step } => {
 								eprintln!("[step] {step} complete");
 							}
+							roku_agent_runtime::LoopEvent::TokenUsage {
+								prompt_tokens,
+								output_tokens,
+								estimated_cost_usd,
+								..
+							} => {
+								eprintln!(
+									"[tokens: {prompt_tokens}/{output_tokens}, cost: ~${estimated_cost_usd:.4}]"
+								);
+							}
 						}
 					}
 				});

@@ -43,6 +43,14 @@ pub enum LoopEvent {
 	LlmDecisionComplete { step: u32 },
 	/// One full loop iteration (decide + optional tool execution) is complete.
 	StepComplete { step: u32 },
+	/// Token usage summary emitted at the end of each tool loop execution.
+	TokenUsage {
+		step: u32,
+		prompt_tokens: u64,
+		output_tokens: u64,
+		total_tokens: u64,
+		estimated_cost_usd: f64,
+	},
 }
 
 /// Convenience alias for the sending half of a `LoopEvent` channel.

@@ -297,7 +297,8 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 									| roku_agent_runtime::LoopEvent::LlmDecisionComplete {
 										..
 									}
-									| roku_agent_runtime::LoopEvent::StepComplete { .. } => None,
+									| roku_agent_runtime::LoopEvent::StepComplete { .. }
+									| roku_agent_runtime::LoopEvent::TokenUsage { .. } => None,
 								};
 								if let (Some(chat_id), Some(text)) = (chat_id, text) {
 									let msg = TelegramOutboundMessage {
