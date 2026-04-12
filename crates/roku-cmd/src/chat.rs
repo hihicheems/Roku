@@ -970,12 +970,14 @@ fn print_help() {
 /// Check whether the system has no credentials at all (no env vars, no auth.json).
 /// Used to distinguish "missing credentials" from other bootstrap failures.
 fn has_no_credentials() -> bool {
-	// Check env vars for any provider.
-	let has_env_key = std::env::var("OPENROUTER_API_KEY")
-		.or_else(|_| std::env::var("ROKU_OPENAI_API_KEY"))
-		.or_else(|_| std::env::var("ROKU_ANTHROPIC_API_KEY"))
-		.map(|v| !v.trim().is_empty())
-		.unwrap_or(false);
+	// Check env vars for any provider. Each must be checked independently
+	// because an empty var (Ok("")) would short-circuit an or_else chain.
+	let env_keys = ["OPENROUTER_API_KEY", "ROKU_OPENAI_API_KEY", "ROKU_ANTHROPIC_API_KEY"];
+	let has_env_key = env_keys.iter().any(|key| {
+		std::env::var(key)
+			.ok()
+			.is_some_and(|v| !v.trim().is_empty())
+	});
 	if has_env_key {
 		return false;
 	}

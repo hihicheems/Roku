@@ -139,14 +139,18 @@ fn bind_callback_listener() -> io::Result<TcpListener> {
 		.or_else(|_| TcpListener::bind(("127.0.0.1", 0)))
 }
 
-/// Extract a query-string parameter value from a URL string.
+/// Extract a query-string parameter value from a URL string, percent-decoding it.
 fn extract_callback_param(url: &str, key: &str) -> Option<String> {
 	let query = url.split_once('?')?.1;
 	for pair in query.split('&') {
 		if let Some((k, v)) = pair.split_once('=')
 			&& k == key
 		{
-			return Some(v.to_string());
+			return Some(
+				percent_encoding::percent_decode_str(v)
+					.decode_utf8_lossy()
+					.into_owned(),
+			);
 		}
 	}
 	None
