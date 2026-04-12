@@ -62,7 +62,7 @@ pub(crate) fn render_markdown(input: &str) -> String {
 	let mut code_buf = String::new();
 	let mut list_depth: usize = 0;
 	let mut in_heading = false;
-	let mut in_link = false;
+	let mut link_url: Option<String> = None;
 
 	for event in parser {
 		match event {
@@ -155,20 +155,33 @@ pub(crate) fn render_markdown(input: &str) -> String {
 				output.push_str("\n\n");
 			}
 			Event::Start(Tag::Link { dest_url, .. }) => {
-				// OSC 8 hyperlink: only emit for safe URLs (http/https, no
-				// control chars) to prevent ANSI escape injection via crafted
-				// markdown from prompt-injected LLM output.
-				if is_safe_url(&dest_url) {
-					output.push_str(&format!("\x1b]8;;{dest_url}\x1b\\"));
-					in_link = true;
-				}
+				// Render link text in cyan (no OSC 8 — Terminal.app renders
+				// OSC 8 hyperlinks with persistent underlines that clutter
+				// tables, lists, and surrounding text).
+				output.push_str(&format!(
+					"{}",
+					crossterm::style::SetForegroundColor(Color::Cyan)
+				));
+				link_url = Some(dest_url.to_string());
 			}
 			Event::End(TagEnd::Link) => {
-				// Only emit close if we emitted open — orphaned close
-				// sequences can confuse some terminals.
-				if in_link {
-					output.push_str("\x1b]8;;\x1b\\");
-					in_link = false;
+				output.push_str(&format!(
+					"{}",
+					crossterm::style::SetForegroundColor(Color::Reset)
+				));
+				// Show URL in parentheses if it differs from the displayed
+				// link text (skip for autolinks where text == URL).
+				if let Some(url) = link_url.take() {
+					// Check if the URL was already shown as the link text
+					// by peeking at the last line of output.
+					let already_shown = output
+						.rfind('\n')
+						.map(|i| &output[i + 1..])
+						.unwrap_or(&output)
+						.contains(&url);
+					if !already_shown && is_safe_url(&url) {
+						output.push_str(&format!(" ({})", url.with(Color::DarkGrey)));
+					}
 				}
 			}
 			Event::Start(Tag::Strikethrough) => {
