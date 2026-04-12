@@ -156,6 +156,9 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 	print_banner(&options.session_id, conversation_history.len());
 	print_auth_status();
 
+	// Tracks whether the user has logged out in this session.
+	let mut logged_out = false;
+
 	// Session-level cumulative token counters.
 	let mut session_prompt_tokens: u64 = 0;
 	let mut session_output_tokens: u64 = 0;
@@ -216,6 +219,7 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 							Ok(()) => match rebuild_service() {
 								Ok(s) => {
 									service = s;
+									logged_out = false;
 									eprintln!("[login] Service rebuilt with new credentials.");
 									print_auth_status();
 								}
@@ -233,6 +237,7 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 								if let Err(e) = auth_store.delete_credential(provider) {
 									eprintln!("[logout] Failed to clear credentials: {e}");
 								} else {
+									logged_out = true;
 									eprintln!(
 										"[logout] Credentials cleared for {provider}. Use /login to sign in again."
 									);
@@ -259,6 +264,11 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 						// Valid user message — add to history.
 						let _ = editor.add_history_entry(trimmed);
 					}
+				}
+
+				if logged_out {
+					eprintln!("Not authenticated. Use /login to sign in.");
+					continue;
 				}
 
 				let goal = trimmed.to_string();
