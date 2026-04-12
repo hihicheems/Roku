@@ -96,9 +96,9 @@ max_skill_execution_output_chars = 4000
 # provider = "openrouter"
 #
 # OAuth client_id for the OpenAI PKCE authorization flow. Required when using
-# `roku chat` first-run OAuth setup. Obtain one by registering an OAuth app
-# with OpenAI, or use the Codex CLI client_id for development/testing.
-# oauth_client_id = "app_EMoamEEZ73f0CkXaXp7hrann"
+# `roku chat` first-run OAuth setup. Override with OPENAI_OAUTH_CLIENT_ID env var,
+# or obtain one by registering an OAuth app with OpenAI.
+oauth_client_id = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 [runtime.llm.openrouter]
 # Primary model id for live LLM routing.

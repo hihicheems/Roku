@@ -1307,8 +1307,17 @@ pub(crate) fn pipe_approval_gate(
 	))
 }
 
-/// Load the OAuth client_id from runtime config (for first-run OAuth flow).
+/// Load the OAuth client_id for the OpenAI PKCE flow.
+///
+/// Resolution order:
+/// 1. `OPENAI_OAUTH_CLIENT_ID` environment variable
+/// 2. `oauth_client_id` field in `config/runtime.toml` under `[runtime.llm]`
 pub(crate) fn load_oauth_client_id() -> Option<String> {
+	if let Ok(val) = std::env::var("OPENAI_OAUTH_CLIENT_ID")
+		&& !val.is_empty()
+	{
+		return Some(val);
+	}
 	use crate::storage::LocalStorageLayout;
 	let layout = LocalStorageLayout::from_env();
 	let configs = crate::runtime_config::load_runtime_configs(&layout).ok()?;
