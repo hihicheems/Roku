@@ -35,7 +35,7 @@ use roku_common_types::{ConversationRole, ConversationTurn, RequestEnvelope, Req
 use crate::CommandError;
 use crate::auth::{AuthStore, CredentialEntry};
 use crate::conversation::compact_conversation_history;
-use crate::input::{CommandEntry, InputReader, ReadlineResult};
+use crate::input::{CommandEntry, InputReader, ReadlineResult, SelectionItem, run_selection};
 use crate::render;
 use crate::runtime::{
 	build_live_runtime_service_from_env, cli_approval_gate, load_oauth_client_id,
@@ -283,7 +283,7 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 			}
 			"/switch" => {
 				reader.add_history_entry(trimmed);
-				if handle_switch_command(&mut service, &mut reader) {
+				if handle_switch_command(&mut service) {
 					logged_out = false;
 				}
 				continue;
@@ -1112,20 +1112,23 @@ fn rebuild_service() -> Result<RuntimeService, CommandError> {
 async fn run_first_time_setup() -> Result<(), String> {
 	let auth_store = AuthStore::from_env();
 
-	eprintln!("Choose a provider:");
-	eprintln!("  1) OpenRouter (API key)");
-	eprintln!("  2) OpenAI (OAuth — opens browser)");
-	eprint!("Selection [1/2]: ");
-	let _ = io::stderr().flush();
-
-	let mut input = String::new();
-	io::stdin()
-		.read_line(&mut input)
-		.map_err(|e| format!("read input: {e}"))?;
-	let choice = input.trim();
+	let items = vec![
+		SelectionItem {
+			label: "OpenRouter".into(),
+			description: "API key".into(),
+		},
+		SelectionItem {
+			label: "OpenAI".into(),
+			description: "OAuth — opens browser".into(),
+		},
+	];
+	let choice = match run_selection(items, "Choose a provider:") {
+		Some(idx) => idx,
+		None => return Err("setup cancelled".to_string()),
+	};
 
 	match choice {
-		"1" => {
+		0 => {
 			eprint!("Enter your OpenRouter API key: ");
 			let _ = io::stderr().flush();
 			let mut key = String::new();
@@ -1146,7 +1149,7 @@ async fn run_first_time_setup() -> Result<(), String> {
 			eprintln!("[setup] OpenRouter API key saved.");
 			Ok(())
 		}
-		"2" => {
+		1 => {
 			let client_id = load_oauth_client_id().ok_or_else(|| {
 				"No oauth_client_id configured. Set OPENAI_OAUTH_CLIENT_ID env var \
 				 or uncomment oauth_client_id in config/runtime.toml under [runtime.llm]."
@@ -1175,7 +1178,7 @@ async fn run_first_time_setup() -> Result<(), String> {
 			eprintln!("[setup] OpenAI OAuth credentials saved.");
 			Ok(())
 		}
-		_ => Err(format!("invalid selection: {choice}")),
+		_ => unreachable!(),
 	}
 }
 
@@ -1340,7 +1343,7 @@ fn readline_history_path() -> std::path::PathBuf {
 
 /// Handle /switch command — list stored credentials, pick one.
 /// Returns `true` if the switch succeeded and the service was rebuilt.
-fn handle_switch_command(service: &mut RuntimeService, reader: &mut InputReader) -> bool {
+fn handle_switch_command(service: &mut RuntimeService) -> bool {
 	let auth_store = AuthStore::from_env();
 	let auth = match auth_store.load() {
 		Ok(Some(a)) if !a.credentials.is_empty() => a,
@@ -1364,53 +1367,52 @@ fn handle_switch_command(service: &mut RuntimeService, reader: &mut InputReader)
 		return false;
 	}
 
-	eprintln!("[switch] Available providers:");
-	for (i, provider) in providers.iter().enumerate() {
-		let active = if auth.active_provider.as_deref() == Some(provider.as_str()) {
-			" (active)"
-		} else {
-			""
-		};
-		let summary = auth
-			.credentials
-			.get(*provider)
-			.map(credential_summary)
-			.unwrap_or_default();
-		eprintln!("  {}) {provider}{active} — {summary}", i + 1);
-	}
-	eprint!("Selection: ");
-	let _ = io::stderr().flush();
-
-	match reader.readline("") {
-		ReadlineResult::Line(line) => {
-			let idx: usize = match line.trim().parse::<usize>() {
-				Ok(n) if n >= 1 && n <= providers.len() => n - 1,
-				_ => {
-					eprintln!("[switch] Invalid selection.");
-					return false;
-				}
+	let items: Vec<SelectionItem> = providers
+		.iter()
+		.map(|provider| {
+			let active = if auth.active_provider.as_deref() == Some(provider.as_str()) {
+				" (active)"
+			} else {
+				""
 			};
-			let target = providers[idx].clone();
-			let mut updated = auth.clone();
-			updated.active_provider = Some(target.clone());
-			if let Err(e) = auth_store.save(&updated) {
-				eprintln!("[switch] Failed to update active provider: {e}");
-				return false;
+			let summary = auth
+				.credentials
+				.get(*provider)
+				.map(credential_summary)
+				.unwrap_or_default();
+			SelectionItem {
+				label: format!("{provider}{active}"),
+				description: summary,
 			}
-			match rebuild_service() {
-				Ok(s) => {
-					*service = s;
-					eprintln!("[switch] Switched to {target}.");
-					print_auth_status();
-					return true;
-				}
-				Err(e) => {
-					eprintln!("[switch] Failed to rebuild service: {e}");
-					let _ = auth_store.save(&auth);
-				}
-			}
+		})
+		.collect();
+
+	let idx = match run_selection(items, "[switch] Available providers:") {
+		Some(i) => i,
+		None => {
+			eprintln!("[switch] Cancelled.");
+			return false;
 		}
-		ReadlineResult::Interrupted | ReadlineResult::Eof => eprintln!("[switch] Cancelled."),
+	};
+
+	let target = providers[idx].clone();
+	let mut updated = auth.clone();
+	updated.active_provider = Some(target.clone());
+	if let Err(e) = auth_store.save(&updated) {
+		eprintln!("[switch] Failed to update active provider: {e}");
+		return false;
 	}
-	false
+	match rebuild_service() {
+		Ok(s) => {
+			*service = s;
+			eprintln!("[switch] Switched to {target}.");
+			print_auth_status();
+			true
+		}
+		Err(e) => {
+			eprintln!("[switch] Failed to rebuild service: {e}");
+			let _ = auth_store.save(&auth);
+			false
+		}
+	}
 }

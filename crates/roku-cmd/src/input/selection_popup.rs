@@ -19,7 +19,6 @@
 //! blocking modal: it takes over terminal input, renders options, and returns
 //! when the user confirms or cancels.
 
-use std::io::Write;
 use std::os::fd::FromRawFd;
 
 use crossterm::cursor::Show;
