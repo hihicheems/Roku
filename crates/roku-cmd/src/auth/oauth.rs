@@ -229,12 +229,16 @@ async fn exchange_code_for_tokens(
 		.map_err(|e| AuthError::Http(format!("parse token response: {e}")))
 }
 
-/// Perform RFC 8693 token-exchange to obtain an API key from an id_token.
-async fn exchange_id_token_for_api_key(
+/// Attempt RFC 8693 token-exchange to obtain an API key from an id_token.
+///
+/// Returns `None` if the exchange is not supported for this client/account
+/// (e.g. 401). The caller should fall back to the OAuth access_token from
+/// the code-for-token step.
+async fn try_exchange_id_token_for_api_key(
 	client: &reqwest::Client,
 	client_id: &str,
 	id_token: &str,
-) -> Result<String, AuthError> {
+) -> Option<String> {
 	let resp = post_form(
 		client,
 		TOKEN_URL,
@@ -252,24 +256,15 @@ async fn exchange_id_token_for_api_key(
 			),
 		],
 	)
-	.await?;
+	.await
+	.ok()?;
 
-	let status = resp.status();
-	let body = resp
-		.text()
-		.await
-		.map_err(|e| AuthError::Http(format!("read exchange body: {e}")))?;
-	if !status.is_success() {
-		let hint = extract_error_hint(&body);
-		return Err(AuthError::Http(format!(
-			"api-key exchange failed ({status}){hint}"
-		)));
+	if !resp.status().is_success() {
+		return None;
 	}
-	let exchange: ExchangeResponse = serde_json::from_str(&body)
-		.map_err(|e| AuthError::Http(format!("parse exchange response: {e}")))?;
-	exchange
-		.access_token
-		.ok_or_else(|| AuthError::Http("api-key exchange returned no access_token".to_string()))
+	let body = resp.text().await.ok()?;
+	let exchange: ExchangeResponse = serde_json::from_str(&body).ok()?;
+	exchange.access_token
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +380,9 @@ pub async fn run_openai_oauth(client_id: &str) -> Result<OAuthResult, AuthError>
 	)
 	.await?;
 
+	let access_token = token_resp
+		.access_token
+		.ok_or_else(|| AuthError::Http("token exchange returned no access_token".to_string()))?;
 	let id_token = token_resp
 		.id_token
 		.ok_or_else(|| AuthError::Http("token exchange returned no id_token".to_string()))?;
@@ -392,11 +390,20 @@ pub async fn run_openai_oauth(client_id: &str) -> Result<OAuthResult, AuthError>
 		.refresh_token
 		.ok_or_else(|| AuthError::Http("token exchange returned no refresh_token".to_string()))?;
 
-	let api_key = exchange_id_token_for_api_key(&http_client, client_id, &id_token).await?;
+	// Try to obtain an API key (sk-*) via RFC 8693 token-exchange.
+	// This is optional — some accounts/clients don't support it.
+	// Fall back to the OAuth access_token from step 1.
+	let api_key =
+		try_exchange_id_token_for_api_key(&http_client, client_id, &id_token).await;
+	let usable_token = api_key.unwrap_or_else(|| {
+		eprintln!("[oauth] API key exchange not available, using OAuth access token.");
+		access_token
+	});
+
 	let id_token_claims = parse_id_token_claims(&id_token);
 
 	Ok(OAuthResult {
-		api_key,
+		api_key: usable_token,
 		refresh_token,
 		id_token_claims,
 	})
