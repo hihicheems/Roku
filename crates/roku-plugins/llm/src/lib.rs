@@ -28,6 +28,10 @@ pub use providers::openai::{
 	OpenAiBootstrapError, OpenAiConfig, OpenAiProvider, OpenAiRuntimeConfig,
 	OpenAiRuntimeConfigPatch, build_openai_router_with_metrics, openai_api_key_from_env,
 };
+pub use providers::openai_responses::{
+	OpenAiResponsesBootstrapError, OpenAiResponsesConfig, OpenAiResponsesProvider,
+	build_openai_responses_router_with_metrics,
+};
 pub use providers::openrouter::{
 	OpenRouterBootstrapError, OpenRouterConfig, OpenRouterProvider, OpenRouterRuntimeConfig,
 	OpenRouterRuntimeConfigPatch, build_openrouter_router, build_openrouter_router_with_metrics,

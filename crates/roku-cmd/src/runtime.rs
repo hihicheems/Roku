@@ -46,10 +46,10 @@ use roku_plugin_host::{
 };
 use roku_plugin_llm::{
 	AnthropicBootstrapError, AnthropicRuntimeConfig, LlmProviderKind, LlmRouter,
-	OpenAiBootstrapError, OpenAiRuntimeConfig, OpenRouterBootstrapError, OpenRouterRuntimeConfig,
-	anthropic_api_key_from_env, build_anthropic_router_with_metrics,
-	build_openai_router_with_metrics, build_openrouter_router_with_metrics,
-	openai_api_key_from_env,
+	OpenAiBootstrapError, OpenAiResponsesConfig, OpenAiRuntimeConfig, OpenRouterBootstrapError,
+	OpenRouterRuntimeConfig, anthropic_api_key_from_env, build_anthropic_router_with_metrics,
+	build_openai_responses_router_with_metrics, build_openai_router_with_metrics,
+	build_openrouter_router_with_metrics, openai_api_key_from_env,
 };
 use roku_plugin_mcp::{McpConfig, McpConnection, McpTool, mcp_tools_to_catalog_descriptors};
 use roku_plugin_skills::{SkillRegistry, SkillsRuntimeConfig};
@@ -1056,6 +1056,34 @@ fn build_live_llm_routers(
 						"ROKU_OPENAI_API_KEY",
 					))
 				})?;
+
+			// OAuth tokens (not sk-* API keys) require the Responses API.
+			if !api_key.starts_with("sk-") {
+				let responses_config = OpenAiResponsesConfig {
+					api_key,
+					base_url: "https://api.openai.com/v1/responses".to_string(),
+					reasoning_effort: openai.reasoning_effort.clone(),
+				};
+				let route_router = build_openai_responses_router_with_metrics(
+					responses_config.clone(),
+					openai.clone(),
+					Arc::clone(metrics),
+				)
+				.map_err(openai_responses_bootstrap_failure)?;
+				let execution_router = build_openai_responses_router_with_metrics(
+					responses_config,
+					openai.clone(),
+					Arc::clone(metrics),
+				)
+				.map_err(openai_responses_bootstrap_failure)?;
+				let _ = emit_global_log(LogRecord::new(
+					"roku-cmd",
+					LogLevel::Info,
+					"using Responses API for OAuth token",
+				));
+				return Ok((route_router, execution_router));
+			}
+
 			let config = openai.clone().with_api_key(api_key);
 			let route_router = build_openai_router_with_metrics(
 				config.clone(),
@@ -1122,6 +1150,14 @@ fn anthropic_bootstrap_failure(error: AnthropicBootstrapError) -> LiveLlmBootstr
 fn openai_bootstrap_failure(error: OpenAiBootstrapError) -> LiveLlmBootstrapFailure {
 	LiveLlmBootstrapFailure {
 		fallback_reason: format!("openai bootstrap failed: {error}"),
+	}
+}
+
+fn openai_responses_bootstrap_failure(
+	error: roku_plugin_llm::OpenAiResponsesBootstrapError,
+) -> LiveLlmBootstrapFailure {
+	LiveLlmBootstrapFailure {
+		fallback_reason: format!("openai responses api bootstrap failed: {error}"),
 	}
 }
 
