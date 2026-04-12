@@ -157,6 +157,12 @@ use std::sync::{Arc, OnceLock};
 /// and streaming-output newline coordination.
 static STDERR_LOG_SINK: OnceLock<Arc<FilteredStderrLogSink>> = OnceLock::new();
 
+/// The log level configured at startup, restored when `/debug` is toggled off.
+static INITIAL_LOG_LEVEL: OnceLock<LogLevel> = OnceLock::new();
+
+/// Global auto-approve flag for tool execution.
+static AUTO_APPROVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Mark that streaming output is in progress (no trailing newline).
 /// The next log line will prepend `\n` to separate from the stream.
 pub(crate) fn mark_streaming_output() {
@@ -171,7 +177,8 @@ pub(crate) fn toggle_debug_logs() -> bool {
 	if let Some(sink) = STDERR_LOG_SINK.get() {
 		let current = sink.min_level();
 		if current == LogLevel::Debug || current == LogLevel::Trace {
-			sink.set_min_level(LogLevel::Info);
+			let restore = INITIAL_LOG_LEVEL.get().copied().unwrap_or(LogLevel::Info);
+			sink.set_min_level(restore);
 			false
 		} else {
 			sink.set_min_level(LogLevel::Debug);
@@ -180,6 +187,18 @@ pub(crate) fn toggle_debug_logs() -> bool {
 	} else {
 		false
 	}
+}
+
+/// Check if auto-approve is enabled.
+pub(crate) fn is_auto_approve() -> bool {
+	AUTO_APPROVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Toggle auto-approve on/off. Returns the new state.
+pub(crate) fn toggle_auto_approve() -> bool {
+	let prev = AUTO_APPROVE.load(std::sync::atomic::Ordering::Relaxed);
+	AUTO_APPROVE.store(!prev, std::sync::atomic::Ordering::Relaxed);
+	!prev
 }
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -1010,6 +1029,7 @@ fn configure_logging_from_env() -> Result<(), CommandError> {
 		_ => LogLevel::Info,
 	};
 
+	let log_dir_display = base_dir.display().to_string();
 	let mut sinks: Vec<Arc<dyn LogSink>> =
 		vec![Arc::new(AsyncRotatingFileLogSink::new(FileLogConfig {
 			base_dir,
@@ -1017,11 +1037,20 @@ fn configure_logging_from_env() -> Result<(), CommandError> {
 			max_backup_files,
 		}))];
 	if stderr_enabled {
+		INITIAL_LOG_LEVEL.get_or_init(|| min_level);
 		let stderr_sink = Arc::new(FilteredStderrLogSink::new(min_level));
 		STDERR_LOG_SINK.get_or_init(|| Arc::clone(&stderr_sink));
 		sinks.push(stderr_sink);
 	}
+
+	// Initialize auto-approve from env var.
+	if env_var_bool("ROKU_AUTO_APPROVE")?.unwrap_or(false) {
+		AUTO_APPROVE.store(true, std::sync::atomic::Ordering::Relaxed);
+	}
 	install_global_log_sink(Arc::new(FanoutLogSink::new(sinks)));
+
+	// Print log directory for user discoverability.
+	eprintln!("[info] logs: {log_dir_display}");
 	Ok(())
 }
 
