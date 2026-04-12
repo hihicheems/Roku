@@ -111,12 +111,20 @@ pub(crate) fn render_markdown(input: &str) -> String {
 				output.push_str(&"│ ".with(Color::DarkGrey).to_string());
 			}
 			Event::Start(Tag::Emphasis) => {
-				// Use dim instead of italic — macOS Terminal.app renders
-				// italic (ESC[3m) as underline, causing visual confusion.
-				output.push_str(&format!("{}", Attribute::Dim));
+				// Use a subtle color instead of italic or dim:
+				// - Italic (ESC[3m) renders as underline on Terminal.app
+				// - Dim (ESC[2m) shares reset (ESC[22m) with bold, breaking
+				//   nested **bold *emph* bold** structures
+				output.push_str(&format!(
+					"{}",
+					crossterm::style::SetForegroundColor(Color::Grey)
+				));
 			}
 			Event::End(TagEnd::Emphasis) => {
-				output.push_str(&format!("{}", Attribute::NormalIntensity));
+				output.push_str(&format!(
+					"{}",
+					crossterm::style::SetForegroundColor(Color::Reset)
+				));
 			}
 			Event::Start(Tag::Strong) => {
 				output.push_str(&format!("{}", Attribute::Bold));
