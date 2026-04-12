@@ -158,7 +158,9 @@ use std::sync::{Arc, OnceLock};
 static STDERR_LOG_SINK: OnceLock<Arc<FilteredStderrLogSink>> = OnceLock::new();
 
 /// The log level configured at startup, restored when `/debug` is toggled off.
-static INITIAL_LOG_LEVEL: OnceLock<LogLevel> = OnceLock::new();
+/// Uses AtomicU8 (not OnceLock) so it can be reset across multiple execute_cli calls.
+static INITIAL_LOG_LEVEL: std::sync::atomic::AtomicU8 =
+	std::sync::atomic::AtomicU8::new(LogLevel::Info as u8);
 
 /// Global auto-approve flag for tool execution.
 static AUTO_APPROVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -181,7 +183,14 @@ pub(crate) fn toggle_debug_logs() -> bool {
 	if let Some(sink) = STDERR_LOG_SINK.get() {
 		let current = sink.min_level();
 		if current == LogLevel::Debug || current == LogLevel::Trace {
-			let restore = INITIAL_LOG_LEVEL.get().copied().unwrap_or(LogLevel::Info);
+			let val = INITIAL_LOG_LEVEL.load(std::sync::atomic::Ordering::Relaxed);
+			let restore = match val {
+				0 => LogLevel::Trace,
+				1 => LogLevel::Debug,
+				2 => LogLevel::Info,
+				3 => LogLevel::Warn,
+				_ => LogLevel::Error,
+			};
 			// Never restore to a level more verbose than Info — that would
 			// make the "disable" toggle a no-op when started with debug/trace.
 			let effective = if (restore as u8) < (LogLevel::Info as u8) {
@@ -1048,7 +1057,7 @@ fn configure_logging_from_env() -> Result<(), CommandError> {
 			max_backup_files,
 		}))];
 	if stderr_enabled {
-		INITIAL_LOG_LEVEL.get_or_init(|| min_level);
+		INITIAL_LOG_LEVEL.store(min_level as u8, std::sync::atomic::Ordering::Relaxed);
 		let stderr_sink = Arc::new(FilteredStderrLogSink::new(min_level));
 		STDERR_LOG_SINK.get_or_init(|| Arc::clone(&stderr_sink));
 		sinks.push(stderr_sink);
