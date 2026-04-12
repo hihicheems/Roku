@@ -30,6 +30,16 @@ pub(super) const MAX_VISIBLE_ROWS: usize = 8;
 pub(crate) struct CommandEntry {
 	pub name: &'static str,
 	pub description: &'static str,
+	/// Optional sub-commands. When present, selecting this command shows a
+	/// sub-command selection popup instead of submitting immediately.
+	pub sub_commands: Option<Vec<SubCommandEntry>>,
+}
+
+/// A sub-command within a parent slash command.
+#[derive(Clone)]
+pub(crate) struct SubCommandEntry {
+	pub name: &'static str,
+	pub description: &'static str,
 }
 
 /// State for the interactive command popup.
@@ -123,6 +133,12 @@ impl CommandPopup {
 	pub fn selected_command(&self) -> Option<String> {
 		let items = self.filtered();
 		items.get(self.selected).map(|e| e.name.to_string())
+	}
+
+	/// Return a clone of the currently selected entry, if any.
+	pub fn selected_entry(&self) -> Option<CommandEntry> {
+		let items = self.filtered();
+		items.get(self.selected).map(|e| (*e).clone())
 	}
 
 	/// Render the popup using relative cursor movement (no absolute positioning).
@@ -241,26 +257,32 @@ mod tests {
 			CommandEntry {
 				name: "clear",
 				description: "Clear conversation history",
+				sub_commands: None,
 			},
 			CommandEntry {
 				name: "compact",
 				description: "Compact conversation history",
+				sub_commands: None,
 			},
 			CommandEntry {
 				name: "exit",
 				description: "Exit the REPL",
+				sub_commands: None,
 			},
 			CommandEntry {
 				name: "help",
 				description: "Show available commands",
+				sub_commands: None,
 			},
 			CommandEntry {
 				name: "login",
 				description: "Sign in to a provider",
+				sub_commands: None,
 			},
 			CommandEntry {
 				name: "session",
 				description: "Manage chat sessions",
+				sub_commands: None,
 			},
 		]
 	}
