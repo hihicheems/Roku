@@ -166,6 +166,9 @@ impl InputReader {
 						&& let Some(name) = names.get(idx)
 					{
 						buf.set(&format!("{parent} {name}"));
+					} else {
+						// Sub-command cancelled — abort the parent command too.
+						buf.set("");
 					}
 					self.redraw(tty, buf, false, prompt_len);
 					let line = buf.content().to_string();
