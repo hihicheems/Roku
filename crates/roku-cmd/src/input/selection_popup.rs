@@ -252,12 +252,15 @@ fn clear_rows(tty: &mut std::fs::File, rows: u16) {
 }
 
 fn cleanup(tty: &mut std::fs::File, rows: u16) {
-	// Clear all rendered rows, then move cursor to the line after the popup.
+	// Clear all rendered rows, move back to the top, then advance one line.
 	for i in 0..rows {
 		let _ = execute!(tty, Clear(ClearType::CurrentLine));
 		if i + 1 < rows {
 			let _ = execute!(tty, Print("\r\n"));
 		}
+	}
+	if rows > 1 {
+		let _ = execute!(tty, crossterm::cursor::MoveUp(rows - 1));
 	}
 	let _ = execute!(tty, Print("\r\n"), Show);
 }
