@@ -20,8 +20,10 @@
 mod command_popup;
 mod history;
 mod line_buffer;
+mod selection_popup;
 
 pub(crate) use command_popup::CommandEntry;
+pub(crate) use selection_popup::{SelectionItem, run_selection};
 
 use std::os::fd::FromRawFd;
 use std::path::PathBuf;
@@ -311,7 +313,7 @@ impl Drop for InputReader {
 
 /// RAII guard that disables raw mode on drop, ensuring terminal state is
 /// restored even if the event loop panics.
-struct RawModeGuard;
+pub(super) struct RawModeGuard;
 
 impl Drop for RawModeGuard {
 	fn drop(&mut self) {
