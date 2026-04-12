@@ -1191,103 +1191,14 @@ fn handle_session_command(
 	let sub = parts.get(1).copied().unwrap_or("list");
 
 	match sub {
-		"list" => match store.list() {
-			Ok(sessions) if sessions.is_empty() => {
-				eprintln!("[session] No sessions found.");
-			}
-			Ok(sessions) => {
-				let items: Vec<SelectionItem> = sessions
-					.iter()
-					.map(|s| {
-						let active = if s.session_id == session_id.as_str() {
-							" (active)"
-						} else {
-							""
-						};
-						let age = format_age(s.last_modified);
-						SelectionItem {
-							label: format!("{}{active}", s.session_id),
-							description: format!("{} turns, last active {age}", s.turn_count),
-						}
-					})
-					.collect();
-				if let Some(idx) = run_selection(items, "[session] Select a session to switch to:")
-				{
-					let target = &sessions[idx].session_id;
-					match store.load(target) {
-						Ok(turns) => {
-							*conversation_history = turns;
-							*session_id = target.to_string();
-							eprintln!(
-								"[session] Switched to '{}' ({} turns loaded).",
-								target,
-								conversation_history.len()
-							);
-						}
-						Err(e) => eprintln!("[session] Failed to load '{target}': {e}"),
-					}
-				}
-			}
-			Err(e) => eprintln!("[session] Failed to list sessions: {e}"),
-		},
+		"list" => {
+			interactive_session_switch(store, session_id, conversation_history);
+		}
 		"switch" => {
 			if let Some(target) = parts.get(2) {
-				match store.load(target) {
-					Ok(turns) => {
-						*conversation_history = turns;
-						*session_id = target.to_string();
-						eprintln!(
-							"[session] Switched to '{}' ({} turns loaded).",
-							target,
-							conversation_history.len()
-						);
-					}
-					Err(e) => eprintln!("[session] Failed to load '{target}': {e}"),
-				}
+				switch_to_session(store, target, session_id, conversation_history);
 			} else {
-				// No ID specified — show interactive selection.
-				match store.list() {
-					Ok(sessions) if !sessions.is_empty() => {
-						let items: Vec<SelectionItem> = sessions
-							.iter()
-							.map(|s| {
-								let active = if s.session_id == session_id.as_str() {
-									" (active)"
-								} else {
-									""
-								};
-								let age = format_age(s.last_modified);
-								SelectionItem {
-									label: format!("{}{active}", s.session_id),
-									description: format!(
-										"{} turns, last active {age}",
-										s.turn_count
-									),
-								}
-							})
-							.collect();
-						if let Some(idx) =
-							run_selection(items, "[session] Select a session to switch to:")
-						{
-							let target = &sessions[idx].session_id;
-							match store.load(target) {
-								Ok(turns) => {
-									*conversation_history = turns;
-									*session_id = target.to_string();
-									eprintln!(
-										"[session] Switched to '{}' ({} turns loaded).",
-										target,
-										conversation_history.len()
-									);
-								}
-								Err(e) => {
-									eprintln!("[session] Failed to load '{target}': {e}")
-								}
-							}
-						}
-					}
-					_ => eprintln!("[session] No sessions to switch to."),
-				}
+				interactive_session_switch(store, session_id, conversation_history);
 			}
 		}
 		"new" => {
@@ -1325,6 +1236,69 @@ fn handle_session_command(
 		_ => {
 			eprintln!("[session] Unknown subcommand: {sub}. Available: list, switch, new");
 		}
+	}
+}
+
+/// Show an interactive session picker and switch to the selected session.
+fn interactive_session_switch(
+	store: &SessionStore,
+	session_id: &mut String,
+	conversation_history: &mut Vec<ConversationTurn>,
+) {
+	let sessions = match store.list() {
+		Ok(s) if s.is_empty() => {
+			eprintln!("[session] No sessions found.");
+			return;
+		}
+		Ok(s) => s,
+		Err(e) => {
+			eprintln!("[session] Failed to list sessions: {e}");
+			return;
+		}
+	};
+	let items: Vec<SelectionItem> = sessions
+		.iter()
+		.map(|s| {
+			let active = if s.session_id == session_id.as_str() {
+				" (active)"
+			} else {
+				""
+			};
+			let age = format_age(s.last_modified);
+			SelectionItem {
+				label: format!("{}{active}", s.session_id),
+				description: format!("{} turns, last active {age}", s.turn_count),
+			}
+		})
+		.collect();
+	if let Some(idx) = run_selection(items, "[session] Select a session to switch to:") {
+		switch_to_session(
+			store,
+			&sessions[idx].session_id,
+			session_id,
+			conversation_history,
+		);
+	}
+}
+
+/// Switch to a specific session by ID.
+fn switch_to_session(
+	store: &SessionStore,
+	target: &str,
+	session_id: &mut String,
+	conversation_history: &mut Vec<ConversationTurn>,
+) {
+	match store.load(target) {
+		Ok(turns) => {
+			*conversation_history = turns;
+			*session_id = target.to_string();
+			eprintln!(
+				"[session] Switched to '{}' ({} turns loaded).",
+				target,
+				conversation_history.len()
+			);
+		}
+		Err(e) => eprintln!("[session] Failed to load '{target}': {e}"),
 	}
 }
 
