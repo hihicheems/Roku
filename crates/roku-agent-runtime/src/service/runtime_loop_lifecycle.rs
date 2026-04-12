@@ -213,6 +213,29 @@ impl RuntimeService {
 				("step_count", loop_state.history.len().to_string()),
 			],
 		);
+
+		// Log final output text at Debug level (file only, not stderr).
+		// Truncate to 2000 chars to avoid bloating log files.
+		let final_text = loop_state
+			.history
+			.last()
+			.and_then(|step| step.decision.final_message.as_deref())
+			.unwrap_or("");
+		if !final_text.is_empty() {
+			let sanitized: String = final_text
+				.chars()
+				.take(2000)
+				.map(|c| if c == '\n' { ' ' } else { c })
+				.collect();
+			log_runtime(
+				LogLevel::Debug,
+				"runtime loop final output",
+				[
+					("run_id", loop_state.run_id.clone()),
+					("text", sanitized),
+				],
+			);
+		}
 	}
 }
 

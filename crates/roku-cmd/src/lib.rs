@@ -157,6 +157,14 @@ use std::sync::{Arc, OnceLock};
 /// and streaming-output newline coordination.
 static STDERR_LOG_SINK: OnceLock<Arc<FilteredStderrLogSink>> = OnceLock::new();
 
+/// The log level configured at startup, restored when `/debug` is toggled off.
+/// Uses AtomicU8 (not OnceLock) so it can be reset across multiple execute_cli calls.
+static INITIAL_LOG_LEVEL: std::sync::atomic::AtomicU8 =
+	std::sync::atomic::AtomicU8::new(LogLevel::Info as u8);
+
+/// Global auto-approve flag for tool execution.
+static AUTO_APPROVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Mark that streaming output is in progress (no trailing newline).
 /// The next log line will prepend `\n` to separate from the stream.
 pub(crate) fn mark_streaming_output() {
@@ -167,11 +175,30 @@ pub(crate) fn mark_streaming_output() {
 }
 
 /// Toggle debug log level on/off. Returns the new state.
+///
+/// "Off" restores the startup level, but never below Info — if the session
+/// started with `ROKU_LOG_LEVEL=debug`, toggling off still silences debug
+/// output (otherwise the toggle would be a no-op).
 pub(crate) fn toggle_debug_logs() -> bool {
 	if let Some(sink) = STDERR_LOG_SINK.get() {
 		let current = sink.min_level();
 		if current == LogLevel::Debug || current == LogLevel::Trace {
-			sink.set_min_level(LogLevel::Info);
+			let val = INITIAL_LOG_LEVEL.load(std::sync::atomic::Ordering::Relaxed);
+			let restore = match val {
+				0 => LogLevel::Trace,
+				1 => LogLevel::Debug,
+				2 => LogLevel::Info,
+				3 => LogLevel::Warn,
+				_ => LogLevel::Error,
+			};
+			// Never restore to a level more verbose than Info — that would
+			// make the "disable" toggle a no-op when started with debug/trace.
+			let effective = if (restore as u8) < (LogLevel::Info as u8) {
+				LogLevel::Info
+			} else {
+				restore
+			};
+			sink.set_min_level(effective);
 			false
 		} else {
 			sink.set_min_level(LogLevel::Debug);
@@ -180,6 +207,18 @@ pub(crate) fn toggle_debug_logs() -> bool {
 	} else {
 		false
 	}
+}
+
+/// Check if auto-approve is enabled.
+pub(crate) fn is_auto_approve() -> bool {
+	AUTO_APPROVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Toggle auto-approve on/off. Returns the new state.
+pub(crate) fn toggle_auto_approve() -> bool {
+	let prev = AUTO_APPROVE.load(std::sync::atomic::Ordering::Relaxed);
+	AUTO_APPROVE.store(!prev, std::sync::atomic::Ordering::Relaxed);
+	!prev
 }
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -1010,6 +1049,7 @@ fn configure_logging_from_env() -> Result<(), CommandError> {
 		_ => LogLevel::Info,
 	};
 
+	let log_dir_display = base_dir.display().to_string();
 	let mut sinks: Vec<Arc<dyn LogSink>> =
 		vec![Arc::new(AsyncRotatingFileLogSink::new(FileLogConfig {
 			base_dir,
@@ -1017,11 +1057,24 @@ fn configure_logging_from_env() -> Result<(), CommandError> {
 			max_backup_files,
 		}))];
 	if stderr_enabled {
+		INITIAL_LOG_LEVEL.store(min_level as u8, std::sync::atomic::Ordering::Relaxed);
 		let stderr_sink = Arc::new(FilteredStderrLogSink::new(min_level));
 		STDERR_LOG_SINK.get_or_init(|| Arc::clone(&stderr_sink));
 		sinks.push(stderr_sink);
 	}
+
+	// Initialize auto-approve from env var (always set, not just when true).
+	AUTO_APPROVE.store(
+		env_var_bool("ROKU_AUTO_APPROVE")?.unwrap_or(false),
+		std::sync::atomic::Ordering::Relaxed,
+	);
 	install_global_log_sink(Arc::new(FanoutLogSink::new(sinks)));
+
+	// Print log directory — only when stderr is enabled (skip in pipe mode
+	// where stderr carries machine-parseable JSONL events).
+	if stderr_enabled {
+		eprintln!("[info] logs: {log_dir_display}");
+	}
 	Ok(())
 }
 

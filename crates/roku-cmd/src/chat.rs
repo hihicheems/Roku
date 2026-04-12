@@ -180,6 +180,18 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 				print_help();
 				continue;
 			}
+			"/approve" => {
+				reader.add_history_entry(trimmed);
+				let enabled = crate::toggle_auto_approve();
+				if enabled {
+					eprintln!(
+						"[approve] Auto-approve enabled. Tools will execute without prompting."
+					);
+				} else {
+					eprintln!("[approve] Auto-approve disabled. Tools will prompt for approval.");
+				}
+				continue;
+			}
 			"/clear" => {
 				reader.add_history_entry(trimmed);
 				conversation_history.clear();
@@ -853,14 +865,17 @@ fn execute_turn(
 							if !rendered.is_empty() {
 								crate::mark_streaming_output();
 								eprint!("{rendered}");
+								let _ = io::stderr().flush();
 							}
 						}
 						LoopEvent::LlmDecisionComplete { .. } => {
 							let remaining = stream_renderer.flush();
 							if !remaining.is_empty() {
+								crate::mark_streaming_output();
 								eprint!("{remaining}");
 							}
 							eprintln!();
+							let _ = io::stderr().flush();
 						}
 						LoopEvent::StepComplete { step } => {
 							eprintln!("[step] {step} complete");
@@ -1273,6 +1288,10 @@ fn format_age(unix_ms: u64) -> String {
 /// Available slash commands with descriptions for the popup.
 fn slash_commands() -> Vec<CommandEntry> {
 	vec![
+		CommandEntry {
+			name: "approve",
+			description: "Toggle auto-approve for tool execution",
+		},
 		CommandEntry {
 			name: "clear",
 			description: "Clear conversation history",

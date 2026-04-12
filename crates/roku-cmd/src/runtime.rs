@@ -1303,6 +1303,10 @@ pub(crate) fn cli_approval_gate(
 ) -> Arc<dyn roku_agent_runtime::ToolApprovalGate> {
 	Arc::new(roku_agent_runtime::RiskBasedGate::new(
 		|tool_name: &str, arguments: &serde_json::Value| {
+			// Auto-approve when enabled via /approve or ROKU_AUTO_APPROVE.
+			if crate::is_auto_approve() {
+				return roku_agent_runtime::ToolApprovalDecision::Approve;
+			}
 			use std::io::Write as _;
 			let args_display = serde_json::to_string_pretty(arguments).unwrap_or_default();
 			eprintln!("\n[approval] Tool: {tool_name}");
@@ -1310,13 +1314,22 @@ pub(crate) fn cli_approval_gate(
 				let summary: String = args_display.chars().take(200).collect();
 				eprintln!("[approval] Arguments: {summary}");
 			}
-			eprint!("[approval] Allow? [y/N] ");
+			eprint!("[approval] Allow? [y/N/a(auto)] ");
 			std::io::stderr().flush().ok();
 			let mut input = String::new();
-			if std::io::stdin().read_line(&mut input).is_ok()
-				&& input.trim().eq_ignore_ascii_case("y")
-			{
-				roku_agent_runtime::ToolApprovalDecision::Approve
+			if std::io::stdin().read_line(&mut input).is_ok() {
+				let trimmed = input.trim();
+				if trimmed.eq_ignore_ascii_case("a") {
+					crate::toggle_auto_approve();
+					eprintln!("[approve] Auto-approve enabled for this session.");
+					roku_agent_runtime::ToolApprovalDecision::Approve
+				} else if trimmed.eq_ignore_ascii_case("y") {
+					roku_agent_runtime::ToolApprovalDecision::Approve
+				} else {
+					roku_agent_runtime::ToolApprovalDecision::Deny(
+						"User denied the operation.".to_string(),
+					)
+				}
 			} else {
 				roku_agent_runtime::ToolApprovalDecision::Deny(
 					"User denied the operation.".to_string(),
