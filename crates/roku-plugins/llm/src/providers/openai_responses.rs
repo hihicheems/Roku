@@ -474,6 +474,36 @@ async fn handle_sse_event(
 					.and_then(Value::as_u64)
 					.unwrap_or(state.output_tokens);
 			}
+
+			// Fallback: if no text was received via `response.output_text.delta`
+			// events during streaming, extract it from the completed response's
+			// `output[]` array. Some API responses deliver text only here.
+			if state.full_text.is_empty()
+				&& let Some(outputs) = parsed
+					.get("response")
+					.and_then(|r| r.get("output"))
+					.and_then(Value::as_array)
+			{
+				for item in outputs {
+					if item.get("type").and_then(Value::as_str) == Some("message")
+						&& let Some(content) = item.get("content").and_then(Value::as_array)
+					{
+						for part in content {
+							if part.get("type").and_then(Value::as_str) == Some("output_text")
+								&& let Some(text) = part.get("text").and_then(Value::as_str)
+							{
+								state.full_text.push_str(text);
+								let _ = tx
+									.send(StreamChunk::TextDelta {
+										text: text.to_string(),
+									})
+									.await;
+							}
+						}
+					}
+				}
+			}
+
 			state.finish_reason = Some(if state.has_function_call {
 				"tool_calls".to_string()
 			} else {
