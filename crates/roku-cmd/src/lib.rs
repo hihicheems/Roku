@@ -151,14 +151,43 @@ pub(crate) mod test_support {
 
 use std::env;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+/// Global reference to the stderr log sink for runtime log-level changes
+/// and streaming-output newline coordination.
+static STDERR_LOG_SINK: OnceLock<Arc<FilteredStderrLogSink>> = OnceLock::new();
+
+/// Mark that streaming output is in progress (no trailing newline).
+/// The next log line will prepend `\n` to separate from the stream.
+pub(crate) fn mark_streaming_output() {
+	if let Some(sink) = STDERR_LOG_SINK.get() {
+		sink.needs_newline
+			.store(true, std::sync::atomic::Ordering::Relaxed);
+	}
+}
+
+/// Toggle debug log level on/off. Returns the new state.
+pub(crate) fn toggle_debug_logs() -> bool {
+	if let Some(sink) = STDERR_LOG_SINK.get() {
+		let current = sink.min_level();
+		if current == LogLevel::Debug || current == LogLevel::Trace {
+			sink.set_min_level(LogLevel::Info);
+			false
+		} else {
+			sink.set_min_level(LogLevel::Debug);
+			true
+		}
+	} else {
+		false
+	}
+}
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use roku_agent_runtime::ToolCatalogConfigError;
 use roku_common_types::ApprovalDecision;
 use roku_common_types::{
-	AsyncRotatingFileLogSink, FanoutLogSink, FileLogConfig, LogSink, StderrLogSink,
-	install_global_log_sink,
+	AsyncRotatingFileLogSink, FanoutLogSink, FileLogConfig, FilteredStderrLogSink, LogLevel,
+	LogSink, install_global_log_sink,
 };
 use roku_memory::{
 	MemoryKind, MemoryQuery, MemoryRecallReason, MemoryScope, MemoryWriteReason, MemoryWriteRequest,
@@ -969,6 +998,18 @@ fn configure_logging_from_env() -> Result<(), CommandError> {
 	let max_backup_files = env_var_usize("ROKU_LOG_MAX_BACKUP_FILES")?.unwrap_or(5);
 	let stderr_enabled = env_var_bool("ROKU_LOG_STDERR")?.unwrap_or(true);
 
+	let min_level = match std::env::var("ROKU_LOG_LEVEL")
+		.unwrap_or_default()
+		.to_lowercase()
+		.as_str()
+	{
+		"trace" => LogLevel::Trace,
+		"debug" => LogLevel::Debug,
+		"warn" | "warning" => LogLevel::Warn,
+		"error" => LogLevel::Error,
+		_ => LogLevel::Info,
+	};
+
 	let mut sinks: Vec<Arc<dyn LogSink>> =
 		vec![Arc::new(AsyncRotatingFileLogSink::new(FileLogConfig {
 			base_dir,
@@ -976,7 +1017,9 @@ fn configure_logging_from_env() -> Result<(), CommandError> {
 			max_backup_files,
 		}))];
 	if stderr_enabled {
-		sinks.push(Arc::new(StderrLogSink));
+		let stderr_sink = Arc::new(FilteredStderrLogSink::new(min_level));
+		STDERR_LOG_SINK.get_or_init(|| Arc::clone(&stderr_sink));
+		sinks.push(stderr_sink);
 	}
 	install_global_log_sink(Arc::new(FanoutLogSink::new(sinks)));
 	Ok(())

@@ -14,6 +14,8 @@
 
 //! Single-line text buffer with cursor tracking.
 
+use unicode_width::UnicodeWidthStr;
+
 /// A mutable text buffer that tracks cursor position as a byte offset.
 pub(crate) struct LineBuffer {
 	content: String,
@@ -33,9 +35,10 @@ impl LineBuffer {
 		&self.content
 	}
 
-	/// Number of display columns to the left of the cursor (char count for ASCII).
+	/// Number of display columns to the left of the cursor.
+	/// Uses unicode-width to correctly handle CJK characters (2-column width).
 	pub fn cursor_display_col(&self) -> usize {
-		self.content[..self.cursor].chars().count()
+		UnicodeWidthStr::width(&self.content[..self.cursor])
 	}
 
 	pub fn is_empty(&self) -> bool {

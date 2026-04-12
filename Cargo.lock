@@ -2239,6 +2239,7 @@ dependencies = [
  "tiny_http",
  "tokio",
  "toml",
+ "unicode-width",
  "zip 8.5.1",
 ]
 

@@ -192,6 +192,16 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 				eprintln!("[clear] Conversation history and pending state cleared.");
 				continue;
 			}
+			"/debug" => {
+				reader.add_history_entry(trimmed);
+				let enabled = crate::toggle_debug_logs();
+				if enabled {
+					eprintln!("[debug] Debug logging enabled.");
+				} else {
+					eprintln!("[debug] Debug logging disabled.");
+				}
+				continue;
+			}
 			"/compact" => {
 				reader.add_history_entry(trimmed);
 				match compact_conversation_history(&mut conversation_history) {
@@ -841,6 +851,7 @@ fn execute_turn(
 						LoopEvent::LlmTextDelta { text, .. } => {
 							let rendered = stream_renderer.push(&text);
 							if !rendered.is_empty() {
+								crate::mark_streaming_output();
 								eprint!("{rendered}");
 							}
 						}
@@ -1269,6 +1280,10 @@ fn slash_commands() -> Vec<CommandEntry> {
 		CommandEntry {
 			name: "compact",
 			description: "Compact conversation history",
+		},
+		CommandEntry {
+			name: "debug",
+			description: "Toggle debug log output",
 		},
 		CommandEntry {
 			name: "exit",
