@@ -357,12 +357,18 @@ impl StreamRenderer {
 		}
 
 		// If there's a partial line remaining (no newline yet), emit it in normal mode only.
+		// Exception: if the partial line looks like it might be a code fence opening
+		// (starts with `), buffer it until newline so fence detection can work.
 		if self.line_buf.len() > self.emitted_len {
 			match self.state {
 				StreamState::Normal => {
-					// Emit only the new portion since last emit.
-					output.push_str(&self.line_buf[self.emitted_len..]);
-					self.emitted_len = self.line_buf.len();
+					let pending = self.line_buf.trim_start();
+					if pending.starts_with('`') {
+						// Potential fence — hold until newline confirms.
+					} else {
+						output.push_str(&self.line_buf[self.emitted_len..]);
+						self.emitted_len = self.line_buf.len();
+					}
 				}
 				StreamState::InCodeBlock => {
 					// Don't emit partial code lines — wait for newline.

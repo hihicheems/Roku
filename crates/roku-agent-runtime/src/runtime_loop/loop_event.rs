@@ -149,7 +149,7 @@ pub fn summarize_tool_result(
 				.map(|arr| {
 					let mut seen = std::collections::HashSet::new();
 					for m in arr {
-						if let Some(f) = m.get("file").and_then(|v| v.as_str()) {
+						if let Some(f) = m.get("file_path").and_then(|v| v.as_str()) {
 							seen.insert(f);
 						}
 					}
