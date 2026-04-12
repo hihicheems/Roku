@@ -261,6 +261,81 @@ fn cleanup(tty: &mut std::fs::File, rows: u16) {
 }
 
 // ---------------------------------------------------------------------------
+// Text input (crossterm-based, Esc-cancellable)
+// ---------------------------------------------------------------------------
+
+/// Read a single line of text with crossterm (Esc to cancel, Enter to submit).
+///
+/// Returns `Some(text)` on Enter, `None` on Esc or Ctrl-C.
+pub(crate) fn read_text_input(prompt: &str) -> Option<String> {
+	let (mut tty, tty_is_fd_alias) = open_tty();
+
+	let _ = execute!(
+		tty,
+		SetForegroundColor(Color::DarkCyan),
+		Print(prompt),
+		ResetColor,
+	);
+
+	let _ = terminal::enable_raw_mode();
+	let _guard = RawModeGuard;
+
+	let mut buf = String::new();
+	let result = loop {
+		let evt = match event::read() {
+			Ok(e) => e,
+			Err(_) => break None,
+		};
+		let Event::Key(key) = evt else {
+			continue;
+		};
+		if key.kind == event::KeyEventKind::Release {
+			continue;
+		}
+		let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+		match key.code {
+			KeyCode::Enter => break Some(buf.clone()),
+			KeyCode::Esc => break None,
+			KeyCode::Char('c') if ctrl => break None,
+			KeyCode::Backspace => {
+				if buf.pop().is_some() {
+					let _ = execute!(
+						tty,
+						crossterm::cursor::MoveLeft(1),
+						Clear(ClearType::UntilNewLine),
+					);
+				}
+			}
+			KeyCode::Char('u') if ctrl => {
+				if !buf.is_empty() {
+					let cols = buf.len() as u16;
+					buf.clear();
+					let _ = execute!(
+						tty,
+						crossterm::cursor::MoveLeft(cols),
+						Clear(ClearType::UntilNewLine),
+					);
+				}
+			}
+			KeyCode::Char(ch) if !ctrl => {
+				buf.push(ch);
+				let _ = execute!(tty, Print(ch));
+			}
+			_ => {}
+		}
+	};
+
+	drop(_guard);
+	let _ = execute!(tty, Print("\r\n"), Show);
+
+	if tty_is_fd_alias {
+		std::mem::forget(tty);
+	}
+
+	result
+}
+
+// ---------------------------------------------------------------------------
 // TTY helper
 // ---------------------------------------------------------------------------
 
