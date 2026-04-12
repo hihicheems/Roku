@@ -131,16 +131,18 @@ max_latency_ms = 60000
 # max_request_cost_usd = 1.0
 # max_latency_ms = 60000
 
-# [runtime.llm.openai]
-# # Primary OpenAI model used when provider = "openai".
-# primary_model = "gpt-4o"
-# fallback_models = ["gpt-4o-mini"]
-# base_url = "https://api.openai.com/v1/chat/completions"
-# max_tokens = 8192
-# max_context_tokens = 128000
-# cost_per_1k_tokens_usd = 0.0
-# max_request_cost_usd = 1.0
-# max_latency_ms = 60000
+[runtime.llm.openai]
+# Primary OpenAI model used when provider = "openai".
+primary_model = "gpt-5.4"
+fallback_models = ["gpt-5.1-codex-mini"]
+base_url = "https://api.openai.com/v1/chat/completions"
+max_tokens = 16384
+max_context_tokens = 128000
+cost_per_1k_tokens_usd = 0.0
+max_request_cost_usd = 1.0
+max_latency_ms = 120000
+# Reasoning effort for models that support it (low, medium, high).
+reasoning_effort = "high"
 
 [runtime.telegram]
 # API base URL for Telegram HTTP requests.

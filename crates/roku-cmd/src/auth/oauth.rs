@@ -287,11 +287,14 @@ pub fn parse_id_token_claims(id_token: &str) -> IdTokenClaims {
 	};
 
 	// Basic claims validation (without full JWKS signature verification).
-	if let Some(iss) = value.get("iss").and_then(|v| v.as_str())
-		&& iss != "https://auth.openai.com/"
-	{
-		eprintln!("[warn] id_token issuer mismatch: expected auth.openai.com, got {iss}");
-		return IdTokenClaims::default();
+	if let Some(iss) = value.get("iss").and_then(|v| v.as_str()) {
+		let normalized = iss.trim_end_matches('/');
+		if normalized != "https://auth.openai.com" {
+			eprintln!(
+				"[warn] id_token issuer mismatch: expected https://auth.openai.com, got {iss}"
+			);
+			return IdTokenClaims::default();
+		}
 	}
 	if let Some(exp) = value.get("exp").and_then(|v| v.as_u64()) {
 		let now = std::time::SystemTime::now()
@@ -393,8 +396,7 @@ pub async fn run_openai_oauth(client_id: &str) -> Result<OAuthResult, AuthError>
 	// Try to obtain an API key (sk-*) via RFC 8693 token-exchange.
 	// This is optional — some accounts/clients don't support it.
 	// Fall back to the OAuth access_token from step 1.
-	let api_key =
-		try_exchange_id_token_for_api_key(&http_client, client_id, &id_token).await;
+	let api_key = try_exchange_id_token_for_api_key(&http_client, client_id, &id_token).await;
 	let usable_token = api_key.unwrap_or_else(|| {
 		eprintln!("[oauth] API key exchange not available, using OAuth access token.");
 		access_token

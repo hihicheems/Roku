@@ -48,8 +48,8 @@ use crate::types::{
 const OPENAI_PROVIDER: &str = "openai";
 const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/v1/chat/completions";
 const DEFAULT_MAX_TOKENS: u64 = 8192;
-const DEFAULT_OPENAI_PRIMARY_MODEL: &str = "gpt-4o";
-const DEFAULT_OPENAI_FALLBACK_MODEL: &str = "gpt-4o-mini";
+const DEFAULT_OPENAI_PRIMARY_MODEL: &str = "gpt-5.4";
+const DEFAULT_OPENAI_FALLBACK_MODEL: &str = "gpt-5.1-codex-mini";
 const DEFAULT_OPENAI_MAX_CONTEXT_TOKENS: u64 = 128_000;
 const HARD_MAX_CONTEXT_TOKENS: u64 = 1_000_000;
 const HARD_MAX_REQUEST_COST_USD: f64 = 100.0;
@@ -75,6 +75,9 @@ pub struct OpenAiRuntimeConfig {
 	pub cost_per_1k_tokens_usd: f64,
 	pub max_request_cost_usd: f64,
 	pub max_latency_ms: u64,
+	/// Optional reasoning effort level sent to the API (`low`, `medium`, `high`).
+	/// Only effective for models that support reasoning (gpt-5.x, o-series).
+	pub reasoning_effort: Option<String>,
 }
 
 /// Partial overrides for [`OpenAiRuntimeConfig`].
@@ -89,6 +92,7 @@ pub struct OpenAiRuntimeConfigPatch {
 	pub cost_per_1k_tokens_usd: Option<f64>,
 	pub max_request_cost_usd: Option<f64>,
 	pub max_latency_ms: Option<u64>,
+	pub reasoning_effort: Option<String>,
 }
 
 impl Default for OpenAiRuntimeConfig {
@@ -102,6 +106,7 @@ impl Default for OpenAiRuntimeConfig {
 			cost_per_1k_tokens_usd: 0.0,
 			max_request_cost_usd: 1.0,
 			max_latency_ms: 60_000,
+			reasoning_effort: None,
 		}
 	}
 }
@@ -132,6 +137,9 @@ impl OpenAiRuntimeConfig {
 		if let Some(value) = patch.max_latency_ms {
 			self.max_latency_ms = value;
 		}
+		if let Some(value) = patch.reasoning_effort {
+			self.reasoning_effort = Some(value);
+		}
 	}
 
 	pub fn apply_env_overrides(&mut self) -> Result<(), OpenAiBootstrapError> {
@@ -143,6 +151,9 @@ impl OpenAiRuntimeConfig {
 		}
 		if let Some(value) = env_var_u64("ROKU_OPENAI_MAX_TOKENS")? {
 			self.max_tokens = value;
+		}
+		if let Some(value) = env_override_string("ROKU_OPENAI_REASONING_EFFORT") {
+			self.reasoning_effort = Some(value);
 		}
 		Ok(())
 	}
@@ -207,6 +218,7 @@ impl OpenAiRuntimeConfig {
 			api_key,
 			base_url: self.base_url,
 			max_tokens: self.max_tokens,
+			reasoning_effort: self.reasoning_effort,
 		}
 	}
 }
@@ -219,6 +231,7 @@ pub struct OpenAiConfig {
 	pub api_key: String,
 	pub base_url: String,
 	pub max_tokens: u64,
+	pub reasoning_effort: Option<String>,
 }
 
 impl OpenAiConfig {
@@ -228,10 +241,14 @@ impl OpenAiConfig {
 		})?;
 		let base_url =
 			env::var("ROKU_OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_OPENAI_URL.to_string());
+		let reasoning_effort = env::var("ROKU_OPENAI_REASONING_EFFORT")
+			.ok()
+			.filter(|v| !v.is_empty());
 		Ok(Self {
 			api_key,
 			base_url,
 			max_tokens: DEFAULT_MAX_TOKENS,
+			reasoning_effort,
 		})
 	}
 }
@@ -374,6 +391,9 @@ struct ChatCompletionRequest<'a> {
 	/// Request usage in streaming chunks (required to get token counts).
 	#[serde(skip_serializing_if = "Option::is_none")]
 	stream_options: Option<StreamOptions>,
+	/// Reasoning effort level for models that support it (gpt-5.x, o-series).
+	#[serde(skip_serializing_if = "Option::is_none")]
+	reasoning_effort: Option<&'a str>,
 }
 
 fn message_to_openai_value(msg: &Message) -> Value {
@@ -430,6 +450,7 @@ fn build_request<'a>(
 	request: &'a GenerationRequest,
 	stream: bool,
 	max_tokens: u64,
+	reasoning_effort: Option<&'a str>,
 ) -> ChatCompletionRequest<'a> {
 	let mut messages: Vec<Value> = Vec::with_capacity(4);
 	if let Some(system_prompt) = &request.system_prompt {
@@ -476,6 +497,7 @@ fn build_request<'a>(
 		} else {
 			None
 		},
+		reasoning_effort,
 	}
 }
 
@@ -692,7 +714,13 @@ impl LlmProvider for OpenAiProvider {
 		request: &GenerationRequest,
 	) -> Result<ProviderResponse, ProviderCallError> {
 		let headers = self.build_headers()?;
-		let body = build_request(&model.model_id, request, false, self.config.max_tokens);
+		let body = build_request(
+			&model.model_id,
+			request,
+			false,
+			self.config.max_tokens,
+			self.config.reasoning_effort.as_deref(),
+		);
 		let started_at = Instant::now();
 
 		let response = self
@@ -754,7 +782,13 @@ impl LlmProvider for OpenAiProvider {
 		tx: mpsc::Sender<StreamChunk>,
 	) -> Result<ProviderResponse, ProviderCallError> {
 		let headers = self.build_headers()?;
-		let body = build_request(&model.model_id, request, true, self.config.max_tokens);
+		let body = build_request(
+			&model.model_id,
+			request,
+			true,
+			self.config.max_tokens,
+			self.config.reasoning_effort.as_deref(),
+		);
 		let started_at = Instant::now();
 
 		let http_response = self
@@ -1100,7 +1134,7 @@ mod tests {
 				parameters: serde_json::json!({"type": "object", "properties": {"url": {"type": "string"}}}),
 			}]),
 		};
-		let body = build_request("gpt-4o", &request, false, DEFAULT_MAX_TOKENS);
+		let body = build_request("gpt-4o", &request, false, DEFAULT_MAX_TOKENS, None);
 		let json = serde_json::to_value(&body).unwrap();
 		assert_eq!(json["model"], "gpt-4o");
 		assert_eq!(json["max_tokens"], 1024);
@@ -1126,7 +1160,7 @@ mod tests {
 			budget_cost_remaining_usd: 5.0,
 			tools: None,
 		};
-		let body = build_request("gpt-4o", &request, true, DEFAULT_MAX_TOKENS);
+		let body = build_request("gpt-4o", &request, true, DEFAULT_MAX_TOKENS, None);
 		let json = serde_json::to_value(&body).unwrap();
 		assert!(json["stream"].as_bool().unwrap());
 		assert_eq!(json["stream_options"]["include_usage"], true);
