@@ -1303,6 +1303,10 @@ pub(crate) fn cli_approval_gate(
 ) -> Arc<dyn roku_agent_runtime::ToolApprovalGate> {
 	Arc::new(roku_agent_runtime::RiskBasedGate::new(
 		|tool_name: &str, arguments: &serde_json::Value| {
+			// Auto-approve when enabled via /approve or ROKU_AUTO_APPROVE.
+			if crate::is_auto_approve() {
+				return roku_agent_runtime::ToolApprovalDecision::Approve;
+			}
 			use std::io::Write as _;
 			let args_display = serde_json::to_string_pretty(arguments).unwrap_or_default();
 			eprintln!("\n[approval] Tool: {tool_name}");
