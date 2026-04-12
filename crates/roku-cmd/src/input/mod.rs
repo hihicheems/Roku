@@ -153,26 +153,19 @@ impl InputReader {
 					let line = buf.content().to_string();
 					return ReadlineResult::Line(line);
 				}
-				KeyAction::SubmitWithSubCommands(items) => {
-					// Show the parent command, then drop raw mode for the modal popup.
+				KeyAction::SubmitWithSubCommands(items, names) => {
+					// Show the parent command, then exit raw mode for the modal popup.
 					*popup_active = false;
 					self.redraw(tty, buf, false, prompt_len);
 					let parent = buf.content().to_string();
-					// run_selection manages its own raw mode, but we must exit
-					// ours first to avoid nesting.
+					// run_selection manages its own raw mode; exit ours to avoid nesting.
 					let _ = terminal::disable_raw_mode();
 					let sub = run_selection(items, "");
 					let _ = terminal::enable_raw_mode();
-					if let Some(idx) = sub {
-						// We need the sub-command name. Re-derive from parent's
-						// sub_commands. The items vec was consumed, but the popup
-						// still has the entry. Reconstruct from index.
-						if let Some(entry) = self.popup.selected_entry()
-							&& let Some(subs) = &entry.sub_commands
-							&& let Some(sub_entry) = subs.get(idx)
-						{
-							buf.set(&format!("{parent} {}", sub_entry.name));
-						}
+					if let Some(idx) = sub
+						&& let Some(name) = names.get(idx)
+					{
+						buf.set(&format!("{parent} {name}"));
 					}
 					self.redraw(tty, buf, false, prompt_len);
 					let line = buf.content().to_string();
@@ -222,7 +215,8 @@ impl InputReader {
 								description: s.description.to_string(),
 							})
 							.collect();
-						return KeyAction::SubmitWithSubCommands(items);
+						let names: Vec<_> = subs.iter().map(|s| s.name.to_string()).collect();
+						return KeyAction::SubmitWithSubCommands(items, names);
 					}
 				}
 				return KeyAction::Submit;
@@ -341,7 +335,8 @@ enum KeyAction {
 	Continue,
 	Submit,
 	/// Submit a parent command, then show a sub-command selection popup.
-	SubmitWithSubCommands(Vec<selection_popup::SelectionItem>),
+	/// Carries (display items for popup, sub-command names for reconstruction).
+	SubmitWithSubCommands(Vec<SelectionItem>, Vec<String>),
 	Interrupt,
 	Eof,
 }

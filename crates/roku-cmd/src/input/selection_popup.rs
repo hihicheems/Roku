@@ -21,11 +21,13 @@
 
 use std::os::fd::FromRawFd;
 
-use crossterm::cursor::Show;
+use crossterm::cursor::{MoveLeft, Show};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::execute;
 use crossterm::style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor};
 use crossterm::terminal::{self, Clear, ClearType};
+
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::RawModeGuard;
 use super::command_popup::MAX_VISIBLE_ROWS;
@@ -298,23 +300,16 @@ pub(crate) fn read_text_input(prompt: &str) -> Option<String> {
 			KeyCode::Esc => break None,
 			KeyCode::Char('c') if ctrl => break None,
 			KeyCode::Backspace => {
-				if buf.pop().is_some() {
-					let _ = execute!(
-						tty,
-						crossterm::cursor::MoveLeft(1),
-						Clear(ClearType::UntilNewLine),
-					);
+				if let Some(ch) = buf.pop() {
+					let w = UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+					let _ = execute!(tty, MoveLeft(w), Clear(ClearType::UntilNewLine));
 				}
 			}
 			KeyCode::Char('u') if ctrl => {
 				if !buf.is_empty() {
-					let cols = buf.len() as u16;
+					let cols = UnicodeWidthStr::width(buf.as_str()) as u16;
 					buf.clear();
-					let _ = execute!(
-						tty,
-						crossterm::cursor::MoveLeft(cols),
-						Clear(ClearType::UntilNewLine),
-					);
+					let _ = execute!(tty, MoveLeft(cols), Clear(ClearType::UntilNewLine));
 				}
 			}
 			KeyCode::Char(ch) if !ctrl => {
