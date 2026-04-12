@@ -1249,19 +1249,22 @@ fn handle_session_command(
 						.unwrap_or(0)
 				)
 			});
-			// Reject if a session with this ID already exists on disk.
-			if store
-				.load(&new_id)
-				.ok()
-				.is_some_and(|turns| !turns.is_empty())
-			{
-				eprintln!(
-					"[session] Session '{new_id}' already exists. Use /session switch {new_id} instead."
-				);
-			} else {
-				conversation_history.clear();
-				eprintln!("[session] Created new session '{new_id}'.");
-				*session_id = new_id;
+			// Reject invalid IDs (path traversal, separators) and
+			// existing sessions to prevent silent persistence failures.
+			match store.load(&new_id) {
+				Err(e) => {
+					eprintln!("[session] Invalid session ID '{new_id}': {e}");
+				}
+				Ok(turns) if !turns.is_empty() => {
+					eprintln!(
+						"[session] Session '{new_id}' already exists. Use /session switch {new_id} instead."
+					);
+				}
+				Ok(_) => {
+					conversation_history.clear();
+					eprintln!("[session] Created new session '{new_id}'.");
+					*session_id = new_id;
+				}
 			}
 		}
 		_ => {
