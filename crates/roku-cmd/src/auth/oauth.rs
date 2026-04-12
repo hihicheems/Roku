@@ -162,14 +162,63 @@ fn extract_callback_param(url: &str, key: &str) -> Option<String> {
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
-async fn post_form(
+/// Encode a value for `application/x-www-form-urlencoded` body.
+///
+/// Keeps unreserved chars (RFC 3986): `A-Za-z0-9 - _ . ~`
+fn form_encode(s: &str) -> String {
+	use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+	// Encode everything except unreserved chars per RFC 3986.
+	const ENCODE_SET: &AsciiSet = &CONTROLS
+		.add(b' ')
+		.add(b'!')
+		.add(b'"')
+		.add(b'#')
+		.add(b'$')
+		.add(b'%')
+		.add(b'&')
+		.add(b'\'')
+		.add(b'(')
+		.add(b')')
+		.add(b'*')
+		.add(b'+')
+		.add(b',')
+		.add(b'/')
+		.add(b':')
+		.add(b';')
+		.add(b'<')
+		.add(b'=')
+		.add(b'>')
+		.add(b'?')
+		.add(b'@')
+		.add(b'[')
+		.add(b'\\')
+		.add(b']')
+		.add(b'^')
+		.add(b'`')
+		.add(b'{')
+		.add(b'|')
+		.add(b'}');
+	utf8_percent_encode(s, ENCODE_SET).to_string()
+}
+
+/// POST with an explicit `application/x-www-form-urlencoded` body.
+///
+/// Constructs the body manually with [`form_encode`] to match the
+/// reference implementation's encoding behavior exactly.
+async fn post_form_encoded(
 	client: &reqwest::Client,
 	url: &str,
 	params: &[(&str, &str)],
 ) -> Result<reqwest::Response, AuthError> {
+	let body = params
+		.iter()
+		.map(|(k, v)| format!("{k}={}", form_encode(v)))
+		.collect::<Vec<_>>()
+		.join("&");
 	client
 		.post(url)
-		.form(params)
+		.header("Content-Type", "application/x-www-form-urlencoded")
+		.body(body)
 		.send()
 		.await
 		.map_err(|e| AuthError::Http(format!("POST {url}: {e}")))
@@ -200,7 +249,7 @@ async fn exchange_code_for_tokens(
 	redirect_uri: &str,
 	code_verifier: &str,
 ) -> Result<TokenResponse, AuthError> {
-	let resp = post_form(
+	let resp = post_form_encoded(
 		client,
 		TOKEN_URL,
 		&[
@@ -235,7 +284,7 @@ async fn exchange_id_token_for_api_key(
 	client_id: &str,
 	id_token: &str,
 ) -> Result<String, AuthError> {
-	let resp = post_form(
+	let resp = post_form_encoded(
 		client,
 		TOKEN_URL,
 		&[
@@ -260,6 +309,8 @@ async fn exchange_id_token_for_api_key(
 		.await
 		.map_err(|e| AuthError::Http(format!("read exchange body: {e}")))?;
 	if !status.is_success() {
+		// Log full response for debugging (body is sanitized by extract_error_hint).
+		eprintln!("[oauth] api-key exchange response: {status} {body}");
 		let hint = extract_error_hint(&body);
 		return Err(AuthError::Http(format!(
 			"api-key exchange failed ({status}){hint}"
