@@ -74,7 +74,7 @@ pub type LoopEventSender = tokio::sync::mpsc::UnboundedSender<LoopEvent>;
 pub fn summarize_tool_args(tool_name: &str, args: &serde_json::Value) -> Option<String> {
 	let s = match tool_name {
 		"Read" => {
-			let path = json_str(args, "file_path").unwrap_or_default();
+			let path = json_str(args, "path").unwrap_or_default();
 			short_path(path)
 		}
 		"Edit" => {
