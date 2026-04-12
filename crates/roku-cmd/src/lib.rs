@@ -173,12 +173,23 @@ pub(crate) fn mark_streaming_output() {
 }
 
 /// Toggle debug log level on/off. Returns the new state.
+///
+/// "Off" restores the startup level, but never below Info — if the session
+/// started with `ROKU_LOG_LEVEL=debug`, toggling off still silences debug
+/// output (otherwise the toggle would be a no-op).
 pub(crate) fn toggle_debug_logs() -> bool {
 	if let Some(sink) = STDERR_LOG_SINK.get() {
 		let current = sink.min_level();
 		if current == LogLevel::Debug || current == LogLevel::Trace {
 			let restore = INITIAL_LOG_LEVEL.get().copied().unwrap_or(LogLevel::Info);
-			sink.set_min_level(restore);
+			// Never restore to a level more verbose than Info — that would
+			// make the "disable" toggle a no-op when started with debug/trace.
+			let effective = if (restore as u8) < (LogLevel::Info as u8) {
+				LogLevel::Info
+			} else {
+				restore
+			};
+			sink.set_min_level(effective);
 			false
 		} else {
 			sink.set_min_level(LogLevel::Debug);
@@ -1043,14 +1054,18 @@ fn configure_logging_from_env() -> Result<(), CommandError> {
 		sinks.push(stderr_sink);
 	}
 
-	// Initialize auto-approve from env var.
-	if env_var_bool("ROKU_AUTO_APPROVE")?.unwrap_or(false) {
-		AUTO_APPROVE.store(true, std::sync::atomic::Ordering::Relaxed);
-	}
+	// Initialize auto-approve from env var (always set, not just when true).
+	AUTO_APPROVE.store(
+		env_var_bool("ROKU_AUTO_APPROVE")?.unwrap_or(false),
+		std::sync::atomic::Ordering::Relaxed,
+	);
 	install_global_log_sink(Arc::new(FanoutLogSink::new(sinks)));
 
-	// Print log directory for user discoverability.
-	eprintln!("[info] logs: {log_dir_display}");
+	// Print log directory — only when stderr is enabled (skip in pipe mode
+	// where stderr carries machine-parseable JSONL events).
+	if stderr_enabled {
+		eprintln!("[info] logs: {log_dir_display}");
+	}
 	Ok(())
 }
 
