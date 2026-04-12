@@ -1245,7 +1245,7 @@ fn handle_session_command(
 					"session-{}",
 					SystemTime::now()
 						.duration_since(UNIX_EPOCH)
-						.map(|d| d.as_secs())
+						.map(|d| d.as_millis())
 						.unwrap_or(0)
 				)
 			});

@@ -397,7 +397,11 @@ impl StreamRenderer {
 				self.state = StreamState::Normal;
 			}
 			StreamState::Normal => {
-				// Any remaining partial line was already emitted incrementally.
+				// Emit any remaining buffered content (e.g. backtick-prefixed
+				// lines held back for fence detection that never completed).
+				if self.line_buf.len() > self.emitted_len {
+					output.push_str(&self.line_buf[self.emitted_len..]);
+				}
 				self.line_buf.clear();
 				self.emitted_len = 0;
 			}
