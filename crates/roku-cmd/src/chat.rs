@@ -242,8 +242,21 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 										"[logout] Credentials cleared for {provider}. Use /login to sign in again."
 									);
 								}
+							} else if !auth.credentials.is_empty() {
+								// No active provider but credentials exist — clear all
+								// so the runtime cannot fall back to a stored key.
+								let providers: Vec<String> =
+									auth.credentials.keys().cloned().collect();
+								for p in &providers {
+									let _ = auth_store.delete_credential(p);
+								}
+								logged_out = true;
+								eprintln!(
+									"[logout] Cleared {} stored credential(s). Use /login to sign in again.",
+									providers.len()
+								);
 							} else {
-								eprintln!("[logout] No active provider found.");
+								eprintln!("[logout] No credentials found.");
 							}
 						} else {
 							eprintln!("[logout] No credentials found.");

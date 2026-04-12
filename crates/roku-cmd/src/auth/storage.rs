@@ -191,10 +191,13 @@ fn expand_tilde(value: &str) -> PathBuf {
 #[cfg(unix)]
 fn write_restricted(path: &std::path::Path, content: &str) -> io::Result<()> {
 	use std::os::unix::fs::OpenOptionsExt;
+	use std::os::unix::fs::PermissionsExt;
 	let mut opts = fs::OpenOptions::new();
 	opts.write(true).create(true).truncate(true).mode(0o600);
 	let mut file = opts.open(path)?;
-	io::Write::write_all(&mut file, content.as_bytes())
+	io::Write::write_all(&mut file, content.as_bytes())?;
+	// Enforce 0o600 even if the file already existed with broader permissions.
+	file.set_permissions(fs::Permissions::from_mode(0o600))
 }
 
 #[cfg(not(unix))]
