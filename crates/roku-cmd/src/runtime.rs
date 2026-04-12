@@ -926,8 +926,13 @@ fn build_live_runtime(
 		));
 	}
 
-	// Use auth.json active_provider when no env var forces a specific provider.
-	let provider_kind = resolve_provider_from_auth_store(bootstrap.runtime_configs.llm_provider);
+	// Only consult auth.json for provider selection when runtime.toml does not
+	// explicitly set `provider`. An explicit toml setting always wins.
+	let provider_kind = if bootstrap.runtime_configs.llm_provider_explicit {
+		bootstrap.runtime_configs.llm_provider
+	} else {
+		resolve_provider_from_auth_store(bootstrap.runtime_configs.llm_provider)
+	};
 	log_selected_llm_provider(provider_kind);
 
 	let (route_router, execution_router) = match build_live_llm_routers(

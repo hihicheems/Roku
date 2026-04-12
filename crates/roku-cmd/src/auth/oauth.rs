@@ -275,12 +275,35 @@ async fn exchange_id_token_for_api_key(
 // ---------------------------------------------------------------------------
 
 /// Decode the payload segment of a JWT and extract the fields we care about.
+///
+/// **Trust model**: The id_token is received over TLS directly from
+/// `auth.openai.com` during the code-for-token exchange. We do NOT verify
+/// the JWT signature (would require fetching JWKS — deferred as follow-up).
+/// We DO validate `iss` and `exp` as basic sanity checks. The claims are
+/// used only for display (email) and as input to the token-exchange endpoint;
+/// the actual API key comes from a separate server response.
 pub fn parse_id_token_claims(id_token: &str) -> IdTokenClaims {
 	let payload = id_token.split('.').nth(1).unwrap_or("");
 	let bytes = URL_SAFE_NO_PAD.decode(payload).unwrap_or_default();
 	let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
 		return IdTokenClaims::default();
 	};
+
+	// Basic claims validation (without full JWKS signature verification).
+	if let Some(iss) = value.get("iss").and_then(|v| v.as_str())
+		&& iss != "https://auth.openai.com/"
+	{
+		eprintln!("[warn] id_token issuer mismatch: expected auth.openai.com, got {iss}");
+	}
+	if let Some(exp) = value.get("exp").and_then(|v| v.as_u64()) {
+		let now = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.map(|d| d.as_secs())
+			.unwrap_or(0);
+		if now > exp {
+			eprintln!("[warn] id_token has expired (exp={exp}, now={now})");
+		}
+	}
 
 	let email = value
 		.get("email")
@@ -442,14 +465,25 @@ fn receive_callback(server: &tiny_http::Server, expected_state: &str) -> Result<
 	let code = extract_callback_param(&url, "code");
 	let state = extract_callback_param(&url, "state");
 
-	let outcome: Result<String, AuthError> = match (code, state) {
-		(Some(c), Some(s)) if s == expected_state => Ok(c),
-		(_, Some(s)) if s != expected_state => Err(AuthError::Callback(
-			"state mismatch — possible CSRF".to_string(),
-		)),
-		_ => Err(AuthError::Callback(
-			"missing code or state in callback".to_string(),
-		)),
+	// Check for OAuth error response (user denied, server error, etc.).
+	let oauth_error = extract_callback_param(&url, "error");
+	let oauth_error_desc = extract_callback_param(&url, "error_description");
+
+	let outcome: Result<String, AuthError> = if let Some(err) = oauth_error {
+		let detail = oauth_error_desc.unwrap_or_default();
+		Err(AuthError::Callback(format!(
+			"authorization denied: {err}{}", if detail.is_empty() { String::new() } else { format!(" — {detail}") }
+		)))
+	} else {
+		match (code, state) {
+			(Some(c), Some(s)) if s == expected_state => Ok(c),
+			(_, Some(s)) if s != expected_state => Err(AuthError::Callback(
+				"state mismatch — possible CSRF".to_string(),
+			)),
+			_ => Err(AuthError::Callback(
+				"missing code or state in callback".to_string(),
+			)),
+		}
 	};
 
 	let html = if outcome.is_ok() {

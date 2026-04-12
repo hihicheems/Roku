@@ -127,8 +127,13 @@ impl AuthStore {
 		let json = serde_json::to_string_pretty(auth)
 			.map_err(|e| AuthError::Storage(format!("serialize auth.json: {e}")))?;
 
-		write_restricted(&self.path, &json)
-			.map_err(|e| AuthError::Storage(format!("write auth.json: {e}")))?;
+		// Atomic write: write to temp sibling → fsync → rename over target.
+		// A crash between truncate and write cannot corrupt the existing file.
+		let tmp = self.path.with_extension("json.tmp");
+		write_restricted(&tmp, &json)
+			.map_err(|e| AuthError::Storage(format!("write auth.json.tmp: {e}")))?;
+		fs::rename(&tmp, &self.path)
+			.map_err(|e| AuthError::Storage(format!("rename auth.json.tmp: {e}")))?;
 
 		Ok(())
 	}
@@ -196,6 +201,7 @@ fn write_restricted(path: &std::path::Path, content: &str) -> io::Result<()> {
 	opts.write(true).create(true).truncate(true).mode(0o600);
 	let mut file = opts.open(path)?;
 	io::Write::write_all(&mut file, content.as_bytes())?;
+	file.sync_all()?; // fsync before rename ensures data is on disk.
 	// Enforce 0o600 even if the file already existed with broader permissions.
 	file.set_permissions(fs::Permissions::from_mode(0o600))
 }
