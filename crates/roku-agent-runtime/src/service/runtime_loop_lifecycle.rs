@@ -204,6 +204,15 @@ impl RuntimeService {
 	}
 
 	fn log_runtime_loop_terminated(&self, loop_state: &LoopState) {
+		// Extract final output text from the last step for debugging.
+		let final_text = loop_state
+			.history
+			.last()
+			.and_then(|step| step.decision.final_message.as_deref())
+			.unwrap_or("");
+		// Truncate to avoid bloating log files with very long outputs.
+		let truncated: String = final_text.chars().take(500).collect();
+
 		log_runtime(
 			LogLevel::Info,
 			"runtime loop terminated",
@@ -211,6 +220,7 @@ impl RuntimeService {
 				("run_id", loop_state.run_id.clone()),
 				("status", format!("{:?}", loop_state.status)),
 				("step_count", loop_state.history.len().to_string()),
+				("final_output", truncated),
 			],
 		);
 	}
