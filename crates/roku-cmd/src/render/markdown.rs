@@ -144,8 +144,12 @@ pub(crate) fn render_markdown(input: &str) -> String {
 				output.push_str("\n\n");
 			}
 			Event::Start(Tag::Link { dest_url, .. }) => {
-				// OSC 8 hyperlink start.
-				output.push_str(&format!("\x1b]8;;{dest_url}\x1b\\"));
+				// OSC 8 hyperlink: only emit for safe URLs (http/https, no
+				// control chars) to prevent ANSI escape injection via crafted
+				// markdown from prompt-injected LLM output.
+				if is_safe_url(&dest_url) {
+					output.push_str(&format!("\x1b]8;;{dest_url}\x1b\\"));
+				}
 			}
 			Event::End(TagEnd::Link) => {
 				output.push_str("\x1b]8;;\x1b\\");
@@ -408,6 +412,20 @@ impl StreamRenderer {
 		}
 		output
 	}
+}
+
+/// Check whether a URL is safe for OSC 8 hyperlink embedding.
+///
+/// Rejects URLs containing control characters (which could inject ANSI escape
+/// sequences) and non-http(s) schemes (which could trigger unexpected protocol
+/// handlers). This is defense-in-depth against prompt-injected LLM output.
+fn is_safe_url(url: &str) -> bool {
+	// Reject any control characters (bytes < 0x20, plus DEL 0x7F).
+	if url.bytes().any(|b| b < 0x20 || b == 0x7F) {
+		return false;
+	}
+	// Only allow http and https schemes.
+	url.starts_with("http://") || url.starts_with("https://")
 }
 
 /// Highlight buffered code and format with gutter prefix.
