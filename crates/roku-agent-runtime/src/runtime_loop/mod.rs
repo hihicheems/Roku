@@ -19,7 +19,7 @@ mod context_assembly;
 pub(crate) mod environment;
 mod execution_trace;
 mod grounding;
-mod loop_event;
+pub(crate) mod loop_event;
 mod loop_state;
 mod next_step;
 mod observation;
