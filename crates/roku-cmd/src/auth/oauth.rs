@@ -78,7 +78,7 @@ struct ExchangeResponse {
 
 const AUTH_BASE: &str = "https://auth.openai.com/oauth/authorize";
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-const SCOPE: &str = "openid profile email offline_access";
+const SCOPE: &str = "openid profile email offline_access api.connectors.read api.connectors.invoke";
 
 /// Build the authorization URL that the user must visit.
 pub fn build_authorize_url(
@@ -118,7 +118,9 @@ pub fn build_authorize_url(
 		 &scope={}\
 		 &code_challenge={}\
 		 &code_challenge_method=S256\
-		 &state={}",
+		 &state={}\
+		 &id_token_add_organizations=true\
+		 &codex_cli_simplified_flow=true",
 		enc(client_id),
 		enc(redirect_uri),
 		enc(SCOPE),
@@ -131,7 +133,7 @@ pub fn build_authorize_url(
 // Callback server
 // ---------------------------------------------------------------------------
 
-const PREFERRED_PORT: u16 = 15777;
+const PREFERRED_PORT: u16 = 1455;
 
 /// Attempt to bind on `PREFERRED_PORT`, then fall back to OS-assigned port.
 fn bind_callback_listener() -> io::Result<TcpListener> {
@@ -360,7 +362,7 @@ pub async fn run_openai_oauth(client_id: &str) -> Result<OAuthResult, AuthError>
 		.local_addr()
 		.map_err(|e| AuthError::Callback(format!("local_addr: {e}")))?
 		.port();
-	let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+	let redirect_uri = format!("http://localhost:{port}/auth/callback");
 
 	let auth_url = build_authorize_url(client_id, &redirect_uri, &pkce.code_challenge, &state);
 
@@ -561,7 +563,7 @@ mod tests {
 	fn authorize_url_contains_required_params() {
 		let url = build_authorize_url(
 			"client-123",
-			"http://127.0.0.1:15777/callback",
+			"http://localhost:1455/auth/callback",
 			"challenge-abc",
 			"state-xyz",
 		);
@@ -578,11 +580,15 @@ mod tests {
 		assert!(url.contains("code_challenge_method=S256"), "missing method");
 		assert!(url.contains("state=state-xyz"), "missing state");
 		assert!(url.contains("scope="), "missing scope");
+		assert!(
+			url.contains("codex_cli_simplified_flow=true"),
+			"missing simplified_flow"
+		);
 	}
 
 	#[test]
 	fn extract_callback_param_parses_code_and_state() {
-		let url = "/callback?code=auth-code-123&state=state-abc";
+		let url = "/auth/callback?code=auth-code-123&state=state-abc";
 		assert_eq!(
 			extract_callback_param(url, "code"),
 			Some("auth-code-123".to_string())
