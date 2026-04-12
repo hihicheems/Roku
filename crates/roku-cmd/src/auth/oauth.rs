@@ -162,63 +162,14 @@ fn extract_callback_param(url: &str, key: &str) -> Option<String> {
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
-/// Encode a value for `application/x-www-form-urlencoded` body.
-///
-/// Keeps unreserved chars (RFC 3986): `A-Za-z0-9 - _ . ~`
-fn form_encode(s: &str) -> String {
-	use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
-	// Encode everything except unreserved chars per RFC 3986.
-	const ENCODE_SET: &AsciiSet = &CONTROLS
-		.add(b' ')
-		.add(b'!')
-		.add(b'"')
-		.add(b'#')
-		.add(b'$')
-		.add(b'%')
-		.add(b'&')
-		.add(b'\'')
-		.add(b'(')
-		.add(b')')
-		.add(b'*')
-		.add(b'+')
-		.add(b',')
-		.add(b'/')
-		.add(b':')
-		.add(b';')
-		.add(b'<')
-		.add(b'=')
-		.add(b'>')
-		.add(b'?')
-		.add(b'@')
-		.add(b'[')
-		.add(b'\\')
-		.add(b']')
-		.add(b'^')
-		.add(b'`')
-		.add(b'{')
-		.add(b'|')
-		.add(b'}');
-	utf8_percent_encode(s, ENCODE_SET).to_string()
-}
-
-/// POST with an explicit `application/x-www-form-urlencoded` body.
-///
-/// Constructs the body manually with [`form_encode`] to match the
-/// reference implementation's encoding behavior exactly.
-async fn post_form_encoded(
+async fn post_form(
 	client: &reqwest::Client,
 	url: &str,
 	params: &[(&str, &str)],
 ) -> Result<reqwest::Response, AuthError> {
-	let body = params
-		.iter()
-		.map(|(k, v)| format!("{k}={}", form_encode(v)))
-		.collect::<Vec<_>>()
-		.join("&");
 	client
 		.post(url)
-		.header("Content-Type", "application/x-www-form-urlencoded")
-		.body(body)
+		.form(params)
 		.send()
 		.await
 		.map_err(|e| AuthError::Http(format!("POST {url}: {e}")))
@@ -249,7 +200,7 @@ async fn exchange_code_for_tokens(
 	redirect_uri: &str,
 	code_verifier: &str,
 ) -> Result<TokenResponse, AuthError> {
-	let resp = post_form_encoded(
+	let resp = post_form(
 		client,
 		TOKEN_URL,
 		&[
@@ -278,13 +229,17 @@ async fn exchange_code_for_tokens(
 		.map_err(|e| AuthError::Http(format!("parse token response: {e}")))
 }
 
-/// Perform RFC 8693 token-exchange to obtain an API key from an id_token.
-async fn exchange_id_token_for_api_key(
+/// Attempt RFC 8693 token-exchange to obtain an API key from an id_token.
+///
+/// Returns `None` if the exchange is not supported for this client/account
+/// (e.g. 401). The caller should fall back to the OAuth access_token from
+/// the code-for-token step.
+async fn try_exchange_id_token_for_api_key(
 	client: &reqwest::Client,
 	client_id: &str,
 	id_token: &str,
-) -> Result<String, AuthError> {
-	let resp = post_form_encoded(
+) -> Option<String> {
+	let resp = post_form(
 		client,
 		TOKEN_URL,
 		&[
@@ -301,26 +256,15 @@ async fn exchange_id_token_for_api_key(
 			),
 		],
 	)
-	.await?;
+	.await
+	.ok()?;
 
-	let status = resp.status();
-	let body = resp
-		.text()
-		.await
-		.map_err(|e| AuthError::Http(format!("read exchange body: {e}")))?;
-	if !status.is_success() {
-		// Log full response for debugging (body is sanitized by extract_error_hint).
-		eprintln!("[oauth] api-key exchange response: {status} {body}");
-		let hint = extract_error_hint(&body);
-		return Err(AuthError::Http(format!(
-			"api-key exchange failed ({status}){hint}"
-		)));
+	if !resp.status().is_success() {
+		return None;
 	}
-	let exchange: ExchangeResponse = serde_json::from_str(&body)
-		.map_err(|e| AuthError::Http(format!("parse exchange response: {e}")))?;
-	exchange
-		.access_token
-		.ok_or_else(|| AuthError::Http("api-key exchange returned no access_token".to_string()))
+	let body = resp.text().await.ok()?;
+	let exchange: ExchangeResponse = serde_json::from_str(&body).ok()?;
+	exchange.access_token
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +380,9 @@ pub async fn run_openai_oauth(client_id: &str) -> Result<OAuthResult, AuthError>
 	)
 	.await?;
 
+	let access_token = token_resp
+		.access_token
+		.ok_or_else(|| AuthError::Http("token exchange returned no access_token".to_string()))?;
 	let id_token = token_resp
 		.id_token
 		.ok_or_else(|| AuthError::Http("token exchange returned no id_token".to_string()))?;
@@ -443,11 +390,20 @@ pub async fn run_openai_oauth(client_id: &str) -> Result<OAuthResult, AuthError>
 		.refresh_token
 		.ok_or_else(|| AuthError::Http("token exchange returned no refresh_token".to_string()))?;
 
-	let api_key = exchange_id_token_for_api_key(&http_client, client_id, &id_token).await?;
+	// Try to obtain an API key (sk-*) via RFC 8693 token-exchange.
+	// This is optional — some accounts/clients don't support it.
+	// Fall back to the OAuth access_token from step 1.
+	let api_key =
+		try_exchange_id_token_for_api_key(&http_client, client_id, &id_token).await;
+	let usable_token = api_key.unwrap_or_else(|| {
+		eprintln!("[oauth] API key exchange not available, using OAuth access token.");
+		access_token
+	});
+
 	let id_token_claims = parse_id_token_claims(&id_token);
 
 	Ok(OAuthResult {
-		api_key,
+		api_key: usable_token,
 		refresh_token,
 		id_token_claims,
 	})
