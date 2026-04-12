@@ -1178,7 +1178,7 @@ async fn run_first_time_setup() -> Result<(), String> {
 			eprintln!("[setup] OpenAI OAuth credentials saved.");
 			Ok(())
 		}
-		_ => unreachable!(),
+		other => unreachable!("unexpected provider index: {other}"),
 	}
 }
 

@@ -309,10 +309,12 @@ mod tests {
 	}
 
 	#[test]
-	fn empty_items_returns_none() {
-		// `run_selection` with empty items should return None immediately.
-		// We cannot test the full run (needs a terminal), but verify the guard.
-		let items: Vec<SelectionItem> = vec![];
-		assert!(items.is_empty());
+	fn single_item_state() {
+		let mut s = SelectionState::new(1);
+		assert_eq!(s.selected, 0);
+		s.move_down();
+		assert_eq!(s.selected, 0); // wraps back to 0
+		s.move_up();
+		assert_eq!(s.selected, 0); // wraps back to 0
 	}
 }

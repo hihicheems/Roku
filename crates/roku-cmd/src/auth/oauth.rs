@@ -370,7 +370,7 @@ pub async fn run_openai_oauth(client_id: &str) -> Result<OAuthResult, AuthError>
 	let server = tiny_http::Server::from_listener(listener, None)
 		.map_err(|e| AuthError::Callback(format!("tiny_http server: {e}")))?;
 
-	let code = receive_callback(&server, &state)?;
+	let code = tokio::task::block_in_place(|| receive_callback(&server, &state))?;
 
 	let http_client = reqwest::Client::new();
 
