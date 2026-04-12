@@ -49,7 +49,10 @@ use crate::types::{
 };
 
 const OPENAI_RESPONSES_PROVIDER: &str = "openai_responses";
-const DEFAULT_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
+/// ChatGPT backend Responses API — OAuth tokens only work here, not on the
+/// public `api.openai.com/v1/responses` endpoint (which requires
+/// `api.responses.write` scope that the PKCE flow does not grant).
+const DEFAULT_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -254,6 +257,7 @@ fn build_responses_request(
 		"instructions": instructions,
 		"input": input,
 		"stream": stream,
+		"store": false,
 	});
 
 	if let Some(tools) = tools_value.filter(|t| !t.is_empty()) {
@@ -283,125 +287,6 @@ fn build_tool_definition(tool: &ToolDefinition) -> Value {
 // ---------------------------------------------------------------------------
 // Non-streaming response parsing
 // ---------------------------------------------------------------------------
-
-/// Parsed result from a non-streaming Responses API response body.
-#[derive(Debug)]
-struct ParsedResponsesCompletion {
-	output: String,
-	finish_reason: Option<String>,
-	prompt_tokens: u64,
-	output_tokens: u64,
-	tool_calls: Option<Vec<ToolCallBlock>>,
-}
-
-/// Parse the full JSON body returned when `stream: false`.
-///
-/// The Responses API returns:
-/// ```json
-/// {
-///   "output": [
-///     {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "..."}]},
-///     {"type": "function_call", "name": "...", "arguments": "...", "call_id": "..."}
-///   ],
-///   "usage": {"input_tokens": N, "output_tokens": M}
-/// }
-/// ```
-fn parse_responses_completion(body: &str) -> Result<ParsedResponsesCompletion, ProviderCallError> {
-	let response: Value = serde_json::from_str(body)
-		.map_err(|e| ProviderCallError::retryable(format!("invalid response json: {e}")))?;
-
-	// Surface any API-level error object.
-	if let Some(error) = response.get("error") {
-		let message = error
-			.get("message")
-			.and_then(Value::as_str)
-			.unwrap_or("unknown error");
-		return Err(ProviderCallError::retryable(format!(
-			"openai responses api error: {message}"
-		)));
-	}
-
-	let output_items = response
-		.get("output")
-		.and_then(Value::as_array)
-		.cloned()
-		.unwrap_or_default();
-
-	let mut text_parts: Vec<String> = Vec::new();
-	let mut tool_calls: Vec<ToolCallBlock> = Vec::new();
-
-	for item in &output_items {
-		let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
-		match item_type {
-			"message" => {
-				if let Some(content_array) = item.get("content").and_then(Value::as_array) {
-					for part in content_array {
-						if part
-							.get("type")
-							.and_then(Value::as_str)
-							.map(|t| t == "output_text")
-							.unwrap_or(false) && let Some(text) =
-							part.get("text").and_then(Value::as_str)
-						{
-							text_parts.push(text.to_string());
-						}
-					}
-				}
-			}
-			"function_call" => {
-				let id = item
-					.get("call_id")
-					.and_then(Value::as_str)
-					.unwrap_or("")
-					.to_string();
-				let name = item
-					.get("name")
-					.and_then(Value::as_str)
-					.unwrap_or("")
-					.to_string();
-				let arguments = item
-					.get("arguments")
-					.and_then(Value::as_str)
-					.and_then(|s| serde_json::from_str::<Value>(s).ok())
-					.unwrap_or(Value::Null);
-				tool_calls.push(ToolCallBlock {
-					id,
-					name,
-					arguments,
-				});
-			}
-			_ => {}
-		}
-	}
-
-	let usage = response.get("usage");
-	let prompt_tokens = usage
-		.and_then(|u| u.get("input_tokens"))
-		.and_then(Value::as_u64)
-		.unwrap_or(0);
-	let output_tokens = usage
-		.and_then(|u| u.get("output_tokens"))
-		.and_then(Value::as_u64)
-		.unwrap_or(0);
-
-	// Derive a finish reason from the response status field if present.
-	let finish_reason = response
-		.get("status")
-		.and_then(Value::as_str)
-		.map(str::to_string);
-
-	Ok(ParsedResponsesCompletion {
-		output: text_parts.join(""),
-		finish_reason,
-		prompt_tokens,
-		output_tokens,
-		tool_calls: if tool_calls.is_empty() {
-			None
-		} else {
-			Some(tool_calls)
-		},
-	})
-}
 
 // ---------------------------------------------------------------------------
 // SSE state accumulator
@@ -686,65 +571,15 @@ impl LlmProvider for OpenAiResponsesProvider {
 		model: &ModelProfile,
 		request: &GenerationRequest,
 	) -> Result<ProviderResponse, ProviderCallError> {
-		let headers = self.build_headers()?;
-		let body = build_responses_request(
-			&model.model_id,
-			request,
-			false, // non-streaming
-			self.config.reasoning_effort.as_deref(),
-		);
-		let started_at = Instant::now();
-
-		let response = self
-			.client
-			.post(&self.config.base_url)
-			.headers(headers)
-			.json(&body)
-			.send()
-			.await
-			.map_err(classify_request_error)?;
-
-		let status = response.status();
-		let response_body = response.text().await.map_err(|e| {
-			ProviderCallError::retryable(format!("failed to read response body: {e}"))
-		})?;
-
-		if !status.is_success() {
-			log_responses(
-				LogLevel::Warn,
-				"provider returned non-success status",
-				[
-					("model", model.model_id.clone()),
-					("status", status.to_string()),
-					("body", truncate_for_log(&response_body, 800)),
-				],
-			);
-			return Err(classify_status_error(status.as_u16(), response_body));
-		}
-
-		let parsed = parse_responses_completion(&response_body)?;
-		let latency_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-
-		log_responses(
-			LogLevel::Info,
-			"provider request completed",
-			[
-				("model", model.model_id.clone()),
-				("status", "ok".to_string()),
-				("latency_ms", latency_ms.to_string()),
-				("prompt_tokens", parsed.prompt_tokens.to_string()),
-				("output_tokens", parsed.output_tokens.to_string()),
-			],
-		);
-
-		Ok(ProviderResponse {
-			output: parsed.output,
-			finish_reason: parsed.finish_reason,
-			prompt_tokens: parsed.prompt_tokens,
-			output_tokens: parsed.output_tokens,
-			latency_ms,
-			tool_calls: parsed.tool_calls,
-		})
+		// The ChatGPT backend requires `stream: true` — it returns 400 for
+		// non-streaming requests. Delegate to stream() with a local channel
+		// and discard the stream chunks (the ProviderResponse carries the
+		// accumulated output).
+		let (tx, mut rx) = mpsc::channel::<StreamChunk>(64);
+		let result = self.stream(model, request, tx).await;
+		// Drain channel to avoid blocking the sender if it hasn't finished.
+		while rx.recv().await.is_some() {}
+		result
 	}
 
 	async fn stream(
@@ -754,10 +589,11 @@ impl LlmProvider for OpenAiResponsesProvider {
 		tx: mpsc::Sender<StreamChunk>,
 	) -> Result<ProviderResponse, ProviderCallError> {
 		let headers = self.build_headers()?;
+		// Always stream=true — ChatGPT backend requires it.
 		let body = build_responses_request(
 			&model.model_id,
 			request,
-			true, // streaming
+			true,
 			self.config.reasoning_effort.as_deref(),
 		);
 		let started_at = Instant::now();
@@ -817,8 +653,9 @@ impl LlmProvider for OpenAiResponsesProvider {
 		if stream_error.is_none()
 			&& let Some(msg) = state.stream_error.take()
 		{
-			stream_error =
-				Some(ProviderCallError::non_retryable(format!("responses api: {msg}")));
+			stream_error = Some(ProviderCallError::non_retryable(format!(
+				"responses api: {msg}"
+			)));
 		}
 
 		let latency_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -1130,66 +967,6 @@ mod tests {
 		assert_eq!(tools[0]["name"], "search");
 	}
 
-	// --- Non-streaming response parsing ---
-
-	#[test]
-	fn parse_text_only_response() {
-		let body = r#"{
-            "output": [
-                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Hello!"}]}
-            ],
-            "usage": {"input_tokens": 10, "output_tokens": 5},
-            "status": "completed"
-        }"#;
-
-		let parsed = parse_responses_completion(body).unwrap();
-		assert_eq!(parsed.output, "Hello!");
-		assert_eq!(parsed.prompt_tokens, 10);
-		assert_eq!(parsed.output_tokens, 5);
-		assert!(parsed.tool_calls.is_none());
-		assert_eq!(parsed.finish_reason.as_deref(), Some("completed"));
-	}
-
-	#[test]
-	fn parse_function_call_response() {
-		let body = r#"{
-            "output": [
-                {"type": "function_call", "name": "read_file", "arguments": "{\"path\":\"/foo.rs\"}", "call_id": "call_1"}
-            ],
-            "usage": {"input_tokens": 20, "output_tokens": 15}
-        }"#;
-
-		let parsed = parse_responses_completion(body).unwrap();
-		assert!(parsed.output.is_empty());
-		let tool_calls = parsed.tool_calls.unwrap();
-		assert_eq!(tool_calls.len(), 1);
-		assert_eq!(tool_calls[0].id, "call_1");
-		assert_eq!(tool_calls[0].name, "read_file");
-		assert_eq!(tool_calls[0].arguments["path"], "/foo.rs");
-	}
-
-	#[test]
-	fn parse_mixed_text_and_tool_calls() {
-		let body = r#"{
-            "output": [
-                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Reading file..."}]},
-                {"type": "function_call", "name": "read_file", "arguments": "{\"path\":\"/a.txt\"}", "call_id": "call_a"}
-            ],
-            "usage": {"input_tokens": 30, "output_tokens": 20}
-        }"#;
-
-		let parsed = parse_responses_completion(body).unwrap();
-		assert_eq!(parsed.output, "Reading file...");
-		let tool_calls = parsed.tool_calls.unwrap();
-		assert_eq!(tool_calls.len(), 1);
-		assert_eq!(tool_calls[0].name, "read_file");
-	}
-
-	#[test]
-	fn parse_api_error_response() {
-		let body = r#"{"error": {"message": "invalid_api_key", "type": "auth_error"}}"#;
-		let result = parse_responses_completion(body);
-		assert!(result.is_err());
-		assert!(result.unwrap_err().to_string().contains("invalid_api_key"));
-	}
+	// Non-streaming response parsing tests removed — complete() now delegates
+	// to stream() because the ChatGPT backend requires stream=true.
 }
