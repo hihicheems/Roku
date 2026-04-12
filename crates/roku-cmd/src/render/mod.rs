@@ -22,5 +22,5 @@ mod diff;
 mod markdown;
 mod style;
 
-pub(crate) use markdown::{StreamRenderer, render_markdown};
+pub(crate) use markdown::StreamRenderer;
 pub(crate) use style::{styled_banner, styled_token_info, styled_tool_end, styled_tool_start};

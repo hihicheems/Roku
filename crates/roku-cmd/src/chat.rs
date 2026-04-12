@@ -392,9 +392,10 @@ fn handle_turn_interactive(
 				model: turn_model.clone(),
 			};
 			write_jsonl_result(&resp);
-		} else {
-			println!("{}", render::render_markdown(msg));
 		}
+		// In interactive mode, the streaming render task already emitted
+		// the response text to stderr in real-time via StreamRenderer.
+		// No final println! — that caused duplicate output.
 	};
 	match result {
 		Ok(TurnResult::Completed(response)) => {
