@@ -294,6 +294,7 @@ pub fn parse_id_token_claims(id_token: &str) -> IdTokenClaims {
 		&& iss != "https://auth.openai.com/"
 	{
 		eprintln!("[warn] id_token issuer mismatch: expected auth.openai.com, got {iss}");
+		return IdTokenClaims::default();
 	}
 	if let Some(exp) = value.get("exp").and_then(|v| v.as_u64()) {
 		let now = std::time::SystemTime::now()
