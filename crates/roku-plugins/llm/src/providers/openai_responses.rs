@@ -419,6 +419,8 @@ struct SseStreamState {
 	prompt_tokens: u64,
 	output_tokens: u64,
 	has_function_call: bool,
+	/// Set when an `error` or `response.failed` SSE event is received.
+	stream_error: Option<String>,
 }
 
 struct PendingResponsesToolCall {
@@ -438,6 +440,7 @@ impl SseStreamState {
 			prompt_tokens: 0,
 			output_tokens: 0,
 			has_function_call: false,
+			stream_error: None,
 		}
 	}
 }
@@ -556,7 +559,13 @@ async fn handle_sse_event(
 						.and_then(Value::as_str)
 						.unwrap_or("")
 						.to_string();
-					if !call_id.is_empty() {
+					// Only emit ToolCallDone if ToolCallStart was sent.
+					let was_started = state
+						.pending_tools
+						.get(&call_id)
+						.map(|p| p.started)
+						.unwrap_or(false);
+					if !call_id.is_empty() && was_started {
 						let _ = tx
 							.send(StreamChunk::ToolCallDone {
 								id: call_id.clone(),
@@ -634,6 +643,24 @@ async fn handle_sse_event(
 				"responses api error event",
 				[("message", message.to_string())],
 			);
+			state.stream_error = Some(message.to_string());
+			return true;
+		}
+
+		"response.failed" => {
+			let reason = parsed
+				.get("response")
+				.and_then(|r| r.get("error"))
+				.and_then(|e| e.get("message"))
+				.and_then(Value::as_str)
+				.unwrap_or("response failed");
+			log_responses(
+				LogLevel::Warn,
+				"responses api failed",
+				[("reason", reason.to_string())],
+			);
+			state.stream_error = Some(reason.to_string());
+			return true;
 		}
 
 		_ => {
@@ -784,6 +811,14 @@ impl LlmProvider for OpenAiResponsesProvider {
 				}
 				None => break,
 			}
+		}
+
+		// Propagate API-level errors from SSE events.
+		if stream_error.is_none()
+			&& let Some(msg) = state.stream_error.take()
+		{
+			stream_error =
+				Some(ProviderCallError::non_retryable(format!("responses api: {msg}")));
 		}
 
 		let latency_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);

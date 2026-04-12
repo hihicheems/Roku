@@ -1076,7 +1076,6 @@ fn build_live_llm_routers(
 					Arc::clone(metrics),
 				)
 				.map_err(openai_responses_bootstrap_failure)?;
-				log_selected_llm_provider(kind);
 				let _ = emit_global_log(LogRecord::new(
 					"roku-cmd",
 					LogLevel::Info,
