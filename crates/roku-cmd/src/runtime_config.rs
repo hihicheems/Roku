@@ -47,6 +47,11 @@ pub(crate) struct RuntimeConfigs {
 	pub agent: AgentRuntimeConfig,
 	pub tools: ToolsRuntimeConfig,
 	pub llm_provider: LlmProviderKind,
+	/// Whether `provider` was explicitly set in runtime.toml (vs. defaulting).
+	/// When true, auth.json's `active_provider` should NOT override it.
+	pub llm_provider_explicit: bool,
+	/// OAuth client_id for the OpenAI PKCE flow (from `[runtime.llm]` config).
+	pub oauth_client_id: Option<String>,
 	pub openrouter: OpenRouterRuntimeConfig,
 	pub anthropic: AnthropicRuntimeConfig,
 	pub openai: OpenAiRuntimeConfig,
@@ -86,6 +91,10 @@ struct LlmSections {
 	/// unset so existing deployments keep working without config changes.
 	#[serde(default)]
 	provider: Option<LlmProviderKind>,
+	/// OAuth client_id for the OpenAI PKCE flow. Required for `roku chat`
+	/// first-run OAuth setup when no API key is configured.
+	#[serde(default)]
+	oauth_client_id: Option<String>,
 	#[serde(default)]
 	openrouter: OpenRouterRuntimeConfigPatch,
 	#[serde(default)]
@@ -139,6 +148,7 @@ pub(crate) fn load_runtime_configs(
 		))
 	})?;
 
+	let llm_provider_explicit = parsed.runtime.llm.provider.is_some();
 	let llm_provider = parsed.runtime.llm.provider.unwrap_or_default();
 
 	let mut openrouter = OpenRouterRuntimeConfig::default();
@@ -203,6 +213,8 @@ pub(crate) fn load_runtime_configs(
 		agent,
 		tools,
 		llm_provider,
+		llm_provider_explicit,
+		oauth_client_id: parsed.runtime.llm.oauth_client_id,
 		openrouter,
 		anthropic,
 		openai,

@@ -24,6 +24,8 @@
 //! `roku-memory`; this crate keeps only the process-local glue that feeds typed config into that
 //! registry.
 
+pub(crate) mod auth;
+
 mod api;
 mod bot;
 mod chat;

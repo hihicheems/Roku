@@ -926,7 +926,13 @@ fn build_live_runtime(
 		));
 	}
 
-	let provider_kind = bootstrap.runtime_configs.llm_provider;
+	// Only consult auth.json for provider selection when runtime.toml does not
+	// explicitly set `provider`. An explicit toml setting always wins.
+	let provider_kind = if bootstrap.runtime_configs.llm_provider_explicit {
+		bootstrap.runtime_configs.llm_provider
+	} else {
+		resolve_provider_from_auth_store(bootstrap.runtime_configs.llm_provider)
+	};
 	log_selected_llm_provider(provider_kind);
 
 	let (route_router, execution_router) = match build_live_llm_routers(
@@ -1005,7 +1011,13 @@ fn build_live_llm_routers(
 ) -> Result<(LlmRouter, LlmRouter), LiveLlmBootstrapFailure> {
 	match kind {
 		LlmProviderKind::Openrouter => {
-			let api_key = openrouter_api_key_from_env().map_err(openrouter_bootstrap_failure)?;
+			let api_key =
+				resolve_api_key_for_provider("openrouter", || openrouter_api_key_from_env().ok())
+					.ok_or_else(|| {
+					openrouter_bootstrap_failure(
+						roku_plugin_llm::OpenRouterBootstrapError::MissingEnv("OPENROUTER_API_KEY"),
+					)
+				})?;
 			let config = openrouter.clone().with_api_key(api_key);
 			let route_router =
 				build_openrouter_router_with_metrics(config.clone(), Arc::clone(metrics))
@@ -1016,7 +1028,15 @@ fn build_live_llm_routers(
 			Ok((route_router, execution_router))
 		}
 		LlmProviderKind::Anthropic => {
-			let api_key = anthropic_api_key_from_env().map_err(anthropic_bootstrap_failure)?;
+			let api_key =
+				resolve_api_key_for_provider("anthropic", || anthropic_api_key_from_env().ok())
+					.ok_or_else(|| {
+						anthropic_bootstrap_failure(
+							roku_plugin_llm::AnthropicBootstrapError::MissingEnv(
+								"ROKU_ANTHROPIC_API_KEY",
+							),
+						)
+					})?;
 			let config = anthropic.clone().with_api_key(api_key);
 			let route_router = build_anthropic_router_with_metrics(
 				config.clone(),
@@ -1030,7 +1050,12 @@ fn build_live_llm_routers(
 			Ok((route_router, execution_router))
 		}
 		LlmProviderKind::Openai => {
-			let api_key = openai_api_key_from_env().map_err(openai_bootstrap_failure)?;
+			let api_key = resolve_api_key_for_provider("openai", || openai_api_key_from_env().ok())
+				.ok_or_else(|| {
+					openai_bootstrap_failure(roku_plugin_llm::OpenAiBootstrapError::MissingEnv(
+						"ROKU_OPENAI_API_KEY",
+					))
+				})?;
 			let config = openai.clone().with_api_key(api_key);
 			let route_router = build_openai_router_with_metrics(
 				config.clone(),
@@ -1043,6 +1068,42 @@ fn build_live_llm_routers(
 					.map_err(openai_bootstrap_failure)?;
 			Ok((route_router, execution_router))
 		}
+	}
+}
+
+/// Resolve an API key for a provider using the priority chain:
+/// 1. Environment variable (via `env_fn`)
+/// 2. auth.json credential store
+fn resolve_api_key_for_provider(
+	provider: &str,
+	env_fn: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+	// Priority 1: environment variable.
+	if let Some(key) = env_fn() {
+		return Some(key);
+	}
+	// Priority 2: auth.json credential.
+	let store = crate::auth::AuthStore::from_env();
+	let auth_file = store.load().ok().flatten()?;
+	let entry = auth_file.credentials.get(provider)?;
+	match entry {
+		crate::auth::CredentialEntry::ApiKey { api_key } => Some(api_key.clone()),
+		crate::auth::CredentialEntry::OAuth { access_token, .. } => Some(access_token.clone()),
+	}
+}
+
+/// Resolve the active provider from auth.json, falling back to the config default.
+pub(crate) fn resolve_provider_from_auth_store(config_default: LlmProviderKind) -> LlmProviderKind {
+	let store = crate::auth::AuthStore::from_env();
+	let auth_file = match store.load() {
+		Ok(Some(f)) => f,
+		_ => return config_default,
+	};
+	match auth_file.active_provider.as_deref() {
+		Some("openrouter") => LlmProviderKind::Openrouter,
+		Some("anthropic") => LlmProviderKind::Anthropic,
+		Some("openai") => LlmProviderKind::Openai,
+		_ => config_default,
 	}
 }
 
@@ -1244,6 +1305,14 @@ pub(crate) fn pipe_approval_gate(
 		},
 		catalog,
 	))
+}
+
+/// Load the OAuth client_id from runtime config (for first-run OAuth flow).
+pub(crate) fn load_oauth_client_id() -> Option<String> {
+	use crate::storage::LocalStorageLayout;
+	let layout = LocalStorageLayout::from_env();
+	let configs = crate::runtime_config::load_runtime_configs(&layout).ok()?;
+	configs.oauth_client_id
 }
 
 pub(crate) fn next_cli_request_sequence() -> u64 {
