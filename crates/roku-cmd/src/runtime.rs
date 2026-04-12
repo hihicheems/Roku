@@ -1057,11 +1057,14 @@ fn build_live_llm_routers(
 					))
 				})?;
 
-			// OAuth tokens (not sk-* API keys) require the Responses API.
+			// OAuth tokens (not sk-* API keys) use the ChatGPT backend
+			// Responses API. The public api.openai.com/v1/responses
+			// endpoint requires api.responses.write scope which the OAuth
+			// PKCE flow does not grant.
 			if !api_key.starts_with("sk-") {
 				let responses_config = OpenAiResponsesConfig {
 					api_key,
-					base_url: "https://api.openai.com/v1/responses".to_string(),
+					base_url: "https://chatgpt.com/backend-api/codex/responses".to_string(),
 					reasoning_effort: openai.reasoning_effort.clone(),
 				};
 				let route_router = build_openai_responses_router_with_metrics(

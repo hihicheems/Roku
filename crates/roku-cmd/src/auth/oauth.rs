@@ -462,14 +462,14 @@ pub async fn refresh_openai_token(
 // ---------------------------------------------------------------------------
 
 fn receive_callback(server: &tiny_http::Server, expected_state: &str) -> Result<String, AuthError> {
-	// Timeout after 120 seconds — if the user closes the browser or OAuth fails,
-	// the REPL should not hang indefinitely.
+	// Timeout after 300 seconds — give users time for 2FA, account selection,
+	// or slow networks. The REPL prints a message when this times out.
 	let request = server
-		.recv_timeout(std::time::Duration::from_secs(120))
+		.recv_timeout(std::time::Duration::from_secs(300))
 		.map_err(|e| AuthError::Callback(format!("recv: {e}")))?
 		.ok_or_else(|| {
 			AuthError::Callback(
-				"OAuth callback timed out after 120 seconds. Try /login again.".to_string(),
+				"OAuth callback timed out after 300 seconds. Try /login again.".to_string(),
 			)
 		})?;
 
