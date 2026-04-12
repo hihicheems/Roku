@@ -62,6 +62,7 @@ pub(crate) fn render_markdown(input: &str) -> String {
 	let mut code_buf = String::new();
 	let mut list_depth: usize = 0;
 	let mut in_heading = false;
+	let mut in_link = false;
 
 	for event in parser {
 		match event {
@@ -110,10 +111,12 @@ pub(crate) fn render_markdown(input: &str) -> String {
 				output.push_str(&"│ ".with(Color::DarkGrey).to_string());
 			}
 			Event::Start(Tag::Emphasis) => {
-				output.push_str(&format!("{}", Attribute::Italic));
+				// Use dim instead of italic — macOS Terminal.app renders
+				// italic (ESC[3m) as underline, causing visual confusion.
+				output.push_str(&format!("{}", Attribute::Dim));
 			}
 			Event::End(TagEnd::Emphasis) => {
-				output.push_str(&format!("{}", Attribute::NoItalic));
+				output.push_str(&format!("{}", Attribute::NormalIntensity));
 			}
 			Event::Start(Tag::Strong) => {
 				output.push_str(&format!("{}", Attribute::Bold));
@@ -149,10 +152,16 @@ pub(crate) fn render_markdown(input: &str) -> String {
 				// markdown from prompt-injected LLM output.
 				if is_safe_url(&dest_url) {
 					output.push_str(&format!("\x1b]8;;{dest_url}\x1b\\"));
+					in_link = true;
 				}
 			}
 			Event::End(TagEnd::Link) => {
-				output.push_str("\x1b]8;;\x1b\\");
+				// Only emit close if we emitted open — orphaned close
+				// sequences can confuse some terminals.
+				if in_link {
+					output.push_str("\x1b]8;;\x1b\\");
+					in_link = false;
+				}
 			}
 			Event::Start(Tag::Strikethrough) => {
 				output.push_str(&format!("{}", Attribute::CrossedOut));
@@ -168,6 +177,10 @@ pub(crate) fn render_markdown(input: &str) -> String {
 	if output.ends_with("\n\n") {
 		output.truncate(output.len() - 1);
 	}
+
+	// Full ANSI reset — defense-in-depth against any leaked attribute
+	// from improperly paired markdown events or terminal quirks.
+	output.push_str("\x1b[0m");
 
 	output
 }
@@ -409,6 +422,10 @@ impl StreamRenderer {
 				self.line_buf.clear();
 				self.emitted_len = 0;
 			}
+		}
+		// Full ANSI reset at end of stream to prevent attribute leaks.
+		if !no_color() {
+			output.push_str("\x1b[0m");
 		}
 		output
 	}
