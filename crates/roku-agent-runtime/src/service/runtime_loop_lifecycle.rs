@@ -230,10 +230,7 @@ impl RuntimeService {
 			log_runtime(
 				LogLevel::Debug,
 				"runtime loop final output",
-				[
-					("run_id", loop_state.run_id.clone()),
-					("text", sanitized),
-				],
+				[("run_id", loop_state.run_id.clone()), ("text", sanitized)],
 			);
 		}
 	}

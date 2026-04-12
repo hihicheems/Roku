@@ -27,8 +27,8 @@ use crossterm::execute;
 use crossterm::style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor};
 use crossterm::terminal::{self, Clear, ClearType};
 
-use super::command_popup::MAX_VISIBLE_ROWS;
 use super::RawModeGuard;
+use super::command_popup::MAX_VISIBLE_ROWS;
 
 /// One item in a selection popup.
 pub(crate) struct SelectionItem {

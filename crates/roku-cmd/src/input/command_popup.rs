@@ -138,9 +138,7 @@ impl CommandPopup {
 		}
 
 		// Clamp visible to items actually reachable from scroll_top.
-		let visible = total
-			.saturating_sub(self.scroll_top)
-			.min(MAX_VISIBLE_ROWS);
+		let visible = total.saturating_sub(self.scroll_top).min(MAX_VISIBLE_ROWS);
 		let name_col_width = items.iter().map(|e| e.name.len()).max().unwrap_or(0) + 3;
 		let mut lines_down: u16 = 0;
 
