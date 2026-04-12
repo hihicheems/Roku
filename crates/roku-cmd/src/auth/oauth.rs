@@ -29,9 +29,9 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::Rng;
 use serde::Deserialize;
 
+use super::AuthError;
 use super::pkce;
 use super::storage::IdTokenClaims;
-use super::AuthError;
 
 // ---------------------------------------------------------------------------
 // Public result types
@@ -473,7 +473,12 @@ fn receive_callback(server: &tiny_http::Server, expected_state: &str) -> Result<
 	let outcome: Result<String, AuthError> = if let Some(err) = oauth_error {
 		let detail = oauth_error_desc.unwrap_or_default();
 		Err(AuthError::Callback(format!(
-			"authorization denied: {err}{}", if detail.is_empty() { String::new() } else { format!(" — {detail}") }
+			"authorization denied: {err}{}",
+			if detail.is_empty() {
+				String::new()
+			} else {
+				format!(" — {detail}")
+			}
 		)))
 	} else {
 		match (code, state) {
