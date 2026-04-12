@@ -90,13 +90,14 @@ impl InputReader {
 		);
 		let prompt_len = prompt.len() as u16;
 
-		// Enter raw mode for key-by-key reading.
+		// Enter raw mode with an RAII guard so it is always restored, even on panic.
 		let _ = terminal::enable_raw_mode();
+		let _raw_guard = RawModeGuard;
 
 		let result = self.event_loop(&mut tty, &mut buf, &mut popup_active, prompt_len);
 
-		// Always restore terminal state.
-		let _ = terminal::disable_raw_mode();
+		// Explicitly disable (guard will also disable on drop/panic).
+		drop(_raw_guard);
 
 		// Clear popup remnants: go down, clear each line, then come back up.
 		let rows = self.popup.last_rendered_rows();
@@ -121,8 +122,11 @@ impl InputReader {
 		popup_active: &mut bool,
 		prompt_len: u16,
 	) -> ReadlineResult {
+		// When the user presses Esc, we suppress re-opening the popup until
+		// the input changes enough to no longer match the trigger condition.
+		let mut popup_dismissed = false;
+
 		loop {
-			// Read a terminal event.
 			let evt = match event::read() {
 				Ok(e) => e,
 				Err(_) => return ReadlineResult::Interrupted,
@@ -132,12 +136,11 @@ impl InputReader {
 				continue;
 			};
 
-			// Ignore key release events (Windows sends these).
 			if key.kind == event::KeyEventKind::Release {
 				continue;
 			}
 
-			match self.handle_key(key, buf, popup_active) {
+			match self.handle_key(key, buf, popup_active, &mut popup_dismissed) {
 				KeyAction::Continue => {}
 				KeyAction::Submit => {
 					let line = buf.content().to_string();
@@ -150,10 +153,14 @@ impl InputReader {
 			// Sync popup state.
 			let content = buf.content();
 			let should_popup = content.starts_with('/') && !content.contains(' ');
-			if should_popup {
+			if should_popup && !popup_dismissed {
 				self.popup.update_filter(content);
 				*popup_active = true;
-			} else if *popup_active {
+			} else {
+				if !should_popup {
+					// Input no longer matches trigger — reset the dismissed flag.
+					popup_dismissed = false;
+				}
 				*popup_active = false;
 			}
 
@@ -166,6 +173,7 @@ impl InputReader {
 		key: KeyEvent,
 		buf: &mut LineBuffer,
 		popup_active: &mut bool,
+		popup_dismissed: &mut bool,
 	) -> KeyAction {
 		let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -201,6 +209,7 @@ impl InputReader {
 			}
 			KeyCode::Esc if *popup_active => {
 				*popup_active = false;
+				*popup_dismissed = true;
 			}
 
 			// --- history navigation (when popup is NOT active) ---
@@ -291,5 +300,15 @@ enum KeyAction {
 impl Drop for InputReader {
 	fn drop(&mut self) {
 		self.save_history();
+	}
+}
+
+/// RAII guard that disables raw mode on drop, ensuring terminal state is
+/// restored even if the event loop panics.
+struct RawModeGuard;
+
+impl Drop for RawModeGuard {
+	fn drop(&mut self) {
+		let _ = terminal::disable_raw_mode();
 	}
 }
