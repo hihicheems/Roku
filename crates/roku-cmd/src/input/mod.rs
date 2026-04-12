@@ -22,8 +22,8 @@ mod history;
 mod line_buffer;
 mod selection_popup;
 
-pub(crate) use command_popup::CommandEntry;
-pub(crate) use selection_popup::{SelectionItem, run_selection};
+pub(crate) use command_popup::{CommandEntry, SubCommandEntry};
+pub(crate) use selection_popup::{SelectionItem, read_text_input, run_selection};
 
 use std::os::fd::FromRawFd;
 use std::path::PathBuf;
@@ -147,6 +147,34 @@ impl InputReader {
 			match self.handle_key(key, buf, popup_active, &mut popup_dismissed) {
 				KeyAction::Continue => {}
 				KeyAction::Submit => {
+					// Redraw before returning so the final command text is visible
+					// on the prompt line (important when popup filled the buffer).
+					self.redraw(tty, buf, false, prompt_len);
+					let line = buf.content().to_string();
+					return ReadlineResult::Line(line);
+				}
+				KeyAction::SubmitWithSubCommands(items) => {
+					// Show the parent command, then drop raw mode for the modal popup.
+					*popup_active = false;
+					self.redraw(tty, buf, false, prompt_len);
+					let parent = buf.content().to_string();
+					// run_selection manages its own raw mode, but we must exit
+					// ours first to avoid nesting.
+					let _ = terminal::disable_raw_mode();
+					let sub = run_selection(items, "");
+					let _ = terminal::enable_raw_mode();
+					if let Some(idx) = sub {
+						// We need the sub-command name. Re-derive from parent's
+						// sub_commands. The items vec was consumed, but the popup
+						// still has the entry. Reconstruct from index.
+						if let Some(entry) = self.popup.selected_entry()
+							&& let Some(subs) = &entry.sub_commands
+							&& let Some(sub_entry) = subs.get(idx)
+						{
+							buf.set(&format!("{parent} {}", sub_entry.name));
+						}
+					}
+					self.redraw(tty, buf, false, prompt_len);
 					let line = buf.content().to_string();
 					return ReadlineResult::Line(line);
 				}
@@ -184,10 +212,17 @@ impl InputReader {
 		match key.code {
 			// --- submit ---
 			KeyCode::Enter => {
-				if *popup_active {
-					// If there's a selected command, fill it in and submit.
-					if let Some(cmd) = self.popup.selected_command() {
-						buf.set(&format!("/{cmd}"));
+				if *popup_active && let Some(selected) = self.popup.selected_entry() {
+					buf.set(&format!("/{}", selected.name));
+					if let Some(subs) = &selected.sub_commands {
+						let items: Vec<_> = subs
+							.iter()
+							.map(|s| SelectionItem {
+								label: s.name.to_string(),
+								description: s.description.to_string(),
+							})
+							.collect();
+						return KeyAction::SubmitWithSubCommands(items);
 					}
 				}
 				return KeyAction::Submit;
@@ -214,6 +249,12 @@ impl InputReader {
 			KeyCode::Esc if *popup_active => {
 				*popup_active = false;
 				*popup_dismissed = true;
+			}
+			KeyCode::Esc => {
+				// Universal cancel: clear input and return to a fresh prompt.
+				buf.set("");
+				self.history.reset_position();
+				return KeyAction::Submit;
 			}
 
 			// --- history navigation (when popup is NOT active) ---
@@ -299,6 +340,8 @@ impl InputReader {
 enum KeyAction {
 	Continue,
 	Submit,
+	/// Submit a parent command, then show a sub-command selection popup.
+	SubmitWithSubCommands(Vec<selection_popup::SelectionItem>),
 	Interrupt,
 	Eof,
 }
