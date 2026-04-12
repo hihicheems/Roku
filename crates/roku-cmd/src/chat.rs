@@ -19,8 +19,9 @@
 //!
 //! ## Modes
 //!
-//! - **Interactive** (default): rustyline REPL, human-friendly output to stderr, response
-//!   text to stdout. Session history loads on start and appends after each turn.
+//! - **Interactive** (default): custom crossterm REPL with command popup, human-friendly
+//!   output to stderr, response text to stdout. Session history loads on start and appends
+//!   after each turn.
 //! - **Pipe** (`--pipe`): stdin lines as user turns, JSON responses to stdout, LoopEvent
 //!   JSONL to stderr. No prompt, no banner, no decorative output on stdout.
 
@@ -30,14 +31,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use roku_agent_runtime::LoopEvent;
 use roku_agent_runtime::RuntimeService;
 use roku_common_types::{ConversationRole, ConversationTurn, RequestEnvelope, RequestId};
-use rustyline::Editor;
-use rustyline::error::ReadlineError;
-use rustyline::history::DefaultHistory;
 
 use crate::CommandError;
 use crate::auth::{AuthStore, CredentialEntry};
-use crate::completer::RokuHelper;
 use crate::conversation::compact_conversation_history;
+use crate::input::{CommandEntry, InputReader, ReadlineResult};
 use crate::render;
 use crate::runtime::{
 	build_live_runtime_service_from_env, cli_approval_gate, load_oauth_client_id,
@@ -146,15 +144,8 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 	};
 	let store = session_store();
 
-	let mut editor: Editor<RokuHelper, DefaultHistory> =
-		Editor::new().map_err(|e| CommandError::Io(io::Error::other(e.to_string())))?;
-	editor.set_helper(Some(RokuHelper));
-
-	// Persist readline history to a file so it survives across sessions.
 	let history_path = readline_history_path();
-	if history_path.exists() {
-		let _ = editor.load_history(&history_path);
-	}
+	let mut reader = InputReader::new(slash_commands(), history_path);
 
 	// Mutable session ID — updated by /session switch and /session new.
 	let mut session_id = options.session_id.clone();
@@ -176,161 +167,140 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 	let mut session_prompt_tokens: u64 = 0;
 	let mut session_output_tokens: u64 = 0;
 
-	loop {
-		match editor.readline("roku> ") {
-			Ok(line) => {
-				let trimmed = line.trim();
-				if trimmed.is_empty() {
-					continue;
-				}
+	while let ReadlineResult::Line(line) = reader.readline("roku> ") {
+		let trimmed = line.trim();
+		if trimmed.is_empty() {
+			continue;
+		}
 
-				match trimmed {
-					"/quit" | "/exit" => break,
-					"/help" => {
-						let _ = editor.add_history_entry(trimmed);
-						print_help();
-						continue;
-					}
-					"/clear" => {
-						let _ = editor.add_history_entry(trimmed);
-						conversation_history.clear();
-						if let Err(e) = store.clear(&session_id) {
-							eprintln!("[warn] failed to clear session file: {e}");
-						}
-						if let Err(e) = service.clear_pending_loop(&session_id) {
-							eprintln!("[warn] failed to clear pending loop: {e}");
-						}
-						eprintln!("[clear] Conversation history and pending state cleared.");
-						continue;
-					}
-					"/compact" => {
-						let _ = editor.add_history_entry(trimmed);
-						match compact_conversation_history(&mut conversation_history) {
-							Some(result) => {
-								if let Err(e) =
-									rewrite_history(&store, &session_id, &conversation_history)
-								{
-									eprintln!("[warn] failed to persist compacted history: {e}");
-								}
-								eprintln!(
-									"[compact] Compacted {} turns into summary. {} turns remain.",
-									result.discarded, result.retained
-								);
-							}
-							None => eprintln!(
-								"[compact] History has {} turns, nothing to compact.",
-								conversation_history.len()
-							),
-						}
-						continue;
-					}
-					"/login" => {
-						let _ = editor.add_history_entry(trimmed);
-						match rt.block_on(run_first_time_setup()) {
-							Ok(()) => match rebuild_service() {
-								Ok(s) => {
-									service = s;
-									logged_out = false;
-									eprintln!("[login] Service rebuilt with new credentials.");
-									print_auth_status();
-								}
-								Err(e) => eprintln!("[login] Failed to rebuild service: {e}"),
-							},
-							Err(e) => eprintln!("[login] {e}"),
-						}
-						continue;
-					}
-					"/logout" => {
-						let _ = editor.add_history_entry(trimmed);
-						let auth_store = AuthStore::from_env();
-						if let Ok(Some(auth)) = auth_store.load() {
-							if let Some(provider) = auth.active_provider.as_deref() {
-								if let Err(e) = auth_store.delete_credential(provider) {
-									eprintln!("[logout] Failed to clear credentials: {e}");
-								} else {
-									logged_out = true;
-									eprintln!(
-										"[logout] Credentials cleared for {provider}. Use /login to sign in again."
-									);
-								}
-							} else if !auth.credentials.is_empty() {
-								// No active provider but credentials exist — clear all
-								// so the runtime cannot fall back to a stored key.
-								let providers: Vec<String> =
-									auth.credentials.keys().cloned().collect();
-								for p in &providers {
-									let _ = auth_store.delete_credential(p);
-								}
-								logged_out = true;
-								eprintln!(
-									"[logout] Cleared {} stored credential(s). Use /login to sign in again.",
-									providers.len()
-								);
-							} else {
-								eprintln!("[logout] No credentials found.");
-							}
-						} else {
-							eprintln!("[logout] No credentials found.");
-						}
-						continue;
-					}
-					"/switch" => {
-						let _ = editor.add_history_entry(trimmed);
-						if handle_switch_command(&mut service, &mut editor) {
-							logged_out = false;
-						}
-						continue;
-					}
-					input if input.starts_with("/session") => {
-						let _ = editor.add_history_entry(trimmed);
-						handle_session_command(
-							input,
-							&store,
-							&mut session_id,
-							&mut conversation_history,
-						);
-						continue;
-					}
-					input if input.starts_with('/') => {
-						// Don't add invalid commands to history.
-						eprintln!("Unknown command: {input}. Type /help for available commands.");
-						continue;
-					}
-					_ => {
-						// Valid user message — add to history.
-						let _ = editor.add_history_entry(trimmed);
-					}
-				}
-
-				if logged_out {
-					eprintln!("Not authenticated. Use /login to sign in.");
-					continue;
-				}
-
-				let goal = trimmed.to_string();
-				handle_turn_interactive(
-					rt,
-					&service,
-					&store,
-					&session_id,
-					goal,
-					&mut conversation_history,
-					&mut editor,
-					options.json,
-					&mut session_prompt_tokens,
-					&mut session_output_tokens,
-				);
+		match trimmed {
+			"/quit" | "/exit" => break,
+			"/help" => {
+				reader.add_history_entry(trimmed);
+				print_help();
+				continue;
 			}
-			Err(ReadlineError::Interrupted | ReadlineError::Eof) => break,
-			Err(e) => {
-				eprintln!("[error] readline: {e}");
-				break;
+			"/clear" => {
+				reader.add_history_entry(trimmed);
+				conversation_history.clear();
+				if let Err(e) = store.clear(&session_id) {
+					eprintln!("[warn] failed to clear session file: {e}");
+				}
+				if let Err(e) = service.clear_pending_loop(&session_id) {
+					eprintln!("[warn] failed to clear pending loop: {e}");
+				}
+				eprintln!("[clear] Conversation history and pending state cleared.");
+				continue;
+			}
+			"/compact" => {
+				reader.add_history_entry(trimmed);
+				match compact_conversation_history(&mut conversation_history) {
+					Some(result) => {
+						if let Err(e) = rewrite_history(&store, &session_id, &conversation_history)
+						{
+							eprintln!("[warn] failed to persist compacted history: {e}");
+						}
+						eprintln!(
+							"[compact] Compacted {} turns into summary. {} turns remain.",
+							result.discarded, result.retained
+						);
+					}
+					None => eprintln!(
+						"[compact] History has {} turns, nothing to compact.",
+						conversation_history.len()
+					),
+				}
+				continue;
+			}
+			"/login" => {
+				reader.add_history_entry(trimmed);
+				match rt.block_on(run_first_time_setup()) {
+					Ok(()) => match rebuild_service() {
+						Ok(s) => {
+							service = s;
+							logged_out = false;
+							eprintln!("[login] Service rebuilt with new credentials.");
+							print_auth_status();
+						}
+						Err(e) => eprintln!("[login] Failed to rebuild service: {e}"),
+					},
+					Err(e) => eprintln!("[login] {e}"),
+				}
+				continue;
+			}
+			"/logout" => {
+				reader.add_history_entry(trimmed);
+				let auth_store = AuthStore::from_env();
+				if let Ok(Some(auth)) = auth_store.load() {
+					if let Some(provider) = auth.active_provider.as_deref() {
+						if let Err(e) = auth_store.delete_credential(provider) {
+							eprintln!("[logout] Failed to clear credentials: {e}");
+						} else {
+							logged_out = true;
+							eprintln!(
+								"[logout] Credentials cleared for {provider}. Use /login to sign in again."
+							);
+						}
+					} else if !auth.credentials.is_empty() {
+						let providers: Vec<String> = auth.credentials.keys().cloned().collect();
+						for p in &providers {
+							let _ = auth_store.delete_credential(p);
+						}
+						logged_out = true;
+						eprintln!(
+							"[logout] Cleared {} stored credential(s). Use /login to sign in again.",
+							providers.len()
+						);
+					} else {
+						eprintln!("[logout] No credentials found.");
+					}
+				} else {
+					eprintln!("[logout] No credentials found.");
+				}
+				continue;
+			}
+			"/switch" => {
+				reader.add_history_entry(trimmed);
+				if handle_switch_command(&mut service, &mut reader) {
+					logged_out = false;
+				}
+				continue;
+			}
+			input if input.starts_with("/session") => {
+				reader.add_history_entry(trimmed);
+				handle_session_command(input, &store, &mut session_id, &mut conversation_history);
+				continue;
+			}
+			input if input.starts_with('/') => {
+				eprintln!("Unknown command: {input}. Type /help for available commands.");
+				continue;
+			}
+			_ => {
+				reader.add_history_entry(trimmed);
 			}
 		}
+
+		if logged_out {
+			eprintln!("Not authenticated. Use /login to sign in.");
+			continue;
+		}
+
+		let goal = trimmed.to_string();
+		handle_turn_interactive(
+			rt,
+			&service,
+			&store,
+			&session_id,
+			goal,
+			&mut conversation_history,
+			&mut reader,
+			options.json,
+			&mut session_prompt_tokens,
+			&mut session_output_tokens,
+		);
 	}
 
-	// Persist readline history for future sessions.
-	let _ = editor.save_history(&history_path);
+	reader.save_history();
 
 	Ok(())
 }
@@ -344,7 +314,7 @@ fn handle_turn_interactive(
 	session_id: &str,
 	goal: String,
 	conversation_history: &mut Vec<ConversationTurn>,
-	editor: &mut Editor<RokuHelper, DefaultHistory>,
+	reader: &mut InputReader,
 	json_mode: bool,
 	session_prompt_tokens: &mut u64,
 	session_output_tokens: &mut u64,
@@ -408,13 +378,13 @@ fn handle_turn_interactive(
 			emit_response(&question, "awaiting_user");
 
 			loop {
-				match editor.readline("roku(reply)> ") {
-					Ok(reply_line) => {
+				match reader.readline("roku(reply)> ") {
+					ReadlineResult::Line(reply_line) => {
 						let reply = reply_line.trim();
 						if reply.is_empty() {
 							continue;
 						}
-						let _ = editor.add_history_entry(reply);
+						reader.add_history_entry(reply);
 
 						let (inner_result, _, inner_tokens) = dispatch_and_record(
 							rt,
@@ -461,15 +431,11 @@ fn handle_turn_interactive(
 							}
 						}
 					}
-					Err(ReadlineError::Interrupted | ReadlineError::Eof) => {
+					ReadlineResult::Interrupted | ReadlineResult::Eof => {
 						if let Err(e) = service.clear_pending_loop(session_id) {
 							eprintln!("[warn] failed to clear pending loop: {e}");
 						}
 						eprintln!("[cancelled] Discarded pending agent state.");
-						break;
-					}
-					Err(e) => {
-						eprintln!("[error] readline: {e}");
 						break;
 					}
 				}
@@ -1156,7 +1122,8 @@ async fn run_first_time_setup() -> Result<(), String> {
 		}
 		"2" => {
 			let client_id = load_oauth_client_id().ok_or_else(|| {
-				"No oauth_client_id configured. Set it in config/runtime.toml under [runtime.llm]."
+				"No oauth_client_id configured. Set OPENAI_OAUTH_CLIENT_ID env var \
+				 or uncomment oauth_client_id in config/runtime.toml under [runtime.llm]."
 					.to_string()
 			})?;
 			eprintln!("[setup] Opening browser for OpenAI authorization...");
@@ -1292,6 +1259,44 @@ fn format_age(unix_ms: u64) -> String {
 	}
 }
 
+/// Available slash commands with descriptions for the popup.
+fn slash_commands() -> Vec<CommandEntry> {
+	vec![
+		CommandEntry {
+			name: "clear",
+			description: "Clear conversation history",
+		},
+		CommandEntry {
+			name: "compact",
+			description: "Compact conversation history",
+		},
+		CommandEntry {
+			name: "exit",
+			description: "Exit the REPL",
+		},
+		CommandEntry {
+			name: "help",
+			description: "Show available commands",
+		},
+		CommandEntry {
+			name: "login",
+			description: "Sign in to a provider",
+		},
+		CommandEntry {
+			name: "logout",
+			description: "Sign out current provider",
+		},
+		CommandEntry {
+			name: "session",
+			description: "Manage chat sessions",
+		},
+		CommandEntry {
+			name: "switch",
+			description: "Switch LLM provider",
+		},
+	]
+}
+
 /// Resolve the readline history file path.
 fn readline_history_path() -> std::path::PathBuf {
 	let layout = LocalStorageLayout::from_env();
@@ -1301,10 +1306,7 @@ fn readline_history_path() -> std::path::PathBuf {
 
 /// Handle /switch command — list stored credentials, pick one.
 /// Returns `true` if the switch succeeded and the service was rebuilt.
-fn handle_switch_command(
-	service: &mut RuntimeService,
-	editor: &mut Editor<RokuHelper, DefaultHistory>,
-) -> bool {
+fn handle_switch_command(service: &mut RuntimeService, reader: &mut InputReader) -> bool {
 	let auth_store = AuthStore::from_env();
 	let auth = match auth_store.load() {
 		Ok(Some(a)) if !a.credentials.is_empty() => a,
@@ -1345,8 +1347,8 @@ fn handle_switch_command(
 	eprint!("Selection: ");
 	let _ = io::stderr().flush();
 
-	match editor.readline("") {
-		Ok(line) => {
+	match reader.readline("") {
+		ReadlineResult::Line(line) => {
 			let idx: usize = match line.trim().parse::<usize>() {
 				Ok(n) if n >= 1 && n <= providers.len() => n - 1,
 				_ => {
@@ -1370,12 +1372,11 @@ fn handle_switch_command(
 				}
 				Err(e) => {
 					eprintln!("[switch] Failed to rebuild service: {e}");
-					// Revert active_provider on failure.
 					let _ = auth_store.save(&auth);
 				}
 			}
 		}
-		Err(_) => eprintln!("[switch] Cancelled."),
+		ReadlineResult::Interrupted | ReadlineResult::Eof => eprintln!("[switch] Cancelled."),
 	}
 	false
 }

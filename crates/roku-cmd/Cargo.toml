@@ -28,7 +28,6 @@ roku-plugin-mcp = { path = "../roku-plugins/mcp" }
 roku-plugin-telegram = { path = "../roku-plugins/telegram" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
-rustyline = { version = "18", features = ["with-file-history"] }
 serde_json = "1"
 # Markdown rendering
 pulldown-cmark = "0.12"
