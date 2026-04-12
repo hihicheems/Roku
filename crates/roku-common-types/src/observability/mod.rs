@@ -26,8 +26,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 
 pub use logging::{
-	AsyncRotatingFileLogSink, FanoutLogSink, FileLogConfig, LogField, LogLevel, LogRecord, LogSink,
-	StderrLogSink, emit_global_log, install_global_log_sink,
+	AsyncRotatingFileLogSink, FanoutLogSink, FileLogConfig, FilteredStderrLogSink, LogField,
+	LogLevel, LogRecord, LogSink, StderrLogSink, emit_global_log, install_global_log_sink,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

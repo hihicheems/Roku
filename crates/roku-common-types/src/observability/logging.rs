@@ -93,6 +93,61 @@ impl LogSink for StderrLogSink {
 	}
 }
 
+/// A stderr log sink that filters by minimum level and ensures a leading
+/// newline when streaming output may be in progress (avoids log lines
+/// being appended to the end of partial streaming text).
+pub struct FilteredStderrLogSink {
+	min_level: std::sync::atomic::AtomicU8,
+	/// Set to `true` when streaming text has been printed via `eprint!`
+	/// without a trailing newline. The sink prepends `\n` before the log
+	/// line to separate it visually.
+	pub needs_newline: std::sync::atomic::AtomicBool,
+}
+
+impl FilteredStderrLogSink {
+	pub fn new(min_level: LogLevel) -> Self {
+		Self {
+			min_level: std::sync::atomic::AtomicU8::new(min_level as u8),
+			needs_newline: std::sync::atomic::AtomicBool::new(false),
+		}
+	}
+
+	pub fn set_min_level(&self, level: LogLevel) {
+		self.min_level
+			.store(level as u8, std::sync::atomic::Ordering::Relaxed);
+	}
+
+	pub fn min_level(&self) -> LogLevel {
+		let val = self.min_level.load(std::sync::atomic::Ordering::Relaxed);
+		match val {
+			0 => LogLevel::Trace,
+			1 => LogLevel::Debug,
+			2 => LogLevel::Info,
+			3 => LogLevel::Warn,
+			_ => LogLevel::Error,
+		}
+	}
+}
+
+impl LogSink for FilteredStderrLogSink {
+	fn write(&self, record: LogRecord) -> std::io::Result<()> {
+		let min = self.min_level.load(std::sync::atomic::Ordering::Relaxed);
+		if (record.level as u8) < min {
+			return Ok(());
+		}
+		let prefix = if self
+			.needs_newline
+			.swap(false, std::sync::atomic::Ordering::Relaxed)
+		{
+			"\n"
+		} else {
+			""
+		};
+		eprintln!("{prefix}{}", format_stderr_record(&record));
+		Ok(())
+	}
+}
+
 pub struct FanoutLogSink {
 	sinks: Vec<Arc<dyn LogSink>>,
 }
