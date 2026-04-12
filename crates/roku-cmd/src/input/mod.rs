@@ -20,8 +20,10 @@
 mod command_popup;
 mod history;
 mod line_buffer;
+mod selection_popup;
 
 pub(crate) use command_popup::CommandEntry;
+pub(crate) use selection_popup::{SelectionItem, run_selection};
 
 use std::os::fd::FromRawFd;
 use std::path::PathBuf;
@@ -72,13 +74,11 @@ impl InputReader {
 	pub fn readline(&mut self, prompt: &str) -> ReadlineResult {
 		// Use /dev/tty for terminal output so it works regardless of redirections.
 		// Track whether we used the fd-2 fallback so we can avoid closing stderr.
-		let (mut tty, tty_is_fd_alias) = match std::fs::OpenOptions::new()
-			.write(true)
-			.open("/dev/tty")
-		{
-			Ok(f) => (f, false),
-			Err(_) => (unsafe { std::fs::File::from_raw_fd(2) }, true),
-		};
+		let (mut tty, tty_is_fd_alias) =
+			match std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+				Ok(f) => (f, false),
+				Err(_) => (unsafe { std::fs::File::from_raw_fd(2) }, true),
+			};
 		let mut buf = LineBuffer::new();
 		let mut popup_active = false;
 
@@ -311,7 +311,7 @@ impl Drop for InputReader {
 
 /// RAII guard that disables raw mode on drop, ensuring terminal state is
 /// restored even if the event loop panics.
-struct RawModeGuard;
+pub(super) struct RawModeGuard;
 
 impl Drop for RawModeGuard {
 	fn drop(&mut self) {

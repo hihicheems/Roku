@@ -63,6 +63,7 @@ impl History {
 	pub fn add(&mut self, line: &str) {
 		let line = line.to_string();
 		if self.entries.last() == Some(&line) {
+			self.reset_position();
 			return;
 		}
 		self.entries.push(line);
@@ -119,6 +120,24 @@ mod tests {
 		assert_eq!(h.navigate_down(), Some("second"));
 		assert_eq!(h.navigate_down(), Some("current"));
 		assert_eq!(h.navigate_down(), None);
+	}
+
+	#[test]
+	fn add_duplicate_resets_position() {
+		let mut h = History {
+			entries: vec!["hello".into(), "world".into()],
+			position: 2,
+			saved_line: None,
+			path: PathBuf::from("/dev/null"),
+		};
+		// Browse up to "world", then add a duplicate.
+		assert_eq!(h.navigate_up("typing"), Some("world"));
+		assert_eq!(h.position, 1);
+		h.add("world"); // duplicate — should still reset position
+		assert_eq!(h.position, 2); // back to end
+		// Navigate up should start from the end, showing "world" first.
+		assert_eq!(h.navigate_up(""), Some("world"));
+		assert_eq!(h.navigate_up(""), Some("hello"));
 	}
 
 	#[test]
