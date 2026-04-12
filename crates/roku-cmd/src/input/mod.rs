@@ -71,13 +71,14 @@ impl InputReader {
 	/// starts with `/`.
 	pub fn readline(&mut self, prompt: &str) -> ReadlineResult {
 		// Use /dev/tty for terminal output so it works regardless of redirections.
-		let mut tty = std::fs::OpenOptions::new()
+		// Track whether we used the fd-2 fallback so we can avoid closing stderr.
+		let (mut tty, tty_is_fd_alias) = match std::fs::OpenOptions::new()
 			.write(true)
 			.open("/dev/tty")
-			.unwrap_or_else(|_| {
-				// Fallback to stderr if /dev/tty is unavailable.
-				unsafe { std::fs::File::from_raw_fd(2) }
-			});
+		{
+			Ok(f) => (f, false),
+			Err(_) => (unsafe { std::fs::File::from_raw_fd(2) }, true),
+		};
 		let mut buf = LineBuffer::new();
 		let mut popup_active = false;
 
@@ -109,8 +110,11 @@ impl InputReader {
 		}
 		let _ = execute!(tty, Print("\r\n"), Show);
 
-		// Prevent closing fd 2 if we used the fallback.
-		std::mem::forget(tty);
+		// Only forget the handle when it aliases fd 2 (stderr fallback);
+		// normal /dev/tty handles must be closed to avoid leaking fds.
+		if tty_is_fd_alias {
+			std::mem::forget(tty);
+		}
 
 		result
 	}
