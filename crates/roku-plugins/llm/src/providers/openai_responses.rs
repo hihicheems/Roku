@@ -257,6 +257,7 @@ fn build_responses_request(
 		"instructions": instructions,
 		"input": input,
 		"stream": stream,
+		"store": false,
 	});
 
 	if let Some(tools) = tools_value.filter(|t| !t.is_empty()) {
