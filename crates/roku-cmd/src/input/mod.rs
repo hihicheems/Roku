@@ -241,14 +241,16 @@ impl InputReader {
 			KeyCode::Right => {
 				buf.move_right();
 			}
-			KeyCode::Home | KeyCode::Char('a') if ctrl => buf.move_home(),
-			KeyCode::End | KeyCode::Char('e') if ctrl => buf.move_end(),
+			KeyCode::Home => buf.move_home(),
+			KeyCode::End => buf.move_end(),
+			KeyCode::Char('a') if ctrl => buf.move_home(),
+			KeyCode::Char('e') if ctrl => buf.move_end(),
 			KeyCode::Char('u') if ctrl => buf.delete_to_start(),
 			KeyCode::Char('k') if ctrl => buf.delete_to_end(),
 			KeyCode::Char('w') if ctrl => buf.delete_word_back(),
 
-			// --- regular character input ---
-			KeyCode::Char(ch) => {
+			// --- regular character input (ignore unhandled Ctrl combos) ---
+			KeyCode::Char(ch) if !ctrl => {
 				buf.insert(ch);
 				self.history.reset_position();
 			}
