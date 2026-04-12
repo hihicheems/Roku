@@ -462,22 +462,58 @@ pub async fn refresh_openai_token(
 // ---------------------------------------------------------------------------
 
 fn receive_callback(server: &tiny_http::Server, expected_state: &str) -> Result<String, AuthError> {
-	// Timeout after 300 seconds — give users time for 2FA, account selection,
-	// or slow networks. The REPL prints a message when this times out.
-	let request = server
-		.recv_timeout(std::time::Duration::from_secs(300))
-		.map_err(|e| AuthError::Callback(format!("recv: {e}")))?
-		.ok_or_else(|| {
-			AuthError::Callback(
-				"OAuth callback timed out after 300 seconds. Try /login again.".to_string(),
-			)
-		})?;
+	use std::time::{Duration, Instant};
 
+	use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+	use crossterm::terminal;
+
+	eprintln!("[setup] Waiting for browser callback... (press Esc to cancel)");
+
+	let deadline = Instant::now() + Duration::from_secs(300);
+
+	let _ = terminal::enable_raw_mode();
+	let _guard = OAuthRawModeGuard;
+
+	loop {
+		// Non-blocking key check — detect Esc or Ctrl-C immediately.
+		if event::poll(Duration::from_millis(0)).unwrap_or(false)
+			&& let Ok(Event::Key(key)) = event::read()
+			&& key.kind != event::KeyEventKind::Release
+			&& (key.code == KeyCode::Esc
+				|| (key.code == KeyCode::Char('c')
+					&& key.modifiers.contains(KeyModifiers::CONTROL)))
+		{
+			return Err(AuthError::Callback("cancelled by user".to_string()));
+		}
+
+		// Short HTTP poll so we can check keys frequently.
+		match server.recv_timeout(Duration::from_millis(200)) {
+			Ok(Some(request)) => {
+				return process_callback_request(request, expected_state);
+			}
+			Ok(None) => {
+				if Instant::now() >= deadline {
+					return Err(AuthError::Callback(
+						"OAuth callback timed out after 300 seconds. Try /login again.".to_string(),
+					));
+				}
+			}
+			Err(e) => {
+				return Err(AuthError::Callback(format!("recv: {e}")));
+			}
+		}
+	}
+}
+
+/// Process the HTTP callback request and extract the authorization code.
+fn process_callback_request(
+	request: tiny_http::Request,
+	expected_state: &str,
+) -> Result<String, AuthError> {
 	let url = request.url().to_string();
 	let code = extract_callback_param(&url, "code");
 	let state = extract_callback_param(&url, "state");
 
-	// Check for OAuth error response (user denied, server error, etc.).
 	let oauth_error = extract_callback_param(&url, "error");
 	let oauth_error_desc = extract_callback_param(&url, "error_description");
 
@@ -515,6 +551,15 @@ fn receive_callback(server: &tiny_http::Server, expected_state: &str) -> Result<
 	);
 	let _ = request.respond(response);
 	outcome
+}
+
+/// RAII guard for raw mode in the OAuth callback wait loop.
+struct OAuthRawModeGuard;
+
+impl Drop for OAuthRawModeGuard {
+	fn drop(&mut self) {
+		let _ = crossterm::terminal::disable_raw_mode();
+	}
 }
 
 // ---------------------------------------------------------------------------
