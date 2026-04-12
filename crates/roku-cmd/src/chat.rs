@@ -35,7 +35,10 @@ use roku_common_types::{ConversationRole, ConversationTurn, RequestEnvelope, Req
 use crate::CommandError;
 use crate::auth::{AuthStore, CredentialEntry};
 use crate::conversation::compact_conversation_history;
-use crate::input::{CommandEntry, InputReader, ReadlineResult, SelectionItem, run_selection};
+use crate::input::{
+	CommandEntry, InputReader, ReadlineResult, SelectionItem, SubCommandEntry, read_text_input,
+	run_selection,
+};
 use crate::render;
 use crate::runtime::{
 	build_live_runtime_service_from_env, cli_approval_gate, load_oauth_client_id,
@@ -1129,16 +1132,11 @@ async fn run_first_time_setup() -> Result<(), String> {
 
 	match choice {
 		0 => {
-			eprint!("Enter your OpenRouter API key: ");
-			let _ = io::stderr().flush();
-			let mut key = String::new();
-			io::stdin()
-				.read_line(&mut key)
-				.map_err(|e| format!("read key: {e}"))?;
-			let key = key.trim().to_string();
-			if key.is_empty() {
-				return Err("empty API key".to_string());
-			}
+			let key = match read_text_input("Enter your OpenRouter API key: ") {
+				Some(k) if !k.trim().is_empty() => k.trim().to_string(),
+				Some(_) => return Err("empty API key".to_string()),
+				None => return Err("setup cancelled".to_string()),
+			};
 			let mut auth = auth_store.load().ok().flatten().unwrap_or_default();
 			auth.active_provider = Some("openrouter".to_string());
 			auth.credentials.insert(
@@ -1198,18 +1196,36 @@ fn handle_session_command(
 				eprintln!("[session] No sessions found.");
 			}
 			Ok(sessions) => {
-				eprintln!("[session] Available sessions:");
-				for s in &sessions {
-					let active = if s.session_id == session_id.as_str() {
-						" (active)"
-					} else {
-						""
-					};
-					let age = format_age(s.last_modified);
-					eprintln!(
-						"  {} — {} turns, last active {}{active}",
-						s.session_id, s.turn_count, age,
-					);
+				let items: Vec<SelectionItem> = sessions
+					.iter()
+					.map(|s| {
+						let active = if s.session_id == session_id.as_str() {
+							" (active)"
+						} else {
+							""
+						};
+						let age = format_age(s.last_modified);
+						SelectionItem {
+							label: format!("{}{active}", s.session_id),
+							description: format!("{} turns, last active {age}", s.turn_count),
+						}
+					})
+					.collect();
+				if let Some(idx) = run_selection(items, "[session] Select a session to switch to:")
+				{
+					let target = &sessions[idx].session_id;
+					match store.load(target) {
+						Ok(turns) => {
+							*conversation_history = turns;
+							*session_id = target.to_string();
+							eprintln!(
+								"[session] Switched to '{}' ({} turns loaded).",
+								target,
+								conversation_history.len()
+							);
+						}
+						Err(e) => eprintln!("[session] Failed to load '{target}': {e}"),
+					}
 				}
 			}
 			Err(e) => eprintln!("[session] Failed to list sessions: {e}"),
@@ -1229,7 +1245,49 @@ fn handle_session_command(
 					Err(e) => eprintln!("[session] Failed to load '{target}': {e}"),
 				}
 			} else {
-				eprintln!("[session] Usage: /session switch <id>");
+				// No ID specified — show interactive selection.
+				match store.list() {
+					Ok(sessions) if !sessions.is_empty() => {
+						let items: Vec<SelectionItem> = sessions
+							.iter()
+							.map(|s| {
+								let active = if s.session_id == session_id.as_str() {
+									" (active)"
+								} else {
+									""
+								};
+								let age = format_age(s.last_modified);
+								SelectionItem {
+									label: format!("{}{active}", s.session_id),
+									description: format!(
+										"{} turns, last active {age}",
+										s.turn_count
+									),
+								}
+							})
+							.collect();
+						if let Some(idx) =
+							run_selection(items, "[session] Select a session to switch to:")
+						{
+							let target = &sessions[idx].session_id;
+							match store.load(target) {
+								Ok(turns) => {
+									*conversation_history = turns;
+									*session_id = target.to_string();
+									eprintln!(
+										"[session] Switched to '{}' ({} turns loaded).",
+										target,
+										conversation_history.len()
+									);
+								}
+								Err(e) => {
+									eprintln!("[session] Failed to load '{target}': {e}")
+								}
+							}
+						}
+					}
+					_ => eprintln!("[session] No sessions to switch to."),
+				}
 			}
 		}
 		"new" => {
@@ -1294,42 +1352,65 @@ fn slash_commands() -> Vec<CommandEntry> {
 		CommandEntry {
 			name: "approve",
 			description: "Toggle auto-approve for tool execution",
+			sub_commands: None,
 		},
 		CommandEntry {
 			name: "clear",
 			description: "Clear conversation history",
+			sub_commands: None,
 		},
 		CommandEntry {
 			name: "compact",
 			description: "Compact conversation history",
+			sub_commands: None,
 		},
 		CommandEntry {
 			name: "debug",
 			description: "Toggle debug log output",
+			sub_commands: None,
 		},
 		CommandEntry {
 			name: "exit",
 			description: "Exit the REPL",
+			sub_commands: None,
 		},
 		CommandEntry {
 			name: "help",
 			description: "Show available commands",
+			sub_commands: None,
 		},
 		CommandEntry {
 			name: "login",
 			description: "Sign in to a provider",
+			sub_commands: None,
 		},
 		CommandEntry {
 			name: "logout",
 			description: "Sign out current provider",
+			sub_commands: None,
 		},
 		CommandEntry {
 			name: "session",
 			description: "Manage chat sessions",
+			sub_commands: Some(vec![
+				SubCommandEntry {
+					name: "list",
+					description: "List all sessions",
+				},
+				SubCommandEntry {
+					name: "switch",
+					description: "Switch to a different session",
+				},
+				SubCommandEntry {
+					name: "new",
+					description: "Create a new session",
+				},
+			]),
 		},
 		CommandEntry {
 			name: "switch",
 			description: "Switch LLM provider",
+			sub_commands: None,
 		},
 	]
 }
