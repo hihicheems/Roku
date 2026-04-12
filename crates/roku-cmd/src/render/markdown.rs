@@ -47,6 +47,7 @@ fn theme_set() -> &'static ThemeSet {
 // ---------------------------------------------------------------------------
 
 /// Render a complete markdown string to styled terminal text.
+#[allow(dead_code)] // Used by tests; batch path removed in favor of streaming.
 pub(crate) fn render_markdown(input: &str) -> String {
 	if no_color() {
 		return input.to_string();
@@ -63,6 +64,9 @@ pub(crate) fn render_markdown(input: &str) -> String {
 	let mut list_depth: usize = 0;
 	let mut in_heading = false;
 	let mut link_url: Option<String> = None;
+	let mut in_blockquote = false;
+	// Stack of (is_ordered, current_index) for nested lists.
+	let mut list_stack: Vec<(bool, u64)> = Vec::new();
 
 	for event in parser {
 		match event {
@@ -94,21 +98,36 @@ pub(crate) fn render_markdown(input: &str) -> String {
 				in_heading = false;
 				output.push('\n');
 			}
-			Event::Start(Tag::List(_)) => {
+			Event::Start(Tag::List(attrs)) => {
 				list_depth += 1;
+				let is_ordered = attrs.is_some();
+				list_stack.push((is_ordered, 1));
 			}
 			Event::End(TagEnd::List(_)) => {
 				list_depth = list_depth.saturating_sub(1);
+				list_stack.pop();
 			}
 			Event::Start(Tag::Item) => {
 				let indent = "  ".repeat(list_depth.saturating_sub(1));
-				output.push_str(&format!("{indent}• "));
+				if let Some((is_ordered, idx)) = list_stack.last_mut() {
+					if *is_ordered {
+						output.push_str(&format!("{indent}{}. ", idx));
+						*idx += 1;
+					} else {
+						output.push_str(&format!("{indent}• "));
+					}
+				} else {
+					output.push_str(&format!("{indent}• "));
+				}
 			}
 			Event::End(TagEnd::Item) => {
 				output.push('\n');
 			}
 			Event::Start(Tag::BlockQuote(_)) => {
-				output.push_str(&"│ ".with(Color::DarkGrey).to_string());
+				in_blockquote = true;
+			}
+			Event::End(TagEnd::BlockQuote(_)) => {
+				in_blockquote = false;
 			}
 			Event::Start(Tag::Emphasis) => {
 				// Use a subtle color instead of italic or dim:
@@ -142,15 +161,26 @@ pub(crate) fn render_markdown(input: &str) -> String {
 				} else if in_heading {
 					output.push_str(&text.bold().to_string());
 				} else {
+					if in_blockquote && !output.ends_with("│ ") {
+						output.push_str(&"│ ".with(Color::DarkGrey).to_string());
+					}
 					output.push_str(&text);
 				}
 			}
 			Event::SoftBreak | Event::HardBreak => {
 				if !in_code_block {
 					output.push('\n');
+					// Re-apply blockquote prefix on new lines.
+					if in_blockquote {
+						output.push_str(&"│ ".with(Color::DarkGrey).to_string());
+					}
 				}
 			}
-			Event::Start(Tag::Paragraph) => {}
+			Event::Start(Tag::Paragraph) => {
+				if in_blockquote && !output.ends_with("│ ") {
+					output.push_str(&"│ ".with(Color::DarkGrey).to_string());
+				}
+			}
 			Event::End(TagEnd::Paragraph) => {
 				output.push_str("\n\n");
 			}
@@ -308,6 +338,8 @@ pub(crate) struct StreamRenderer {
 	state: StreamState,
 	code_buf: String,
 	code_lang: String,
+	/// The opening fence string (e.g. "```" or "````") for matching the close.
+	opening_fence: String,
 	/// Accumulates the line currently being received (for fence detection).
 	line_buf: String,
 	/// How many bytes of `line_buf` have already been emitted (for partial lines).
@@ -325,6 +357,7 @@ impl StreamRenderer {
 			state: StreamState::Normal,
 			code_buf: String::new(),
 			code_lang: String::new(),
+			opening_fence: String::new(),
 			line_buf: String::new(),
 			emitted_len: 0,
 		}
@@ -351,15 +384,14 @@ impl StreamRenderer {
 				self.emitted_len = 0;
 				match self.state {
 					StreamState::Normal => {
-						if line.trim_start().starts_with("```") {
+						let trimmed = line.trim_start();
+						if trimmed.starts_with("```") {
+							// Extract the fence string (all leading backticks).
+							let fence: String = trimmed.chars().take_while(|&c| c == '`').collect();
 							// Opening fence detected.
 							self.state = StreamState::InCodeBlock;
-							self.code_lang = line
-								.trim_start()
-								.strip_prefix("```")
-								.unwrap_or("")
-								.trim()
-								.to_string();
+							self.opening_fence = fence.clone();
+							self.code_lang = trimmed[fence.len()..].trim().to_string();
 							self.code_buf.clear();
 							// Emit code block header.
 							output.push_str(&"  ┌".with(Color::DarkGrey).to_string());
@@ -376,12 +408,20 @@ impl StreamRenderer {
 						}
 					}
 					StreamState::InCodeBlock => {
-						if line.trim_start().starts_with("```") {
+						let trimmed = line.trim_start();
+						// Only close on a fence that matches the opening fence
+						// exactly (same number of backticks, no trailing text
+						// other than whitespace). Inner fences with fewer
+						// backticks or a language tag are treated as content.
+						let is_closing = trimmed.starts_with(&self.opening_fence)
+							&& trimmed[self.opening_fence.len()..].trim().is_empty();
+						if is_closing {
 							// Closing fence — flush highlighted code.
 							output.push_str(&flush_code_block(&self.code_buf, &self.code_lang));
 							output.push_str(&"  └".with(Color::DarkGrey).to_string());
 							output.push('\n');
 							self.code_buf.clear();
+							self.opening_fence.clear();
 							self.state = StreamState::Normal;
 						} else {
 							// Buffer code line; emit with gutter for immediate feedback.
