@@ -1207,6 +1207,9 @@ impl GenericAgentRuntime {
 						let _ = sender.send(crate::runtime_loop::LoopEvent::ToolStart {
 							step: current_step_index,
 							tool_name: tool_name.clone(),
+							args_summary: crate::runtime_loop::loop_event::summarize_tool_args(
+								tool_name, &arguments,
+							),
 						});
 					}
 					let start_ms = std::time::Instant::now();
@@ -1231,6 +1234,7 @@ impl GenericAgentRuntime {
 							step: current_step_index,
 							tool_name: tool_name.clone(),
 							elapsed_ms: Some(elapsed_ms),
+							result_summary: None,
 						});
 					}
 
@@ -1248,6 +1252,9 @@ impl GenericAgentRuntime {
 					let _ = sender.send(crate::runtime_loop::LoopEvent::ToolStart {
 						step: current_step_index,
 						tool_name: tool_name.clone(),
+						args_summary: crate::runtime_loop::loop_event::summarize_tool_args(
+							tool_name, &arguments,
+						),
 					});
 				}
 
@@ -1269,6 +1276,15 @@ impl GenericAgentRuntime {
 				});
 
 				let elapsed = execution_elapsed_ms(&execution.result);
+				let raw_tool_output = raw_tool_output_from_result(&execution.result);
+				let observation =
+					self.loop_observation_from_execution(&tool_name_owned, &execution.result);
+
+				let result_summary = crate::runtime_loop::loop_event::summarize_tool_result(
+					&tool_name_owned,
+					observation.ok,
+					&observation.data,
+				);
 
 				// Emit ToolEnd.
 				if let Some(sender) = event_sender {
@@ -1276,12 +1292,9 @@ impl GenericAgentRuntime {
 						step: current_step_index,
 						tool_name: tool_name_owned.clone(),
 						elapsed_ms: elapsed,
+						result_summary,
 					});
 				}
-
-				let raw_tool_output = raw_tool_output_from_result(&execution.result);
-				let observation =
-					self.loop_observation_from_execution(&tool_name_owned, &execution.result);
 				let interpreted = interpret_observation(
 					loop_state,
 					observation.clone(),

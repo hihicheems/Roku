@@ -30,12 +30,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use roku_agent_runtime::LoopEvent;
 use roku_agent_runtime::RuntimeService;
 use roku_common_types::{ConversationRole, ConversationTurn, RequestEnvelope, RequestId};
-use rustyline::DefaultEditor;
+use rustyline::Editor;
 use rustyline::error::ReadlineError;
+use rustyline::history::DefaultHistory;
 
 use crate::CommandError;
 use crate::auth::{AuthStore, CredentialEntry};
+use crate::completer::RokuHelper;
 use crate::conversation::compact_conversation_history;
+use crate::render;
 use crate::runtime::{
 	build_live_runtime_service_from_env, cli_approval_gate, load_oauth_client_id,
 	next_cli_request_sequence, pipe_approval_gate,
@@ -143,17 +146,27 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 	};
 	let store = session_store();
 
-	let mut editor =
-		DefaultEditor::new().map_err(|e| CommandError::Io(io::Error::other(e.to_string())))?;
+	let mut editor: Editor<RokuHelper, DefaultHistory> =
+		Editor::new().map_err(|e| CommandError::Io(io::Error::other(e.to_string())))?;
+	editor.set_helper(Some(RokuHelper));
 
-	// Load persisted history.
+	// Persist readline history to a file so it survives across sessions.
+	let history_path = readline_history_path();
+	if history_path.exists() {
+		let _ = editor.load_history(&history_path);
+	}
+
+	// Mutable session ID — updated by /session switch and /session new.
+	let mut session_id = options.session_id.clone();
+
+	// Load persisted conversation history.
 	let mut conversation_history: Vec<ConversationTurn> =
-		store.load(&options.session_id).unwrap_or_else(|e| {
+		store.load(&session_id).unwrap_or_else(|e| {
 			eprintln!("[warn] failed to load session history: {e}");
 			Vec::new()
 		});
 
-	print_banner(&options.session_id, conversation_history.len());
+	print_banner(&session_id, conversation_history.len());
 	print_auth_status();
 
 	// Tracks whether the user has logged out in this session.
@@ -181,10 +194,10 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 					"/clear" => {
 						let _ = editor.add_history_entry(trimmed);
 						conversation_history.clear();
-						if let Err(e) = store.clear(&options.session_id) {
+						if let Err(e) = store.clear(&session_id) {
 							eprintln!("[warn] failed to clear session file: {e}");
 						}
-						if let Err(e) = service.clear_pending_loop(&options.session_id) {
+						if let Err(e) = service.clear_pending_loop(&session_id) {
 							eprintln!("[warn] failed to clear pending loop: {e}");
 						}
 						eprintln!("[clear] Conversation history and pending state cleared.");
@@ -194,11 +207,9 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 						let _ = editor.add_history_entry(trimmed);
 						match compact_conversation_history(&mut conversation_history) {
 							Some(result) => {
-								if let Err(e) = rewrite_history(
-									&store,
-									&options.session_id,
-									&conversation_history,
-								) {
+								if let Err(e) =
+									rewrite_history(&store, &session_id, &conversation_history)
+								{
 									eprintln!("[warn] failed to persist compacted history: {e}");
 								}
 								eprintln!(
@@ -270,6 +281,16 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 						}
 						continue;
 					}
+					input if input.starts_with("/session") => {
+						let _ = editor.add_history_entry(trimmed);
+						handle_session_command(
+							input,
+							&store,
+							&mut session_id,
+							&mut conversation_history,
+						);
+						continue;
+					}
 					input if input.starts_with('/') => {
 						// Don't add invalid commands to history.
 						eprintln!("Unknown command: {input}. Type /help for available commands.");
@@ -291,7 +312,7 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 					rt,
 					&service,
 					&store,
-					&options.session_id,
+					&session_id,
 					goal,
 					&mut conversation_history,
 					&mut editor,
@@ -308,6 +329,9 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 		}
 	}
 
+	// Persist readline history for future sessions.
+	let _ = editor.save_history(&history_path);
+
 	Ok(())
 }
 
@@ -320,7 +344,7 @@ fn handle_turn_interactive(
 	session_id: &str,
 	goal: String,
 	conversation_history: &mut Vec<ConversationTurn>,
-	editor: &mut DefaultEditor,
+	editor: &mut Editor<RokuHelper, DefaultHistory>,
 	json_mode: bool,
 	session_prompt_tokens: &mut u64,
 	session_output_tokens: &mut u64,
@@ -342,14 +366,15 @@ fn handle_turn_interactive(
 		let turn_cost = (turn_tokens.prompt as f64 / 1_000_000.0) * 3.0
 			+ (turn_tokens.output as f64 / 1_000_000.0) * 15.0;
 		let session_total = session_prompt_tokens.saturating_add(*session_output_tokens);
-		let model_tag = turn_tokens
-			.model_id
-			.as_deref()
-			.map(|m| format!(" model: {m}"))
-			.unwrap_or_default();
 		eprintln!(
-			"[tokens: {}/{}, cost: ~${turn_cost:.4}] [session: {}]{model_tag}",
-			turn_tokens.prompt, turn_tokens.output, session_total,
+			"{}",
+			render::styled_token_info(
+				turn_tokens.prompt,
+				turn_tokens.output,
+				turn_cost,
+				session_total,
+				turn_tokens.model_id.as_deref(),
+			)
 		);
 	}
 
@@ -368,7 +393,7 @@ fn handle_turn_interactive(
 			};
 			write_jsonl_result(&resp);
 		} else {
-			println!("{msg}");
+			println!("{}", render::render_markdown(msg));
 		}
 	};
 	match result {
@@ -805,23 +830,38 @@ fn execute_turn(
 				}
 			})
 		} else {
-			// Interactive mode: human-friendly event display.
+			// Interactive mode: styled event display with streaming markdown.
 			tokio::spawn(async move {
+				let mut stream_renderer = crate::render::StreamRenderer::new();
 				while let Some(event) = rx.recv().await {
 					match event {
-						LoopEvent::ToolStart { step, tool_name } => {
-							eprintln!("[tool] step {step} starting: {tool_name}");
+						LoopEvent::ToolStart {
+							tool_name,
+							args_summary,
+							..
+						} => {
+							eprintln!(
+								"{}",
+								crate::render::styled_tool_start(
+									&tool_name,
+									args_summary.as_deref(),
+								)
+							);
 						}
 						LoopEvent::ToolEnd {
-							step,
 							tool_name,
 							elapsed_ms,
+							result_summary,
+							..
 						} => {
-							if let Some(ms) = elapsed_ms {
-								eprintln!("[tool] step {step} done: {tool_name} ({ms}ms)");
-							} else {
-								eprintln!("[tool] step {step} done: {tool_name}");
-							}
+							eprintln!(
+								"{}",
+								crate::render::styled_tool_end(
+									&tool_name,
+									elapsed_ms,
+									result_summary.as_deref(),
+								)
+							);
 						}
 						LoopEvent::CompactTriggered {
 							step,
@@ -832,9 +872,16 @@ fn execute_turn(
 							);
 						}
 						LoopEvent::LlmTextDelta { text, .. } => {
-							eprint!("{text}");
+							let rendered = stream_renderer.push(&text);
+							if !rendered.is_empty() {
+								eprint!("{rendered}");
+							}
 						}
 						LoopEvent::LlmDecisionComplete { .. } => {
+							let remaining = stream_renderer.flush();
+							if !remaining.is_empty() {
+								eprint!("{remaining}");
+							}
 							eprintln!();
 						}
 						LoopEvent::StepComplete { step } => {
@@ -954,7 +1001,7 @@ fn now_unix_ms() -> u64 {
 }
 
 fn print_banner(session_id: &str, turn_count: usize) {
-	eprintln!("Roku interactive chat");
+	eprintln!("{}", render::styled_banner("Roku interactive chat"));
 	if turn_count > 0 {
 		eprintln!(
 			"Resuming session '{}' ({} turns loaded)",
@@ -969,13 +1016,18 @@ fn print_banner(session_id: &str, turn_count: usize) {
 
 fn print_help() {
 	eprintln!("Commands:");
-	eprintln!("  /help     Show this help message");
-	eprintln!("  /clear    Reset conversation history and pending state");
-	eprintln!("  /compact  Compress older conversation turns into a summary");
-	eprintln!("  /login    Sign in with a new provider or account");
-	eprintln!("  /logout   Clear current credentials");
-	eprintln!("  /switch   Switch between stored credentials");
-	eprintln!("  /quit     Exit the REPL (also: /exit, Ctrl+C, Ctrl+D)");
+	eprintln!("  /help              Show this help message");
+	eprintln!("  /clear             Reset conversation history and pending state");
+	eprintln!("  /compact           Compress older conversation turns into a summary");
+	eprintln!("  /login             Sign in with a new provider or account");
+	eprintln!("  /logout            Clear current credentials");
+	eprintln!("  /switch            Switch between stored credentials");
+	eprintln!("  /session list      List all sessions");
+	eprintln!("  /session switch ID Switch to a different session");
+	eprintln!("  /session new NAME  Create a new session");
+	eprintln!("  /quit              Exit the REPL (also: /exit, Ctrl+C, Ctrl+D)");
+	eprintln!();
+	eprintln!("Tab completion is available for all commands.");
 }
 
 // ---------------------------------------------------------------------------
@@ -987,7 +1039,11 @@ fn print_help() {
 fn has_no_credentials() -> bool {
 	// Check env vars for any provider. Each must be checked independently
 	// because an empty var (Ok("")) would short-circuit an or_else chain.
-	let env_keys = ["OPENROUTER_API_KEY", "ROKU_OPENAI_API_KEY", "ROKU_ANTHROPIC_API_KEY"];
+	let env_keys = [
+		"OPENROUTER_API_KEY",
+		"ROKU_OPENAI_API_KEY",
+		"ROKU_ANTHROPIC_API_KEY",
+	];
 	let has_env_key = env_keys.iter().any(|key| {
 		std::env::var(key)
 			.ok()
@@ -1129,9 +1185,122 @@ async fn run_first_time_setup() -> Result<(), String> {
 	}
 }
 
+/// Handle /session subcommands (list, switch, new).
+fn handle_session_command(
+	input: &str,
+	store: &SessionStore,
+	session_id: &mut String,
+	conversation_history: &mut Vec<ConversationTurn>,
+) {
+	let parts: Vec<&str> = input.split_whitespace().collect();
+	let sub = parts.get(1).copied().unwrap_or("list");
+
+	match sub {
+		"list" => match store.list() {
+			Ok(sessions) if sessions.is_empty() => {
+				eprintln!("[session] No sessions found.");
+			}
+			Ok(sessions) => {
+				eprintln!("[session] Available sessions:");
+				for s in &sessions {
+					let active = if s.session_id == session_id.as_str() {
+						" (active)"
+					} else {
+						""
+					};
+					let age = format_age(s.last_modified);
+					eprintln!(
+						"  {} — {} turns, last active {}{active}",
+						s.session_id, s.turn_count, age,
+					);
+				}
+			}
+			Err(e) => eprintln!("[session] Failed to list sessions: {e}"),
+		},
+		"switch" => {
+			if let Some(target) = parts.get(2) {
+				match store.load(target) {
+					Ok(turns) => {
+						*conversation_history = turns;
+						*session_id = target.to_string();
+						eprintln!(
+							"[session] Switched to '{}' ({} turns loaded).",
+							target,
+							conversation_history.len()
+						);
+					}
+					Err(e) => eprintln!("[session] Failed to load '{target}': {e}"),
+				}
+			} else {
+				eprintln!("[session] Usage: /session switch <id>");
+			}
+		}
+		"new" => {
+			let name = parts
+				.get(2..)
+				.map(|p| p.join("-"))
+				.filter(|s| !s.is_empty());
+			let new_id = name.unwrap_or_else(|| {
+				format!(
+					"session-{}",
+					SystemTime::now()
+						.duration_since(UNIX_EPOCH)
+						.map(|d| d.as_millis())
+						.unwrap_or(0)
+				)
+			});
+			// Reject if a session with this ID already exists on disk.
+			if store
+				.load(&new_id)
+				.ok()
+				.is_some_and(|turns| !turns.is_empty())
+			{
+				eprintln!(
+					"[session] Session '{new_id}' already exists. Use /session switch {new_id} instead."
+				);
+			} else {
+				conversation_history.clear();
+				eprintln!("[session] Created new session '{new_id}'.");
+				*session_id = new_id;
+			}
+		}
+		_ => {
+			eprintln!("[session] Unknown subcommand: {sub}. Available: list, switch, new");
+		}
+	}
+}
+
+/// Format a unix-ms timestamp as a human-readable relative age.
+fn format_age(unix_ms: u64) -> String {
+	let now = now_unix_ms();
+	if unix_ms == 0 || now < unix_ms {
+		return "unknown".to_string();
+	}
+	let secs = (now - unix_ms) / 1000;
+	if secs < 60 {
+		"just now".to_string()
+	} else if secs < 3600 {
+		format!("{}m ago", secs / 60)
+	} else if secs < 86400 {
+		format!("{}h ago", secs / 3600)
+	} else {
+		format!("{}d ago", secs / 86400)
+	}
+}
+
+/// Resolve the readline history file path.
+fn readline_history_path() -> std::path::PathBuf {
+	let layout = LocalStorageLayout::from_env();
+	let dir = layout.session_history_dir;
+	dir.join(".readline_history")
+}
+
 /// Handle /switch command — list stored credentials, pick one.
 /// Returns `true` if the switch succeeded and the service was rebuilt.
-fn handle_switch_command(service: &mut RuntimeService, editor: &mut DefaultEditor) -> bool {
+fn handle_switch_command(
+	service: &mut RuntimeService,
+	editor: &mut Editor<RokuHelper, DefaultHistory>,
+) -> bool {
 	let auth_store = AuthStore::from_env();
 	let auth = match auth_store.load() {
 		Ok(Some(a)) if !a.credentials.is_empty() => a,

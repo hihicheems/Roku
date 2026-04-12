@@ -29,11 +29,13 @@ pub(crate) mod auth;
 mod api;
 mod bot;
 mod chat;
+mod completer;
 mod conversation;
 mod entry_registry;
 mod eval;
 mod memory_runtime_config;
 mod pending_loop_substrate;
+mod render;
 mod runtime;
 mod runtime_config;
 mod session_store;
@@ -636,19 +638,33 @@ where
 				let render_task = tokio::spawn(async move {
 					while let Some(event) = rx.recv().await {
 						match event {
-							roku_agent_runtime::LoopEvent::ToolStart { step, tool_name } => {
-								eprintln!("[tool] step {step} starting: {tool_name}");
+							roku_agent_runtime::LoopEvent::ToolStart {
+								tool_name,
+								args_summary,
+								..
+							} => {
+								eprintln!(
+									"{}",
+									crate::render::styled_tool_start(
+										&tool_name,
+										args_summary.as_deref(),
+									)
+								);
 							}
 							roku_agent_runtime::LoopEvent::ToolEnd {
-								step,
 								tool_name,
 								elapsed_ms,
+								result_summary,
+								..
 							} => {
-								if let Some(ms) = elapsed_ms {
-									eprintln!("[tool] step {step} done: {tool_name} ({ms}ms)");
-								} else {
-									eprintln!("[tool] step {step} done: {tool_name}");
-								}
+								eprintln!(
+									"{}",
+									crate::render::styled_tool_end(
+										&tool_name,
+										elapsed_ms,
+										result_summary.as_deref(),
+									)
+								);
 							}
 							roku_agent_runtime::LoopEvent::CompactTriggered {
 								step,

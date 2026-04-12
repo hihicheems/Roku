@@ -290,7 +290,14 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 									roku_agent_runtime::LoopEvent::ToolStart {
 										step,
 										tool_name,
-									} => Some(format!("⚙️ Step {step}: `{tool_name}`")),
+										args_summary,
+									} => {
+										let detail = args_summary
+											.as_deref()
+											.map(|s| format!(": {s}"))
+											.unwrap_or_default();
+										Some(format!("⚙️ Step {step}: `{tool_name}`{detail}"))
+									}
 									roku_agent_runtime::LoopEvent::ToolEnd { .. }
 									| roku_agent_runtime::LoopEvent::CompactTriggered { .. }
 									| roku_agent_runtime::LoopEvent::LlmTextDelta { .. }
