@@ -252,7 +252,9 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 					}
 					"/switch" => {
 						let _ = editor.add_history_entry(trimmed);
-						handle_switch_command(&mut service, &mut editor);
+						if handle_switch_command(&mut service, &mut editor) {
+							logged_out = false;
+						}
 						continue;
 					}
 					input if input.starts_with('/') => {
@@ -1115,24 +1117,29 @@ async fn run_first_time_setup() -> Result<(), String> {
 }
 
 /// Handle /switch command — list stored credentials, pick one.
-fn handle_switch_command(service: &mut RuntimeService, editor: &mut DefaultEditor) {
+/// Returns `true` if the switch succeeded and the service was rebuilt.
+fn handle_switch_command(service: &mut RuntimeService, editor: &mut DefaultEditor) -> bool {
 	let auth_store = AuthStore::from_env();
 	let auth = match auth_store.load() {
 		Ok(Some(a)) if !a.credentials.is_empty() => a,
 		_ => {
 			eprintln!("[switch] No stored credentials. Use /login first.");
-			return;
+			return false;
 		}
 	};
 
 	let mut providers: Vec<&String> = auth.credentials.keys().collect();
 	providers.sort();
-	if providers.len() < 2 {
+	if providers.len() < 2 && auth.active_provider.is_some() {
 		eprintln!(
 			"[switch] Only one credential stored ({}). Use /login to add another.",
 			providers.first().map(|s| s.as_str()).unwrap_or("?")
 		);
-		return;
+		return false;
+	}
+	if providers.is_empty() {
+		eprintln!("[switch] No stored credentials. Use /login first.");
+		return false;
 	}
 
 	eprintln!("[switch] Available providers:");
@@ -1158,7 +1165,7 @@ fn handle_switch_command(service: &mut RuntimeService, editor: &mut DefaultEdito
 				Ok(n) if n >= 1 && n <= providers.len() => n - 1,
 				_ => {
 					eprintln!("[switch] Invalid selection.");
-					return;
+					return false;
 				}
 			};
 			let target = providers[idx].clone();
@@ -1166,13 +1173,14 @@ fn handle_switch_command(service: &mut RuntimeService, editor: &mut DefaultEdito
 			updated.active_provider = Some(target.clone());
 			if let Err(e) = auth_store.save(&updated) {
 				eprintln!("[switch] Failed to update active provider: {e}");
-				return;
+				return false;
 			}
 			match rebuild_service() {
 				Ok(s) => {
 					*service = s;
 					eprintln!("[switch] Switched to {target}.");
 					print_auth_status();
+					return true;
 				}
 				Err(e) => {
 					eprintln!("[switch] Failed to rebuild service: {e}");
@@ -1183,4 +1191,5 @@ fn handle_switch_command(service: &mut RuntimeService, editor: &mut DefaultEdito
 		}
 		Err(_) => eprintln!("[switch] Cancelled."),
 	}
+	false
 }
