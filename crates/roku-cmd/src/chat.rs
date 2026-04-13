@@ -931,6 +931,10 @@ fn execute_turn(
 				// newline, waiting for the matching ToolEnd to complete the line.
 				// Stores the tool name so we only inline-complete the correct tool.
 				let mut pending_tool_name: Option<String> = None;
+				// Timestamp of the last tool event. The timer tick suppresses
+				// status redraws shortly after tool activity to avoid blank-line
+				// artifacts when rapid tool events interleave with the 500ms tick.
+				let mut last_tool_event = start_time;
 
 				// Helper: draw or refresh the status line.
 				macro_rules! show_status {
@@ -996,6 +1000,7 @@ fn execute_turn(
 									current_step = step;
 									current_tool = Some(tool_name.clone());
 									streaming_active = false;
+									last_tool_event = std::time::Instant::now();
 									let msg = crate::render::styled_tool_start(
 										&tool_name, args_summary.as_deref(),
 									);
@@ -1008,6 +1013,7 @@ fn execute_turn(
 								}
 								LoopEvent::ToolEnd { tool_name, elapsed_ms, result_summary, .. } => {
 									current_tool = None;
+									last_tool_event = std::time::Instant::now();
 									if is_matching_tool_end {
 										// Append completion suffix on same line.
 										let suffix = crate::render::styled_tool_end_suffix(
@@ -1078,10 +1084,14 @@ fn execute_turn(
 							// Periodic refresh: update elapsed time in the status line.
 							// Skip when streaming text is active (cursor is mid-line),
 							// when a ToolStart line is pending (would be overwritten),
-							// or when the approval prompt is visible.
+							// when the approval prompt is visible, or shortly after
+							// a tool event (avoids blank-line artifacts from status
+							// being shown and immediately cleared by the next tool).
 							if !streaming_active
 								&& pending_tool_name.is_none()
 								&& !crate::is_approval_active()
+								&& last_tool_event.elapsed()
+									>= std::time::Duration::from_secs(1)
 							{
 								show_status!();
 							}
