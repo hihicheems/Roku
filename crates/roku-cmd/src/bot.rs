@@ -481,17 +481,16 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 
 									// Update content message (LLM text only).
 									if content_dirty && !accumulated_text.is_empty() {
-										let display_text = roku_plugin_telegram::markdown::strip_tool_call_xml(
-											&accumulated_text,
-										);
+										let display_text =
+											roku_plugin_telegram::markdown::strip_tool_call_xml(
+												&accumulated_text,
+											);
 										let truncated = truncate_for_telegram(&display_text);
 										let client = Arc::clone(&bot_client);
 										if content_mid > 0 {
 											let mid = content_mid;
 											let _ = tokio::task::spawn_blocking(move || {
-												client.edit_message_text(
-													cid, mid, &truncated, None,
-												)
+												client.edit_message_text(cid, mid, &truncated, None)
 											})
 											.await;
 										} else {
@@ -593,10 +592,9 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 					&& let Some(client) = self.bot_client.as_ref()
 				{
 					use roku_plugin_telegram::markdown::{
-						chunk_message, markdown_to_telegram_html, TELEGRAM_MAX_MESSAGE_LEN,
+						TELEGRAM_MAX_MESSAGE_LEN, chunk_message, markdown_to_telegram_html,
 					};
-					let html =
-						markdown_to_telegram_html(&handler_response.response.message);
+					let html = markdown_to_telegram_html(&handler_response.response.message);
 					let chunks = chunk_message(&html, TELEGRAM_MAX_MESSAGE_LEN);
 
 					// First chunk edits the existing content message.
@@ -630,12 +628,8 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 								ss.prompt_tokens,
 								ss.output_tokens,
 							);
-							let _ = client.edit_message_text(
-								chat_id,
-								ss.progress_mid,
-								&summary,
-								None,
-							);
+							let _ =
+								client.edit_message_text(chat_id, ss.progress_mid, &summary, None);
 						}
 					}
 				}

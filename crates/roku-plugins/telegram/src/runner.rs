@@ -283,10 +283,7 @@ impl TelegramPollingRunner {
 						"skipping dispatch: response delivered via streaming edit",
 						[
 							("chat_id", chat_id.to_string()),
-							(
-								"request_id",
-								handler_response.response.request_id.0.clone(),
-							),
+							("request_id", handler_response.response.request_id.0.clone()),
 						],
 					);
 					return Ok(());
