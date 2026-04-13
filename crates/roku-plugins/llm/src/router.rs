@@ -288,8 +288,9 @@ impl LlmRouter {
 			)
 			.await;
 
-			// Ensure the forwarder finishes flushing before inspecting chunks_forwarded.
-			forwarder.abort();
+			// Let the forwarder drain naturally — attempt_tx was moved into stream()
+			// and is dropped when it returns, closing the channel. Aborting would
+			// lose buffered chunks and undercount chunks_forwarded.
 			let _ = forwarder.await;
 
 			match stream_result {
@@ -341,6 +342,7 @@ impl LlmRouter {
 					});
 				}
 				Err(_elapsed) => {
+					provider.record_failure(&self.resilience_policy);
 					return Err(LlmAdapterError::ProviderCallFailed {
 						provider: selected_model.provider.clone(),
 						model_id: selected_model.model_id.clone(),
