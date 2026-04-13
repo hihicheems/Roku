@@ -165,6 +165,19 @@ static INITIAL_LOG_LEVEL: std::sync::atomic::AtomicU8 =
 /// Global auto-approve flag for tool execution.
 static AUTO_APPROVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Set while the interactive approval prompt is visible. The render task's
+/// timer tick checks this and skips status redraws to avoid overwriting the
+/// approval text.
+static APPROVAL_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn is_approval_active() -> bool {
+	APPROVAL_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn set_approval_active(active: bool) {
+	APPROVAL_ACTIVE.store(active, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Mark that streaming output is in progress (no trailing newline).
 /// The next log line will prepend `\n` to separate from the stream.
 pub(crate) fn mark_streaming_output() {

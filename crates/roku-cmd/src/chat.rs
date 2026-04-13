@@ -1027,13 +1027,17 @@ fn execute_turn(
 								}
 							}
 
-							// Re-show status after non-streaming output.
-							show_status!();
+							// Re-show status after non-streaming output,
+							// unless the approval prompt is currently visible.
+							if !crate::is_approval_active() {
+								show_status!();
+							}
 						}
 						_ = tick.tick() => {
 							// Periodic refresh: update elapsed time in the status line.
-							// Skip when streaming text is active (cursor is mid-line).
-							if !streaming_active {
+							// Skip when streaming text is active (cursor is mid-line)
+							// or when the approval prompt is visible.
+							if !streaming_active && !crate::is_approval_active() {
 								show_status!();
 							}
 						}

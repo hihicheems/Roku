@@ -1308,20 +1308,26 @@ pub(crate) fn cli_approval_gate(
 				return roku_agent_runtime::ToolApprovalDecision::Approve;
 			}
 			use std::io::Write as _;
+			// Signal the render task to pause timer ticks while the prompt
+			// is visible. Use \r\n for raw-mode compatibility.
+			crate::set_approval_active(true);
 			let args_display = serde_json::to_string_pretty(arguments).unwrap_or_default();
-			eprintln!("\n[approval] Tool: {tool_name}");
+			eprint!("\r\n[approval] Tool: {tool_name}\r\n");
 			if !args_display.is_empty() && args_display != "null" {
 				let summary: String = args_display.chars().take(200).collect();
-				eprintln!("[approval] Arguments: {summary}");
+				eprint!(
+					"[approval] Arguments: {}\r\n",
+					summary.replace('\n', "\r\n")
+				);
 			}
 			eprint!("[approval] Allow? [y/N/a(auto)] ");
 			std::io::stderr().flush().ok();
 			let mut input = String::new();
-			if std::io::stdin().read_line(&mut input).is_ok() {
+			let decision = if std::io::stdin().read_line(&mut input).is_ok() {
 				let trimmed = input.trim();
 				if trimmed.eq_ignore_ascii_case("a") {
 					crate::toggle_auto_approve();
-					eprintln!("[approve] Auto-approve enabled for this session.");
+					eprint!("[approve] Auto-approve enabled for this session.\r\n");
 					roku_agent_runtime::ToolApprovalDecision::Approve
 				} else if trimmed.eq_ignore_ascii_case("y") {
 					roku_agent_runtime::ToolApprovalDecision::Approve
@@ -1334,7 +1340,9 @@ pub(crate) fn cli_approval_gate(
 				roku_agent_runtime::ToolApprovalDecision::Deny(
 					"User denied the operation.".to_string(),
 				)
-			}
+			};
+			crate::set_approval_active(false);
+			decision
 		},
 		catalog,
 	))
