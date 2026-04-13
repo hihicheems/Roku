@@ -162,6 +162,9 @@ impl InputReader {
 					let _ = terminal::disable_raw_mode();
 					let sub = run_selection(items, "");
 					let _ = terminal::enable_raw_mode();
+					// run_selection's prompt "\r\n" displaced cursor one line down.
+					// Move back up so redraw() updates the original prompt line.
+					let _ = execute!(tty, crossterm::cursor::MoveUp(1));
 					if let Some(idx) = sub
 						&& let Some(name) = names.get(idx)
 					{

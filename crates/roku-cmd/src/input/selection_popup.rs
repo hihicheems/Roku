@@ -252,7 +252,8 @@ fn clear_rows(tty: &mut std::fs::File, rows: u16) {
 }
 
 fn cleanup(tty: &mut std::fs::File, rows: u16) {
-	// Clear all rendered rows, move back to the top, then advance one line.
+	// Clear all rendered rows and move back to the first rendered row.
+	// Intentionally does NOT advance a line — callers handle their own newlines.
 	for i in 0..rows {
 		let _ = execute!(tty, Clear(ClearType::CurrentLine));
 		if i + 1 < rows {
@@ -262,7 +263,7 @@ fn cleanup(tty: &mut std::fs::File, rows: u16) {
 	if rows > 1 {
 		let _ = execute!(tty, crossterm::cursor::MoveUp(rows - 1));
 	}
-	let _ = execute!(tty, Print("\r\n"), Show);
+	let _ = execute!(tty, Print("\r"), Show);
 }
 
 // ---------------------------------------------------------------------------
