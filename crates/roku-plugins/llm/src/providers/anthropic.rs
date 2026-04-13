@@ -457,6 +457,12 @@ impl AnthropicProvider {
 				ThinkingEffort::None => 0,
 			};
 			if budget_tokens > 0 {
+				// Anthropic requires max_tokens >= budget_tokens (max_tokens is
+				// the total budget including thinking output). Bump it if needed.
+				let current_max = body["max_tokens"].as_u64().unwrap_or(max_tokens);
+				if current_max < budget_tokens + 1024 {
+					body["max_tokens"] = Value::from(budget_tokens + 1024);
+				}
 				body["thinking"] = serde_json::json!({
 					"type": "enabled",
 					"budget_tokens": budget_tokens,
