@@ -720,28 +720,41 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 						));
 
 						if edit_ok {
-							// Send remaining chunks; only mark delivered if all succeed.
-							let mut all_ok = true;
+							// First chunk delivered; mark streamed so dispatch
+							// won't send a duplicate (which also can't handle
+							// >4096 chars). Remaining chunks are best-effort.
+							handler_response.delivered_via_streaming = true;
+							let pm = if parse_mode.is_some() {
+								TelegramParseMode::Html
+							} else {
+								TelegramParseMode::PlainText
+							};
 							for chunk in chunks.iter().skip(1) {
 								let msg = TelegramOutboundMessage {
 									chat_id,
 									text: chunk.clone(),
-									parse_mode: if parse_mode.is_some() {
-										TelegramParseMode::Html
-									} else {
-										TelegramParseMode::PlainText
-									},
+									parse_mode: pm,
 									disable_web_page_preview: true,
 									reply_markup: None,
 								};
-								if client.send_message(&msg).is_err() {
-									all_ok = false;
-									break;
-								}
+								let _ = client.send_message(&msg);
 							}
-							if all_ok {
-								handler_response.delivered_via_streaming = true;
-							}
+						}
+
+						// Append artifacts/references as a separate plain
+						// message so they aren't lost when streaming bypasses
+						// the normal dispatch render path.
+						let artifacts = &handler_response.response.artifacts;
+						if !artifacts.is_empty() {
+							let artifact_text = artifacts.join("\n");
+							let msg = TelegramOutboundMessage {
+								chat_id,
+								text: artifact_text,
+								parse_mode: TelegramParseMode::PlainText,
+								disable_web_page_preview: true,
+								reply_markup: None,
+							};
+							let _ = client.send_message(&msg);
 						}
 					}
 
