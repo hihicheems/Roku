@@ -22,7 +22,8 @@
 //! Updates are dispatched as independent async tasks so that slow requests (multi-step agent
 //! execution, context compaction) do not block slash commands or other users.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use roku_common_types::{ApprovalDecision, ApprovalId, RequestEnvelope, RuntimeError};
@@ -115,6 +116,11 @@ impl TelegramPollingRunner {
 	{
 		let mut next_offset: Option<u64> = None;
 		let mut consecutive_poll_failures = 0_u32;
+		// Per-chat semaphore prevents concurrent handle_request calls for the
+		// same chat, which would race on session state. Control commands and
+		// callbacks bypass this lock since they are fast and stateless.
+		let chat_locks: Arc<Mutex<HashMap<i64, Arc<tokio::sync::Semaphore>>>> =
+			Arc::new(Mutex::new(HashMap::new()));
 
 		loop {
 			let client = Arc::clone(&self.client);
@@ -180,9 +186,11 @@ impl TelegramPollingRunner {
 				let client = Arc::clone(&self.client);
 				let connector = self.connector;
 				let render_options = self.render_options;
+				let locks = Arc::clone(&chat_locks);
 				tokio::spawn(async move {
 					if let Err(error) =
-						dispatch_update(handler, client, connector, render_options, update).await
+						dispatch_update(handler, client, connector, render_options, locks, update)
+							.await
 					{
 						log_telegram(
 							LogLevel::Error,
@@ -202,6 +210,7 @@ async fn dispatch_update<H>(
 	client: Arc<TelegramBotClient>,
 	connector: TelegramConnector,
 	render_options: TelegramRenderOptions,
+	chat_locks: Arc<Mutex<HashMap<i64, Arc<tokio::sync::Semaphore>>>>,
 	update: TelegramUpdate,
 ) -> Result<(), TelegramTransportError>
 where
@@ -231,6 +240,15 @@ where
 					("goal", truncate_for_log(&request.goal, 160)),
 				],
 			);
+			// Acquire per-chat semaphore to prevent concurrent requests on the
+			// same session. The lock is held for the duration of handle_request.
+			let sem = {
+				let mut locks = chat_locks.lock().unwrap_or_else(|e| e.into_inner());
+				Arc::clone(locks.entry(chat_id).or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(1))))
+			};
+			let _permit = sem.acquire().await.map_err(|_| {
+				TelegramTransportError::Api("chat semaphore closed".to_string())
+			})?;
 			let h = handler;
 			let result = tokio::task::spawn_blocking(move || h.handle_request(request))
 				.await
