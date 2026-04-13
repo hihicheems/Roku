@@ -336,6 +336,7 @@ pub struct AnthropicProvider {
 impl AnthropicProvider {
 	pub fn new(config: AnthropicConfig) -> Result<Self, ProviderCallError> {
 		let client = Client::builder()
+			.connect_timeout(std::time::Duration::from_secs(30))
 			.build()
 			.map_err(|e| ProviderCallError::non_retryable(format!("http client error: {e}")))?;
 		Ok(Self { client, config })
@@ -586,7 +587,19 @@ impl LlmProvider for AnthropicProvider {
 		let mut pending_tools: HashMap<u32, PendingToolUse> = HashMap::new();
 		let mut completed_tools: Vec<ToolCallBlock> = Vec::new();
 
-		while let Some(event_result) = stream.next().await {
+		let event_timeout = std::time::Duration::from_secs(120);
+
+		loop {
+			let event_result = match tokio::time::timeout(event_timeout, stream.next()).await {
+				Ok(Some(result)) => result,
+				Ok(None) => break,
+				Err(_) => {
+					stream_error = Some(ProviderCallError::retryable(
+						"SSE stream timed out waiting for next event".to_string(),
+					));
+					break;
+				}
+			};
 			let event = match event_result {
 				Ok(event) => event,
 				Err(error) => {
