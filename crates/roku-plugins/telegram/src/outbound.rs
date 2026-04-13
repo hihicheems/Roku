@@ -22,6 +22,7 @@ use crate::inbound::approval_callback_data;
 pub enum TelegramParseMode {
 	PlainText,
 	MarkdownV2,
+	Html,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

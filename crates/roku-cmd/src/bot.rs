@@ -530,8 +530,9 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 					);
 				}
 
-				// Edit-in-place: replace the streaming progress message with the
-				// clean final answer so dispatch_response can skip the duplicate.
+				// Edit-in-place: replace the streaming content message with the
+				// clean final answer (Markdown → HTML) so dispatch_response can
+				// skip the duplicate. Long responses are chunked at 4096 chars.
 				if content_mid > 0
 					&& matches!(
 						handler_response.response.status,
@@ -539,13 +540,35 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 					) && let Some(chat_id) = binding_chat_id(&binding_id)
 					&& let Some(client) = self.bot_client.as_ref()
 				{
-					let text = truncate_for_telegram(&handler_response.response.message);
-					match client.edit_message_text(chat_id, content_mid, &text, None) {
-						Ok(()) => {
-							handler_response.delivered_via_streaming = true;
-						}
-						Err(_) => {
-							// Edit failed — fall through to normal dispatch.
+					use roku_plugin_telegram::markdown::{
+						chunk_message, markdown_to_telegram_html, TELEGRAM_MAX_MESSAGE_LEN,
+					};
+					let html =
+						markdown_to_telegram_html(&handler_response.response.message);
+					let chunks = chunk_message(&html, TELEGRAM_MAX_MESSAGE_LEN);
+
+					// First chunk edits the existing content message.
+					let edit_ok = chunks
+						.first()
+						.map(|first| {
+							client
+								.edit_message_text(chat_id, content_mid, first, Some("HTML"))
+								.is_ok()
+						})
+						.unwrap_or(false);
+
+					if edit_ok {
+						handler_response.delivered_via_streaming = true;
+						// Remaining chunks are sent as new messages.
+						for chunk in chunks.iter().skip(1) {
+							let msg = TelegramOutboundMessage {
+								chat_id,
+								text: chunk.clone(),
+								parse_mode: TelegramParseMode::Html,
+								disable_web_page_preview: true,
+								reply_markup: None,
+							};
+							let _ = client.send_message(&msg);
 						}
 					}
 				}
@@ -1413,6 +1436,7 @@ fn telegram_parse_mode_label(mode: TelegramParseMode) -> &'static str {
 	match mode {
 		TelegramParseMode::PlainText => "PlainText",
 		TelegramParseMode::MarkdownV2 => "MarkdownV2",
+		TelegramParseMode::Html => "HTML",
 	}
 }
 
