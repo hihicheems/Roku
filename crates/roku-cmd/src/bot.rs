@@ -228,6 +228,16 @@ struct PendingRenameState {
 	target_session_id: String,
 }
 
+/// Truncates text to fit within Telegram's 4096-character message limit.
+fn truncate_for_telegram(text: &str) -> String {
+	const MAX: usize = 4096;
+	if text.len() <= MAX {
+		return text.to_string();
+	}
+	let end = text.ceil_char_boundary(MAX.saturating_sub(4));
+	format!("{}...", &text[..end])
+}
+
 /// Formats a live streaming progress message for display inside a single Telegram message.
 ///
 /// The output is plain text kept under Telegram's 4096-character limit. Sections are separated
@@ -317,7 +327,7 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 		// inside execute_tool_loop works correctly. rt.block_on alone would run
 		// the future on the driver thread where block_in_place panics.
 		let service_clone = self.service.clone();
-		let execution = std::thread::scope(|s| {
+		let (execution, streaming_message_id) = std::thread::scope(|s| {
 			s.spawn(|| {
 				let rt = tokio::runtime::Builder::new_multi_thread()
 					.enable_all()
@@ -438,40 +448,24 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 								}
 							}
 
-							// Final edit with the complete accumulated output.
-							if let Some(cid) = chat_id
-								&& message_id > 0
-							{
-								let status = format_streaming_progress(
-									current_step,
-									None,
-									&accumulated_text,
-									prompt_tokens,
-									output_tokens,
-								);
-								let client = Arc::clone(&bot_client);
-								let _ = tokio::task::spawn_blocking(move || {
-									client.edit_message_text(cid, message_id, &status, None)
-								})
-								.await;
-							}
-
 							// Stop the typing indicator loop.
 							typing_active.store(false, std::sync::atomic::Ordering::Relaxed);
 							if let Some(handle) = typing_handle {
 								let _ = handle.await;
 							}
+
+							message_id
 						});
 						let result = service
 							.execute_with_mode(request, RunMode::Normal, Some(&tx))
 							.await;
 						drop(tx);
-						render_task.await.ok();
-						result
+						let streaming_mid = render_task.await.unwrap_or(-1);
+						(result, streaming_mid)
 					})
 				} else {
 					let service = service_clone;
-					rt.spawn(async move { service.execute(request).await })
+					rt.spawn(async move { (service.execute(request).await, -1_i64) })
 				};
 				rt.block_on(handle)
 					.expect("telegram request task should not panic")
@@ -507,6 +501,27 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 						handler_response.response.message
 					);
 				}
+
+				// Edit-in-place: replace the streaming progress message with the
+				// clean final answer so dispatch_response can skip the duplicate.
+				if streaming_message_id > 0
+					&& matches!(
+						handler_response.response.status,
+						ResponseStatus::Succeeded | ResponseStatus::Failed
+					) && let Some(chat_id) = binding_chat_id(&binding_id)
+					&& let Some(client) = self.bot_client.as_ref()
+				{
+					let text = truncate_for_telegram(&handler_response.response.message);
+					match client.edit_message_text(chat_id, streaming_message_id, &text, None) {
+						Ok(()) => {
+							handler_response.delivered_via_streaming = true;
+						}
+						Err(_) => {
+							// Edit failed — fall through to normal dispatch.
+						}
+					}
+				}
+
 				Ok(handler_response)
 			}
 			Err(error) => {

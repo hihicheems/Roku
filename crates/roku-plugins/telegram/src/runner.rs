@@ -295,6 +295,20 @@ impl TelegramPollingRunner {
 	) -> Result<(), TelegramTransportError> {
 		match response {
 			Ok(handler_response) => {
+				if handler_response.delivered_via_streaming {
+					log_telegram(
+						LogLevel::Info,
+						"skipping dispatch: response delivered via streaming edit",
+						[
+							("chat_id", chat_id.to_string()),
+							(
+								"request_id",
+								handler_response.response.request_id.0.clone(),
+							),
+						],
+					);
+					return Ok(());
+				}
 				let response = &handler_response.response;
 				log_telegram(
 					LogLevel::Info,
