@@ -70,7 +70,6 @@ pub struct TelegramPollingRunner {
 	client: TelegramBotClient,
 	idle_backoff_ms: u64,
 	poll_error_log_threshold: u32,
-	progress_notices_enabled: bool,
 	render_options: TelegramRenderOptions,
 }
 
@@ -82,14 +81,12 @@ impl TelegramPollingRunner {
 	pub fn new(config: TelegramBotConfig) -> Result<Self, TelegramTransportError> {
 		let idle_backoff_ms = config.idle_backoff_ms;
 		let poll_error_log_threshold = config.poll_error_log_threshold;
-		let progress_notices_enabled = config.progress_notices_enabled;
 		let render_options = config.render_options();
 		Ok(Self {
 			connector: TelegramConnector,
 			client: TelegramBotClient::new(config)?,
 			idle_backoff_ms,
 			poll_error_log_threshold,
-			progress_notices_enabled,
 			render_options,
 		})
 	}
@@ -191,21 +188,6 @@ impl TelegramPollingRunner {
 						("goal", truncate_for_log(&request.goal, 160)),
 					],
 				);
-				if self.progress_notices_enabled
-					&& let Err(error) = self
-						.client
-						.send_message(&TelegramOutboundMessage::progress_notice(chat_id, &request))
-				{
-					log_telegram(
-						LogLevel::Warn,
-						"failed to send progress notice",
-						[
-							("chat_id", chat_id.to_string()),
-							("request_id", request.request_id.0.clone()),
-							("error", error.to_string()),
-						],
-					);
-				}
 				self.dispatch_response(chat_id, handler.handle_request(request))
 			}
 			Ok(TelegramInteraction::ControlCommand(command)) => {
@@ -422,7 +404,7 @@ mod tests {
 	}
 
 	#[test]
-	fn runner_captures_progress_notice_and_render_flags_from_config() {
+	fn runner_captures_render_flags_from_config() {
 		let runner = super::TelegramPollingRunner::new(TelegramBotConfig {
 			token: "token".to_string(),
 			api_base_url: "https://api.telegram.org".to_string(),
@@ -435,7 +417,6 @@ mod tests {
 		})
 		.expect("runner should build");
 
-		assert!(!runner.progress_notices_enabled);
 		assert!(runner.render_options.include_request_metadata);
 		assert!(runner.render_options.show_attachments);
 	}
