@@ -228,6 +228,15 @@ struct PendingRenameState {
 	target_session_id: String,
 }
 
+/// State returned by the streaming render_task for post-execution edits.
+struct StreamingState {
+	progress_mid: i64,
+	content_mid: i64,
+	prompt_tokens: u64,
+	output_tokens: u64,
+	elapsed: std::time::Duration,
+}
+
 /// Truncates text to fit within Telegram's 4096-character message limit.
 fn truncate_for_telegram(text: &str) -> String {
 	const MAX: usize = 4096;
@@ -266,6 +275,40 @@ fn format_progress_status(
 	}
 
 	parts.join("\n")
+}
+
+/// Formats a compact one-line execution summary for the progress message after completion.
+///
+/// Example: `✅ 12s · ↑6.1k ↓0.2k`
+fn format_compact_summary(
+	elapsed: std::time::Duration,
+	prompt_tokens: u64,
+	output_tokens: u64,
+) -> String {
+	let secs = elapsed.as_secs();
+	let duration = if secs >= 60 {
+		format!("{}m{}s", secs / 60, secs % 60)
+	} else {
+		format!("{secs}s")
+	};
+
+	let fmt_tokens = |n: u64| -> String {
+		if n >= 1000 {
+			format!("{:.1}k", n as f64 / 1000.0)
+		} else {
+			n.to_string()
+		}
+	};
+
+	let mut parts = vec![format!("\u{2705} {duration}")];
+	if prompt_tokens > 0 || output_tokens > 0 {
+		parts.push(format!(
+			"\u{2191}{} \u{2193}{}",
+			fmt_tokens(prompt_tokens),
+			fmt_tokens(output_tokens)
+		));
+	}
+	parts.join(" \u{00b7} ")
 }
 
 impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegramHandler {
@@ -308,7 +351,7 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 		// inside execute_tool_loop works correctly. rt.block_on alone would run
 		// the future on the driver thread where block_in_place panics.
 		let service_clone = self.service.clone();
-		let (execution, _progress_mid, content_mid) = std::thread::scope(|s| {
+		let (execution, streaming) = std::thread::scope(|s| {
 			s.spawn(|| {
 				let rt = tokio::runtime::Builder::new_multi_thread()
 					.enable_all()
@@ -323,6 +366,7 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 							tokio::sync::mpsc::unbounded_channel::<roku_agent_runtime::LoopEvent>();
 						// render_task returns (progress_message_id, content_message_id).
 						let render_task = tokio::spawn(async move {
+							let started_at = std::time::Instant::now();
 							let mut progress_mid: i64 = -1;
 							let mut content_mid: i64 = -1;
 
@@ -482,18 +526,24 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 								let _ = handle.await;
 							}
 
-							(progress_mid, content_mid)
+							StreamingState {
+								progress_mid,
+								content_mid,
+								prompt_tokens,
+								output_tokens,
+								elapsed: started_at.elapsed(),
+							}
 						});
 						let result = service
 							.execute_with_mode(request, RunMode::Normal, Some(&tx))
 							.await;
 						drop(tx);
-						let (p_mid, c_mid) = render_task.await.unwrap_or((-1, -1));
-						(result, p_mid, c_mid)
+						let streaming = render_task.await.ok();
+						(result, streaming)
 					})
 				} else {
 					let service = service_clone;
-					rt.spawn(async move { (service.execute(request).await, -1_i64, -1_i64) })
+					rt.spawn(async move { (service.execute(request).await, None) })
 				};
 				rt.block_on(handle)
 					.expect("telegram request task should not panic")
@@ -533,7 +583,9 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 				// Edit-in-place: replace the streaming content message with the
 				// clean final answer (Markdown → HTML) so dispatch_response can
 				// skip the duplicate. Long responses are chunked at 4096 chars.
-				if content_mid > 0
+				// Also edit the progress message to a compact summary.
+				if let Some(ref ss) = streaming
+					&& ss.content_mid > 0
 					&& matches!(
 						handler_response.response.status,
 						ResponseStatus::Succeeded | ResponseStatus::Failed
@@ -552,7 +604,7 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 						.first()
 						.map(|first| {
 							client
-								.edit_message_text(chat_id, content_mid, first, Some("HTML"))
+								.edit_message_text(chat_id, ss.content_mid, first, Some("HTML"))
 								.is_ok()
 						})
 						.unwrap_or(false);
@@ -569,6 +621,21 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 								reply_markup: None,
 							};
 							let _ = client.send_message(&msg);
+						}
+
+						// Edit progress message to compact execution summary.
+						if ss.progress_mid > 0 {
+							let summary = format_compact_summary(
+								ss.elapsed,
+								ss.prompt_tokens,
+								ss.output_tokens,
+							);
+							let _ = client.edit_message_text(
+								chat_id,
+								ss.progress_mid,
+								&summary,
+								None,
+							);
 						}
 					}
 				}
