@@ -443,9 +443,11 @@ impl LlmRouter {
 	}
 
 	fn select_model(&self, request: &GenerationRequest) -> Result<&ModelProfile, LlmAdapterError> {
-		// If model_override is set, try to find that model in the registered list first.
+		// If model_override is set and the model passes eligibility checks
+		// (risk tier, token budget, cost budget), prefer it over normal routing.
 		if let Some(override_id) = &request.model_override
 			&& let Some(model) = self.models.iter().find(|m| &m.model_id == override_id)
+			&& model.supports(request)
 		{
 			return Ok(model);
 		}

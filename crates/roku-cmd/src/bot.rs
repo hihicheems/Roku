@@ -255,7 +255,10 @@ fn format_streaming_progress(
 	if !text.is_empty() {
 		let max_text = 3600;
 		let display = if text.len() > max_text {
-			&text[text.len() - max_text..]
+			// Find a safe UTF-8 boundary near the desired offset.
+			let start = text.len() - max_text;
+			let safe_start = text.ceil_char_boundary(start);
+			&text[safe_start..]
 		} else {
 			text
 		};
