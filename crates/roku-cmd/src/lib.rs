@@ -779,6 +779,14 @@ where
 									"[compact] step {step} triggered (~{estimated_tokens} tokens)"
 								);
 							}
+							roku_agent_runtime::LoopEvent::CompactComplete {
+								elapsed_ms,
+								llm_succeeded,
+								..
+							} => {
+								let method = if llm_succeeded { "LLM" } else { "mechanical" };
+								eprintln!("[compact] completed ({method}, {elapsed_ms}ms)");
+							}
 							roku_agent_runtime::LoopEvent::LlmTextDelta { text, .. } => {
 								eprint!("{text}");
 							}

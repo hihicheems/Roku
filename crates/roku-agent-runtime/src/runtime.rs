@@ -726,15 +726,14 @@ impl GenericAgentRuntime {
 		messages: &mut Vec<roku_plugin_llm::Message>,
 		current_step_index: u32,
 		event_sender: Option<&crate::runtime_loop::LoopEventSender>,
+		system_prompt_len: usize,
 	) -> (u64, u64) {
 		// Truncate oversized tool results in messages.
 		let tool_result_max_chars = self.agent_runtime_config.r#loop.working_summary_max_chars;
 		crate::runtime_loop::truncate_large_tool_results(messages, tool_result_max_chars);
 
 		let threshold = self.agent_runtime_config.r#loop.compact_threshold_tokens();
-		let msg_tokens = crate::runtime_loop::estimate_message_tokens(messages);
-		let state_tokens = crate::runtime_loop::estimate_context_tokens(loop_state);
-		let estimated = msg_tokens.max(state_tokens);
+		let estimated = crate::runtime_loop::estimate_prompt_pressure(messages, system_prompt_len);
 		if estimated > threshold {
 			let _ = roku_common_types::emit_global_log(roku_common_types::LogRecord::new(
 				"roku-runtime-service",
@@ -757,22 +756,41 @@ impl GenericAgentRuntime {
 					.working_summary_max_chars,
 				..Default::default()
 			};
+			let compact_start = std::time::Instant::now();
 			// Compact conversation messages (preserve recent 5).
 			let retain_messages = 5_usize.max(compact_config.retain_tail_steps);
+			let llm_succeeded;
+			let compact_tokens;
 			if let Some(router) = self.route_router.as_deref() {
 				let (_, msg_pt, msg_ot) = crate::runtime_loop::compact_messages_with_llm(
 					messages,
 					retain_messages,
 					router,
+					&compact_config,
 				)
 				.await;
-				crate::runtime_loop::compact_history_with_llm(loop_state, &compact_config, router)
-					.await;
-				return (msg_pt, msg_ot);
+				let history_ok = crate::runtime_loop::compact_history_with_llm(
+					loop_state,
+					&compact_config,
+					router,
+				)
+				.await;
+				llm_succeeded = history_ok;
+				compact_tokens = (msg_pt, msg_ot);
 			} else {
 				crate::runtime_loop::compact_messages(messages, retain_messages);
 				crate::runtime_loop::compact_history(loop_state, &compact_config);
+				llm_succeeded = false;
+				compact_tokens = (0, 0);
 			}
+			if let Some(sender) = event_sender {
+				let _ = sender.send(crate::runtime_loop::LoopEvent::CompactComplete {
+					step: current_step_index,
+					llm_succeeded,
+					elapsed_ms: compact_start.elapsed().as_millis() as u64,
+				});
+			}
+			return compact_tokens;
 		}
 		(0, 0)
 	}
@@ -895,6 +913,7 @@ impl GenericAgentRuntime {
 				&loop_state.working_directory,
 				project_instruction.as_deref(),
 			);
+			let system_prompt_len = system_prompt.len();
 
 			let config = &self.agent_runtime_config.next_step;
 			let thinking_effort = request.thinking_effort.as_deref().and_then(|s| match s {
@@ -1319,7 +1338,8 @@ impl GenericAgentRuntime {
 				});
 
 				let elapsed = execution_elapsed_ms(&execution.result);
-				let raw_tool_output = raw_tool_output_from_result(&execution.result);
+				let raw_tool_output =
+					truncate_raw_tool_output(raw_tool_output_from_result(&execution.result));
 				let observation =
 					self.loop_observation_from_execution(&tool_name_owned, &execution.result);
 
@@ -1406,7 +1426,13 @@ impl GenericAgentRuntime {
 			}
 
 			let (compact_pt, compact_ot) = self
-				.maybe_compact(loop_state, &mut messages, current_step_index, event_sender)
+				.maybe_compact(
+					loop_state,
+					&mut messages,
+					current_step_index,
+					event_sender,
+					system_prompt_len,
+				)
 				.await;
 			total_prompt_tokens = total_prompt_tokens.saturating_add(compact_pt);
 			total_output_tokens = total_output_tokens.saturating_add(compact_ot);
@@ -2171,6 +2197,32 @@ fn truncate_tool_result_for_message(content: &str, max_chars: usize) -> String {
 		content.len(),
 		&content[tail_start..],
 	)
+}
+
+/// Truncate a raw tool output `Value` so it fits within `MAX_TOOL_RESULT_CHARS`.
+///
+/// - `Value::String` that exceeds the limit is head+tail truncated.
+/// - Objects/arrays whose JSON serialization exceeds the limit are replaced with
+///   a truncated string representation plus a note.
+/// - Small values pass through unchanged.
+fn truncate_raw_tool_output(value: Value) -> Value {
+	match &value {
+		Value::String(s) if s.len() > MAX_TOOL_RESULT_CHARS => {
+			Value::String(truncate_tool_result_for_message(s, MAX_TOOL_RESULT_CHARS))
+		}
+		Value::Object(_) | Value::Array(_) => {
+			let serialized = serde_json::to_string(&value).unwrap_or_default();
+			if serialized.len() > MAX_TOOL_RESULT_CHARS {
+				Value::String(truncate_tool_result_for_message(
+					&serialized,
+					MAX_TOOL_RESULT_CHARS,
+				))
+			} else {
+				value
+			}
+		}
+		_ => value,
+	}
 }
 
 fn awaiting_user_resume_prompt(
