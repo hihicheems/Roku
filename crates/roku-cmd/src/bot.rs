@@ -228,6 +228,55 @@ struct PendingRenameState {
 	target_session_id: String,
 }
 
+/// Formats a live streaming progress message for display inside a single Telegram message.
+///
+/// The output is plain text kept under Telegram's 4096-character limit. Sections are separated
+/// by a thin rule so the header, streamed text, and token summary read as distinct zones.
+fn format_streaming_progress(
+	step: u32,
+	tool: Option<&str>,
+	text: &str,
+	prompt_tokens: u64,
+	output_tokens: u64,
+) -> String {
+	let mut parts: Vec<String> = Vec::new();
+
+	if let Some(tool_name) = tool {
+		parts.push(format!(
+			"\u{2699}\u{fe0f} Step {} \u{2014} Running {}",
+			step, tool_name
+		));
+	} else if step > 0 {
+		parts.push(format!("\u{2699}\u{fe0f} Step {}", step));
+	} else {
+		parts.push("\u{23f3} Processing...".to_string());
+	}
+
+	if !text.is_empty() {
+		let max_text = 3600;
+		let display = if text.len() > max_text {
+			// Find a safe UTF-8 boundary near the desired offset.
+			let start = text.len() - max_text;
+			let safe_start = text.ceil_char_boundary(start);
+			&text[safe_start..]
+		} else {
+			text
+		};
+		parts.push("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}".to_string());
+		parts.push(display.to_string());
+	}
+
+	if prompt_tokens > 0 || output_tokens > 0 {
+		parts.push("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}".to_string());
+		parts.push(format!(
+			"\u{1f4ca} Tokens: {}/{}",
+			prompt_tokens, output_tokens
+		));
+	}
+
+	parts.join("\n")
+}
+
 impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegramHandler {
 	fn handle_request(
 		&self,
@@ -282,54 +331,135 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 						let (tx, mut rx) =
 							tokio::sync::mpsc::unbounded_channel::<roku_agent_runtime::LoopEvent>();
 						let render_task = tokio::spawn(async move {
+							// Lazily created on the first throttled edit so we don't
+							// duplicate the runner's progress notice.
+							let mut message_id: i64 = -1;
+
+							// Spawn a background loop that sends "typing" every 4 s while
+							// the agent is working, keeping the Telegram status indicator alive.
+							let typing_active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+							let typing_handle = if let Some(cid) = chat_id {
+								let client = Arc::clone(&bot_client);
+								let active = typing_active.clone();
+								Some(tokio::task::spawn_blocking(move || {
+									let mut ticks: u32 = 0;
+									while active.load(std::sync::atomic::Ordering::Relaxed) {
+										// Send typing action every ~4s (8 ticks × 500ms).
+										if ticks.is_multiple_of(8) {
+											let _ = client.send_chat_action(cid, "typing");
+										}
+										std::thread::sleep(std::time::Duration::from_millis(500));
+										ticks = ticks.wrapping_add(1);
+									}
+								}))
+							} else {
+								None
+							};
+
+							// Event consumer: accumulate state and throttle edits to <=1 per second.
+							let mut accumulated_text = String::new();
+							let mut current_step: u32 = 0;
+							let mut current_tool: Option<String> = None;
+							let mut prompt_tokens: u64 = 0;
+							let mut output_tokens: u64 = 0;
+							let mut last_edit =
+								std::time::Instant::now() - std::time::Duration::from_secs(2);
+
 							while let Some(event) = rx.recv().await {
-								// Only emit ToolStart notices. ToolEnd messages roughly double the
-								// message count for multi-step tasks and add little value while
-								// the final response makes the step outcome clear.
-								let text = match &event {
+								match &event {
+									roku_agent_runtime::LoopEvent::LlmTextDelta { text, step } => {
+										accumulated_text.push_str(text);
+										current_step = *step;
+									}
+									roku_agent_runtime::LoopEvent::LlmDecisionComplete {
+										..
+									} => {
+										current_tool = None;
+									}
 									roku_agent_runtime::LoopEvent::ToolStart {
 										step,
 										tool_name,
-										args_summary,
-									} => {
-										let detail = args_summary
-											.as_deref()
-											.map(|s| format!(": {s}"))
-											.unwrap_or_default();
-										Some(format!("⚙️ Step {step}: `{tool_name}`{detail}"))
-									}
-									roku_agent_runtime::LoopEvent::ToolEnd { .. }
-									| roku_agent_runtime::LoopEvent::CompactTriggered { .. }
-									| roku_agent_runtime::LoopEvent::LlmTextDelta { .. }
-									| roku_agent_runtime::LoopEvent::LlmDecisionComplete {
 										..
+									} => {
+										current_step = *step;
+										current_tool = Some(tool_name.clone());
 									}
-									| roku_agent_runtime::LoopEvent::StepComplete { .. }
-									| roku_agent_runtime::LoopEvent::TokenUsage { .. } => None,
-								};
-								if let (Some(chat_id), Some(text)) = (chat_id, text) {
-									let msg = TelegramOutboundMessage {
-										chat_id,
-										text,
-										parse_mode: TelegramParseMode::PlainText,
-										disable_web_page_preview: true,
-										reply_markup: None,
-									};
-									let client = Arc::clone(&bot_client);
-									let _ = tokio::task::spawn_blocking(move || {
-										if let Err(error) = client.send_message(&msg) {
-											let _ = emit_global_log(
-												LogRecord::new(
-													"roku-cmd",
-													LogLevel::Warn,
-													"failed to send tool progress message",
-												)
-												.with_field("error", error.to_string()),
-											);
-										}
-									})
-									.await;
+									roku_agent_runtime::LoopEvent::ToolEnd { .. } => {
+										current_tool = None;
+									}
+									roku_agent_runtime::LoopEvent::TokenUsage {
+										prompt_tokens: p,
+										output_tokens: o,
+										..
+									} => {
+										prompt_tokens += p;
+										output_tokens += o;
+									}
+									_ => {}
 								}
+
+								if let Some(cid) = chat_id
+									&& last_edit.elapsed() >= std::time::Duration::from_secs(1)
+								{
+									let status = format_streaming_progress(
+										current_step,
+										current_tool.as_deref(),
+										&accumulated_text,
+										prompt_tokens,
+										output_tokens,
+									);
+									let client = Arc::clone(&bot_client);
+									if message_id > 0 {
+										let mid = message_id;
+										let _ = tokio::task::spawn_blocking(move || {
+											client.edit_message_text(cid, mid, &status, None)
+										})
+										.await;
+									} else {
+										// First update: create the editable message.
+										let msg = TelegramOutboundMessage {
+											chat_id: cid,
+											text: status,
+											parse_mode: TelegramParseMode::PlainText,
+											disable_web_page_preview: true,
+											reply_markup: None,
+										};
+										if let Some(mid) = tokio::task::spawn_blocking(move || {
+											client.send_message_with_id(&msg).ok()
+										})
+										.await
+										.ok()
+										.flatten()
+										{
+											message_id = mid;
+										}
+									}
+									last_edit = std::time::Instant::now();
+								}
+							}
+
+							// Final edit with the complete accumulated output.
+							if let Some(cid) = chat_id
+								&& message_id > 0
+							{
+								let status = format_streaming_progress(
+									current_step,
+									None,
+									&accumulated_text,
+									prompt_tokens,
+									output_tokens,
+								);
+								let client = Arc::clone(&bot_client);
+								let _ = tokio::task::spawn_blocking(move || {
+									client.edit_message_text(cid, message_id, &status, None)
+								})
+								.await;
+							}
+
+							// Stop the typing indicator loop.
+							typing_active.store(false, std::sync::atomic::Ordering::Relaxed);
+							if let Some(handle) = typing_handle {
+								let _ = handle.await;
 							}
 						});
 						let result = service
@@ -2537,6 +2667,8 @@ mod tests {
 			goal: goal.to_string(),
 			planning_mode_hint: None,
 			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
 		}
 	}
 

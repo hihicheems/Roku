@@ -815,6 +815,8 @@ mod tests {
 			budget_tokens_remaining: 100_000,
 			budget_cost_remaining_usd: 10.0,
 			tools: None,
+			model_override: None,
+			thinking_effort: None,
 		};
 
 		let body = build_responses_request("gpt-4.1", &request, false, None);
@@ -842,6 +844,8 @@ mod tests {
 			budget_tokens_remaining: 100_000,
 			budget_cost_remaining_usd: 10.0,
 			tools: None,
+			model_override: None,
+			thinking_effort: None,
 		};
 
 		let body = build_responses_request("gpt-4.1", &request, false, None);
@@ -872,6 +876,8 @@ mod tests {
 			budget_tokens_remaining: 100_000,
 			budget_cost_remaining_usd: 10.0,
 			tools: None,
+			model_override: None,
+			thinking_effort: None,
 		};
 
 		let body = build_responses_request("gpt-4.1", &request, false, None);
@@ -899,6 +905,8 @@ mod tests {
 			budget_tokens_remaining: 100_000,
 			budget_cost_remaining_usd: 10.0,
 			tools: None,
+			model_override: None,
+			thinking_effort: None,
 		};
 
 		let body = build_responses_request("gpt-4.1", &request, false, None);
@@ -923,6 +931,8 @@ mod tests {
 			budget_tokens_remaining: 100_000,
 			budget_cost_remaining_usd: 10.0,
 			tools: None,
+			model_override: None,
+			thinking_effort: None,
 		};
 
 		let body = build_responses_request("gpt-4.1", &request, false, None);
@@ -945,6 +955,8 @@ mod tests {
 			budget_tokens_remaining: 100_000,
 			budget_cost_remaining_usd: 10.0,
 			tools: None,
+			model_override: None,
+			thinking_effort: None,
 		};
 
 		let body = build_responses_request("gpt-4.1", &request, false, Some("high"));
@@ -964,6 +976,8 @@ mod tests {
 			budget_tokens_remaining: 100_000,
 			budget_cost_remaining_usd: 10.0,
 			tools: None,
+			model_override: None,
+			thinking_effort: None,
 		};
 
 		let body = build_responses_request("gpt-4.1", &request, false, None);
@@ -988,6 +1002,8 @@ mod tests {
 				description: "Search the web".to_string(),
 				parameters: json!({"type": "object"}),
 			}]),
+			model_override: None,
+			thinking_effort: None,
 		};
 
 		let body = build_responses_request("gpt-4.1", &request, false, None);

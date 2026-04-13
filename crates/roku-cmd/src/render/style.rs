@@ -76,6 +76,42 @@ pub(crate) fn styled_tool_end(
 	}
 }
 
+/// Format a duration as a compact human-readable string: `5s`, `1m 22s`, `1h 02m 30s`.
+pub(crate) fn fmt_elapsed_compact(secs: u64) -> String {
+	if secs < 60 {
+		format!("{secs}s")
+	} else if secs < 3600 {
+		format!("{}m {:02}s", secs / 60, secs % 60)
+	} else {
+		format!(
+			"{}h {:02}m {:02}s",
+			secs / 3600,
+			(secs % 3600) / 60,
+			secs % 60
+		)
+	}
+}
+
+/// Styled working status indicator: `• Working (step 3 • 12s • esc to interrupt)`
+pub(crate) fn styled_working_status(
+	step: u32,
+	tool: Option<&str>,
+	elapsed: std::time::Duration,
+) -> String {
+	let time = fmt_elapsed_compact(elapsed.as_secs());
+	let body = match tool {
+		Some(name) => format!("Running {name} (step {step} • {time} • esc to interrupt)"),
+		None if step > 0 => format!("Working (step {step} • {time} • esc to interrupt)"),
+		None => format!("Working ({time} • esc to interrupt)"),
+	};
+	if no_color() {
+		return format!("• {body}");
+	}
+	let dot = "•".with(Color::DarkCyan).to_string();
+	let text = body.with(Color::DarkGrey).to_string();
+	format!("{dot} {text}")
+}
+
 /// Styled token/cost info line.
 pub(crate) fn styled_token_info(
 	prompt: u64,

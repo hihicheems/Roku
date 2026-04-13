@@ -795,6 +795,8 @@ fn plan_skill_creator(
 			budget_tokens_remaining: input.budget_tokens,
 			budget_cost_remaining_usd: 1.0,
 			tools: None,
+			model_override: None,
+			thinking_effort: None,
 		})
 		.map_err(|e| ToolFailure::terminal(format!("LLM error: {e}")))?;
 	parse_json_reply::<SkillCreatorExecutionPlan>(&response.output).ok_or_else(|| {
@@ -832,6 +834,8 @@ fn plan_script_execution(
 			budget_tokens_remaining: input.budget_tokens,
 			budget_cost_remaining_usd: 1.0,
 			tools: None,
+			model_override: None,
+			thinking_effort: None,
 		})
 		.map_err(|e| ToolFailure::terminal(format!("LLM error: {e}")))?;
 	parse_json_reply::<SkillExecutionPlan>(&response.output)

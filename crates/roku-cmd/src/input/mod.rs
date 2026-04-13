@@ -31,8 +31,10 @@ use std::path::PathBuf;
 use crossterm::cursor::Show;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
-use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
+use crossterm::style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor};
 use crossterm::terminal::{self, Clear, ClearType};
+
+use unicode_width::UnicodeWidthStr;
 
 use command_popup::CommandPopup;
 use history::History;
@@ -82,13 +84,27 @@ impl InputReader {
 		let mut buf = LineBuffer::new();
 		let mut popup_active = false;
 
-		// Print the prompt.
-		let _ = execute!(
-			tty,
-			SetForegroundColor(Color::DarkCyan),
-			Print(prompt),
-			ResetColor,
-		);
+		// Print the prompt with optional subtle background.
+		let use_bg = !crate::render::no_color();
+		if use_bg {
+			let _ = execute!(
+				tty,
+				SetBackgroundColor(Color::Rgb {
+					r: 40,
+					g: 40,
+					b: 44
+				}),
+				SetForegroundColor(Color::DarkCyan),
+				Print(prompt),
+			);
+		} else {
+			let _ = execute!(
+				tty,
+				SetForegroundColor(Color::DarkCyan),
+				Print(prompt),
+				ResetColor,
+			);
+		}
 		let prompt_len = prompt.len() as u16;
 
 		// Enter raw mode with an RAII guard so it is always restored, even on panic.
@@ -108,7 +124,7 @@ impl InputReader {
 			}
 			let _ = execute!(tty, crossterm::cursor::MoveUp(rows));
 		}
-		let _ = execute!(tty, Print("\r\n"), Show);
+		let _ = execute!(tty, ResetColor, Print("\r\n"), Show);
 
 		// Only forget the handle when it aliases fd 2 (stderr fallback);
 		// normal /dev/tty handles must be closed to avoid leaking fds.
@@ -310,14 +326,38 @@ impl InputReader {
 		prompt_len: u16,
 	) {
 		let (term_cols, _) = terminal::size().unwrap_or((80, 24));
+		let use_bg = !crate::render::no_color();
 
 		// Redraw the input text on the prompt line.
-		let _ = execute!(
-			tty,
-			crossterm::cursor::MoveToColumn(prompt_len),
-			Clear(ClearType::UntilNewLine),
-			Print(buf.content()),
-		);
+		if use_bg {
+			let _ = execute!(
+				tty,
+				crossterm::cursor::MoveToColumn(prompt_len),
+				Clear(ClearType::UntilNewLine),
+				SetBackgroundColor(Color::Rgb {
+					r: 40,
+					g: 40,
+					b: 44
+				}),
+				SetForegroundColor(Color::White),
+				Print(buf.content()),
+			);
+			// Fill the rest of the line with the background color.
+			let content_width = UnicodeWidthStr::width(buf.content());
+			let used = prompt_len as usize + content_width;
+			let remaining = (term_cols as usize).saturating_sub(used);
+			if remaining > 0 {
+				let _ = execute!(tty, Print(" ".repeat(remaining)));
+			}
+			let _ = execute!(tty, ResetColor);
+		} else {
+			let _ = execute!(
+				tty,
+				crossterm::cursor::MoveToColumn(prompt_len),
+				Clear(ClearType::UntilNewLine),
+				Print(buf.content()),
+			);
+		}
 
 		// Render popup below using relative movement.
 		let rows_drawn = if popup_active {

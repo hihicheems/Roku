@@ -223,6 +223,8 @@ impl TelegramConnector {
 			goal,
 			planning_mode_hint: None,
 			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
 		})
 	}
 

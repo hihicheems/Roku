@@ -120,6 +120,12 @@ pub struct RequestEnvelope {
 	#[serde(default)]
 	/// Short-term continuity only; long-term recall is injected through runtime-owned context.
 	pub conversation_history: Vec<ConversationTurn>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	/// Request a specific model by ID. The runtime will prefer this model when routing.
+	pub model_override: Option<String>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	/// Controls extended thinking budget. Parsed into ThinkingEffort by the runtime.
+	pub thinking_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

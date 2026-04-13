@@ -38,7 +38,7 @@ use tokio::sync::mpsc;
 use crate::router::{LlmProvider, LlmRouter};
 use crate::types::{
 	GenerationRequest, Message, ModelProfile, ProviderCallError, ProviderResponse, RiskTier,
-	RoutingPolicy, StreamChunk, ToolCallBlock, estimate_prompt_tokens,
+	RoutingPolicy, StreamChunk, ThinkingEffort, ToolCallBlock, estimate_prompt_tokens,
 };
 
 const ANTHROPIC_PROVIDER: &str = "anthropic";
@@ -446,6 +446,27 @@ impl AnthropicProvider {
 				.collect();
 			if !tool_defs.is_empty() {
 				body["tools"] = Value::Array(tool_defs);
+			}
+		}
+
+		if let Some(effort) = request.thinking_effort {
+			let budget_tokens: u64 = match effort {
+				ThinkingEffort::Low => 1024,
+				ThinkingEffort::Medium => 4096,
+				ThinkingEffort::High => 16384,
+				ThinkingEffort::None => 0,
+			};
+			if budget_tokens > 0 {
+				// Anthropic requires max_tokens >= budget_tokens (max_tokens is
+				// the total budget including thinking output). Bump it if needed.
+				let current_max = body["max_tokens"].as_u64().unwrap_or(max_tokens);
+				if current_max < budget_tokens + 1024 {
+					body["max_tokens"] = Value::from(budget_tokens + 1024);
+				}
+				body["thinking"] = serde_json::json!({
+					"type": "enabled",
+					"budget_tokens": budget_tokens,
+				});
 			}
 		}
 
@@ -1061,6 +1082,8 @@ mod tests {
 				description: "Fetch a URL".to_string(),
 				parameters: serde_json::json!({"type": "object", "properties": {"url": {"type": "string"}}}),
 			}]),
+			model_override: None,
+			thinking_effort: None,
 		};
 		let body = provider.build_request_body("claude-sonnet-4-5-20250514", &request, false);
 		assert_eq!(body["model"], "claude-sonnet-4-5-20250514");
@@ -1091,6 +1114,8 @@ mod tests {
 			budget_tokens_remaining: 50_000,
 			budget_cost_remaining_usd: 5.0,
 			tools: None,
+			model_override: None,
+			thinking_effort: None,
 		};
 		let body = provider.build_request_body("claude-sonnet-4-5-20250514", &request, true);
 		assert_eq!(body["stream"], true);
