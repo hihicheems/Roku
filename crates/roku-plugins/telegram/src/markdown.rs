@@ -117,7 +117,8 @@ pub fn markdown_to_telegram_html(md: &str) -> String {
 			&& let Some((link_text, url, end_pos)) = try_parse_link(&chars, i)
 		{
 			use std::fmt::Write;
-			let _ = write!(result, "<a href=\"{url}\">{link_text}</a>");
+			let safe_url = url.replace('"', "&quot;");
+			let _ = write!(result, "<a href=\"{safe_url}\">{link_text}</a>");
 			i = end_pos;
 			continue;
 		}
@@ -156,8 +157,12 @@ pub fn markdown_to_telegram_html(md: &str) -> String {
 			i = end_pos;
 			continue;
 		}
+		// Only treat _text_ as italic when _ is at a word boundary to avoid
+		// mangling identifiers like my_var_name.
 		if chars[i] == '_'
+			&& is_delimiter_boundary(&chars, i)
 			&& let Some((content, end_pos)) = try_parse_delimited(&chars, i, "_")
+			&& is_delimiter_boundary(&chars, end_pos.saturating_sub(1))
 		{
 			result.push_str("<i>");
 			result.push_str(&content);
@@ -271,9 +276,24 @@ fn preprocess_blocks(md: &str) -> String {
 	let mut lines: Vec<String> = Vec::new();
 	let raw_lines: Vec<&str> = md.lines().collect();
 	let mut idx = 0usize;
+	let mut in_code_fence = false;
 
 	while idx < raw_lines.len() {
 		let line = raw_lines[idx];
+		let trimmed = line.trim();
+
+		// Track fenced code blocks — skip all transformations inside them.
+		if trimmed.starts_with("```") {
+			in_code_fence = !in_code_fence;
+			lines.push(line.to_string());
+			idx += 1;
+			continue;
+		}
+		if in_code_fence {
+			lines.push(line.to_string());
+			idx += 1;
+			continue;
+		}
 
 		// Markdown table block
 		if is_markdown_table_header(line)
@@ -303,8 +323,6 @@ fn preprocess_blocks(md: &str) -> String {
 			lines.push("```".to_owned());
 			continue;
 		}
-
-		let trimmed = line.trim();
 
 		if let Some(rest) = strip_heading_prefix(trimmed) {
 			lines.push(format!("**{rest}**"));
@@ -454,6 +472,20 @@ fn is_horizontal_rule(line: &str) -> bool {
 	}
 	let ch = stripped.as_bytes()[0];
 	matches!(ch, b'-' | b'*' | b'_') && stripped.bytes().all(|b| b == ch)
+}
+
+/// Check whether the character at `pos` is at a word boundary — i.e. the
+/// adjacent character (before or after) is whitespace, punctuation, or absent.
+/// Used to prevent intraword underscore from triggering italic.
+fn is_delimiter_boundary(chars: &[char], pos: usize) -> bool {
+	let before = if pos > 0 { Some(chars[pos - 1]) } else { None };
+	let after = if pos + 1 < chars.len() {
+		Some(chars[pos + 1])
+	} else {
+		None
+	};
+	let is_word = |c: char| c.is_alphanumeric() || c == '_';
+	!matches!(before, Some(c) if is_word(c)) || !matches!(after, Some(c) if is_word(c))
 }
 
 fn try_parse_link(chars: &[char], pos: usize) -> Option<(String, String, usize)> {
@@ -758,5 +790,38 @@ mod tests {
 	fn strip_tool_use_variant() {
 		let input = "before <tool_use>call</tool_use> after";
 		assert_eq!(strip_tool_call_xml(input), "before  after");
+	}
+
+	// -- underscore intraword --
+
+	#[test]
+	fn underscore_intraword_not_italic() {
+		let html = markdown_to_telegram_html("my_var_name");
+		assert_eq!(html, "my_var_name");
+	}
+
+	#[test]
+	fn underscore_at_boundary_is_italic() {
+		let html = markdown_to_telegram_html("hello _world_ end");
+		assert_eq!(html, "hello <i>world</i> end");
+	}
+
+	// -- URL quote escaping --
+
+	#[test]
+	fn link_url_with_quotes_escaped() {
+		let html = markdown_to_telegram_html(r#"[click](https://x.com/a"b)"#);
+		assert!(html.contains("&quot;"));
+		assert!(html.contains("<a href="));
+	}
+
+	// -- code fence in preprocess --
+
+	#[test]
+	fn heading_inside_code_fence_preserved() {
+		let input = "```\n# Not a heading\n```";
+		let html = markdown_to_telegram_html(input);
+		assert!(html.contains("# Not a heading"));
+		assert!(!html.contains("<b>"));
 	}
 }

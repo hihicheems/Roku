@@ -237,6 +237,16 @@ struct StreamingState {
 	elapsed: std::time::Duration,
 }
 
+/// Treat an `edit_message_text` result as successful if the edit went through
+/// OR if Telegram returned "message is not modified" (content already matches).
+fn is_edit_ok(result: Result<(), roku_plugin_telegram::TelegramTransportError>) -> bool {
+	match result {
+		Ok(()) => true,
+		Err(e) if e.to_string().contains("not modified") => true,
+		Err(_) => false,
+	}
+}
+
 /// Truncates text to fit within Telegram's 4096-character message limit.
 fn truncate_for_telegram(text: &str) -> String {
 	const MAX: usize = 4096;
@@ -684,57 +694,76 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 				}
 
 				// Edit-in-place: replace the streaming content message with the
-				// clean final answer (Markdown → HTML) so dispatch_response can
-				// skip the duplicate. Long responses are chunked at 4096 chars.
+				// clean final answer so dispatch_response can skip the duplicate.
 				// Also edit the progress message to a compact summary.
 				if let Some(ref ss) = streaming
-					&& ss.content_mid > 0
 					&& matches!(
 						handler_response.response.status,
 						ResponseStatus::Succeeded | ResponseStatus::Failed
 					) && let Some(chat_id) = binding_chat_id(&binding_id)
 					&& let Some(client) = self.bot_client.as_ref()
 				{
-					use roku_plugin_telegram::markdown::{
-						TELEGRAM_MAX_MESSAGE_LEN, chunk_message, markdown_to_telegram_html,
-					};
-					let html = markdown_to_telegram_html(&handler_response.response.message);
-					let chunks = chunk_message(&html, TELEGRAM_MAX_MESSAGE_LEN);
+					// Content edit-in-place (only if a content message was created).
+					if ss.content_mid > 0 {
+						use roku_plugin_telegram::markdown::{
+							TELEGRAM_MAX_MESSAGE_LEN, chunk_message, markdown_to_telegram_html,
+						};
+						let html = markdown_to_telegram_html(&handler_response.response.message);
 
-					// First chunk edits the existing content message.
-					let edit_ok = chunks
-						.first()
-						.map(|first| {
-							client
-								.edit_message_text(chat_id, ss.content_mid, first, Some("HTML"))
-								.is_ok()
-						})
-						.unwrap_or(false);
+						// Use HTML only when the response fits in one message to
+						// avoid split-tag issues; fall back to plain text for
+						// chunked responses.
+						let (chunks, parse_mode) = if html.len() <= TELEGRAM_MAX_MESSAGE_LEN {
+							(vec![html], Some("HTML"))
+						} else {
+							(
+								chunk_message(
+									&handler_response.response.message,
+									TELEGRAM_MAX_MESSAGE_LEN,
+								),
+								None,
+							)
+						};
 
-					if edit_ok {
-						handler_response.delivered_via_streaming = true;
-						// Remaining chunks are sent as new messages.
-						for chunk in chunks.iter().skip(1) {
-							let msg = TelegramOutboundMessage {
-								chat_id,
-								text: chunk.clone(),
-								parse_mode: TelegramParseMode::Html,
-								disable_web_page_preview: true,
-								reply_markup: None,
-							};
-							let _ = client.send_message(&msg);
+						let edit_ok = is_edit_ok(client.edit_message_text(
+							chat_id,
+							ss.content_mid,
+							chunks.first().map_or("", String::as_str),
+							parse_mode,
+						));
+
+						if edit_ok {
+							// Send remaining chunks; only mark delivered if all succeed.
+							let mut all_ok = true;
+							for chunk in chunks.iter().skip(1) {
+								let msg = TelegramOutboundMessage {
+									chat_id,
+									text: chunk.clone(),
+									parse_mode: if parse_mode.is_some() {
+										TelegramParseMode::Html
+									} else {
+										TelegramParseMode::PlainText
+									},
+									disable_web_page_preview: true,
+									reply_markup: None,
+								};
+								if client.send_message(&msg).is_err() {
+									all_ok = false;
+									break;
+								}
+							}
+							if all_ok {
+								handler_response.delivered_via_streaming = true;
+							}
 						}
+					}
 
-						// Edit progress message to compact execution summary.
-						if ss.progress_mid > 0 {
-							let summary = format_compact_summary(
-								ss.elapsed,
-								ss.prompt_tokens,
-								ss.output_tokens,
-							);
-							let _ =
-								client.edit_message_text(chat_id, ss.progress_mid, &summary, None);
-						}
+					// Always update progress to compact summary when streaming
+					// was active, even if no content message was created.
+					if ss.progress_mid > 0 {
+						let summary =
+							format_compact_summary(ss.elapsed, ss.prompt_tokens, ss.output_tokens);
+						let _ = client.edit_message_text(chat_id, ss.progress_mid, &summary, None);
 					}
 				}
 
