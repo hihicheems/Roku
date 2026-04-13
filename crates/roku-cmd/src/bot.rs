@@ -399,8 +399,7 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 								}
 
 								if let Some(cid) = chat_id
-									&& last_edit.elapsed()
-										>= std::time::Duration::from_secs(1)
+									&& last_edit.elapsed() >= std::time::Duration::from_secs(1)
 								{
 									let status = format_streaming_progress(
 										current_step,
@@ -425,13 +424,12 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 											disable_web_page_preview: true,
 											reply_markup: None,
 										};
-										if let Some(mid) =
-											tokio::task::spawn_blocking(move || {
-												client.send_message_with_id(&msg).ok()
-											})
-											.await
-											.ok()
-											.flatten()
+										if let Some(mid) = tokio::task::spawn_blocking(move || {
+											client.send_message_with_id(&msg).ok()
+										})
+										.await
+										.ok()
+										.flatten()
 										{
 											message_id = mid;
 										}
