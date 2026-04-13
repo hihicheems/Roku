@@ -1015,12 +1015,15 @@ fn execute_turn(
 										);
 										eprint!("{suffix}\r\n");
 										pending_tool_name = None;
-									} else {
-										let msg = crate::render::styled_tool_end(
-											&tool_name, elapsed_ms, result_summary.as_deref(),
-										);
-										eprint!("{msg}\r\n");
+										// Skip status reprint — avoids blank-line noise
+										// during rapid sequential tool completions. The
+										// timer tick will show status if there's a gap.
+										continue;
 									}
+									let msg = crate::render::styled_tool_end(
+										&tool_name, elapsed_ms, result_summary.as_deref(),
+									);
+									eprint!("{msg}\r\n");
 								}
 								LoopEvent::CompactTriggered { step, estimated_tokens } => {
 									eprint!("[compact] step {step} triggered (~{estimated_tokens} tokens)\r\n");
