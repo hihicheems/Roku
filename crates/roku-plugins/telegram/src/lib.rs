@@ -16,6 +16,7 @@
 
 mod client;
 mod inbound;
+pub mod markdown;
 mod outbound;
 mod runner;
 
