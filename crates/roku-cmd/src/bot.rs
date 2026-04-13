@@ -331,27 +331,9 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 						let (tx, mut rx) =
 							tokio::sync::mpsc::unbounded_channel::<roku_agent_runtime::LoopEvent>();
 						let render_task = tokio::spawn(async move {
-							// Send the initial progress placeholder and capture its message_id
-							// so we can edit it in-place rather than posting new messages.
-							let message_id = if let Some(cid) = chat_id {
-								let initial_msg = TelegramOutboundMessage {
-									chat_id: cid,
-									text: "⏳ Processing...".to_string(),
-									parse_mode: TelegramParseMode::PlainText,
-									disable_web_page_preview: true,
-									reply_markup: None,
-								};
-								let client = Arc::clone(&bot_client);
-								tokio::task::spawn_blocking(move || {
-									client.send_message_with_id(&initial_msg)
-								})
-								.await
-								.ok()
-								.and_then(|r| r.ok())
-								.unwrap_or(-1)
-							} else {
-								-1
-							};
+							// Lazily created on the first throttled edit so we don't
+							// duplicate the runner's progress notice.
+							let mut message_id: i64 = -1;
 
 							// Spawn a background loop that sends "typing" every 4 s while
 							// the agent is working, keeping the Telegram status indicator alive.
@@ -360,9 +342,14 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 								let client = Arc::clone(&bot_client);
 								let active = typing_active.clone();
 								Some(tokio::task::spawn_blocking(move || {
+									let mut ticks: u32 = 0;
 									while active.load(std::sync::atomic::Ordering::Relaxed) {
-										let _ = client.send_chat_action(cid, "typing");
-										std::thread::sleep(std::time::Duration::from_secs(4));
+										// Send typing action every ~4s (8 ticks × 500ms).
+										if ticks.is_multiple_of(8) {
+											let _ = client.send_chat_action(cid, "typing");
+										}
+										std::thread::sleep(std::time::Duration::from_millis(500));
+										ticks = ticks.wrapping_add(1);
 									}
 								}))
 							} else {
@@ -412,8 +399,8 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 								}
 
 								if let Some(cid) = chat_id
-									&& message_id > 0 && last_edit.elapsed()
-									>= std::time::Duration::from_secs(1)
+									&& last_edit.elapsed()
+										>= std::time::Duration::from_secs(1)
 								{
 									let status = format_streaming_progress(
 										current_step,
@@ -423,11 +410,32 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 										output_tokens,
 									);
 									let client = Arc::clone(&bot_client);
-									let mid = message_id;
-									let _ = tokio::task::spawn_blocking(move || {
-										client.edit_message_text(cid, mid, &status, None)
-									})
-									.await;
+									if message_id > 0 {
+										let mid = message_id;
+										let _ = tokio::task::spawn_blocking(move || {
+											client.edit_message_text(cid, mid, &status, None)
+										})
+										.await;
+									} else {
+										// First update: create the editable message.
+										let msg = TelegramOutboundMessage {
+											chat_id: cid,
+											text: status,
+											parse_mode: TelegramParseMode::PlainText,
+											disable_web_page_preview: true,
+											reply_markup: None,
+										};
+										if let Some(mid) =
+											tokio::task::spawn_blocking(move || {
+												client.send_message_with_id(&msg).ok()
+											})
+											.await
+											.ok()
+											.flatten()
+										{
+											message_id = mid;
+										}
+									}
 									last_edit = std::time::Instant::now();
 								}
 							}

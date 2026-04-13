@@ -1053,11 +1053,11 @@ fn execute_turn(
 						// as a key event instead of SIGINT.
 						let is_esc = key.code == crossterm::event::KeyCode::Esc;
 						let is_ctrl_c = key.code == crossterm::event::KeyCode::Char('c')
-							&& key.modifiers
+							&& key
+								.modifiers
 								.contains(crossterm::event::KeyModifiers::CONTROL);
 						if is_esc || is_ctrl_c {
-							esc_flag
-								.store(true, std::sync::atomic::Ordering::Relaxed);
+							esc_flag.store(true, std::sync::atomic::Ordering::Relaxed);
 							break;
 						}
 					}
