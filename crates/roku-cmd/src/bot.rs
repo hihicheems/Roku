@@ -228,53 +228,191 @@ struct PendingRenameState {
 	target_session_id: String,
 }
 
-/// Formats a live streaming progress message for display inside a single Telegram message.
-///
-/// The output is plain text kept under Telegram's 4096-character limit. Sections are separated
-/// by a thin rule so the header, streamed text, and token summary read as distinct zones.
-fn format_streaming_progress(
-	step: u32,
-	tool: Option<&str>,
-	text: &str,
+/// State returned by the streaming render_task for post-execution edits.
+struct StreamingState {
+	progress_mid: i64,
+	content_mid: i64,
+	prompt_tokens: u64,
+	output_tokens: u64,
+	elapsed: std::time::Duration,
+}
+
+/// Treat an `edit_message_text` result as successful if the edit went through
+/// OR if Telegram returned "message is not modified" (content already matches).
+fn is_edit_ok(result: Result<(), roku_plugin_telegram::TelegramTransportError>) -> bool {
+	match result {
+		Ok(()) => true,
+		Err(e) if e.to_string().contains("not modified") => true,
+		Err(_) => false,
+	}
+}
+
+/// Truncates text to fit within Telegram's 4096-character message limit.
+fn truncate_for_telegram(text: &str) -> String {
+	const MAX: usize = 4096;
+	if text.len() <= MAX {
+		return text.to_string();
+	}
+	let end = text.ceil_char_boundary(MAX.saturating_sub(4));
+	format!("{}...", &text[..end])
+}
+
+/// Per-tool progress entry tracked by the render_task.
+struct ToolProgressEntry {
+	name: String,
+	summary: String,
+	started_at: std::time::Instant,
+	elapsed_ms: Option<u64>,
+	finished: bool,
+}
+
+/// Render per-tool progress lines with a footer showing elapsed and tokens.
+fn render_progress(
+	tools: &[ToolProgressEntry],
+	started_at: std::time::Instant,
 	prompt_tokens: u64,
 	output_tokens: u64,
 ) -> String {
-	let mut parts: Vec<String> = Vec::new();
+	let mut lines = Vec::new();
 
-	if let Some(tool_name) = tool {
-		parts.push(format!(
-			"\u{2699}\u{fe0f} Step {} \u{2014} Running {}",
-			step, tool_name
-		));
-	} else if step > 0 {
-		parts.push(format!("\u{2699}\u{fe0f} Step {}", step));
+	if tools.is_empty() {
+		lines.push("\u{23f3} Processing...".to_string());
+	} else if tools.len() <= 5 {
+		for tool in tools {
+			lines.push(format_tool_line(tool));
+		}
 	} else {
-		parts.push("\u{23f3} Processing...".to_string());
+		// Collapse older finished tools, keep last 2 finished + all in-progress.
+		let finished_count = tools.iter().filter(|t| t.finished).count();
+		let collapse_count = finished_count.saturating_sub(2);
+		if collapse_count > 0 {
+			let collapsed_ms: u64 = tools
+				.iter()
+				.filter(|t| t.finished)
+				.take(collapse_count)
+				.filter_map(|t| t.elapsed_ms)
+				.sum();
+			let dur = if collapsed_ms > 0 {
+				format!(" ({})", format_duration_compact_ms(collapsed_ms))
+			} else {
+				String::new()
+			};
+			lines.push(format!("\u{22ef} {collapse_count} tools done{dur}"));
+		}
+		let mut finished_seen = 0usize;
+		for tool in tools {
+			if tool.finished {
+				finished_seen += 1;
+				if finished_seen <= collapse_count {
+					continue;
+				}
+			}
+			lines.push(format_tool_line(tool));
+		}
 	}
 
-	if !text.is_empty() {
-		let max_text = 3600;
-		let display = if text.len() > max_text {
-			// Find a safe UTF-8 boundary near the desired offset.
-			let start = text.len() - max_text;
-			let safe_start = text.ceil_char_boundary(start);
-			&text[safe_start..]
-		} else {
-			text
-		};
-		parts.push("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}".to_string());
-		parts.push(display.to_string());
-	}
-
+	// Footer: elapsed · tokens
+	let elapsed = format_duration_compact(started_at.elapsed());
+	let mut footer_parts = vec![elapsed];
 	if prompt_tokens > 0 || output_tokens > 0 {
-		parts.push("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}".to_string());
-		parts.push(format!(
-			"\u{1f4ca} Tokens: {}/{}",
-			prompt_tokens, output_tokens
+		footer_parts.push(format!(
+			"\u{2191}{} \u{2193}{}",
+			format_token_count(prompt_tokens),
+			format_token_count(output_tokens)
 		));
 	}
+	lines.push(format!(
+		"\u{2733}\u{fe0f} {}",
+		footer_parts.join(" \u{00b7} ")
+	));
 
-	parts.join("\n")
+	lines.join("\n")
+}
+
+fn format_tool_line(t: &ToolProgressEntry) -> String {
+	let emoji = tool_emoji(&t.name);
+	let summary_part = if t.summary.is_empty() {
+		String::new()
+	} else {
+		let truncated: String = t.summary.chars().take(50).collect();
+		let ellipsis = if t.summary.chars().count() > 50 {
+			"\u{2026}"
+		} else {
+			""
+		};
+		format!(" {truncated}{ellipsis}")
+	};
+
+	if t.finished {
+		// Skip duration display for very fast tools (<50ms) to reduce noise.
+		let dur = t
+			.elapsed_ms
+			.filter(|&ms| ms >= 50)
+			.map(|ms| format!(" {}", format_duration_compact_ms(ms)))
+			.unwrap_or_default();
+		format!("\u{2705} {emoji} {}{summary_part}{dur}", t.name)
+	} else {
+		let elapsed = format_duration_compact(t.started_at.elapsed());
+		format!("\u{23f3} {emoji} {}{summary_part} {elapsed}", t.name)
+	}
+}
+
+fn tool_emoji(name: &str) -> &'static str {
+	match name {
+		"Bash" => "\u{1f4bb}",
+		"Read" => "\u{1f4d6}",
+		"Write" => "\u{270d}\u{fe0f}",
+		"Edit" => "\u{1f527}",
+		"ListDir" => "\u{1f4c2}",
+		"Inspect" | "Exists" => "\u{1f50d}",
+		"web_search" => "\u{1f50d}",
+		"web_fetch" => "\u{1f4c4}",
+		"python_run" => "\u{1f40d}",
+		"table_query" | "table_edit" => "\u{1f4ca}",
+		_ => "\u{26a1}",
+	}
+}
+
+fn format_duration_compact(d: std::time::Duration) -> String {
+	let secs = d.as_secs();
+	if secs < 1 {
+		format!("{}ms", d.as_millis())
+	} else if secs < 60 {
+		format!("{}.{}s", secs, d.subsec_millis() / 100)
+	} else {
+		format!("{}m{}s", secs / 60, secs % 60)
+	}
+}
+
+fn format_duration_compact_ms(ms: u64) -> String {
+	format_duration_compact(std::time::Duration::from_millis(ms))
+}
+
+fn format_token_count(n: u64) -> String {
+	if n >= 1000 {
+		format!("{:.1}k", n as f64 / 1000.0)
+	} else {
+		n.to_string()
+	}
+}
+
+/// Formats a compact one-line execution summary for the progress message after completion.
+///
+/// Example: `✅ 12.3s · ↑6.1k ↓0.2k`
+fn format_compact_summary(
+	elapsed: std::time::Duration,
+	prompt_tokens: u64,
+	output_tokens: u64,
+) -> String {
+	let mut parts = vec![format!("\u{2705} {}", format_duration_compact(elapsed))];
+	if prompt_tokens > 0 || output_tokens > 0 {
+		parts.push(format!(
+			"\u{2191}{} \u{2193}{}",
+			format_token_count(prompt_tokens),
+			format_token_count(output_tokens)
+		));
+	}
+	parts.join(" \u{00b7} ")
 }
 
 impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegramHandler {
@@ -317,7 +455,7 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 		// inside execute_tool_loop works correctly. rt.block_on alone would run
 		// the future on the driver thread where block_in_place panics.
 		let service_clone = self.service.clone();
-		let execution = std::thread::scope(|s| {
+		let (execution, streaming) = std::thread::scope(|s| {
 			s.spawn(|| {
 				let rt = tokio::runtime::Builder::new_multi_thread()
 					.enable_all()
@@ -330,13 +468,34 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 					rt.spawn(async move {
 						let (tx, mut rx) =
 							tokio::sync::mpsc::unbounded_channel::<roku_agent_runtime::LoopEvent>();
+						// render_task returns (progress_message_id, content_message_id).
 						let render_task = tokio::spawn(async move {
-							// Lazily created on the first throttled edit so we don't
-							// duplicate the runner's progress notice.
-							let mut message_id: i64 = -1;
+							let started_at = std::time::Instant::now();
+							let mut progress_mid: i64 = -1;
+							let mut content_mid: i64 = -1;
 
-							// Spawn a background loop that sends "typing" every 4 s while
-							// the agent is working, keeping the Telegram status indicator alive.
+							// Immediately create the progress message.
+							if let Some(cid) = chat_id {
+								let msg = TelegramOutboundMessage {
+									chat_id: cid,
+									text: "\u{23f3} Processing...".to_string(),
+									parse_mode: TelegramParseMode::PlainText,
+									disable_web_page_preview: true,
+									reply_markup: None,
+								};
+								let client = Arc::clone(&bot_client);
+								if let Some(mid) = tokio::task::spawn_blocking(move || {
+									client.send_message_with_id(&msg).ok()
+								})
+								.await
+								.ok()
+								.flatten()
+								{
+									progress_mid = mid;
+								}
+							}
+
+							// Spawn a background loop that sends "typing" every 4 s.
 							let typing_active = Arc::new(std::sync::atomic::AtomicBool::new(true));
 							let typing_handle = if let Some(cid) = chat_id {
 								let client = Arc::clone(&bot_client);
@@ -344,7 +503,6 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 								Some(tokio::task::spawn_blocking(move || {
 									let mut ticks: u32 = 0;
 									while active.load(std::sync::atomic::Ordering::Relaxed) {
-										// Send typing action every ~4s (8 ticks × 500ms).
 										if ticks.is_multiple_of(8) {
 											let _ = client.send_chat_action(cid, "typing");
 										}
@@ -356,104 +514,110 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 								None
 							};
 
-							// Event consumer: accumulate state and throttle edits to <=1 per second.
+							// Event consumer with 1-second tick-driven flush.
+							// Events accumulate dirty flags via `continue`; the
+							// interval tick is the sole flush trigger so updates
+							// happen reliably every second.
 							let mut accumulated_text = String::new();
-							let mut current_step: u32 = 0;
-							let mut current_tool: Option<String> = None;
+							let mut tool_entries: Vec<ToolProgressEntry> = Vec::new();
 							let mut prompt_tokens: u64 = 0;
 							let mut output_tokens: u64 = 0;
-							let mut last_edit =
-								std::time::Instant::now() - std::time::Duration::from_secs(2);
+							let mut content_dirty = false;
+							let mut tick =
+								tokio::time::interval(std::time::Duration::from_secs(1));
 
-							while let Some(event) = rx.recv().await {
-								match &event {
-									roku_agent_runtime::LoopEvent::LlmTextDelta { text, step } => {
-										accumulated_text.push_str(text);
-										current_step = *step;
+							loop {
+								tokio::select! {
+									event = rx.recv() => {
+										let Some(event) = event else { break };
+										match &event {
+											roku_agent_runtime::LoopEvent::LlmTextDelta { text, .. } => {
+												accumulated_text.push_str(text);
+												content_dirty = true;
+											}
+											roku_agent_runtime::LoopEvent::LlmDecisionComplete { .. } => {}
+											roku_agent_runtime::LoopEvent::ToolStart { tool_name, args_summary, .. } => {
+												tool_entries.push(ToolProgressEntry {
+													name: tool_name.clone(),
+													summary: args_summary.clone().unwrap_or_default(),
+													started_at: std::time::Instant::now(),
+													elapsed_ms: None,
+													finished: false,
+												});
+											}
+											roku_agent_runtime::LoopEvent::ToolEnd { tool_name, elapsed_ms, .. } => {
+												if let Some(entry) = tool_entries.iter_mut().rev().find(|e| !e.finished && e.name == *tool_name) {
+													entry.finished = true;
+													entry.elapsed_ms = *elapsed_ms;
+												}
+											}
+											roku_agent_runtime::LoopEvent::TokenUsage { prompt_tokens: p, output_tokens: o, .. } => {
+												prompt_tokens += p;
+												output_tokens += o;
+											}
+											_ => {}
+										}
+										// Don't flush on events — accumulate and wait for tick.
+										continue;
 									}
-									roku_agent_runtime::LoopEvent::LlmDecisionComplete {
-										..
-									} => {
-										current_tool = None;
+									_ = tick.tick() => {
+										// Footer elapsed always changes; fall through to flush.
 									}
-									roku_agent_runtime::LoopEvent::ToolStart {
-										step,
-										tool_name,
-										..
-									} => {
-										current_step = *step;
-										current_tool = Some(tool_name.clone());
-									}
-									roku_agent_runtime::LoopEvent::ToolEnd { .. } => {
-										current_tool = None;
-									}
-									roku_agent_runtime::LoopEvent::TokenUsage {
-										prompt_tokens: p,
-										output_tokens: o,
-										..
-									} => {
-										prompt_tokens += p;
-										output_tokens += o;
-									}
-									_ => {}
 								}
 
-								if let Some(cid) = chat_id
-									&& last_edit.elapsed() >= std::time::Duration::from_secs(1)
-								{
-									let status = format_streaming_progress(
-										current_step,
-										current_tool.as_deref(),
-										&accumulated_text,
-										prompt_tokens,
-										output_tokens,
-									);
-									let client = Arc::clone(&bot_client);
-									if message_id > 0 {
-										let mid = message_id;
+								// Flush (only reached on tick, events `continue` above).
+								if let Some(cid) = chat_id {
+									// Always refresh progress (footer elapsed ticks up).
+									if progress_mid > 0 {
+										let status = render_progress(
+											&tool_entries,
+											started_at,
+											prompt_tokens,
+											output_tokens,
+										);
+										let client = Arc::clone(&bot_client);
+										let mid = progress_mid;
 										let _ = tokio::task::spawn_blocking(move || {
 											client.edit_message_text(cid, mid, &status, None)
 										})
 										.await;
-									} else {
-										// First update: create the editable message.
-										let msg = TelegramOutboundMessage {
-											chat_id: cid,
-											text: status,
-											parse_mode: TelegramParseMode::PlainText,
-											disable_web_page_preview: true,
-											reply_markup: None,
-										};
-										if let Some(mid) = tokio::task::spawn_blocking(move || {
-											client.send_message_with_id(&msg).ok()
-										})
-										.await
-										.ok()
-										.flatten()
-										{
-											message_id = mid;
-										}
 									}
-									last_edit = std::time::Instant::now();
-								}
-							}
 
-							// Final edit with the complete accumulated output.
-							if let Some(cid) = chat_id
-								&& message_id > 0
-							{
-								let status = format_streaming_progress(
-									current_step,
-									None,
-									&accumulated_text,
-									prompt_tokens,
-									output_tokens,
-								);
-								let client = Arc::clone(&bot_client);
-								let _ = tokio::task::spawn_blocking(move || {
-									client.edit_message_text(cid, message_id, &status, None)
-								})
-								.await;
+									if content_dirty && !accumulated_text.is_empty() {
+										let display_text =
+											roku_plugin_telegram::markdown::strip_tool_call_xml(
+												&accumulated_text,
+											);
+										let truncated = truncate_for_telegram(&display_text);
+										let client = Arc::clone(&bot_client);
+										if content_mid > 0 {
+											let mid = content_mid;
+											let _ = tokio::task::spawn_blocking(move || {
+												client.edit_message_text(cid, mid, &truncated, None)
+											})
+											.await;
+										} else {
+											let msg = TelegramOutboundMessage {
+												chat_id: cid,
+												text: truncated,
+												parse_mode: TelegramParseMode::PlainText,
+												disable_web_page_preview: true,
+												reply_markup: None,
+											};
+											if let Some(mid) =
+												tokio::task::spawn_blocking(move || {
+													client.send_message_with_id(&msg).ok()
+												})
+												.await
+												.ok()
+												.flatten()
+											{
+												content_mid = mid;
+											}
+										}
+										content_dirty = false;
+									}
+								}
 							}
 
 							// Stop the typing indicator loop.
@@ -461,17 +625,25 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 							if let Some(handle) = typing_handle {
 								let _ = handle.await;
 							}
+
+							StreamingState {
+								progress_mid,
+								content_mid,
+								prompt_tokens,
+								output_tokens,
+								elapsed: started_at.elapsed(),
+							}
 						});
 						let result = service
 							.execute_with_mode(request, RunMode::Normal, Some(&tx))
 							.await;
 						drop(tx);
-						render_task.await.ok();
-						result
+						let streaming = render_task.await.ok();
+						(result, streaming)
 					})
 				} else {
 					let service = service_clone;
-					rt.spawn(async move { service.execute(request).await })
+					rt.spawn(async move { (service.execute(request).await, None) })
 				};
 				rt.block_on(handle)
 					.expect("telegram request task should not panic")
@@ -507,6 +679,94 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 						handler_response.response.message
 					);
 				}
+
+				// Edit-in-place: replace the streaming content message with the
+				// clean final answer so dispatch_response can skip the duplicate.
+				// Also edit the progress message to a compact summary.
+				if let Some(ref ss) = streaming
+					&& matches!(
+						handler_response.response.status,
+						ResponseStatus::Succeeded | ResponseStatus::Failed
+					) && let Some(chat_id) = binding_chat_id(&binding_id)
+					&& let Some(client) = self.bot_client.as_ref()
+				{
+					// Content edit-in-place (only if a content message was created).
+					if ss.content_mid > 0 {
+						use roku_plugin_telegram::markdown::{
+							TELEGRAM_MAX_MESSAGE_LEN, chunk_message, markdown_to_telegram_html,
+						};
+						let html = markdown_to_telegram_html(&handler_response.response.message);
+
+						// Use HTML only when the response fits in one message to
+						// avoid split-tag issues; fall back to plain text for
+						// chunked responses.
+						let (chunks, parse_mode) = if html.len() <= TELEGRAM_MAX_MESSAGE_LEN {
+							(vec![html], Some("HTML"))
+						} else {
+							(
+								chunk_message(
+									&handler_response.response.message,
+									TELEGRAM_MAX_MESSAGE_LEN,
+								),
+								None,
+							)
+						};
+
+						let edit_ok = is_edit_ok(client.edit_message_text(
+							chat_id,
+							ss.content_mid,
+							chunks.first().map_or("", String::as_str),
+							parse_mode,
+						));
+
+						if edit_ok {
+							// First chunk delivered; mark streamed so dispatch
+							// won't send a duplicate (which also can't handle
+							// >4096 chars). Remaining chunks are best-effort.
+							handler_response.delivered_via_streaming = true;
+							let pm = if parse_mode.is_some() {
+								TelegramParseMode::Html
+							} else {
+								TelegramParseMode::PlainText
+							};
+							for chunk in chunks.iter().skip(1) {
+								let msg = TelegramOutboundMessage {
+									chat_id,
+									text: chunk.clone(),
+									parse_mode: pm,
+									disable_web_page_preview: true,
+									reply_markup: None,
+								};
+								let _ = client.send_message(&msg);
+							}
+						}
+
+						// Append artifacts/references as a separate plain
+						// message so they aren't lost when streaming bypasses
+						// the normal dispatch render path.
+						let artifacts = &handler_response.response.artifacts;
+						if !artifacts.is_empty() {
+							let artifact_text = artifacts.join("\n");
+							let msg = TelegramOutboundMessage {
+								chat_id,
+								text: artifact_text,
+								parse_mode: TelegramParseMode::PlainText,
+								disable_web_page_preview: true,
+								reply_markup: None,
+							};
+							let _ = client.send_message(&msg);
+						}
+					}
+
+					// Always update progress to compact summary when streaming
+					// was active, even if no content message was created.
+					if ss.progress_mid > 0 {
+						let summary =
+							format_compact_summary(ss.elapsed, ss.prompt_tokens, ss.output_tokens);
+						let _ = client.edit_message_text(chat_id, ss.progress_mid, &summary, None);
+					}
+				}
+
 				Ok(handler_response)
 			}
 			Err(error) => {
@@ -1370,6 +1630,7 @@ fn telegram_parse_mode_label(mode: TelegramParseMode) -> &'static str {
 	match mode {
 		TelegramParseMode::PlainText => "PlainText",
 		TelegramParseMode::MarkdownV2 => "MarkdownV2",
+		TelegramParseMode::Html => "HTML",
 	}
 }
 

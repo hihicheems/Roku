@@ -459,6 +459,7 @@ fn parse_mode_label(mode: TelegramParseMode) -> Option<&'static str> {
 	match mode {
 		TelegramParseMode::PlainText => None,
 		TelegramParseMode::MarkdownV2 => Some("MarkdownV2"),
+		TelegramParseMode::Html => Some("HTML"),
 	}
 }
 

@@ -22,6 +22,7 @@ use crate::inbound::approval_callback_data;
 pub enum TelegramParseMode {
 	PlainText,
 	MarkdownV2,
+	Html,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +38,10 @@ pub struct TelegramOutboundMessage {
 pub struct TelegramHandlerResponse {
 	pub response: ResponseEnvelope,
 	pub reply_markup: Option<TelegramReplyMarkup>,
+	/// When `true`, the response text was already delivered to the user by
+	/// editing a streaming progress message in-place. `dispatch_response`
+	/// should skip sending a duplicate message.
+	pub delivered_via_streaming: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -149,6 +154,7 @@ impl From<ResponseEnvelope> for TelegramHandlerResponse {
 		Self {
 			response,
 			reply_markup: None,
+			delivered_via_streaming: false,
 		}
 	}
 }
