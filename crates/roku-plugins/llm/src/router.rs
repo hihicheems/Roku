@@ -342,11 +342,32 @@ impl LlmRouter {
 					});
 				}
 				Err(_elapsed) => {
-					provider.record_failure(&self.resilience_policy);
-					return Err(LlmAdapterError::ProviderCallFailed {
+					let attempts_used = attempt_index.saturating_add(1);
+					let opened_circuit = provider.record_failure(&self.resilience_policy);
+					let any_chunks = chunks_forwarded.load(Ordering::Relaxed) > 0;
+
+					// Treat timeout like a retryable error — retry if no chunks sent.
+					if any_chunks || opened_circuit || attempts_used >= total_attempts {
+						return Err(LlmAdapterError::ProviderCallFailed {
+							provider: selected_model.provider.clone(),
+							model_id: selected_model.model_id.clone(),
+							message: format!(
+								"streaming overall timeout exceeded (300s) after {attempts_used} attempts"
+							),
+						});
+					}
+
+					let backoff_ms =
+						backoff_for_attempt(attempt_index, &self.resilience_policy);
+					if backoff_ms > 0 {
+						tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+					}
+					last_error = Some(LlmAdapterError::ProviderCallFailed {
 						provider: selected_model.provider.clone(),
 						model_id: selected_model.model_id.clone(),
-						message: "streaming overall timeout exceeded (300s)".to_string(),
+						message: format!(
+							"streaming overall timeout exceeded (300s) after {attempts_used} attempts"
+						),
 					});
 				}
 			}
