@@ -762,20 +762,21 @@ impl GenericAgentRuntime {
 			let llm_succeeded;
 			let compact_tokens;
 			if let Some(router) = self.route_router.as_deref() {
-				let (_, msg_pt, msg_ot) = crate::runtime_loop::compact_messages_with_llm(
-					messages,
-					retain_messages,
-					router,
-					&compact_config,
-				)
-				.await;
+				let (msg_llm_ok, msg_pt, msg_ot) =
+					crate::runtime_loop::compact_messages_with_llm(
+						messages,
+						retain_messages,
+						router,
+						&compact_config,
+					)
+					.await;
 				let history_ok = crate::runtime_loop::compact_history_with_llm(
 					loop_state,
 					&compact_config,
 					router,
 				)
 				.await;
-				llm_succeeded = history_ok;
+				llm_succeeded = msg_llm_ok && history_ok;
 				compact_tokens = (msg_pt, msg_ot);
 			} else {
 				crate::runtime_loop::compact_messages(messages, retain_messages);
