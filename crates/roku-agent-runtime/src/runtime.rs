@@ -967,7 +967,23 @@ impl GenericAgentRuntime {
 					(text, tool_calls)
 				});
 				let llm_result = router.generate_streaming(&gen_request, tx).await;
-				let (text, tool_calls) = accumulator.await.unwrap_or_default();
+				let (mut text, tool_calls) = accumulator.await.unwrap_or_default();
+
+				// Fallback: if the provider returned text but no streaming deltas
+				// reached the accumulator (e.g. SSE delivered text only in
+				// `response.completed`), emit a synthetic delta so the render
+				// task can display the response.
+				if text.is_empty()
+					&& let Ok(ref resp) = llm_result
+					&& !resp.output.is_empty()
+				{
+					text.clone_from(&resp.output);
+					let _ = sender.send(crate::runtime_loop::LoopEvent::LlmTextDelta {
+						step: current_step_index,
+						text: resp.output.clone(),
+					});
+				}
+
 				let _ = sender.send(crate::runtime_loop::LoopEvent::LlmDecisionComplete {
 					step: current_step_index,
 				});

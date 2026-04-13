@@ -411,7 +411,7 @@ fn handle_turn_interactive(
 	model_override: Option<&str>,
 	thinking_effort: Option<&str>,
 ) {
-	let (result, _request_id, turn_tokens) = dispatch_and_record(
+	let (result, _request_id, turn_tokens, text_streamed) = dispatch_and_record(
 		rt,
 		service,
 		store,
@@ -463,11 +463,17 @@ fn handle_turn_interactive(
 	};
 	match result {
 		Ok(TurnResult::Completed(response)) => {
+			// When the render task didn't stream any text (e.g. the LLM
+			// produced only tool calls and no text deltas), print the
+			// final response here so it isn't silently lost.
+			if !json_mode && !text_streamed && !response.is_empty() {
+				eprintln!("{}", render::render_final_response(&response));
+			}
 			emit_response(&response, "succeeded");
 		}
 		Ok(TurnResult::AwaitingUser(question)) => {
-			if !json_mode {
-				eprintln!("[agent is asking for input]");
+			if !json_mode && !text_streamed && !question.is_empty() {
+				eprintln!("{}", render::render_final_response(&question));
 			}
 			emit_response(&question, "awaiting_user");
 
@@ -480,7 +486,7 @@ fn handle_turn_interactive(
 						}
 						reader.add_history_entry(reply);
 
-						let (inner_result, _, inner_tokens) = dispatch_and_record(
+						let (inner_result, _, inner_tokens, inner_streamed) = dispatch_and_record(
 							rt,
 							service,
 							store,
@@ -508,12 +514,15 @@ fn handle_turn_interactive(
 						}
 						match inner_result {
 							Ok(TurnResult::Completed(response)) => {
+								if !json_mode && !inner_streamed && !response.is_empty() {
+									eprintln!("{}", render::render_final_response(&response));
+								}
 								emit_response(&response, "succeeded");
 								break;
 							}
 							Ok(TurnResult::AwaitingUser(q)) => {
-								if !json_mode {
-									eprintln!("[agent is asking for input]");
+								if !json_mode && !inner_streamed && !q.is_empty() {
+									eprintln!("{}", render::render_final_response(&q));
 								}
 								emit_response(&q, "awaiting_user");
 							}
@@ -685,7 +694,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 		let goal = trimmed.to_string();
 
 		let json_mode = options.json;
-		let (result, request_id, tokens) = dispatch_and_record(
+		let (result, request_id, tokens, _text_streamed) = dispatch_and_record(
 			rt,
 			&service,
 			&store,
@@ -774,8 +783,8 @@ fn write_json_stdout(resp: &PipeResponse) {
 /// Execute a turn and record both user message and assistant response in history.
 /// Persists new turns to the session store. On cancel/error, history is not modified.
 ///
-/// Returns `(Result<TurnResult>, request_id, TurnTokens)` so callers can track
-/// token usage and correlate the response with the `RequestEnvelope` sent to the runtime.
+/// Returns `(Result<TurnResult>, request_id, TurnTokens, bool)` so callers can track
+/// token usage and whether the render task streamed LLM text.
 fn dispatch_and_record(
 	rt: &tokio::runtime::Runtime,
 	service: &RuntimeService,
@@ -787,11 +796,11 @@ fn dispatch_and_record(
 	json_mode: bool,
 	model_override: Option<&str>,
 	thinking_effort: Option<&str>,
-) -> (Result<TurnResult, CommandError>, String, TurnTokens) {
+) -> (Result<TurnResult, CommandError>, String, TurnTokens, bool) {
 	let seq = next_cli_request_sequence();
 	let request_id = format!("req-{seq}");
 
-	let (turn_result, tokens) = match execute_turn(
+	let (turn_result, tokens, text_streamed) = match execute_turn(
 		rt,
 		service,
 		session_id,
@@ -803,8 +812,8 @@ fn dispatch_and_record(
 		model_override,
 		thinking_effort,
 	) {
-		Ok(pair) => pair,
-		Err(e) => return (Err(e), request_id, TurnTokens::default()),
+		Ok(triple) => triple,
+		Err(e) => return (Err(e), request_id, TurnTokens::default(), false),
 	};
 	let result = turn_result;
 
@@ -832,13 +841,13 @@ fn dispatch_and_record(
 		TurnResult::Cancelled => {}
 	}
 
-	(Ok(result), request_id, tokens)
+	(Ok(result), request_id, tokens, text_streamed)
 }
 
 /// Execute a single chat turn with Ctrl+C cancellation support.
 ///
-/// Returns `Ok((TurnResult, TurnTokens))` where `TurnTokens` holds the prompt/output
-/// token counts from the `TokenUsage` LoopEvent emitted by the runtime.
+/// Returns `Ok((TurnResult, TurnTokens, bool))` where `TurnTokens` holds the prompt/output
+/// token counts and the bool indicates whether the render task streamed any LLM text.
 fn execute_turn(
 	rt: &tokio::runtime::Runtime,
 	service: &RuntimeService,
@@ -850,13 +859,18 @@ fn execute_turn(
 	request_id: &str,
 	model_override_arg: Option<&str>,
 	thinking_effort_arg: Option<&str>,
-) -> Result<(TurnResult, TurnTokens), CommandError> {
+) -> Result<(TurnResult, TurnTokens, bool), CommandError> {
 	rt.block_on(async {
 		let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LoopEvent>();
 
 		// Shared token accumulator: the render task writes, execute_turn reads after join.
 		let captured_tokens = std::sync::Arc::new(std::sync::Mutex::new(TurnTokens::default()));
 		let captured_tokens_task = captured_tokens.clone();
+
+		// Tracks whether the render task streamed any LLM text to the terminal.
+		// When false, the caller should print the response message directly.
+		let text_was_streamed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let text_streamed_flag = text_was_streamed.clone();
 
 		let render_task = if json_mode {
 			// JSON mode: emit typed JSONL event lines to stdout + capture tokens.
@@ -977,6 +991,10 @@ fn execute_turn(
 									streaming_active = true;
 									let rendered = stream_renderer.push(&text);
 									if !rendered.is_empty() {
+										text_streamed_flag.store(
+											true,
+											std::sync::atomic::Ordering::Relaxed,
+										);
 										crate::mark_streaming_output();
 										eprint!("{}", rendered.replace('\n', "\r\n"));
 										let _ = io::stderr().flush();
@@ -1094,17 +1112,18 @@ fn execute_turn(
 				render_task.await.ok();
 
 				let tokens = captured_tokens.lock().map(|g| g.clone()).unwrap_or_default();
+				let streamed = text_was_streamed.load(std::sync::atomic::Ordering::Relaxed);
 				if let Ok(Some(_pending)) = service.pending_loop(session_id) {
-					Ok((TurnResult::AwaitingUser(response.message), tokens))
+					Ok((TurnResult::AwaitingUser(response.message), tokens, streamed))
 				} else {
-					Ok((TurnResult::Completed(response.message), tokens))
+					Ok((TurnResult::Completed(response.message), tokens, streamed))
 				}
 			}
 			_ = tokio::signal::ctrl_c() => {
 				drop(tx);
 				render_task.await.ok();
 				let _ = service.clear_pending_loop(session_id);
-				Ok((TurnResult::Cancelled, TurnTokens::default()))
+				Ok((TurnResult::Cancelled, TurnTokens::default(), false))
 			}
 			_ = async {
 				loop {
@@ -1115,7 +1134,7 @@ fn execute_turn(
 				drop(tx);
 				render_task.await.ok();
 				let _ = service.clear_pending_loop(session_id);
-				Ok((TurnResult::Cancelled, TurnTokens::default()))
+				Ok((TurnResult::Cancelled, TurnTokens::default(), false))
 			}
 		};
 
