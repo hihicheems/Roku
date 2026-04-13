@@ -736,9 +736,13 @@ impl GenericAgentRuntime {
 		let state_tokens = crate::runtime_loop::estimate_context_tokens(loop_state);
 		let estimated = msg_tokens.max(state_tokens);
 		if estimated > threshold {
-			eprintln!(
-				"Context compact triggered: estimated {estimated} tokens exceeds threshold {threshold}"
-			);
+			let _ = roku_common_types::emit_global_log(roku_common_types::LogRecord::new(
+				"roku-runtime-service",
+				roku_common_types::LogLevel::Info,
+				format!(
+					"context compact triggered: estimated {estimated} tokens exceeds threshold {threshold}"
+				),
+			));
 			if let Some(sender) = event_sender {
 				let _ = sender.send(crate::runtime_loop::LoopEvent::CompactTriggered {
 					step: current_step_index,
