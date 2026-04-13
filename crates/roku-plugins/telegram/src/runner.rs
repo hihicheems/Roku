@@ -240,20 +240,30 @@ where
 					("goal", truncate_for_log(&request.goal, 160)),
 				],
 			);
-			// Acquire per-chat semaphore to prevent concurrent requests on the
-			// same session. The lock is held for the duration of handle_request.
+			// Try to acquire per-chat semaphore. If another request is already
+			// running for this chat, reply "busy" instead of queueing unboundedly.
 			let sem = {
 				let mut locks = chat_locks.lock().unwrap_or_else(|e| e.into_inner());
 				Arc::clone(locks.entry(chat_id).or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(1))))
 			};
-			let _permit = sem.acquire().await.map_err(|_| {
-				TelegramTransportError::Api("chat semaphore closed".to_string())
-			})?;
+			let _permit = match sem.try_acquire() {
+				Ok(permit) => permit,
+				Err(_) => {
+					let c = Arc::clone(&client);
+					let _ = tokio::task::spawn_blocking(move || {
+						c.send_message(&TelegramOutboundMessage::from_error(
+							chat_id,
+							"A request is already in progress for this chat. Please wait for it to finish.",
+						))
+					}).await;
+					return Ok(());
+				}
+			};
 			let h = handler;
 			let result = tokio::task::spawn_blocking(move || h.handle_request(request))
 				.await
 				.map_err(|e| TelegramTransportError::Api(format!("handler task panicked: {e}")))?;
-			dispatch_response(&client, chat_id, result, render_options)
+			dispatch_response_blocking(&client, chat_id, result, render_options).await
 		}
 		Ok(TelegramInteraction::ControlCommand(command)) => {
 			log_telegram(
@@ -274,7 +284,7 @@ where
 			let result = tokio::task::spawn_blocking(move || h.handle_control_command(command))
 				.await
 				.map_err(|e| TelegramTransportError::Api(format!("handler task panicked: {e}")))?;
-			dispatch_response(&client, cid, result, render_options)
+			dispatch_response_blocking(&client, cid, result, render_options).await
 		}
 		Ok(TelegramInteraction::ApprovalDecision(action)) => {
 			log_telegram(
@@ -299,8 +309,12 @@ where
 					.map_err(|e| {
 						TelegramTransportError::Api(format!("handler task panicked: {e}"))
 					})?;
-			client.answer_callback_query(&cbq, callback_acknowledgement(&result))?;
-			dispatch_response(&client, cid, result, render_options)
+			let ack = callback_acknowledgement(&result).to_string();
+			let c = Arc::clone(&client);
+			let cbq_owned = cbq;
+			let _ = tokio::task::spawn_blocking(move || c.answer_callback_query(&cbq_owned, &ack))
+				.await;
+			dispatch_response_blocking(&client, cid, result, render_options).await
 		}
 		Ok(TelegramInteraction::SessionCallback(action)) => {
 			log_telegram(
@@ -320,11 +334,12 @@ where
 					.map_err(|e| {
 						TelegramTransportError::Api(format!("handler task panicked: {e}"))
 					})?;
-			client.answer_callback_query(
-				&action.callback_query_id,
-				session_callback_acknowledgement(&result),
-			)?;
-			dispatch_response(&client, action.chat_id, result, render_options)
+			let ack = session_callback_acknowledgement(&result).to_string();
+			let c = Arc::clone(&client);
+			let cbq_owned = action.callback_query_id.clone();
+			let _ = tokio::task::spawn_blocking(move || c.answer_callback_query(&cbq_owned, &ack))
+				.await;
+			dispatch_response_blocking(&client, action.chat_id, result, render_options).await
 		}
 		Err(TelegramConnectorError::BotOriginIgnored) => {
 			log_telegram(
@@ -341,15 +356,32 @@ where
 				[("error", error.to_string())],
 			);
 			if let Some(chat_id) = fallback_chat_id {
-				client.send_message(&TelegramOutboundMessage::from_error(
-					chat_id,
-					&error.to_string(),
-				))
+				let err_msg = error.to_string();
+				let c = Arc::clone(&client);
+				let _ = tokio::task::spawn_blocking(move || {
+					c.send_message(&TelegramOutboundMessage::from_error(chat_id, &err_msg))
+				})
+				.await;
+				Ok(())
 			} else {
 				Ok(())
 			}
 		}
 	}
+}
+
+/// Async wrapper that runs `dispatch_response` on a blocking thread so that
+/// synchronous Telegram HTTP calls do not occupy tokio worker threads.
+async fn dispatch_response_blocking(
+	client: &Arc<TelegramBotClient>,
+	chat_id: i64,
+	response: Result<TelegramHandlerResponse, RuntimeError>,
+	render_options: TelegramRenderOptions,
+) -> Result<(), TelegramTransportError> {
+	let c = Arc::clone(client);
+	tokio::task::spawn_blocking(move || dispatch_response(&c, chat_id, response, render_options))
+		.await
+		.map_err(|e| TelegramTransportError::Api(format!("dispatch task panicked: {e}")))?
 }
 
 fn dispatch_response(
