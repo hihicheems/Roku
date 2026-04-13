@@ -13,13 +13,12 @@
 # Alias for linting
 alias l := lint
 
-# Lint the codebase
+# Lint the codebase (mirrors CI check job)
 @lint:
     # This command checks the codebase for issues according to the hawkeye configuration.
     hawkeye check
-    # This command checks the Rust codebase for errors and warnings.
-    cargo check --locked --all --all-features --all-targets
     # This command runs clippy to lint the Rust codebase and treats warnings as errors.
+    # clippy implicitly runs cargo check, so a separate check step is not needed.
     cargo clippy --locked --all-targets --workspace -- -D warnings
 
 # Calculate lines of code
@@ -30,10 +29,10 @@ alias l := lint
 # Alias for testing
 alias t := test
 
-# Run tests
+# Run tests (mirrors CI unit job)
 @test:
     # This command runs all tests in the workspace using nextest.
-    cargo nextest run --locked --workspace
+    cargo nextest run --locked --workspace --all-features --no-tests=pass
 
 # Build a Docker image for the current local architecture.
 @docker-build image="roku:local":
