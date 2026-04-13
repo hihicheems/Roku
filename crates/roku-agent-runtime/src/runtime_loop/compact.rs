@@ -15,8 +15,9 @@
 use roku_plugin_llm::{GenerationRequest, LlmRouter, Message, RiskTier};
 
 /// Maximum time to wait for an LLM compact summarization call before falling
-/// back to mechanical summarization.
-const COMPACT_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// back to mechanical summarization. LLM compaction routinely takes 2-3 minutes
+/// for large contexts; only truly hung calls (>5 min) should be timed out.
+const COMPACT_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 use super::LoopState;
 
