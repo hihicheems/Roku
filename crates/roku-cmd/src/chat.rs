@@ -991,9 +991,10 @@ fn execute_turn(
 								pending_tool_name = None;
 							}
 
+							// All events print their output and continue.
+							// Status display is handled exclusively by the timer tick.
 							match event {
 								LoopEvent::ToolStart { step, tool_name, args_summary } => {
-									// Close previous pending line if back-to-back starts.
 									if pending_tool_name.is_some() {
 										eprint!("\r\n");
 									}
@@ -1004,32 +1005,25 @@ fn execute_turn(
 									let msg = crate::render::styled_tool_start(
 										&tool_name, args_summary.as_deref(),
 									);
-									// Print without newline — ToolEnd will complete the line.
 									eprint!("{msg}");
 									let _ = io::stderr().flush();
 									pending_tool_name = Some(tool_name);
-									// Skip status reprint; tool may complete instantly.
-									continue;
 								}
 								LoopEvent::ToolEnd { tool_name, elapsed_ms, result_summary, .. } => {
 									current_tool = None;
 									last_tool_event = std::time::Instant::now();
 									if is_matching_tool_end {
-										// Append completion suffix on same line.
 										let suffix = crate::render::styled_tool_end_suffix(
 											elapsed_ms, result_summary.as_deref(),
 										);
 										eprint!("{suffix}\r\n");
 										pending_tool_name = None;
-										// Skip status reprint — avoids blank-line noise
-										// during rapid sequential tool completions. The
-										// timer tick will show status if there's a gap.
-										continue;
+									} else {
+										let msg = crate::render::styled_tool_end(
+											&tool_name, elapsed_ms, result_summary.as_deref(),
+										);
+										eprint!("{msg}\r\n");
 									}
-									let msg = crate::render::styled_tool_end(
-										&tool_name, elapsed_ms, result_summary.as_deref(),
-									);
-									eprint!("{msg}\r\n");
 								}
 								LoopEvent::CompactTriggered { step, estimated_tokens } => {
 									eprint!("[compact] step {step} triggered (~{estimated_tokens} tokens)\r\n");
@@ -1046,7 +1040,6 @@ fn execute_turn(
 										eprint!("{}", rendered.replace('\n', "\r\n"));
 										let _ = io::stderr().flush();
 									}
-									continue; // no status reprint during streaming
 								}
 								LoopEvent::LlmDecisionComplete { .. } => {
 									streaming_active = false;
@@ -1070,14 +1063,7 @@ fn execute_turn(
 											guard.model_id = Some(id);
 										}
 									}
-									continue;
 								}
-							}
-
-							// Re-show status after non-streaming output,
-							// unless the approval prompt is currently visible.
-							if !crate::is_approval_active() {
-								show_status!();
 							}
 						}
 						_ = tick.tick() => {
