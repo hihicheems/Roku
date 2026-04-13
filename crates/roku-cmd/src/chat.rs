@@ -962,6 +962,9 @@ fn execute_turn(
 								eprint!("{}", rendered.replace('\n', "\r\n"));
 								let _ = io::stderr().flush();
 							}
+							// Skip status reprint during active text streaming
+							// to avoid appending onto partial text lines.
+							continue;
 						}
 						LoopEvent::LlmDecisionComplete { .. } => {
 							let remaining = stream_renderer.flush();
@@ -990,6 +993,7 @@ fn execute_turn(
 									guard.model_id = Some(id);
 								}
 							}
+							continue; // silent event, no status reprint
 						}
 					}
 
@@ -1043,11 +1047,19 @@ fn execute_turn(
 					if crossterm::event::poll(std::time::Duration::from_millis(200))
 						.unwrap_or(false) && let Ok(crossterm::event::Event::Key(key)) =
 						crossterm::event::read()
-						&& key.code == crossterm::event::KeyCode::Esc
 						&& key.kind != crossterm::event::KeyEventKind::Release
 					{
-						esc_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-						break;
+						// Esc or Ctrl+C both cancel. In raw mode, Ctrl+C arrives
+						// as a key event instead of SIGINT.
+						let is_esc = key.code == crossterm::event::KeyCode::Esc;
+						let is_ctrl_c = key.code == crossterm::event::KeyCode::Char('c')
+							&& key.modifiers
+								.contains(crossterm::event::KeyModifiers::CONTROL);
+						if is_esc || is_ctrl_c {
+							esc_flag
+								.store(true, std::sync::atomic::Ordering::Relaxed);
+							break;
+						}
 					}
 				}
 				let _ = crossterm::terminal::disable_raw_mode();

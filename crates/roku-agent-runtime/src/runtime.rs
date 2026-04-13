@@ -446,6 +446,7 @@ impl GenericAgentRuntime {
 			plugin_snapshot,
 			agent_runtime_config,
 		)
+		.with_execution_router(execution_router)
 		.with_route_router(Arc::new(route_router));
 		runtime._mcp_runtime = mcp_runtime;
 		runtime
