@@ -14,6 +14,10 @@
 
 use roku_plugin_llm::{GenerationRequest, LlmRouter, Message, RiskTier};
 
+/// Maximum time to wait for an LLM compact summarization call before falling
+/// back to mechanical summarization.
+const COMPACT_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 use super::LoopState;
 
 /// Estimate the approximate token usage of the current loop context.
@@ -177,8 +181,9 @@ pub async fn compact_history_with_llm(
 		steps_json
 	);
 
-	let llm_result = router
-		.generate(&GenerationRequest {
+	let llm_result = tokio::time::timeout(
+		COMPACT_LLM_TIMEOUT,
+		router.generate(&GenerationRequest {
 			system_prompt: Some(
 				"You are a concise summarizer for an agent runtime's execution history."
 					.to_string(),
@@ -193,13 +198,14 @@ pub async fn compact_history_with_llm(
 			tools: None,
 			model_override: None,
 			thinking_effort: None,
-		})
-		.await;
+		}),
+	)
+	.await;
 
 	let summary = match llm_result {
-		Ok(response) if !response.output.trim().is_empty() => response.output,
+		Ok(Ok(response)) if !response.output.trim().is_empty() => response.output,
 		_ => {
-			// Fallback to mechanical summarization.
+			// Fallback to mechanical summarization on error or timeout.
 			let mechanical = summarize_discarded_steps(&discarded);
 			apply_compact_state(state, &discarded, mechanical, config);
 			return false;
@@ -364,8 +370,9 @@ pub async fn compact_messages_with_llm(
 		 tool results, and decisions. Output plain text only.\n\n{}",
 		mechanical
 	);
-	let result = router
-		.generate(&GenerationRequest {
+	let result = tokio::time::timeout(
+		COMPACT_LLM_TIMEOUT,
+		router.generate(&GenerationRequest {
 			system_prompt: Some("You summarize agent conversation history.".to_string()),
 			prompt,
 			messages: None,
@@ -377,11 +384,12 @@ pub async fn compact_messages_with_llm(
 			tools: None,
 			model_override: None,
 			thinking_effort: None,
-		})
-		.await;
+		}),
+	)
+	.await;
 
 	let (summary, prompt_tokens, output_tokens) = match result {
-		Ok(r) if !r.output.trim().is_empty() => (r.output, r.prompt_tokens, r.output_tokens),
+		Ok(Ok(r)) if !r.output.trim().is_empty() => (r.output, r.prompt_tokens, r.output_tokens),
 		_ => (mechanical, 0, 0),
 	};
 	messages.insert(
