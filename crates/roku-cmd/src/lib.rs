@@ -209,6 +209,30 @@ pub(crate) fn toggle_debug_logs() -> bool {
 	}
 }
 
+/// RAII guard that restores the stderr log level on drop.
+/// Created by [`suppress_stderr_logs`]; ensures the level is restored even on panic.
+pub(crate) struct StderrLogGuard {
+	prev: LogLevel,
+}
+
+impl Drop for StderrLogGuard {
+	fn drop(&mut self) {
+		if let Some(sink) = STDERR_LOG_SINK.get() {
+			sink.set_min_level(self.prev);
+		}
+	}
+}
+
+/// Temporarily suppress stderr log output by raising the minimum level to Error.
+/// Returns an RAII guard that restores the previous level on drop (panic-safe).
+pub(crate) fn suppress_stderr_logs() -> Option<StderrLogGuard> {
+	STDERR_LOG_SINK.get().map(|sink| {
+		let prev = sink.min_level();
+		sink.set_min_level(LogLevel::Error);
+		StderrLogGuard { prev }
+	})
+}
+
 /// Check if auto-approve is enabled.
 pub(crate) fn is_auto_approve() -> bool {
 	AUTO_APPROVE.load(std::sync::atomic::Ordering::Relaxed)

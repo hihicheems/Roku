@@ -904,20 +904,28 @@ fn execute_turn(
 			// Interactive mode: styled event display with streaming markdown.
 			// Raw mode is active (for Esc key detection), so all output uses
 			// explicit \r\n instead of relying on terminal LF→CRLF translation.
+			// Suppress stderr logs during execution to avoid raw-mode CRLF issues.
 			tokio::spawn(async move {
+				let _log_guard = crate::suppress_stderr_logs();
 				let mut stream_renderer = crate::render::StreamRenderer::new();
 				let start_time = std::time::Instant::now();
 				let mut current_step: u32 = 0;
 				let mut current_tool: Option<String> = None;
+				let mut status_visible: bool;
 
 				// Show initial status line.
 				let status = crate::render::styled_working_status(0, None, start_time.elapsed());
 				eprint!("{status}");
 				let _ = io::stderr().flush();
+				status_visible = true;
 
 				while let Some(event) = rx.recv().await {
-					// Clear the status line before printing event output.
-					eprint!("\r\x1b[K");
+					// Clear the status line only when one is actually displayed,
+					// to avoid erasing streaming text on the current line.
+					if status_visible {
+						eprint!("\r\x1b[K");
+						status_visible = false;
+					}
 
 					match event {
 						LoopEvent::ToolStart {
@@ -962,8 +970,7 @@ fn execute_turn(
 								eprint!("{}", rendered.replace('\n', "\r\n"));
 								let _ = io::stderr().flush();
 							}
-							// Skip status reprint during active text streaming
-							// to avoid appending onto partial text lines.
+							// Skip status reprint during active text streaming.
 							continue;
 						}
 						LoopEvent::LlmDecisionComplete { .. } => {
@@ -978,7 +985,6 @@ fn execute_turn(
 						LoopEvent::StepComplete { step } => {
 							current_step = step;
 							current_tool = None;
-							eprint!("[step] {step} complete\r\n");
 						}
 						LoopEvent::TokenUsage {
 							prompt_tokens,
@@ -993,11 +999,11 @@ fn execute_turn(
 									guard.model_id = Some(id);
 								}
 							}
-							continue; // silent event, no status reprint
+							continue;
 						}
 					}
 
-					// Re-show the status line after output.
+					// Re-show the status line after non-streaming output.
 					let status = crate::render::styled_working_status(
 						current_step,
 						current_tool.as_deref(),
@@ -1005,11 +1011,15 @@ fn execute_turn(
 					);
 					eprint!("{status}");
 					let _ = io::stderr().flush();
+					status_visible = true;
 				}
 
 				// Clear status line on exit.
-				eprint!("\r\x1b[K");
+				if status_visible {
+					eprint!("\r\x1b[K");
+				}
 				let _ = io::stderr().flush();
+				drop(_log_guard);
 			})
 		};
 
