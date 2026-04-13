@@ -409,8 +409,8 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 								}
 
 								if let Some(cid) = chat_id
-									&& message_id > 0
-									&& last_edit.elapsed() >= std::time::Duration::from_secs(1)
+									&& message_id > 0 && last_edit.elapsed()
+									>= std::time::Duration::from_secs(1)
 								{
 									let status = format_streaming_progress(
 										current_step,

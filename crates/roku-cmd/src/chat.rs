@@ -1041,8 +1041,8 @@ fn execute_turn(
 						break;
 					}
 					if crossterm::event::poll(std::time::Duration::from_millis(200))
-						.unwrap_or(false)
-						&& let Ok(crossterm::event::Event::Key(key)) = crossterm::event::read()
+						.unwrap_or(false) && let Ok(crossterm::event::Event::Key(key)) =
+						crossterm::event::read()
 						&& key.code == crossterm::event::KeyCode::Esc
 						&& key.kind != crossterm::event::KeyEventKind::Release
 					{
