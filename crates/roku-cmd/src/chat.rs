@@ -166,6 +166,10 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 	// Tracks whether the user has logged out in this session.
 	let mut logged_out = false;
 
+	// Session-level model/thinking overrides.
+	let mut model_override: Option<String> = None;
+	let mut thinking_effort: Option<String> = None;
+
 	// Session-level cumulative token counters.
 	let mut session_prompt_tokens: u64 = 0;
 	let mut session_output_tokens: u64 = 0;
@@ -284,6 +288,65 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 				}
 				continue;
 			}
+			"/model" => {
+				reader.add_history_entry(trimmed);
+				let models = service.available_models();
+				if models.is_empty() {
+					eprintln!("[model] No models available.");
+				} else {
+					let mut items: Vec<SelectionItem> = vec![SelectionItem {
+						label: "(default)".to_string(),
+						description: "Use the configured default model".to_string(),
+					}];
+					items.extend(models.iter().map(|m| SelectionItem {
+						label: m.clone(),
+						description: String::new(),
+					}));
+					if let Some(idx) = run_selection(items, "Select model:") {
+						if idx == 0 {
+							model_override = None;
+							eprintln!("[model] Using default model.");
+						} else {
+							let model_id = models[idx - 1].clone();
+							eprintln!("[model] Switched to {model_id}.");
+							model_override = Some(model_id);
+						}
+					}
+				}
+				continue;
+			}
+			"/thinking" => {
+				reader.add_history_entry(trimmed);
+				let items = vec![
+					SelectionItem {
+						label: "none".to_string(),
+						description: "No reasoning/thinking".to_string(),
+					},
+					SelectionItem {
+						label: "low".to_string(),
+						description: "Minimal reasoning".to_string(),
+					},
+					SelectionItem {
+						label: "medium".to_string(),
+						description: "Moderate reasoning".to_string(),
+					},
+					SelectionItem {
+						label: "high".to_string(),
+						description: "Maximum reasoning depth".to_string(),
+					},
+				];
+				if let Some(idx) = run_selection(items, "Select thinking effort:") {
+					let effort = match idx {
+						1 => "low",
+						2 => "medium",
+						3 => "high",
+						_ => "none",
+					};
+					eprintln!("[thinking] Set to {effort}.");
+					thinking_effort = Some(effort.to_string());
+				}
+				continue;
+			}
 			"/switch" => {
 				reader.add_history_entry(trimmed);
 				if handle_switch_command(&mut service) {
@@ -322,6 +385,8 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 			options.json,
 			&mut session_prompt_tokens,
 			&mut session_output_tokens,
+			model_override.as_deref(),
+			thinking_effort.as_deref(),
 		);
 	}
 
@@ -343,6 +408,8 @@ fn handle_turn_interactive(
 	json_mode: bool,
 	session_prompt_tokens: &mut u64,
 	session_output_tokens: &mut u64,
+	model_override: Option<&str>,
+	thinking_effort: Option<&str>,
 ) {
 	let (result, _request_id, turn_tokens) = dispatch_and_record(
 		rt,
@@ -353,6 +420,8 @@ fn handle_turn_interactive(
 		conversation_history,
 		false,
 		json_mode,
+		model_override,
+		thinking_effort,
 	);
 	// Accumulate session totals and display token usage after this turn.
 	*session_prompt_tokens = session_prompt_tokens.saturating_add(turn_tokens.prompt);
@@ -420,6 +489,8 @@ fn handle_turn_interactive(
 							conversation_history,
 							false,
 							json_mode,
+							model_override,
+							thinking_effort,
 						);
 						*session_prompt_tokens =
 							session_prompt_tokens.saturating_add(inner_tokens.prompt);
@@ -623,6 +694,8 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 			&mut conversation_history,
 			true,
 			json_mode,
+			None,
+			None,
 		);
 		let model = tokens.model_id;
 
@@ -712,6 +785,8 @@ fn dispatch_and_record(
 	conversation_history: &mut Vec<ConversationTurn>,
 	pipe_mode: bool,
 	json_mode: bool,
+	model_override: Option<&str>,
+	thinking_effort: Option<&str>,
 ) -> (Result<TurnResult, CommandError>, String, TurnTokens) {
 	let seq = next_cli_request_sequence();
 	let request_id = format!("req-{seq}");
@@ -725,6 +800,8 @@ fn dispatch_and_record(
 		pipe_mode,
 		json_mode,
 		&request_id,
+		model_override,
+		thinking_effort,
 	) {
 		Ok(pair) => pair,
 		Err(e) => return (Err(e), request_id, TurnTokens::default()),
@@ -771,6 +848,8 @@ fn execute_turn(
 	pipe_mode: bool,
 	json_mode: bool,
 	request_id: &str,
+	model_override_arg: Option<&str>,
+	thinking_effort_arg: Option<&str>,
 ) -> Result<(TurnResult, TurnTokens), CommandError> {
 	rt.block_on(async {
 		let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LoopEvent>();
@@ -823,22 +902,36 @@ fn execute_turn(
 			})
 		} else {
 			// Interactive mode: styled event display with streaming markdown.
+			// Raw mode is active (for Esc key detection), so all output uses
+			// explicit \r\n instead of relying on terminal LF→CRLF translation.
 			tokio::spawn(async move {
 				let mut stream_renderer = crate::render::StreamRenderer::new();
+				let start_time = std::time::Instant::now();
+				let mut current_step: u32 = 0;
+				let mut current_tool: Option<String> = None;
+
+				// Show initial status line.
+				let status = crate::render::styled_working_status(0, None, start_time.elapsed());
+				eprint!("{status}");
+				let _ = io::stderr().flush();
+
 				while let Some(event) = rx.recv().await {
+					// Clear the status line before printing event output.
+					eprint!("\r\x1b[K");
+
 					match event {
 						LoopEvent::ToolStart {
+							step,
 							tool_name,
 							args_summary,
-							..
 						} => {
-							eprintln!(
-								"{}",
-								crate::render::styled_tool_start(
-									&tool_name,
-									args_summary.as_deref(),
-								)
+							current_step = step;
+							current_tool = Some(tool_name.clone());
+							let msg = crate::render::styled_tool_start(
+								&tool_name,
+								args_summary.as_deref(),
 							);
+							eprint!("{msg}\r\n");
 						}
 						LoopEvent::ToolEnd {
 							tool_name,
@@ -846,28 +939,27 @@ fn execute_turn(
 							result_summary,
 							..
 						} => {
-							eprintln!(
-								"{}",
-								crate::render::styled_tool_end(
-									&tool_name,
-									elapsed_ms,
-									result_summary.as_deref(),
-								)
+							current_tool = None;
+							let msg = crate::render::styled_tool_end(
+								&tool_name,
+								elapsed_ms,
+								result_summary.as_deref(),
 							);
+							eprint!("{msg}\r\n");
 						}
 						LoopEvent::CompactTriggered {
 							step,
 							estimated_tokens,
 						} => {
-							eprintln!(
-								"[compact] step {step} triggered (~{estimated_tokens} tokens)"
+							eprint!(
+								"[compact] step {step} triggered (~{estimated_tokens} tokens)\r\n"
 							);
 						}
 						LoopEvent::LlmTextDelta { text, .. } => {
 							let rendered = stream_renderer.push(&text);
 							if !rendered.is_empty() {
 								crate::mark_streaming_output();
-								eprint!("{rendered}");
+								eprint!("{}", rendered.replace('\n', "\r\n"));
 								let _ = io::stderr().flush();
 							}
 						}
@@ -875,13 +967,15 @@ fn execute_turn(
 							let remaining = stream_renderer.flush();
 							if !remaining.is_empty() {
 								crate::mark_streaming_output();
-								eprint!("{remaining}");
+								eprint!("{}", remaining.replace('\n', "\r\n"));
 							}
-							eprintln!();
+							eprint!("\r\n");
 							let _ = io::stderr().flush();
 						}
 						LoopEvent::StepComplete { step } => {
-							eprintln!("[step] {step} complete");
+							current_step = step;
+							current_tool = None;
+							eprint!("[step] {step} complete\r\n");
 						}
 						LoopEvent::TokenUsage {
 							prompt_tokens,
@@ -898,7 +992,20 @@ fn execute_turn(
 							}
 						}
 					}
+
+					// Re-show the status line after output.
+					let status = crate::render::styled_working_status(
+						current_step,
+						current_tool.as_deref(),
+						start_time.elapsed(),
+					);
+					eprint!("{status}");
+					let _ = io::stderr().flush();
 				}
+
+				// Clear status line on exit.
+				eprint!("\r\x1b[K");
+				let _ = io::stderr().flush();
 			})
 		};
 
@@ -908,6 +1015,8 @@ fn execute_turn(
 			goal,
 			planning_mode_hint: None,
 			conversation_history: conversation_history.to_vec(),
+			model_override: model_override_arg.map(str::to_string),
+			thinking_effort: thinking_effort_arg.map(str::to_string),
 		};
 
 		let execute_fut = async {
@@ -916,6 +1025,38 @@ fn execute_turn(
 				.await
 		};
 
+		// Esc-to-cancel: spawn a key-polling task that enters raw mode and
+		// watches for Esc. Raw mode is terminal-wide so the render task above
+		// uses explicit \r\n for all output.
+		let esc_cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let stop_polling = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let interactive = !pipe_mode && !json_mode;
+		let key_poller = if interactive {
+			let esc_flag = esc_cancelled.clone();
+			let stop_flag = stop_polling.clone();
+			Some(tokio::task::spawn_blocking(move || {
+				let _ = crossterm::terminal::enable_raw_mode();
+				loop {
+					if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+						break;
+					}
+					if crossterm::event::poll(std::time::Duration::from_millis(200))
+						.unwrap_or(false)
+						&& let Ok(crossterm::event::Event::Key(key)) = crossterm::event::read()
+						&& key.code == crossterm::event::KeyCode::Esc
+						&& key.kind != crossterm::event::KeyEventKind::Release
+					{
+						esc_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+						break;
+					}
+				}
+				let _ = crossterm::terminal::disable_raw_mode();
+			}))
+		} else {
+			None
+		};
+
+		let esc_flag = esc_cancelled.clone();
 		let result = tokio::select! {
 			response = execute_fut => {
 				let response = response.map_err(CommandError::Runtime)?;
@@ -935,7 +1076,24 @@ fn execute_turn(
 				let _ = service.clear_pending_loop(session_id);
 				Ok((TurnResult::Cancelled, TurnTokens::default()))
 			}
+			_ = async {
+				loop {
+					if esc_flag.load(std::sync::atomic::Ordering::Relaxed) { break; }
+					tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+				}
+			} => {
+				drop(tx);
+				render_task.await.ok();
+				let _ = service.clear_pending_loop(session_id);
+				Ok((TurnResult::Cancelled, TurnTokens::default()))
+			}
 		};
+
+		// Stop the key poller and ensure raw mode is disabled.
+		stop_polling.store(true, std::sync::atomic::Ordering::Relaxed);
+		if let Some(poller) = key_poller {
+			let _ = poller.await;
+		}
 
 		result
 	})
@@ -1359,6 +1517,11 @@ fn slash_commands() -> Vec<CommandEntry> {
 			sub_commands: None,
 		},
 		CommandEntry {
+			name: "model",
+			description: "Select LLM model",
+			sub_commands: None,
+		},
+		CommandEntry {
 			name: "logout",
 			description: "Sign out current provider",
 			sub_commands: None,
@@ -1384,6 +1547,11 @@ fn slash_commands() -> Vec<CommandEntry> {
 		CommandEntry {
 			name: "switch",
 			description: "Switch LLM provider",
+			sub_commands: None,
+		},
+		CommandEntry {
+			name: "thinking",
+			description: "Set thinking/reasoning effort",
 			sub_commands: None,
 		},
 	]
