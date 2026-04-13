@@ -1084,6 +1084,13 @@ fn execute_turn(
 					if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
 						break;
 					}
+					// Pause event reading while the approval prompt is active.
+					// The approval gate disables raw mode and reads stdin directly;
+					// consuming events here would steal keystrokes.
+					if crate::is_approval_active() {
+						std::thread::sleep(std::time::Duration::from_millis(200));
+						continue;
+					}
 					if crossterm::event::poll(std::time::Duration::from_millis(200))
 						.unwrap_or(false) && let Ok(crossterm::event::Event::Key(key)) =
 						crossterm::event::read()

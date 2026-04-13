@@ -1308,17 +1308,18 @@ pub(crate) fn cli_approval_gate(
 				return roku_agent_runtime::ToolApprovalDecision::Approve;
 			}
 			use std::io::Write as _;
-			// Signal the render task to pause timer ticks while the prompt
-			// is visible. Use \r\n for raw-mode compatibility.
+			// Pause the render task's timer tick and the key poller so they
+			// don't overwrite the prompt or consume keystrokes.
 			crate::set_approval_active(true);
+			// Exit raw mode so stdin.read_line() works (the key poller skips
+			// event reads while APPROVAL_ACTIVE is set).
+			let _ = crossterm::terminal::disable_raw_mode();
+
 			let args_display = serde_json::to_string_pretty(arguments).unwrap_or_default();
-			eprint!("\r\n[approval] Tool: {tool_name}\r\n");
+			eprintln!("\n[approval] Tool: {tool_name}");
 			if !args_display.is_empty() && args_display != "null" {
 				let summary: String = args_display.chars().take(200).collect();
-				eprint!(
-					"[approval] Arguments: {}\r\n",
-					summary.replace('\n', "\r\n")
-				);
+				eprintln!("[approval] Arguments: {summary}");
 			}
 			eprint!("[approval] Allow? [y/N/a(auto)] ");
 			std::io::stderr().flush().ok();
@@ -1327,7 +1328,7 @@ pub(crate) fn cli_approval_gate(
 				let trimmed = input.trim();
 				if trimmed.eq_ignore_ascii_case("a") {
 					crate::toggle_auto_approve();
-					eprint!("[approve] Auto-approve enabled for this session.\r\n");
+					eprintln!("[approve] Auto-approve enabled for this session.");
 					roku_agent_runtime::ToolApprovalDecision::Approve
 				} else if trimmed.eq_ignore_ascii_case("y") {
 					roku_agent_runtime::ToolApprovalDecision::Approve
@@ -1341,6 +1342,8 @@ pub(crate) fn cli_approval_gate(
 					"User denied the operation.".to_string(),
 				)
 			};
+			// Restore raw mode for key poller, then unpause.
+			let _ = crossterm::terminal::enable_raw_mode();
 			crate::set_approval_active(false);
 			decision
 		},
