@@ -244,7 +244,11 @@ where
 			// running for this chat, reply "busy" instead of queueing unboundedly.
 			let sem = {
 				let mut locks = chat_locks.lock().unwrap_or_else(|e| e.into_inner());
-				Arc::clone(locks.entry(chat_id).or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(1))))
+				Arc::clone(
+					locks
+						.entry(chat_id)
+						.or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(1))),
+				)
 			};
 			let _permit = match sem.try_acquire() {
 				Ok(permit) => permit,
@@ -255,7 +259,8 @@ where
 							chat_id,
 							"A request is already in progress for this chat. Please wait for it to finish.",
 						))
-					}).await;
+					})
+					.await;
 					return Ok(());
 				}
 			};
@@ -312,8 +317,17 @@ where
 			let ack = callback_acknowledgement(&result).to_string();
 			let c = Arc::clone(&client);
 			let cbq_owned = cbq;
-			let _ = tokio::task::spawn_blocking(move || c.answer_callback_query(&cbq_owned, &ack))
-				.await;
+			if let Err(e) =
+				tokio::task::spawn_blocking(move || c.answer_callback_query(&cbq_owned, &ack))
+					.await
+					.unwrap_or_else(|e| Err(TelegramTransportError::Api(e.to_string())))
+			{
+				log_telegram(
+					LogLevel::Warn,
+					"failed to acknowledge approval callback",
+					[("error", e.to_string())],
+				);
+			}
 			dispatch_response_blocking(&client, cid, result, render_options).await
 		}
 		Ok(TelegramInteraction::SessionCallback(action)) => {
@@ -337,8 +351,17 @@ where
 			let ack = session_callback_acknowledgement(&result).to_string();
 			let c = Arc::clone(&client);
 			let cbq_owned = action.callback_query_id.clone();
-			let _ = tokio::task::spawn_blocking(move || c.answer_callback_query(&cbq_owned, &ack))
-				.await;
+			if let Err(e) =
+				tokio::task::spawn_blocking(move || c.answer_callback_query(&cbq_owned, &ack))
+					.await
+					.unwrap_or_else(|e| Err(TelegramTransportError::Api(e.to_string())))
+			{
+				log_telegram(
+					LogLevel::Warn,
+					"failed to acknowledge session callback",
+					[("error", e.to_string())],
+				);
+			}
 			dispatch_response_blocking(&client, action.chat_id, result, render_options).await
 		}
 		Err(TelegramConnectorError::BotOriginIgnored) => {
