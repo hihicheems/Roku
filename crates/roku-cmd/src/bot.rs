@@ -514,17 +514,15 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 								None
 							};
 
-							// Event consumer with 1-second polling.
-							// Events set dirty flags; the interval tick ensures elapsed
-							// times for in-progress tools refresh even without events.
+							// Event consumer with 1-second tick-driven flush.
+							// Events accumulate dirty flags via `continue`; the
+							// interval tick is the sole flush trigger so updates
+							// happen reliably every second.
 							let mut accumulated_text = String::new();
 							let mut tool_entries: Vec<ToolProgressEntry> = Vec::new();
 							let mut prompt_tokens: u64 = 0;
 							let mut output_tokens: u64 = 0;
-							let mut progress_dirty = false;
 							let mut content_dirty = false;
-							let mut last_edit =
-								std::time::Instant::now() - std::time::Duration::from_secs(2);
 							let mut tick =
 								tokio::time::interval(std::time::Duration::from_secs(1));
 
@@ -537,9 +535,7 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 												accumulated_text.push_str(text);
 												content_dirty = true;
 											}
-											roku_agent_runtime::LoopEvent::LlmDecisionComplete { .. } => {
-												progress_dirty = true;
-											}
+											roku_agent_runtime::LoopEvent::LlmDecisionComplete { .. } => {}
 											roku_agent_runtime::LoopEvent::ToolStart { tool_name, args_summary, .. } => {
 												tool_entries.push(ToolProgressEntry {
 													name: tool_name.clone(),
@@ -548,37 +544,31 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 													elapsed_ms: None,
 													finished: false,
 												});
-												progress_dirty = true;
 											}
 											roku_agent_runtime::LoopEvent::ToolEnd { tool_name, elapsed_ms, .. } => {
 												if let Some(entry) = tool_entries.iter_mut().rev().find(|e| !e.finished && e.name == *tool_name) {
 													entry.finished = true;
 													entry.elapsed_ms = *elapsed_ms;
 												}
-												progress_dirty = true;
 											}
 											roku_agent_runtime::LoopEvent::TokenUsage { prompt_tokens: p, output_tokens: o, .. } => {
 												prompt_tokens += p;
 												output_tokens += o;
-												progress_dirty = true;
 											}
 											_ => {}
 										}
+										// Don't flush on events — accumulate and wait for tick.
+										continue;
 									}
 									_ = tick.tick() => {
-										// Periodic refresh: mark progress dirty if any tool
-										// is still running so its elapsed time updates.
-										if tool_entries.iter().any(|t| !t.finished) {
-											progress_dirty = true;
-										}
+										// Footer elapsed always changes; fall through to flush.
 									}
 								}
 
-								// Flush at most once per second.
-								if let Some(cid) = chat_id
-									&& last_edit.elapsed() >= std::time::Duration::from_secs(1)
-								{
-									if progress_dirty && progress_mid > 0 {
+								// Flush (only reached on tick, events `continue` above).
+								if let Some(cid) = chat_id {
+									// Always refresh progress (footer elapsed ticks up).
+									if progress_mid > 0 {
 										let status = render_progress(
 											&tool_entries,
 											started_at,
@@ -591,7 +581,6 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 											client.edit_message_text(cid, mid, &status, None)
 										})
 										.await;
-										progress_dirty = false;
 									}
 
 									if content_dirty && !accumulated_text.is_empty() {
@@ -628,8 +617,6 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 										}
 										content_dirty = false;
 									}
-
-									last_edit = std::time::Instant::now();
 								}
 							}
 
