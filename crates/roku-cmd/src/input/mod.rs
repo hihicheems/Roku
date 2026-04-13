@@ -129,6 +129,10 @@ impl InputReader {
 		// When the user presses Esc, we suppress re-opening the popup until
 		// the input changes enough to no longer match the trigger condition.
 		let mut popup_dismissed = false;
+		// Suppress popup activation when content came from history navigation.
+		// Up/Down through history may land on `/`-prefixed entries; the popup
+		// should not hijack arrow keys in that case.
+		let mut navigating_history = false;
 
 		loop {
 			let evt = match event::read() {
@@ -144,7 +148,13 @@ impl InputReader {
 				continue;
 			}
 
-			match self.handle_key(key, buf, popup_active, &mut popup_dismissed) {
+			match self.handle_key(
+				key,
+				buf,
+				popup_active,
+				&mut popup_dismissed,
+				&mut navigating_history,
+			) {
 				KeyAction::Continue => {}
 				KeyAction::Submit => {
 					// Redraw before returning so the final command text is visible
@@ -181,9 +191,11 @@ impl InputReader {
 				KeyAction::Eof => return ReadlineResult::Eof,
 			}
 
-			// Sync popup state.
+			// Sync popup state. Suppress when browsing history so that
+			// navigating to a `/`-prefixed entry doesn't hijack arrows.
 			let content = buf.content();
-			let should_popup = content.starts_with('/') && !content.contains(' ');
+			let should_popup =
+				content.starts_with('/') && !content.contains(' ') && !navigating_history;
 			if should_popup && !popup_dismissed {
 				self.popup.update_filter(content);
 				*popup_active = true;
@@ -205,6 +217,7 @@ impl InputReader {
 		buf: &mut LineBuffer,
 		popup_active: &mut bool,
 		popup_dismissed: &mut bool,
+		navigating_history: &mut bool,
 	) -> KeyAction {
 		let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -264,11 +277,13 @@ impl InputReader {
 			KeyCode::Up => {
 				if let Some(line) = self.history.navigate_up(buf.content()) {
 					buf.set(line);
+					*navigating_history = true;
 				}
 			}
 			KeyCode::Down => {
 				if let Some(line) = self.history.navigate_down() {
 					buf.set(line);
+					*navigating_history = true;
 				}
 			}
 
@@ -297,6 +312,7 @@ impl InputReader {
 			KeyCode::Char(ch) if !ctrl => {
 				buf.insert(ch);
 				self.history.reset_position();
+				*navigating_history = false;
 			}
 
 			_ => {}

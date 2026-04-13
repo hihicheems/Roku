@@ -935,6 +935,10 @@ fn execute_turn(
 				// status redraws shortly after tool activity to avoid blank-line
 				// artifacts when rapid tool events interleave with the 500ms tick.
 				let mut last_tool_event = start_time;
+				// Whether any text was printed since the last LlmDecisionComplete.
+				// Controls whether a trailing \r\n is needed to separate text from
+				// subsequent tool output.
+				let mut had_text_output = false;
 
 				// Helper: draw or refresh the status line.
 				macro_rules! show_status {
@@ -1032,6 +1036,7 @@ fn execute_turn(
 									streaming_active = true;
 									let rendered = stream_renderer.push(&text);
 									if !rendered.is_empty() {
+										had_text_output = true;
 										text_streamed_flag.store(
 											true,
 											std::sync::atomic::Ordering::Relaxed,
@@ -1045,10 +1050,18 @@ fn execute_turn(
 									streaming_active = false;
 									let remaining = stream_renderer.flush();
 									if !remaining.is_empty() {
+										had_text_output = true;
 										crate::mark_streaming_output();
 										eprint!("{}", remaining.replace('\n', "\r\n"));
 									}
-									eprint!("\r\n");
+									// Only add newline when there was actual text to
+									// separate from. Without this guard, every
+									// LlmDecisionComplete creates a blank line before
+									// the next tool output.
+									if had_text_output {
+										eprint!("\r\n");
+										had_text_output = false;
+									}
 									let _ = io::stderr().flush();
 								}
 								LoopEvent::StepComplete { step } => {
