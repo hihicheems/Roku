@@ -823,7 +823,20 @@ impl LlmProvider for OpenAiProvider {
 		let mut stream_error: Option<ProviderCallError> = None;
 		let mut pending_tools: HashMap<u32, PendingToolCall> = HashMap::new();
 
-		while let Some(event_result) = event_stream.next().await {
+		let event_timeout = std::time::Duration::from_secs(120);
+
+		loop {
+			let event_result = match tokio::time::timeout(event_timeout, event_stream.next()).await
+			{
+				Ok(Some(result)) => result,
+				Ok(None) => break,
+				Err(_) => {
+					stream_error = Some(ProviderCallError::retryable(
+						"SSE stream timed out waiting for next event".to_string(),
+					));
+					break;
+				}
+			};
 			let event = match event_result {
 				Ok(event) => event,
 				Err(error) => {
