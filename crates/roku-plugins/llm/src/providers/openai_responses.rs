@@ -150,6 +150,7 @@ pub struct OpenAiResponsesProvider {
 impl OpenAiResponsesProvider {
 	pub fn new(config: OpenAiResponsesConfig) -> Result<Self, ProviderCallError> {
 		let client = Client::builder()
+			.connect_timeout(std::time::Duration::from_secs(30))
 			.build()
 			.map_err(|e| ProviderCallError::non_retryable(format!("http client error: {e}")))?;
 		Ok(Self { client, config })

@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -243,6 +244,8 @@ impl LlmRouter {
 		request: &GenerationRequest,
 		tx: tokio::sync::mpsc::Sender<StreamChunk>,
 	) -> Result<LlmResponse, LlmAdapterError> {
+		const STREAMING_OVERALL_TIMEOUT: Duration = Duration::from_secs(300);
+
 		let selected_model = self.select_model(request)?;
 		let provider = self
 			.providers
@@ -251,34 +254,109 @@ impl LlmRouter {
 				LlmAdapterError::ProviderNotRegistered(selected_model.provider.clone())
 			})?;
 
-		let provider_response = provider
-			.provider
-			.stream(selected_model, request, tx)
-			.await
-			.map_err(|error| LlmAdapterError::ProviderCallFailed {
+		provider
+			.allow_call(&self.resilience_policy)
+			.map_err(|retry_after_ms| LlmAdapterError::CircuitOpen {
 				provider: selected_model.provider.clone(),
-				model_id: selected_model.model_id.clone(),
-				message: error.to_string(),
+				retry_after_ms,
 			})?;
 
-		let total_tokens = provider_response
-			.prompt_tokens
-			.saturating_add(provider_response.output_tokens);
-		let estimated_cost_usd =
-			estimate_cost_usd(total_tokens, selected_model.cost_per_1k_tokens_usd);
+		let total_attempts = usize::from(self.resilience_policy.max_retries).saturating_add(1);
+		let chunks_forwarded = Arc::new(AtomicU64::new(0));
+		let mut last_error: Option<LlmAdapterError> = None;
 
-		Ok(LlmResponse {
-			provider: selected_model.provider.clone(),
-			model_id: selected_model.model_id.clone(),
-			output: provider_response.output,
-			finish_reason: provider_response.finish_reason,
-			prompt_tokens: provider_response.prompt_tokens,
-			output_tokens: provider_response.output_tokens,
-			total_tokens,
-			estimated_cost_usd,
-			latency_ms: provider_response.latency_ms,
-			tool_calls: provider_response.tool_calls.clone(),
-		})
+		for attempt_index in 0..total_attempts {
+			// Per-attempt channel pair; a forwarder task copies chunks to the
+			// real `tx` while tracking how many have been sent.
+			let (attempt_tx, mut attempt_rx) = tokio::sync::mpsc::channel::<StreamChunk>(32);
+			let real_tx = tx.clone();
+			let counter = Arc::clone(&chunks_forwarded);
+			let forwarder = tokio::spawn(async move {
+				while let Some(chunk) = attempt_rx.recv().await {
+					counter.fetch_add(1, Ordering::Relaxed);
+					if real_tx.send(chunk).await.is_err() {
+						break;
+					}
+				}
+			});
+
+			let stream_result = tokio::time::timeout(
+				STREAMING_OVERALL_TIMEOUT,
+				provider
+					.provider
+					.stream(selected_model, request, attempt_tx),
+			)
+			.await;
+
+			// Ensure the forwarder finishes flushing before inspecting chunks_forwarded.
+			forwarder.abort();
+			let _ = forwarder.await;
+
+			match stream_result {
+				Ok(Ok(response)) => {
+					provider.record_success();
+					let total_tokens = response
+						.prompt_tokens
+						.saturating_add(response.output_tokens);
+					let estimated_cost_usd =
+						estimate_cost_usd(total_tokens, selected_model.cost_per_1k_tokens_usd);
+					return Ok(LlmResponse {
+						provider: selected_model.provider.clone(),
+						model_id: selected_model.model_id.clone(),
+						output: response.output,
+						finish_reason: response.finish_reason,
+						prompt_tokens: response.prompt_tokens,
+						output_tokens: response.output_tokens,
+						total_tokens,
+						estimated_cost_usd,
+						latency_ms: response.latency_ms,
+						tool_calls: response.tool_calls.clone(),
+					});
+				}
+				Ok(Err(error)) => {
+					let attempts_used = attempt_index.saturating_add(1);
+					let opened_circuit = provider.record_failure(&self.resilience_policy);
+					let any_chunks = chunks_forwarded.load(Ordering::Relaxed) > 0;
+
+					// Never retry once chunks have been forwarded (would duplicate content).
+					if any_chunks
+						|| !error.is_retryable()
+						|| opened_circuit || attempts_used >= total_attempts
+					{
+						return Err(LlmAdapterError::ProviderCallFailed {
+							provider: selected_model.provider.clone(),
+							model_id: selected_model.model_id.clone(),
+							message: format!("{error} after {attempts_used} attempts"),
+						});
+					}
+
+					let backoff_ms = backoff_for_attempt(attempt_index, &self.resilience_policy);
+					if backoff_ms > 0 {
+						tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+					}
+					last_error = Some(LlmAdapterError::ProviderCallFailed {
+						provider: selected_model.provider.clone(),
+						model_id: selected_model.model_id.clone(),
+						message: format!("{error} after {attempts_used} attempts"),
+					});
+				}
+				Err(_elapsed) => {
+					return Err(LlmAdapterError::ProviderCallFailed {
+						provider: selected_model.provider.clone(),
+						model_id: selected_model.model_id.clone(),
+						message: "streaming overall timeout exceeded (300s)".to_string(),
+					});
+				}
+			}
+		}
+
+		Err(
+			last_error.unwrap_or_else(|| LlmAdapterError::ProviderCallFailed {
+				provider: selected_model.provider.clone(),
+				model_id: selected_model.model_id.clone(),
+				message: "streaming call exhausted attempts".to_string(),
+			}),
+		)
 	}
 
 	/// Async entrypoint: generate and parse a structured JSON response.
