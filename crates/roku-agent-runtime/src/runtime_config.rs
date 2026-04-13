@@ -191,7 +191,7 @@ pub enum AgentRuntimeConfigError {
 /// Final ceiling for `runtime.agent.loop.initial_step_budget`.
 ///
 /// This is a safety guardrail, not the recommended operating value.
-pub const HARD_MAX_INITIAL_STEP_BUDGET: u32 = 64;
+pub const HARD_MAX_INITIAL_STEP_BUDGET: u32 = 500;
 /// Final ceiling for `runtime.agent.loop.initial_recovery_budget`.
 ///
 /// This is a safety guardrail, not the recommended operating value.
@@ -224,7 +224,7 @@ pub const HARD_MAX_NEXT_STEP_BUDGET_COST_REMAINING_USD: f64 = 10.0;
 impl Default for LoopRuntimeConfig {
 	fn default() -> Self {
 		Self {
-			initial_step_budget: 30,
+			initial_step_budget: 200,
 			initial_recovery_budget: 5,
 			context_window_tokens: 200_000,
 			compact_threshold_ratio: 0.75,
@@ -659,7 +659,7 @@ mod tests {
 	#[test]
 	fn defaults_are_stable() {
 		let config = AgentRuntimeConfig::default();
-		assert_eq!(config.r#loop.initial_step_budget, 30);
+		assert_eq!(config.r#loop.initial_step_budget, 200);
 		assert_eq!(config.r#loop.context_window_tokens, 200_000);
 		assert_eq!(config.r#loop.compact_threshold_ratio, 0.75);
 		assert_eq!(config.r#loop.compact_threshold_tokens(), 150_000);
