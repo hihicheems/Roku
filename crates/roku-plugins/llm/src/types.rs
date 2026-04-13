@@ -24,6 +24,15 @@ pub enum RiskTier {
 	Critical,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingEffort {
+	None,
+	Low,
+	Medium,
+	High,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelProfile {
 	pub model_id: String,
@@ -158,6 +167,14 @@ pub struct GenerationRequest {
 	/// send these as the `tools` parameter and expect `tool_calls` in response.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub tools: Option<Vec<ToolDefinition>>,
+	/// Override the model selected by the router. When Some, the router will
+	/// prefer the specified model if it is registered.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub model_override: Option<String>,
+	/// Controls how much extended thinking budget the provider should allocate.
+	/// Defaults to no thinking when None or ThinkingEffort::None.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub thinking_effort: Option<ThinkingEffort>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -361,6 +378,8 @@ mod tests {
 			budget_tokens_remaining: 100_000,
 			budget_cost_remaining_usd: 10.0,
 			tools: None,
+			model_override: None,
+			thinking_effort: None,
 		}
 	}
 

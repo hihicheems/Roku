@@ -134,6 +134,8 @@ fn request(goal: &str) -> RequestEnvelope {
 		goal: goal.to_string(),
 		planning_mode_hint: None,
 		conversation_history: Vec::new(),
+		model_override: None,
+		thinking_effort: None,
 	}
 }
 
@@ -532,6 +534,8 @@ fn context_bundle_separates_short_term_continuity_from_long_term_hits() {
 			content: "Please use concise answers.".to_string(),
 			created_at_unix_ms: 0,
 		}],
+		model_override: None,
+		thinking_effort: None,
 	};
 
 	let bundle = service
@@ -573,6 +577,8 @@ fn context_bundle_renders_continuity_and_recall_as_named_memory_sections() {
 			content: "Please use concise answers.".to_string(),
 			created_at_unix_ms: 0,
 		}],
+		model_override: None,
+		thinking_effort: None,
 	};
 
 	let bundle = service
@@ -615,6 +621,8 @@ fn runtime_memory_layers_keep_continuity_recall_and_working_memory_distinct() {
 			content: "Please use concise answers.".to_string(),
 			created_at_unix_ms: 0,
 		}],
+		model_override: None,
+		thinking_effort: None,
 	};
 
 	let bundle = service
@@ -717,6 +725,8 @@ fn cached_runtime_memory_layers_project_structured_sections_as_primary_spec_memo
 			content: "Please use concise answers.".to_string(),
 			created_at_unix_ms: 0,
 		}],
+		model_override: None,
+		thinking_effort: None,
 	};
 	let runtime_memory_layers = service
 		.build_context_bundle(&request, false)
@@ -1442,6 +1452,8 @@ fn compact_summary_is_written_back_when_compact_boundary_exists() {
 		goal: "test compact write-back".to_string(),
 		planning_mode_hint: None,
 		conversation_history: Vec::new(),
+		model_override: None,
+		thinking_effort: None,
 	};
 
 	let mut loop_state = LoopState::with_budgets(

@@ -443,6 +443,13 @@ impl LlmRouter {
 	}
 
 	fn select_model(&self, request: &GenerationRequest) -> Result<&ModelProfile, LlmAdapterError> {
+		// If model_override is set, try to find that model in the registered list first.
+		if let Some(override_id) = &request.model_override
+			&& let Some(model) = self.models.iter().find(|m| &m.model_id == override_id)
+		{
+			return Ok(model);
+		}
+
 		let mut eligible = self
 			.models
 			.iter()
@@ -475,6 +482,11 @@ impl LlmRouter {
 			.into_iter()
 			.next()
 			.ok_or(LlmAdapterError::NoEligibleModel)
+	}
+
+	/// Returns a list of all registered model IDs.
+	pub fn available_models(&self) -> Vec<String> {
+		self.models.iter().map(|m| m.model_id.clone()).collect()
 	}
 }
 
@@ -680,6 +692,8 @@ mod tests {
 			budget_tokens_remaining: 4_000,
 			budget_cost_remaining_usd: 2.0,
 			tools: None,
+			model_override: None,
+			thinking_effort: None,
 		}
 	}
 

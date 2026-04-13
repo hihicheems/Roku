@@ -1133,6 +1133,8 @@ mod tests {
 				description: "Fetch a URL".to_string(),
 				parameters: serde_json::json!({"type": "object", "properties": {"url": {"type": "string"}}}),
 			}]),
+			model_override: None,
+			thinking_effort: None,
 		};
 		let body = build_request("gpt-4o", &request, false, DEFAULT_MAX_TOKENS, None);
 		let json = serde_json::to_value(&body).unwrap();
@@ -1159,6 +1161,8 @@ mod tests {
 			budget_tokens_remaining: 50_000,
 			budget_cost_remaining_usd: 5.0,
 			tools: None,
+			model_override: None,
+			thinking_effort: None,
 		};
 		let body = build_request("gpt-4o", &request, true, DEFAULT_MAX_TOKENS, None);
 		let json = serde_json::to_value(&body).unwrap();

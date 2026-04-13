@@ -43,7 +43,7 @@ use roku_plugin_host::{
 	PluginRegistrySnapshot, ToolExecutionResult, ToolInvocation, ToolRuntime, ToolRuntimeError,
 };
 use roku_plugin_llm::{
-	GenerationRequest, LlmRouter, Message, RiskTier, StreamChunk, ToolCallBlock,
+	GenerationRequest, LlmRouter, Message, RiskTier, StreamChunk, ThinkingEffort, ToolCallBlock,
 };
 use roku_plugin_skills::SkillRegistry;
 use roku_plugin_tools::{PSEUDO_AGENT, ResourceCatalog, ResourceKind};
@@ -89,6 +89,7 @@ pub struct GenericAgentRuntime {
 	tool_config: ToolCatalogConfig,
 	plugin_snapshot: PluginRegistrySnapshot,
 	route_router: Option<Arc<LlmRouter>>,
+	execution_router: Option<Arc<LlmRouter>>,
 	agent_runtime_config: AgentRuntimeConfig,
 	/// Keepalive for the MCP bootstrap tokio runtime. The rmcp serve loop tasks
 	/// are spawned on this runtime during MCP server connection. Dropping it
@@ -147,6 +148,7 @@ impl GenericAgentRuntime {
 			tool_config: tool_config.clone(),
 			plugin_snapshot,
 			route_router: None,
+			execution_router: None,
 			agent_runtime_config,
 			_mcp_runtime: None,
 		};
@@ -359,6 +361,7 @@ impl GenericAgentRuntime {
 			plugin_snapshot,
 			agent_runtime_config,
 		)
+		.with_execution_router(Arc::clone(&execution_router))
 		.with_route_router(route_router)
 	}
 
@@ -452,6 +455,14 @@ impl GenericAgentRuntime {
 		&self.resource_catalog
 	}
 
+	/// Returns the list of model IDs available to the execution router.
+	pub fn available_models(&self) -> Vec<String> {
+		self.execution_router
+			.as_ref()
+			.map(|r| r.available_models())
+			.unwrap_or_default()
+	}
+
 	pub fn tool_config(&self) -> &ToolCatalogConfig {
 		&self.tool_config
 	}
@@ -496,6 +507,8 @@ impl GenericAgentRuntime {
 					.router
 					.budget_cost_remaining_usd,
 				tools: None,
+				model_override: None,
+				thinking_effort: None,
 			})
 			.await
 		{
@@ -879,6 +892,13 @@ impl GenericAgentRuntime {
 			);
 
 			let config = &self.agent_runtime_config.next_step;
+			let thinking_effort = request.thinking_effort.as_deref().and_then(|s| match s {
+				"low" => Some(ThinkingEffort::Low),
+				"medium" => Some(ThinkingEffort::Medium),
+				"high" => Some(ThinkingEffort::High),
+				"none" => Some(ThinkingEffort::None),
+				_ => None,
+			});
 			let gen_request = GenerationRequest {
 				system_prompt: Some(system_prompt),
 				prompt: String::new(),
@@ -893,6 +913,8 @@ impl GenericAgentRuntime {
 				} else {
 					Some(tool_definitions)
 				},
+				model_override: request.model_override.clone(),
+				thinking_effort,
 			};
 
 			let current_step_index = loop_state.step_index + 1;
@@ -1431,6 +1453,8 @@ impl GenericAgentRuntime {
 			goal: task.clone(),
 			planning_mode_hint: None,
 			conversation_history: Vec::new(),
+			model_override: parent_request.model_override.clone(),
+			thinking_effort: parent_request.thinking_effort.clone(),
 		};
 
 		// Build a minimal LoopContext for the sub-agent.
@@ -1513,6 +1537,11 @@ impl GenericAgentRuntime {
 			.iter()
 			.find(|entry| entry.worker.supports(&spec.capabilities))
 			.map(|entry| entry.worker.execute(spec, node))
+	}
+
+	fn with_execution_router(mut self, execution_router: Arc<LlmRouter>) -> Self {
+		self.execution_router = Some(execution_router);
+		self
 	}
 
 	fn with_route_router(mut self, route_router: Arc<LlmRouter>) -> Self {
@@ -2762,6 +2791,8 @@ mod tests {
 			goal: "Inspect the current workspace directory".to_string(),
 			planning_mode_hint: None,
 			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
 		};
 		let decision = crate::router::RouteDecision::new(
 			IntentFamily::FilesystemRead,
@@ -2860,6 +2891,8 @@ mod tests {
 			goal: "Inspect a file for me".to_string(),
 			planning_mode_hint: None,
 			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
 		};
 		let decision = crate::router::RouteDecision::new(
 			IntentFamily::Chat,
@@ -2939,6 +2972,8 @@ mod tests {
 			goal: "run dd if=/dev/zero of=/dev/null".to_string(),
 			planning_mode_hint: None,
 			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
 		};
 		let decision = crate::router::RouteDecision::new(
 			IntentFamily::CodeExec,
@@ -2997,6 +3032,8 @@ mod tests {
 			goal: "Read Cargo.toml".to_string(),
 			planning_mode_hint: None,
 			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
 		};
 		let decision = crate::router::RouteDecision::new(
 			IntentFamily::FilesystemRead,
@@ -3060,6 +3097,8 @@ mod tests {
 			goal: "Preview the loaded table".to_string(),
 			planning_mode_hint: None,
 			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
 		};
 		let decision = crate::router::RouteDecision::new(
 			IntentFamily::TableRead,
@@ -3130,6 +3169,8 @@ mod tests {
 			goal: format!("Find and read {file_name}."),
 			planning_mode_hint: None,
 			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
 		};
 		let decision = crate::router::RouteDecision::new(
 			IntentFamily::FilesystemRead,
@@ -3192,6 +3233,8 @@ mod tests {
 			goal: "Read Cargo.toml and summarize the workspace layout".to_string(),
 			planning_mode_hint: None,
 			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
 		};
 		let decision = crate::router::RouteDecision::new(
 			IntentFamily::FilesystemRead,
@@ -3277,6 +3320,8 @@ mod tests {
 			goal: "hello".to_string(),
 			planning_mode_hint: None,
 			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
 		};
 		let decision = crate::router::RouteDecision::new(
 			IntentFamily::Chat,

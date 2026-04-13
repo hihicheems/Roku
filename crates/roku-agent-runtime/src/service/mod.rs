@@ -291,6 +291,11 @@ impl RuntimeService {
 		self.runtime.resource_catalog()
 	}
 
+	/// Returns the list of model IDs available to the LLM router.
+	pub fn available_models(&self) -> Vec<String> {
+		self.runtime.available_models()
+	}
+
 	pub fn runtime_mode_report(&self) -> RuntimeModeReport {
 		self.runtime_mode.clone()
 	}

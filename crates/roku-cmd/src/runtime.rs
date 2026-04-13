@@ -1789,6 +1789,8 @@ path = "{}"
 			goal: goal.to_string(),
 			planning_mode_hint: None,
 			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
 		}
 	}
 

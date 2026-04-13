@@ -191,6 +191,8 @@ pub async fn compact_history_with_llm(
 			budget_tokens_remaining: config.llm_budget_tokens_remaining,
 			budget_cost_remaining_usd: config.llm_budget_cost_remaining_usd,
 			tools: None,
+			model_override: None,
+			thinking_effort: None,
 		})
 		.await;
 
@@ -373,6 +375,8 @@ pub async fn compact_messages_with_llm(
 			budget_tokens_remaining: 10_000,
 			budget_cost_remaining_usd: 0.50,
 			tools: None,
+			model_override: None,
+			thinking_effort: None,
 		})
 		.await;
 

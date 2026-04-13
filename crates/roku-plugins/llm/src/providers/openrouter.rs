@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 use crate::router::{LlmProvider, LlmRouter};
 use crate::types::{
 	GenerationRequest, Message, ModelProfile, ProviderCallError, ProviderResponse, RiskTier,
-	RoutingPolicy, StreamChunk, ToolCallBlock, estimate_prompt_tokens,
+	RoutingPolicy, StreamChunk, ThinkingEffort, ToolCallBlock, estimate_prompt_tokens,
 };
 
 const OPENROUTER_PROVIDER: &str = "openrouter";
@@ -895,7 +895,7 @@ fn build_request_body_inner<'a>(
 		models: fallback_models.to_vec(),
 		messages,
 		max_tokens: request.expected_output_tokens,
-		reasoning: reasoning_config_for_model(model_id),
+		reasoning: reasoning_config_for_model(model_id, request.thinking_effort),
 		stream,
 		tools: tools.filter(|t| !t.is_empty()),
 	}
@@ -1079,16 +1079,30 @@ struct OpenRouterReasoningConfig {
 	effort: Option<&'static str>,
 }
 
-fn reasoning_config_for_model(model_id: &str) -> OpenRouterReasoningConfig {
-	let effort = if model_id.starts_with("stepfun/step-3.5-flash") {
-		None
-	} else {
-		Some("none")
-	};
+fn reasoning_config_for_model(
+	model_id: &str,
+	thinking_effort: Option<ThinkingEffort>,
+) -> OpenRouterReasoningConfig {
+	// stepfun models do not support the effort override parameter.
+	let is_stepfun = model_id.starts_with("stepfun/step-3.5-flash");
 
-	OpenRouterReasoningConfig {
-		exclude: true,
-		effort,
+	match thinking_effort {
+		Some(ThinkingEffort::Low) => OpenRouterReasoningConfig {
+			exclude: false,
+			effort: if is_stepfun { None } else { Some("low") },
+		},
+		Some(ThinkingEffort::Medium) => OpenRouterReasoningConfig {
+			exclude: false,
+			effort: if is_stepfun { None } else { Some("medium") },
+		},
+		Some(ThinkingEffort::High) => OpenRouterReasoningConfig {
+			exclude: false,
+			effort: if is_stepfun { None } else { Some("high") },
+		},
+		None | Some(ThinkingEffort::None) => OpenRouterReasoningConfig {
+			exclude: true,
+			effort: if is_stepfun { None } else { Some("none") },
+		},
 	}
 }
 
@@ -1323,6 +1337,8 @@ mod tests {
 			budget_tokens_remaining: 1024,
 			budget_cost_remaining_usd: 0.1,
 			tools: None,
+			model_override: None,
+			thinking_effort: None,
 		}
 	}
 
@@ -1499,14 +1515,16 @@ mod tests {
 
 	#[test]
 	fn reasoning_config_disables_effort_override_for_stepfun_models_only() {
-		let stepfun_config =
-			serde_json::to_value(reasoning_config_for_model("stepfun/step-3.5-flash:free"))
-				.expect("stepfun reasoning config should serialize");
+		let stepfun_config = serde_json::to_value(reasoning_config_for_model(
+			"stepfun/step-3.5-flash:free",
+			None,
+		))
+		.expect("stepfun reasoning config should serialize");
 		assert_eq!(stepfun_config["exclude"], true);
 		assert!(stepfun_config.get("effort").is_none());
 
 		let deepseek_config =
-			serde_json::to_value(reasoning_config_for_model("deepseek/deepseek-chat"))
+			serde_json::to_value(reasoning_config_for_model("deepseek/deepseek-chat", None))
 				.expect("deepseek reasoning config should serialize");
 		assert_eq!(deepseek_config["exclude"], true);
 		assert_eq!(deepseek_config["effort"], "none");
