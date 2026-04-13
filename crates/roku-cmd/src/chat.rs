@@ -927,9 +927,10 @@ fn execute_turn(
 				let mut current_tool: Option<String> = None;
 				let mut status_visible = false;
 				let mut streaming_active = false;
-				// When true, a ToolStart line has been printed without a trailing
+				// When Some, a ToolStart line has been printed without a trailing
 				// newline, waiting for the matching ToolEnd to complete the line.
-				let mut pending_tool_line = false;
+				// Stores the tool name so we only inline-complete the correct tool.
+				let mut pending_tool_name: Option<String> = None;
 
 				// Helper: draw or refresh the status line.
 				macro_rules! show_status {
@@ -971,20 +972,25 @@ fn execute_turn(
 							}
 
 							// Close any pending ToolStart line before printing
-							// other event output (unless ToolEnd will complete it).
-							let is_matching_tool_end = matches!(
-								&event,
-								LoopEvent::ToolEnd { .. }
-							);
-							if pending_tool_line && !is_matching_tool_end {
+							// other event output, unless the matching ToolEnd will
+							// complete it inline.
+							let is_matching_tool_end = if let LoopEvent::ToolEnd {
+								ref tool_name, ..
+							} = event
+							{
+								pending_tool_name.as_deref() == Some(tool_name.as_str())
+							} else {
+								false
+							};
+							if pending_tool_name.is_some() && !is_matching_tool_end {
 								eprint!("\r\n");
-								pending_tool_line = false;
+								pending_tool_name = None;
 							}
 
 							match event {
 								LoopEvent::ToolStart { step, tool_name, args_summary } => {
 									// Close previous pending line if back-to-back starts.
-									if pending_tool_line {
+									if pending_tool_name.is_some() {
 										eprint!("\r\n");
 									}
 									current_step = step;
@@ -996,19 +1002,19 @@ fn execute_turn(
 									// Print without newline — ToolEnd will complete the line.
 									eprint!("{msg}");
 									let _ = io::stderr().flush();
-									pending_tool_line = true;
+									pending_tool_name = Some(tool_name);
 									// Skip status reprint; tool may complete instantly.
 									continue;
 								}
 								LoopEvent::ToolEnd { tool_name, elapsed_ms, result_summary, .. } => {
 									current_tool = None;
-									if pending_tool_line {
+									if is_matching_tool_end {
 										// Append completion suffix on same line.
 										let suffix = crate::render::styled_tool_end_suffix(
 											elapsed_ms, result_summary.as_deref(),
 										);
 										eprint!("{suffix}\r\n");
-										pending_tool_line = false;
+										pending_tool_name = None;
 									} else {
 										let msg = crate::render::styled_tool_end(
 											&tool_name, elapsed_ms, result_summary.as_deref(),
@@ -1067,9 +1073,13 @@ fn execute_turn(
 						}
 						_ = tick.tick() => {
 							// Periodic refresh: update elapsed time in the status line.
-							// Skip when streaming text is active (cursor is mid-line)
+							// Skip when streaming text is active (cursor is mid-line),
+							// when a ToolStart line is pending (would be overwritten),
 							// or when the approval prompt is visible.
-							if !streaming_active && !crate::is_approval_active() {
+							if !streaming_active
+								&& pending_tool_name.is_none()
+								&& !crate::is_approval_active()
+							{
 								show_status!();
 							}
 						}
