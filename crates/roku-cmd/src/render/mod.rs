@@ -24,6 +24,14 @@ mod style;
 
 pub(crate) use markdown::StreamRenderer;
 pub(crate) use style::{
-	no_color, styled_banner, styled_token_info, styled_tool_end, styled_tool_start,
+	styled_banner, styled_token_info, styled_tool_end, styled_tool_end_suffix, styled_tool_start,
 	styled_working_status,
 };
+
+/// Render a final response that was not streamed via the render task.
+///
+/// Used as a fallback when the LLM produced only tool calls and the response
+/// text was assembled from tool results rather than streamed as text deltas.
+pub(crate) fn render_final_response(text: &str) -> String {
+	markdown::render_markdown(text)
+}

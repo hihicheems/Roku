@@ -76,6 +76,32 @@ pub(crate) fn styled_tool_end(
 	}
 }
 
+/// Suffix appended to a ToolStart line when ToolEnd completes it inline.
+///
+/// Produces `: result ✓ 12ms` or just ` ✓ 12ms` depending on whether a result summary exists.
+pub(crate) fn styled_tool_end_suffix(
+	elapsed_ms: Option<u64>,
+	result_summary: Option<&str>,
+) -> String {
+	if no_color() {
+		let elapsed = elapsed_ms
+			.map(|ms| format!(" ({ms}ms)"))
+			.unwrap_or_default();
+		return match result_summary {
+			Some(s) => format!(": {s}{elapsed}"),
+			None => format!(" done{elapsed}"),
+		};
+	}
+	let check = "✓".with(Color::Green).to_string();
+	let elapsed = elapsed_ms
+		.map(|ms| format!(" {}", format!("{ms}ms").with(Color::DarkGrey)))
+		.unwrap_or_default();
+	match result_summary {
+		Some(s) => format!(": {} {check}{elapsed}", s.with(Color::Grey)),
+		None => format!(" {check}{elapsed}"),
+	}
+}
+
 /// Format a duration as a compact human-readable string: `5s`, `1m 22s`, `1h 02m 30s`.
 pub(crate) fn fmt_elapsed_compact(secs: u64) -> String {
 	if secs < 60 {

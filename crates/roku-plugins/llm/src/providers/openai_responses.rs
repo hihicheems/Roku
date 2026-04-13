@@ -656,8 +656,22 @@ impl LlmProvider for OpenAiResponsesProvider {
 		let mut state = SseStreamState::new();
 		let mut stream_error: Option<ProviderCallError> = None;
 
+		// Per-event timeout: if no SSE event arrives within this duration,
+		// treat the stream as stalled and abort (prevents indefinite hangs
+		// after context compaction or server-side failures).
+		let event_timeout = std::time::Duration::from_secs(120);
+
 		loop {
-			let event_result = event_stream.next().await;
+			let event_result = match tokio::time::timeout(event_timeout, event_stream.next()).await
+			{
+				Ok(result) => result,
+				Err(_) => {
+					stream_error = Some(ProviderCallError::retryable(
+						"SSE stream timed out waiting for next event".to_string(),
+					));
+					break;
+				}
+			};
 			match event_result {
 				Some(Ok(event)) => {
 					if event.data == "[DONE]" {

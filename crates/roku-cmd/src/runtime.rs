@@ -1308,6 +1308,13 @@ pub(crate) fn cli_approval_gate(
 				return roku_agent_runtime::ToolApprovalDecision::Approve;
 			}
 			use std::io::Write as _;
+			// Pause the render task's timer tick and the key poller so they
+			// don't overwrite the prompt or consume keystrokes.
+			crate::set_approval_active(true);
+			// Exit raw mode so stdin.read_line() works (the key poller skips
+			// event reads while APPROVAL_ACTIVE is set).
+			let _ = crossterm::terminal::disable_raw_mode();
+
 			let args_display = serde_json::to_string_pretty(arguments).unwrap_or_default();
 			eprintln!("\n[approval] Tool: {tool_name}");
 			if !args_display.is_empty() && args_display != "null" {
@@ -1317,7 +1324,7 @@ pub(crate) fn cli_approval_gate(
 			eprint!("[approval] Allow? [y/N/a(auto)] ");
 			std::io::stderr().flush().ok();
 			let mut input = String::new();
-			if std::io::stdin().read_line(&mut input).is_ok() {
+			let decision = if std::io::stdin().read_line(&mut input).is_ok() {
 				let trimmed = input.trim();
 				if trimmed.eq_ignore_ascii_case("a") {
 					crate::toggle_auto_approve();
@@ -1334,7 +1341,11 @@ pub(crate) fn cli_approval_gate(
 				roku_agent_runtime::ToolApprovalDecision::Deny(
 					"User denied the operation.".to_string(),
 				)
-			}
+			};
+			// Restore raw mode for key poller, then unpause.
+			let _ = crossterm::terminal::enable_raw_mode();
+			crate::set_approval_active(false);
+			decision
 		},
 		catalog,
 	))

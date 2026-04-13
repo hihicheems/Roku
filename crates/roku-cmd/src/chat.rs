@@ -411,7 +411,7 @@ fn handle_turn_interactive(
 	model_override: Option<&str>,
 	thinking_effort: Option<&str>,
 ) {
-	let (result, _request_id, turn_tokens) = dispatch_and_record(
+	let (result, _request_id, turn_tokens, text_streamed) = dispatch_and_record(
 		rt,
 		service,
 		store,
@@ -463,11 +463,17 @@ fn handle_turn_interactive(
 	};
 	match result {
 		Ok(TurnResult::Completed(response)) => {
+			// When the render task didn't stream any text (e.g. the LLM
+			// produced only tool calls and no text deltas), print the
+			// final response here so it isn't silently lost.
+			if !json_mode && !text_streamed && !response.is_empty() {
+				eprintln!("{}", render::render_final_response(&response));
+			}
 			emit_response(&response, "succeeded");
 		}
 		Ok(TurnResult::AwaitingUser(question)) => {
-			if !json_mode {
-				eprintln!("[agent is asking for input]");
+			if !json_mode && !text_streamed && !question.is_empty() {
+				eprintln!("{}", render::render_final_response(&question));
 			}
 			emit_response(&question, "awaiting_user");
 
@@ -480,7 +486,7 @@ fn handle_turn_interactive(
 						}
 						reader.add_history_entry(reply);
 
-						let (inner_result, _, inner_tokens) = dispatch_and_record(
+						let (inner_result, _, inner_tokens, inner_streamed) = dispatch_and_record(
 							rt,
 							service,
 							store,
@@ -508,12 +514,15 @@ fn handle_turn_interactive(
 						}
 						match inner_result {
 							Ok(TurnResult::Completed(response)) => {
+								if !json_mode && !inner_streamed && !response.is_empty() {
+									eprintln!("{}", render::render_final_response(&response));
+								}
 								emit_response(&response, "succeeded");
 								break;
 							}
 							Ok(TurnResult::AwaitingUser(q)) => {
-								if !json_mode {
-									eprintln!("[agent is asking for input]");
+								if !json_mode && !inner_streamed && !q.is_empty() {
+									eprintln!("{}", render::render_final_response(&q));
 								}
 								emit_response(&q, "awaiting_user");
 							}
@@ -685,7 +694,7 @@ fn run_pipe(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result<(), Co
 		let goal = trimmed.to_string();
 
 		let json_mode = options.json;
-		let (result, request_id, tokens) = dispatch_and_record(
+		let (result, request_id, tokens, _text_streamed) = dispatch_and_record(
 			rt,
 			&service,
 			&store,
@@ -774,8 +783,8 @@ fn write_json_stdout(resp: &PipeResponse) {
 /// Execute a turn and record both user message and assistant response in history.
 /// Persists new turns to the session store. On cancel/error, history is not modified.
 ///
-/// Returns `(Result<TurnResult>, request_id, TurnTokens)` so callers can track
-/// token usage and correlate the response with the `RequestEnvelope` sent to the runtime.
+/// Returns `(Result<TurnResult>, request_id, TurnTokens, bool)` so callers can track
+/// token usage and whether the render task streamed LLM text.
 fn dispatch_and_record(
 	rt: &tokio::runtime::Runtime,
 	service: &RuntimeService,
@@ -787,11 +796,11 @@ fn dispatch_and_record(
 	json_mode: bool,
 	model_override: Option<&str>,
 	thinking_effort: Option<&str>,
-) -> (Result<TurnResult, CommandError>, String, TurnTokens) {
+) -> (Result<TurnResult, CommandError>, String, TurnTokens, bool) {
 	let seq = next_cli_request_sequence();
 	let request_id = format!("req-{seq}");
 
-	let (turn_result, tokens) = match execute_turn(
+	let (turn_result, tokens, text_streamed) = match execute_turn(
 		rt,
 		service,
 		session_id,
@@ -803,8 +812,8 @@ fn dispatch_and_record(
 		model_override,
 		thinking_effort,
 	) {
-		Ok(pair) => pair,
-		Err(e) => return (Err(e), request_id, TurnTokens::default()),
+		Ok(triple) => triple,
+		Err(e) => return (Err(e), request_id, TurnTokens::default(), false),
 	};
 	let result = turn_result;
 
@@ -832,13 +841,13 @@ fn dispatch_and_record(
 		TurnResult::Cancelled => {}
 	}
 
-	(Ok(result), request_id, tokens)
+	(Ok(result), request_id, tokens, text_streamed)
 }
 
 /// Execute a single chat turn with Ctrl+C cancellation support.
 ///
-/// Returns `Ok((TurnResult, TurnTokens))` where `TurnTokens` holds the prompt/output
-/// token counts from the `TokenUsage` LoopEvent emitted by the runtime.
+/// Returns `Ok((TurnResult, TurnTokens, bool))` where `TurnTokens` holds the prompt/output
+/// token counts and the bool indicates whether the render task streamed any LLM text.
 fn execute_turn(
 	rt: &tokio::runtime::Runtime,
 	service: &RuntimeService,
@@ -850,13 +859,18 @@ fn execute_turn(
 	request_id: &str,
 	model_override_arg: Option<&str>,
 	thinking_effort_arg: Option<&str>,
-) -> Result<(TurnResult, TurnTokens), CommandError> {
+) -> Result<(TurnResult, TurnTokens, bool), CommandError> {
 	rt.block_on(async {
 		let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LoopEvent>();
 
 		// Shared token accumulator: the render task writes, execute_turn reads after join.
 		let captured_tokens = std::sync::Arc::new(std::sync::Mutex::new(TurnTokens::default()));
 		let captured_tokens_task = captured_tokens.clone();
+
+		// Tracks whether the render task streamed any LLM text to the terminal.
+		// When false, the caller should print the response message directly.
+		let text_was_streamed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let text_streamed_flag = text_was_streamed.clone();
 
 		let render_task = if json_mode {
 			// JSON mode: emit typed JSONL event lines to stdout + capture tokens.
@@ -904,112 +918,192 @@ fn execute_turn(
 			// Interactive mode: styled event display with streaming markdown.
 			// Raw mode is active (for Esc key detection), so all output uses
 			// explicit \r\n instead of relying on terminal LF→CRLF translation.
+			// Suppress stderr logs during execution to avoid raw-mode CRLF issues.
 			tokio::spawn(async move {
+				let _log_guard = crate::suppress_stderr_logs();
 				let mut stream_renderer = crate::render::StreamRenderer::new();
 				let start_time = std::time::Instant::now();
 				let mut current_step: u32 = 0;
 				let mut current_tool: Option<String> = None;
+				let mut status_visible = false;
+				let mut streaming_active = false;
+				// When Some, a ToolStart line has been printed without a trailing
+				// newline, waiting for the matching ToolEnd to complete the line.
+				// Stores the tool name so we only inline-complete the correct tool.
+				let mut pending_tool_name: Option<String> = None;
+				// Timestamp of the last tool event. The timer tick suppresses
+				// status redraws shortly after tool activity to avoid blank-line
+				// artifacts when rapid tool events interleave with the 500ms tick.
+				let mut last_tool_event = start_time;
+				// Whether any text was printed since the last LlmDecisionComplete.
+				// Controls whether a trailing \r\n is needed to separate text from
+				// subsequent tool output.
+				let mut had_text_output = false;
+
+				// Helper: draw or refresh the status line.
+				macro_rules! show_status {
+					() => {
+						if status_visible {
+							eprint!("\r\x1b[K");
+						}
+						let s = crate::render::styled_working_status(
+							current_step,
+							current_tool.as_deref(),
+							start_time.elapsed(),
+						);
+						eprint!("{s}");
+						let _ = io::stderr().flush();
+						status_visible = true;
+					};
+				}
 
 				// Show initial status line.
-				let status = crate::render::styled_working_status(0, None, start_time.elapsed());
-				eprint!("{status}");
-				let _ = io::stderr().flush();
+				show_status!();
 
-				while let Some(event) = rx.recv().await {
-					// Clear the status line before printing event output.
-					eprint!("\r\x1b[K");
+				// Timer-based status refresh: updates elapsed time and tool
+				// name independently of events (like Codex's 32ms tick, but
+				// at 500ms since we only show text, not a spinner animation).
+				let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
+				tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+				// Consume the immediate first tick.
+				tick.tick().await;
 
-					match event {
-						LoopEvent::ToolStart {
-							step,
-							tool_name,
-							args_summary,
-						} => {
-							current_step = step;
-							current_tool = Some(tool_name.clone());
-							let msg = crate::render::styled_tool_start(
-								&tool_name,
-								args_summary.as_deref(),
-							);
-							eprint!("{msg}\r\n");
-						}
-						LoopEvent::ToolEnd {
-							tool_name,
-							elapsed_ms,
-							result_summary,
-							..
-						} => {
-							current_tool = None;
-							let msg = crate::render::styled_tool_end(
-								&tool_name,
-								elapsed_ms,
-								result_summary.as_deref(),
-							);
-							eprint!("{msg}\r\n");
-						}
-						LoopEvent::CompactTriggered {
-							step,
-							estimated_tokens,
-						} => {
-							eprint!(
-								"[compact] step {step} triggered (~{estimated_tokens} tokens)\r\n"
-							);
-						}
-						LoopEvent::LlmTextDelta { text, .. } => {
-							let rendered = stream_renderer.push(&text);
-							if !rendered.is_empty() {
-								crate::mark_streaming_output();
-								eprint!("{}", rendered.replace('\n', "\r\n"));
-								let _ = io::stderr().flush();
+				loop {
+					tokio::select! {
+						event = rx.recv() => {
+							let Some(event) = event else { break };
+
+							// Clear status before printing event output.
+							if status_visible {
+								eprint!("\r\x1b[K");
+								status_visible = false;
 							}
-							// Skip status reprint during active text streaming
-							// to avoid appending onto partial text lines.
-							continue;
-						}
-						LoopEvent::LlmDecisionComplete { .. } => {
-							let remaining = stream_renderer.flush();
-							if !remaining.is_empty() {
-								crate::mark_streaming_output();
-								eprint!("{}", remaining.replace('\n', "\r\n"));
+
+							// Close any pending ToolStart line before printing
+							// other event output, unless the matching ToolEnd will
+							// complete it inline.
+							let is_matching_tool_end = if let LoopEvent::ToolEnd {
+								ref tool_name, ..
+							} = event
+							{
+								pending_tool_name.as_deref() == Some(tool_name.as_str())
+							} else {
+								false
+							};
+							if pending_tool_name.is_some() && !is_matching_tool_end {
+								eprint!("\r\n");
+								pending_tool_name = None;
 							}
-							eprint!("\r\n");
-							let _ = io::stderr().flush();
-						}
-						LoopEvent::StepComplete { step } => {
-							current_step = step;
-							current_tool = None;
-							eprint!("[step] {step} complete\r\n");
-						}
-						LoopEvent::TokenUsage {
-							prompt_tokens,
-							output_tokens,
-							model_id,
-							..
-						} => {
-							if let Ok(mut guard) = captured_tokens_task.lock() {
-								guard.prompt = guard.prompt.saturating_add(prompt_tokens);
-								guard.output = guard.output.saturating_add(output_tokens);
-								if let Some(id) = model_id {
-									guard.model_id = Some(id);
+
+							// All events print their output and continue.
+							// Status display is handled exclusively by the timer tick.
+							match event {
+								LoopEvent::ToolStart { step, tool_name, args_summary } => {
+									if pending_tool_name.is_some() {
+										eprint!("\r\n");
+									}
+									current_step = step;
+									current_tool = Some(tool_name.clone());
+									streaming_active = false;
+									last_tool_event = std::time::Instant::now();
+									let msg = crate::render::styled_tool_start(
+										&tool_name, args_summary.as_deref(),
+									);
+									eprint!("{msg}");
+									let _ = io::stderr().flush();
+									pending_tool_name = Some(tool_name);
+								}
+								LoopEvent::ToolEnd { tool_name, elapsed_ms, result_summary, .. } => {
+									current_tool = None;
+									last_tool_event = std::time::Instant::now();
+									if is_matching_tool_end {
+										let suffix = crate::render::styled_tool_end_suffix(
+											elapsed_ms, result_summary.as_deref(),
+										);
+										eprint!("{suffix}\r\n");
+										pending_tool_name = None;
+									} else {
+										let msg = crate::render::styled_tool_end(
+											&tool_name, elapsed_ms, result_summary.as_deref(),
+										);
+										eprint!("{msg}\r\n");
+									}
+								}
+								LoopEvent::CompactTriggered { step, estimated_tokens } => {
+									eprint!("[compact] step {step} triggered (~{estimated_tokens} tokens)\r\n");
+								}
+								LoopEvent::LlmTextDelta { text, .. } => {
+									streaming_active = true;
+									let rendered = stream_renderer.push(&text);
+									if !rendered.is_empty() {
+										had_text_output = true;
+										text_streamed_flag.store(
+											true,
+											std::sync::atomic::Ordering::Relaxed,
+										);
+										crate::mark_streaming_output();
+										eprint!("{}", rendered.replace('\n', "\r\n"));
+										let _ = io::stderr().flush();
+									}
+								}
+								LoopEvent::LlmDecisionComplete { .. } => {
+									streaming_active = false;
+									let remaining = stream_renderer.flush();
+									if !remaining.is_empty() {
+										had_text_output = true;
+										crate::mark_streaming_output();
+										eprint!("{}", remaining.replace('\n', "\r\n"));
+									}
+									// Only add newline when there was actual text to
+									// separate from. Without this guard, every
+									// LlmDecisionComplete creates a blank line before
+									// the next tool output.
+									if had_text_output {
+										eprint!("\r\n");
+										had_text_output = false;
+									}
+									let _ = io::stderr().flush();
+								}
+								LoopEvent::StepComplete { step } => {
+									current_step = step;
+									current_tool = None;
+								}
+								LoopEvent::TokenUsage { prompt_tokens, output_tokens, model_id, .. } => {
+									if let Ok(mut guard) = captured_tokens_task.lock() {
+										guard.prompt = guard.prompt.saturating_add(prompt_tokens);
+										guard.output = guard.output.saturating_add(output_tokens);
+										if let Some(id) = model_id {
+											guard.model_id = Some(id);
+										}
+									}
 								}
 							}
-							continue; // silent event, no status reprint
+						}
+						_ = tick.tick() => {
+							// Periodic refresh: update elapsed time in the status line.
+							// Skip when streaming text is active (cursor is mid-line),
+							// when a ToolStart line is pending (would be overwritten),
+							// when the approval prompt is visible, or shortly after
+							// a tool event (avoids blank-line artifacts from status
+							// being shown and immediately cleared by the next tool).
+							if !streaming_active
+								&& pending_tool_name.is_none()
+								&& !crate::is_approval_active()
+								&& last_tool_event.elapsed()
+									>= std::time::Duration::from_secs(1)
+							{
+								show_status!();
+							}
 						}
 					}
-
-					// Re-show the status line after output.
-					let status = crate::render::styled_working_status(
-						current_step,
-						current_tool.as_deref(),
-						start_time.elapsed(),
-					);
-					eprint!("{status}");
-					let _ = io::stderr().flush();
 				}
 
 				// Clear status line on exit.
-				eprint!("\r\x1b[K");
+				if status_visible {
+					eprint!("\r\x1b[K");
+				}
 				let _ = io::stderr().flush();
+				drop(_log_guard);
 			})
 		};
 
@@ -1044,6 +1138,13 @@ fn execute_turn(
 					if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
 						break;
 					}
+					// Pause event reading while the approval prompt is active.
+					// The approval gate disables raw mode and reads stdin directly;
+					// consuming events here would steal keystrokes.
+					if crate::is_approval_active() {
+						std::thread::sleep(std::time::Duration::from_millis(200));
+						continue;
+					}
 					if crossterm::event::poll(std::time::Duration::from_millis(200))
 						.unwrap_or(false) && let Ok(crossterm::event::Event::Key(key)) =
 						crossterm::event::read()
@@ -1076,17 +1177,18 @@ fn execute_turn(
 				render_task.await.ok();
 
 				let tokens = captured_tokens.lock().map(|g| g.clone()).unwrap_or_default();
+				let streamed = text_was_streamed.load(std::sync::atomic::Ordering::Relaxed);
 				if let Ok(Some(_pending)) = service.pending_loop(session_id) {
-					Ok((TurnResult::AwaitingUser(response.message), tokens))
+					Ok((TurnResult::AwaitingUser(response.message), tokens, streamed))
 				} else {
-					Ok((TurnResult::Completed(response.message), tokens))
+					Ok((TurnResult::Completed(response.message), tokens, streamed))
 				}
 			}
 			_ = tokio::signal::ctrl_c() => {
 				drop(tx);
 				render_task.await.ok();
 				let _ = service.clear_pending_loop(session_id);
-				Ok((TurnResult::Cancelled, TurnTokens::default()))
+				Ok((TurnResult::Cancelled, TurnTokens::default(), false))
 			}
 			_ = async {
 				loop {
@@ -1097,7 +1199,7 @@ fn execute_turn(
 				drop(tx);
 				render_task.await.ok();
 				let _ = service.clear_pending_loop(session_id);
-				Ok((TurnResult::Cancelled, TurnTokens::default()))
+				Ok((TurnResult::Cancelled, TurnTokens::default(), false))
 			}
 		};
 

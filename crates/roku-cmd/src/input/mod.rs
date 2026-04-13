@@ -31,10 +31,8 @@ use std::path::PathBuf;
 use crossterm::cursor::Show;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
-use crossterm::style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor};
+use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use crossterm::terminal::{self, Clear, ClearType};
-
-use unicode_width::UnicodeWidthStr;
 
 use command_popup::CommandPopup;
 use history::History;
@@ -84,27 +82,13 @@ impl InputReader {
 		let mut buf = LineBuffer::new();
 		let mut popup_active = false;
 
-		// Print the prompt with optional subtle background.
-		let use_bg = !crate::render::no_color();
-		if use_bg {
-			let _ = execute!(
-				tty,
-				SetBackgroundColor(Color::Rgb {
-					r: 40,
-					g: 40,
-					b: 44
-				}),
-				SetForegroundColor(Color::DarkCyan),
-				Print(prompt),
-			);
-		} else {
-			let _ = execute!(
-				tty,
-				SetForegroundColor(Color::DarkCyan),
-				Print(prompt),
-				ResetColor,
-			);
-		}
+		// Print the prompt prefix in DarkCyan, no background color.
+		let _ = execute!(
+			tty,
+			SetForegroundColor(Color::DarkCyan),
+			Print(prompt),
+			ResetColor,
+		);
 		let prompt_len = prompt.len() as u16;
 
 		// Enter raw mode with an RAII guard so it is always restored, even on panic.
@@ -145,6 +129,10 @@ impl InputReader {
 		// When the user presses Esc, we suppress re-opening the popup until
 		// the input changes enough to no longer match the trigger condition.
 		let mut popup_dismissed = false;
+		// Suppress popup activation when content came from history navigation.
+		// Up/Down through history may land on `/`-prefixed entries; the popup
+		// should not hijack arrow keys in that case.
+		let mut navigating_history = false;
 
 		loop {
 			let evt = match event::read() {
@@ -160,7 +148,13 @@ impl InputReader {
 				continue;
 			}
 
-			match self.handle_key(key, buf, popup_active, &mut popup_dismissed) {
+			match self.handle_key(
+				key,
+				buf,
+				popup_active,
+				&mut popup_dismissed,
+				&mut navigating_history,
+			) {
 				KeyAction::Continue => {}
 				KeyAction::Submit => {
 					// Redraw before returning so the final command text is visible
@@ -197,9 +191,11 @@ impl InputReader {
 				KeyAction::Eof => return ReadlineResult::Eof,
 			}
 
-			// Sync popup state.
+			// Sync popup state. Suppress when browsing history so that
+			// navigating to a `/`-prefixed entry doesn't hijack arrows.
 			let content = buf.content();
-			let should_popup = content.starts_with('/') && !content.contains(' ');
+			let should_popup =
+				content.starts_with('/') && !content.contains(' ') && !navigating_history;
 			if should_popup && !popup_dismissed {
 				self.popup.update_filter(content);
 				*popup_active = true;
@@ -221,6 +217,7 @@ impl InputReader {
 		buf: &mut LineBuffer,
 		popup_active: &mut bool,
 		popup_dismissed: &mut bool,
+		navigating_history: &mut bool,
 	) -> KeyAction {
 		let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -240,6 +237,10 @@ impl InputReader {
 						let names: Vec<_> = subs.iter().map(|s| s.name.to_string()).collect();
 						return KeyAction::SubmitWithSubCommands(items, names);
 					}
+				}
+				// Empty Enter is a no-op — stay on the same prompt line.
+				if buf.is_empty() {
+					return KeyAction::Continue;
 				}
 				return KeyAction::Submit;
 			}
@@ -267,21 +268,22 @@ impl InputReader {
 				*popup_dismissed = true;
 			}
 			KeyCode::Esc => {
-				// Universal cancel: clear input and return to a fresh prompt.
+				// Clear input but stay on the same prompt line.
 				buf.set("");
 				self.history.reset_position();
-				return KeyAction::Submit;
 			}
 
 			// --- history navigation (when popup is NOT active) ---
 			KeyCode::Up => {
 				if let Some(line) = self.history.navigate_up(buf.content()) {
 					buf.set(line);
+					*navigating_history = true;
 				}
 			}
 			KeyCode::Down => {
 				if let Some(line) = self.history.navigate_down() {
 					buf.set(line);
+					*navigating_history = true;
 				}
 			}
 
@@ -310,6 +312,7 @@ impl InputReader {
 			KeyCode::Char(ch) if !ctrl => {
 				buf.insert(ch);
 				self.history.reset_position();
+				*navigating_history = false;
 			}
 
 			_ => {}
@@ -326,38 +329,14 @@ impl InputReader {
 		prompt_len: u16,
 	) {
 		let (term_cols, _) = terminal::size().unwrap_or((80, 24));
-		let use_bg = !crate::render::no_color();
 
-		// Redraw the input text on the prompt line.
-		if use_bg {
-			let _ = execute!(
-				tty,
-				crossterm::cursor::MoveToColumn(prompt_len),
-				Clear(ClearType::UntilNewLine),
-				SetBackgroundColor(Color::Rgb {
-					r: 40,
-					g: 40,
-					b: 44
-				}),
-				SetForegroundColor(Color::White),
-				Print(buf.content()),
-			);
-			// Fill the rest of the line with the background color.
-			let content_width = UnicodeWidthStr::width(buf.content());
-			let used = prompt_len as usize + content_width;
-			let remaining = (term_cols as usize).saturating_sub(used);
-			if remaining > 0 {
-				let _ = execute!(tty, Print(" ".repeat(remaining)));
-			}
-			let _ = execute!(tty, ResetColor);
-		} else {
-			let _ = execute!(
-				tty,
-				crossterm::cursor::MoveToColumn(prompt_len),
-				Clear(ClearType::UntilNewLine),
-				Print(buf.content()),
-			);
-		}
+		// Redraw the input text on the prompt line (no background color).
+		let _ = execute!(
+			tty,
+			crossterm::cursor::MoveToColumn(prompt_len),
+			Clear(ClearType::UntilNewLine),
+			Print(buf.content()),
+		);
 
 		// Render popup below using relative movement.
 		let rows_drawn = if popup_active {

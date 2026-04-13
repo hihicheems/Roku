@@ -736,9 +736,13 @@ impl GenericAgentRuntime {
 		let state_tokens = crate::runtime_loop::estimate_context_tokens(loop_state);
 		let estimated = msg_tokens.max(state_tokens);
 		if estimated > threshold {
-			eprintln!(
-				"Context compact triggered: estimated {estimated} tokens exceeds threshold {threshold}"
-			);
+			let _ = roku_common_types::emit_global_log(roku_common_types::LogRecord::new(
+				"roku-runtime-service",
+				roku_common_types::LogLevel::Info,
+				format!(
+					"context compact triggered: estimated {estimated} tokens exceeds threshold {threshold}"
+				),
+			));
 			if let Some(sender) = event_sender {
 				let _ = sender.send(crate::runtime_loop::LoopEvent::CompactTriggered {
 					step: current_step_index,
@@ -967,7 +971,23 @@ impl GenericAgentRuntime {
 					(text, tool_calls)
 				});
 				let llm_result = router.generate_streaming(&gen_request, tx).await;
-				let (text, tool_calls) = accumulator.await.unwrap_or_default();
+				let (mut text, tool_calls) = accumulator.await.unwrap_or_default();
+
+				// Fallback: if the provider returned text but no streaming deltas
+				// reached the accumulator (e.g. SSE delivered text only in
+				// `response.completed`), emit a synthetic delta so the render
+				// task can display the response.
+				if text.is_empty()
+					&& let Ok(ref resp) = llm_result
+					&& !resp.output.is_empty()
+				{
+					text.clone_from(&resp.output);
+					let _ = sender.send(crate::runtime_loop::LoopEvent::LlmTextDelta {
+						step: current_step_index,
+						text: resp.output.clone(),
+					});
+				}
+
 				let _ = sender.send(crate::runtime_loop::LoopEvent::LlmDecisionComplete {
 					step: current_step_index,
 				});
