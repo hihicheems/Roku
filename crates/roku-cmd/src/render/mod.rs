@@ -23,4 +23,7 @@ mod markdown;
 mod style;
 
 pub(crate) use markdown::StreamRenderer;
-pub(crate) use style::{styled_banner, styled_token_info, styled_tool_end, styled_tool_start};
+pub(crate) use style::{
+	no_color, styled_banner, styled_token_info, styled_tool_end, styled_tool_start,
+	styled_working_status,
+};
