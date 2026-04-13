@@ -283,6 +283,77 @@ impl TelegramBotClient {
 		Ok(())
 	}
 
+	/// Sends a message and returns the `message_id` of the created Telegram message.
+	pub fn send_message_with_id(
+		&self,
+		message: &TelegramOutboundMessage,
+	) -> Result<i64, TelegramTransportError> {
+		let response = self
+			.client
+			.post(self.endpoint("sendMessage"))
+			.json(&SendMessageRequest {
+				chat_id: message.chat_id,
+				text: message.text.clone(),
+				parse_mode: parse_mode_label(message.parse_mode).map(str::to_string),
+				disable_web_page_preview: message.disable_web_page_preview,
+				reply_markup: message.reply_markup.clone(),
+			})
+			.send()
+			.map_err(TelegramTransportError::HttpRequest)?;
+		let result: serde_json::Value = parse_api_response(response)?;
+		let message_id = result
+			.get("message_id")
+			.and_then(|v| v.as_i64())
+			.ok_or_else(|| {
+				TelegramTransportError::Api(
+					"telegram sendMessage response missing message_id".to_string(),
+				)
+			})?;
+		Ok(message_id)
+	}
+
+	/// Edits the text of an existing message.
+	pub fn edit_message_text(
+		&self,
+		chat_id: i64,
+		message_id: i64,
+		text: &str,
+		parse_mode: Option<&str>,
+	) -> Result<(), TelegramTransportError> {
+		let response = self
+			.client
+			.post(self.endpoint("editMessageText"))
+			.json(&EditMessageTextRequest {
+				chat_id,
+				message_id,
+				text: text.to_string(),
+				parse_mode: parse_mode.map(str::to_string),
+			})
+			.send()
+			.map_err(TelegramTransportError::HttpRequest)?;
+		let _: serde_json::Value = parse_api_response(response)?;
+		Ok(())
+	}
+
+	/// Sends a chat action (e.g. `"typing"`) to display a status indicator to the user.
+	pub fn send_chat_action(
+		&self,
+		chat_id: i64,
+		action: &str,
+	) -> Result<(), TelegramTransportError> {
+		let response = self
+			.client
+			.post(self.endpoint("sendChatAction"))
+			.json(&SendChatActionRequest {
+				chat_id,
+				action: action.to_string(),
+			})
+			.send()
+			.map_err(TelegramTransportError::HttpRequest)?;
+		let _: serde_json::Value = parse_api_response(response)?;
+		Ok(())
+	}
+
 	fn endpoint(&self, method: &str) -> String {
 		format!(
 			"{}/bot{}/{}",
@@ -331,6 +402,21 @@ struct AnswerCallbackQueryRequest {
 	callback_query_id: String,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	text: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct EditMessageTextRequest {
+	chat_id: i64,
+	message_id: i64,
+	text: String,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	parse_mode: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SendChatActionRequest {
+	chat_id: i64,
+	action: String,
 }
 
 #[derive(Debug, Deserialize)]
