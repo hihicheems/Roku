@@ -334,8 +334,10 @@ fn format_tool_line(t: &ToolProgressEntry) -> String {
 	};
 
 	if t.finished {
+		// Skip duration display for very fast tools (<50ms) to reduce noise.
 		let dur = t
 			.elapsed_ms
+			.filter(|&ms| ms >= 50)
 			.map(|ms| format!(" {}", format_duration_compact_ms(ms)))
 			.unwrap_or_default();
 		format!("\u{2705} {emoji} {}{summary_part}{dur}", t.name)
@@ -502,7 +504,9 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 								None
 							};
 
-							// Event consumer: accumulate state, throttle edits to <=1/sec.
+							// Event consumer with 1-second polling.
+							// Events set dirty flags; the interval tick ensures elapsed
+							// times for in-progress tools refresh even without events.
 							let mut accumulated_text = String::new();
 							let mut tool_entries: Vec<ToolProgressEntry> = Vec::new();
 							let mut prompt_tokens: u64 = 0;
@@ -511,65 +515,59 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 							let mut content_dirty = false;
 							let mut last_edit =
 								std::time::Instant::now() - std::time::Duration::from_secs(2);
+							let mut tick =
+								tokio::time::interval(std::time::Duration::from_secs(1));
 
-							while let Some(event) = rx.recv().await {
-								match &event {
-									roku_agent_runtime::LoopEvent::LlmTextDelta {
-										text, ..
-									} => {
-										accumulated_text.push_str(text);
-										content_dirty = true;
-									}
-									roku_agent_runtime::LoopEvent::LlmDecisionComplete {
-										..
-									} => {
-										progress_dirty = true;
-									}
-									roku_agent_runtime::LoopEvent::ToolStart {
-										tool_name,
-										args_summary,
-										..
-									} => {
-										tool_entries.push(ToolProgressEntry {
-											name: tool_name.clone(),
-											summary: args_summary.clone().unwrap_or_default(),
-											started_at: std::time::Instant::now(),
-											elapsed_ms: None,
-											finished: false,
-										});
-										progress_dirty = true;
-									}
-									roku_agent_runtime::LoopEvent::ToolEnd {
-										tool_name,
-										elapsed_ms,
-										..
-									} => {
-										if let Some(entry) = tool_entries
-											.iter_mut()
-											.rev()
-											.find(|e| !e.finished && e.name == *tool_name)
-										{
-											entry.finished = true;
-											entry.elapsed_ms = *elapsed_ms;
+							loop {
+								tokio::select! {
+									event = rx.recv() => {
+										let Some(event) = event else { break };
+										match &event {
+											roku_agent_runtime::LoopEvent::LlmTextDelta { text, .. } => {
+												accumulated_text.push_str(text);
+												content_dirty = true;
+											}
+											roku_agent_runtime::LoopEvent::LlmDecisionComplete { .. } => {
+												progress_dirty = true;
+											}
+											roku_agent_runtime::LoopEvent::ToolStart { tool_name, args_summary, .. } => {
+												tool_entries.push(ToolProgressEntry {
+													name: tool_name.clone(),
+													summary: args_summary.clone().unwrap_or_default(),
+													started_at: std::time::Instant::now(),
+													elapsed_ms: None,
+													finished: false,
+												});
+												progress_dirty = true;
+											}
+											roku_agent_runtime::LoopEvent::ToolEnd { tool_name, elapsed_ms, .. } => {
+												if let Some(entry) = tool_entries.iter_mut().rev().find(|e| !e.finished && e.name == *tool_name) {
+													entry.finished = true;
+													entry.elapsed_ms = *elapsed_ms;
+												}
+												progress_dirty = true;
+											}
+											roku_agent_runtime::LoopEvent::TokenUsage { prompt_tokens: p, output_tokens: o, .. } => {
+												prompt_tokens += p;
+												output_tokens += o;
+												progress_dirty = true;
+											}
+											_ => {}
 										}
-										progress_dirty = true;
 									}
-									roku_agent_runtime::LoopEvent::TokenUsage {
-										prompt_tokens: p,
-										output_tokens: o,
-										..
-									} => {
-										prompt_tokens += p;
-										output_tokens += o;
-										progress_dirty = true;
+									_ = tick.tick() => {
+										// Periodic refresh: mark progress dirty if any tool
+										// is still running so its elapsed time updates.
+										if tool_entries.iter().any(|t| !t.finished) {
+											progress_dirty = true;
+										}
 									}
-									_ => {}
 								}
 
+								// Flush at most once per second.
 								if let Some(cid) = chat_id
 									&& last_edit.elapsed() >= std::time::Duration::from_secs(1)
 								{
-									// Update progress message (per-tool lines + footer).
 									if progress_dirty && progress_mid > 0 {
 										let status = render_progress(
 											&tool_entries,
@@ -586,7 +584,6 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 										progress_dirty = false;
 									}
 
-									// Update content message (LLM text only).
 									if content_dirty && !accumulated_text.is_empty() {
 										let display_text =
 											roku_plugin_telegram::markdown::strip_tool_call_xml(
