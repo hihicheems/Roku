@@ -911,107 +911,115 @@ fn execute_turn(
 				let start_time = std::time::Instant::now();
 				let mut current_step: u32 = 0;
 				let mut current_tool: Option<String> = None;
-				let mut status_visible: bool;
+				let mut status_visible = false;
+				let mut streaming_active = false;
+
+				// Helper: draw or refresh the status line.
+				macro_rules! show_status {
+					() => {
+						if status_visible {
+							eprint!("\r\x1b[K");
+						}
+						let s = crate::render::styled_working_status(
+							current_step,
+							current_tool.as_deref(),
+							start_time.elapsed(),
+						);
+						eprint!("{s}");
+						let _ = io::stderr().flush();
+						status_visible = true;
+					};
+				}
 
 				// Show initial status line.
-				let status = crate::render::styled_working_status(0, None, start_time.elapsed());
-				eprint!("{status}");
-				let _ = io::stderr().flush();
-				status_visible = true;
+				show_status!();
 
-				while let Some(event) = rx.recv().await {
-					// Clear the status line only when one is actually displayed,
-					// to avoid erasing streaming text on the current line.
-					if status_visible {
-						eprint!("\r\x1b[K");
-						status_visible = false;
-					}
+				// Timer-based status refresh: updates elapsed time and tool
+				// name independently of events (like Codex's 32ms tick, but
+				// at 500ms since we only show text, not a spinner animation).
+				let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
+				tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+				// Consume the immediate first tick.
+				tick.tick().await;
 
-					match event {
-						LoopEvent::ToolStart {
-							step,
-							tool_name,
-							args_summary,
-						} => {
-							current_step = step;
-							current_tool = Some(tool_name.clone());
-							let msg = crate::render::styled_tool_start(
-								&tool_name,
-								args_summary.as_deref(),
-							);
-							eprint!("{msg}\r\n");
-						}
-						LoopEvent::ToolEnd {
-							tool_name,
-							elapsed_ms,
-							result_summary,
-							..
-						} => {
-							current_tool = None;
-							let msg = crate::render::styled_tool_end(
-								&tool_name,
-								elapsed_ms,
-								result_summary.as_deref(),
-							);
-							eprint!("{msg}\r\n");
-						}
-						LoopEvent::CompactTriggered {
-							step,
-							estimated_tokens,
-						} => {
-							eprint!(
-								"[compact] step {step} triggered (~{estimated_tokens} tokens)\r\n"
-							);
-						}
-						LoopEvent::LlmTextDelta { text, .. } => {
-							let rendered = stream_renderer.push(&text);
-							if !rendered.is_empty() {
-								crate::mark_streaming_output();
-								eprint!("{}", rendered.replace('\n', "\r\n"));
-								let _ = io::stderr().flush();
+				loop {
+					tokio::select! {
+						event = rx.recv() => {
+							let Some(event) = event else { break };
+
+							// Clear status before printing event output.
+							if status_visible {
+								eprint!("\r\x1b[K");
+								status_visible = false;
 							}
-							// Skip status reprint during active text streaming.
-							continue;
-						}
-						LoopEvent::LlmDecisionComplete { .. } => {
-							let remaining = stream_renderer.flush();
-							if !remaining.is_empty() {
-								crate::mark_streaming_output();
-								eprint!("{}", remaining.replace('\n', "\r\n"));
-							}
-							eprint!("\r\n");
-							let _ = io::stderr().flush();
-						}
-						LoopEvent::StepComplete { step } => {
-							current_step = step;
-							current_tool = None;
-						}
-						LoopEvent::TokenUsage {
-							prompt_tokens,
-							output_tokens,
-							model_id,
-							..
-						} => {
-							if let Ok(mut guard) = captured_tokens_task.lock() {
-								guard.prompt = guard.prompt.saturating_add(prompt_tokens);
-								guard.output = guard.output.saturating_add(output_tokens);
-								if let Some(id) = model_id {
-									guard.model_id = Some(id);
+
+							match event {
+								LoopEvent::ToolStart { step, tool_name, args_summary } => {
+									current_step = step;
+									current_tool = Some(tool_name.clone());
+									streaming_active = false;
+									let msg = crate::render::styled_tool_start(
+										&tool_name, args_summary.as_deref(),
+									);
+									eprint!("{msg}\r\n");
+								}
+								LoopEvent::ToolEnd { tool_name, elapsed_ms, result_summary, .. } => {
+									current_tool = None;
+									let msg = crate::render::styled_tool_end(
+										&tool_name, elapsed_ms, result_summary.as_deref(),
+									);
+									eprint!("{msg}\r\n");
+								}
+								LoopEvent::CompactTriggered { step, estimated_tokens } => {
+									eprint!("[compact] step {step} triggered (~{estimated_tokens} tokens)\r\n");
+								}
+								LoopEvent::LlmTextDelta { text, .. } => {
+									streaming_active = true;
+									let rendered = stream_renderer.push(&text);
+									if !rendered.is_empty() {
+										crate::mark_streaming_output();
+										eprint!("{}", rendered.replace('\n', "\r\n"));
+										let _ = io::stderr().flush();
+									}
+									continue; // no status reprint during streaming
+								}
+								LoopEvent::LlmDecisionComplete { .. } => {
+									streaming_active = false;
+									let remaining = stream_renderer.flush();
+									if !remaining.is_empty() {
+										crate::mark_streaming_output();
+										eprint!("{}", remaining.replace('\n', "\r\n"));
+									}
+									eprint!("\r\n");
+									let _ = io::stderr().flush();
+								}
+								LoopEvent::StepComplete { step } => {
+									current_step = step;
+									current_tool = None;
+								}
+								LoopEvent::TokenUsage { prompt_tokens, output_tokens, model_id, .. } => {
+									if let Ok(mut guard) = captured_tokens_task.lock() {
+										guard.prompt = guard.prompt.saturating_add(prompt_tokens);
+										guard.output = guard.output.saturating_add(output_tokens);
+										if let Some(id) = model_id {
+											guard.model_id = Some(id);
+										}
+									}
+									continue;
 								}
 							}
-							continue;
+
+							// Re-show status after non-streaming output.
+							show_status!();
+						}
+						_ = tick.tick() => {
+							// Periodic refresh: update elapsed time in the status line.
+							// Skip when streaming text is active (cursor is mid-line).
+							if !streaming_active {
+								show_status!();
+							}
 						}
 					}
-
-					// Re-show the status line after non-streaming output.
-					let status = crate::render::styled_working_status(
-						current_step,
-						current_tool.as_deref(),
-						start_time.elapsed(),
-					);
-					eprint!("{status}");
-					let _ = io::stderr().flush();
-					status_visible = true;
 				}
 
 				// Clear status line on exit.
