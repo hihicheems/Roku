@@ -927,6 +927,9 @@ fn execute_turn(
 				let mut current_tool: Option<String> = None;
 				let mut status_visible = false;
 				let mut streaming_active = false;
+				// When true, a ToolStart line has been printed without a trailing
+				// newline, waiting for the matching ToolEnd to complete the line.
+				let mut pending_tool_line = false;
 
 				// Helper: draw or refresh the status line.
 				macro_rules! show_status {
@@ -967,22 +970,51 @@ fn execute_turn(
 								status_visible = false;
 							}
 
+							// Close any pending ToolStart line before printing
+							// other event output (unless ToolEnd will complete it).
+							let is_matching_tool_end = matches!(
+								&event,
+								LoopEvent::ToolEnd { .. }
+							);
+							if pending_tool_line && !is_matching_tool_end {
+								eprint!("\r\n");
+								pending_tool_line = false;
+							}
+
 							match event {
 								LoopEvent::ToolStart { step, tool_name, args_summary } => {
+									// Close previous pending line if back-to-back starts.
+									if pending_tool_line {
+										eprint!("\r\n");
+									}
 									current_step = step;
 									current_tool = Some(tool_name.clone());
 									streaming_active = false;
 									let msg = crate::render::styled_tool_start(
 										&tool_name, args_summary.as_deref(),
 									);
-									eprint!("{msg}\r\n");
+									// Print without newline — ToolEnd will complete the line.
+									eprint!("{msg}");
+									let _ = io::stderr().flush();
+									pending_tool_line = true;
+									// Skip status reprint; tool may complete instantly.
+									continue;
 								}
 								LoopEvent::ToolEnd { tool_name, elapsed_ms, result_summary, .. } => {
 									current_tool = None;
-									let msg = crate::render::styled_tool_end(
-										&tool_name, elapsed_ms, result_summary.as_deref(),
-									);
-									eprint!("{msg}\r\n");
+									if pending_tool_line {
+										// Append completion suffix on same line.
+										let suffix = crate::render::styled_tool_end_suffix(
+											elapsed_ms, result_summary.as_deref(),
+										);
+										eprint!("{suffix}\r\n");
+										pending_tool_line = false;
+									} else {
+										let msg = crate::render::styled_tool_end(
+											&tool_name, elapsed_ms, result_summary.as_deref(),
+										);
+										eprint!("{msg}\r\n");
+									}
 								}
 								LoopEvent::CompactTriggered { step, estimated_tokens } => {
 									eprint!("[compact] step {step} triggered (~{estimated_tokens} tokens)\r\n");

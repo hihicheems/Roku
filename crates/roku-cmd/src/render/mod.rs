@@ -24,7 +24,8 @@ mod style;
 
 pub(crate) use markdown::StreamRenderer;
 pub(crate) use style::{
-	styled_banner, styled_token_info, styled_tool_end, styled_tool_start, styled_working_status,
+	styled_banner, styled_token_info, styled_tool_end, styled_tool_end_suffix, styled_tool_start,
+	styled_working_status,
 };
 
 /// Render a final response that was not streamed via the render task.
