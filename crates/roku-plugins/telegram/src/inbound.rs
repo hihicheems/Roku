@@ -166,7 +166,7 @@ pub enum TelegramConnectorError {
 	BotOriginIgnored,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct TelegramConnector;
 
 impl TelegramConnector {
