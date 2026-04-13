@@ -247,65 +247,157 @@ fn truncate_for_telegram(text: &str) -> String {
 	format!("{}...", &text[..end])
 }
 
-/// Formats a progress status message showing only execution metadata (no LLM text).
-fn format_progress_status(
-	step: u32,
-	tool: Option<&str>,
+/// Per-tool progress entry tracked by the render_task.
+struct ToolProgressEntry {
+	name: String,
+	summary: String,
+	started_at: std::time::Instant,
+	elapsed_ms: Option<u64>,
+	finished: bool,
+}
+
+/// Render per-tool progress lines with a footer showing elapsed and tokens.
+fn render_progress(
+	tools: &[ToolProgressEntry],
+	started_at: std::time::Instant,
 	prompt_tokens: u64,
 	output_tokens: u64,
 ) -> String {
-	let mut parts: Vec<String> = Vec::new();
+	let mut lines = Vec::new();
 
-	if let Some(tool_name) = tool {
-		parts.push(format!(
-			"\u{2699}\u{fe0f} Step {} \u{2014} Running {}",
-			step, tool_name
-		));
-	} else if step > 0 {
-		parts.push(format!("\u{2699}\u{fe0f} Step {}", step));
+	if tools.is_empty() {
+		lines.push("\u{23f3} Processing...".to_string());
+	} else if tools.len() <= 5 {
+		for tool in tools {
+			lines.push(format_tool_line(tool));
+		}
 	} else {
-		parts.push("\u{23f3} Processing...".to_string());
+		// Collapse older finished tools, keep last 2 finished + all in-progress.
+		let finished_count = tools.iter().filter(|t| t.finished).count();
+		let collapse_count = finished_count.saturating_sub(2);
+		if collapse_count > 0 {
+			let collapsed_ms: u64 = tools
+				.iter()
+				.filter(|t| t.finished)
+				.take(collapse_count)
+				.filter_map(|t| t.elapsed_ms)
+				.sum();
+			let dur = if collapsed_ms > 0 {
+				format!(" ({})", format_duration_compact_ms(collapsed_ms))
+			} else {
+				String::new()
+			};
+			lines.push(format!("\u{22ef} {collapse_count} tools done{dur}"));
+		}
+		let mut finished_seen = 0usize;
+		for tool in tools {
+			if tool.finished {
+				finished_seen += 1;
+				if finished_seen <= collapse_count {
+					continue;
+				}
+			}
+			lines.push(format_tool_line(tool));
+		}
 	}
 
+	// Footer: elapsed · tokens
+	let elapsed = format_duration_compact(started_at.elapsed());
+	let mut footer_parts = vec![elapsed];
 	if prompt_tokens > 0 || output_tokens > 0 {
-		parts.push(format!(
-			"\u{1f4ca} Tokens: {}/{}",
-			prompt_tokens, output_tokens
+		footer_parts.push(format!(
+			"\u{2191}{} \u{2193}{}",
+			format_token_count(prompt_tokens),
+			format_token_count(output_tokens)
 		));
 	}
+	lines.push(format!(
+		"\u{2733}\u{fe0f} {}",
+		footer_parts.join(" \u{00b7} ")
+	));
 
-	parts.join("\n")
+	lines.join("\n")
+}
+
+fn format_tool_line(t: &ToolProgressEntry) -> String {
+	let emoji = tool_emoji(&t.name);
+	let summary_part = if t.summary.is_empty() {
+		String::new()
+	} else {
+		let truncated: String = t.summary.chars().take(50).collect();
+		let ellipsis = if t.summary.chars().count() > 50 {
+			"\u{2026}"
+		} else {
+			""
+		};
+		format!(" {truncated}{ellipsis}")
+	};
+
+	if t.finished {
+		let dur = t
+			.elapsed_ms
+			.map(|ms| format!(" {}", format_duration_compact_ms(ms)))
+			.unwrap_or_default();
+		format!("\u{2705} {emoji} {}{summary_part}{dur}", t.name)
+	} else {
+		let elapsed = format_duration_compact(t.started_at.elapsed());
+		format!("\u{23f3} {emoji} {}{summary_part} {elapsed}", t.name)
+	}
+}
+
+fn tool_emoji(name: &str) -> &'static str {
+	match name {
+		"Bash" => "\u{1f4bb}",
+		"Read" => "\u{1f4d6}",
+		"Write" => "\u{270d}\u{fe0f}",
+		"Edit" => "\u{1f527}",
+		"ListDir" => "\u{1f4c2}",
+		"Inspect" | "Exists" => "\u{1f50d}",
+		"web_search" => "\u{1f50d}",
+		"web_fetch" => "\u{1f4c4}",
+		"python_run" => "\u{1f40d}",
+		"table_query" | "table_edit" => "\u{1f4ca}",
+		_ => "\u{26a1}",
+	}
+}
+
+fn format_duration_compact(d: std::time::Duration) -> String {
+	let secs = d.as_secs();
+	if secs < 1 {
+		format!("{}ms", d.as_millis())
+	} else if secs < 60 {
+		format!("{}.{}s", secs, d.subsec_millis() / 100)
+	} else {
+		format!("{}m{}s", secs / 60, secs % 60)
+	}
+}
+
+fn format_duration_compact_ms(ms: u64) -> String {
+	format_duration_compact(std::time::Duration::from_millis(ms))
+}
+
+fn format_token_count(n: u64) -> String {
+	if n >= 1000 {
+		format!("{:.1}k", n as f64 / 1000.0)
+	} else {
+		n.to_string()
+	}
 }
 
 /// Formats a compact one-line execution summary for the progress message after completion.
 ///
-/// Example: `✅ 12s · ↑6.1k ↓0.2k`
+/// Example: `✅ 12.3s · ↑6.1k ↓0.2k`
 fn format_compact_summary(
 	elapsed: std::time::Duration,
 	prompt_tokens: u64,
 	output_tokens: u64,
 ) -> String {
-	let secs = elapsed.as_secs();
-	let duration = if secs >= 60 {
-		format!("{}m{}s", secs / 60, secs % 60)
-	} else {
-		format!("{secs}s")
-	};
-
-	let fmt_tokens = |n: u64| -> String {
-		if n >= 1000 {
-			format!("{:.1}k", n as f64 / 1000.0)
-		} else {
-			n.to_string()
-		}
-	};
-
-	let mut parts = vec![format!("\u{2705} {duration}")];
+	let mut parts = vec![format!("\u{2705} {}", format_duration_compact(elapsed))];
 	if prompt_tokens > 0 || output_tokens > 0 {
 		parts.push(format!(
 			"\u{2191}{} \u{2193}{}",
-			fmt_tokens(prompt_tokens),
-			fmt_tokens(output_tokens)
+			format_token_count(prompt_tokens),
+			format_token_count(output_tokens)
 		));
 	}
 	parts.join(" \u{00b7} ")
@@ -412,8 +504,7 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 
 							// Event consumer: accumulate state, throttle edits to <=1/sec.
 							let mut accumulated_text = String::new();
-							let mut current_step: u32 = 0;
-							let mut current_tool: Option<String> = None;
+							let mut tool_entries: Vec<ToolProgressEntry> = Vec::new();
 							let mut prompt_tokens: u64 = 0;
 							let mut output_tokens: u64 = 0;
 							let mut progress_dirty = false;
@@ -423,28 +514,44 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 
 							while let Some(event) = rx.recv().await {
 								match &event {
-									roku_agent_runtime::LoopEvent::LlmTextDelta { text, step } => {
+									roku_agent_runtime::LoopEvent::LlmTextDelta {
+										text, ..
+									} => {
 										accumulated_text.push_str(text);
-										current_step = *step;
 										content_dirty = true;
 									}
 									roku_agent_runtime::LoopEvent::LlmDecisionComplete {
 										..
 									} => {
-										current_tool = None;
 										progress_dirty = true;
 									}
 									roku_agent_runtime::LoopEvent::ToolStart {
-										step,
 										tool_name,
+										args_summary,
 										..
 									} => {
-										current_step = *step;
-										current_tool = Some(tool_name.clone());
+										tool_entries.push(ToolProgressEntry {
+											name: tool_name.clone(),
+											summary: args_summary.clone().unwrap_or_default(),
+											started_at: std::time::Instant::now(),
+											elapsed_ms: None,
+											finished: false,
+										});
 										progress_dirty = true;
 									}
-									roku_agent_runtime::LoopEvent::ToolEnd { .. } => {
-										current_tool = None;
+									roku_agent_runtime::LoopEvent::ToolEnd {
+										tool_name,
+										elapsed_ms,
+										..
+									} => {
+										if let Some(entry) = tool_entries
+											.iter_mut()
+											.rev()
+											.find(|e| !e.finished && e.name == *tool_name)
+										{
+											entry.finished = true;
+											entry.elapsed_ms = *elapsed_ms;
+										}
 										progress_dirty = true;
 									}
 									roku_agent_runtime::LoopEvent::TokenUsage {
@@ -462,11 +569,11 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 								if let Some(cid) = chat_id
 									&& last_edit.elapsed() >= std::time::Duration::from_secs(1)
 								{
-									// Update progress message (metadata only).
+									// Update progress message (per-tool lines + footer).
 									if progress_dirty && progress_mid > 0 {
-										let status = format_progress_status(
-											current_step,
-											current_tool.as_deref(),
+										let status = render_progress(
+											&tool_entries,
+											started_at,
 											prompt_tokens,
 											output_tokens,
 										);
