@@ -67,9 +67,9 @@ impl Default for CompactConfig {
 		Self {
 			retain_tail_steps: 8,
 			working_summary_max_chars: 4_000,
-			llm_expected_output_tokens: 512_u64,
-			llm_budget_tokens_remaining: 10_000,
-			llm_budget_cost_remaining_usd: 0.50,
+			llm_expected_output_tokens: 2_048,
+			llm_budget_tokens_remaining: 100_000,
+			llm_budget_cost_remaining_usd: 2.00,
 		}
 	}
 }
@@ -281,6 +281,19 @@ pub fn estimate_message_tokens(messages: &[Message]) -> u64 {
 	chars / 4
 }
 
+/// Estimate the token pressure of what will actually be sent to the LLM.
+///
+/// This measures the system prompt + conversation messages — the data the model
+/// receives — rather than internal bookkeeping state.  Used by `maybe_compact`
+/// to decide when compaction is needed.
+pub fn estimate_prompt_pressure(messages: &[Message], system_prompt_len: usize) -> u64 {
+	let system_tokens = system_prompt_len as u64 / 4;
+	let message_tokens = estimate_message_tokens(messages);
+	// Per-message framing overhead charged by the API (~4 tokens each).
+	let framing = messages.len() as u64 * 4;
+	system_tokens + message_tokens + framing
+}
+
 /// Truncate a tool result that exceeds `max_chars`, keeping head + tail + a note.
 pub fn truncate_tool_result(content: &str, max_chars: usize) -> String {
 	if content.len() <= max_chars {
@@ -351,6 +364,7 @@ pub async fn compact_messages_with_llm(
 	messages: &mut Vec<Message>,
 	retain_tail: usize,
 	router: &LlmRouter,
+	config: &CompactConfig,
 ) -> (bool, u64, u64) {
 	if messages.len() <= retain_tail + 1 {
 		return (false, 0, 0);
@@ -377,11 +391,11 @@ pub async fn compact_messages_with_llm(
 			system_prompt: Some("You summarize agent conversation history.".to_string()),
 			prompt,
 			messages: None,
-			expected_output_tokens: 512,
+			expected_output_tokens: config.llm_expected_output_tokens,
 			risk_tier: RiskTier::Low,
 			preferred_provider: None,
-			budget_tokens_remaining: 10_000,
-			budget_cost_remaining_usd: 0.50,
+			budget_tokens_remaining: config.llm_budget_tokens_remaining,
+			budget_cost_remaining_usd: config.llm_budget_cost_remaining_usd,
 			tools: None,
 			model_override: None,
 			thinking_effort: None,
