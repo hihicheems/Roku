@@ -26,7 +26,7 @@ use std::io;
 use std::net::TcpListener;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::Rng;
+use rand::RngExt;
 use serde::Deserialize;
 
 use super::AuthError;
