@@ -498,6 +498,7 @@ mod tests {
 			latest_explicit_grounding_fingerprint: String::new(),
 			ambiguity_stagnation: None,
 			sub_agent_depth: 0,
+			disallowed_tools: Vec::new(),
 		}
 	}
 

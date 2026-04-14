@@ -287,6 +287,16 @@ impl RuntimeService {
 		self
 	}
 
+	/// Set the tool-loop mode (Normal or Plan) on the underlying runtime.
+	pub fn set_loop_mode(&mut self, mode: crate::tools::trait_def::LoopMode) {
+		self.runtime.set_loop_mode(mode);
+	}
+
+	/// Returns the current tool-loop mode.
+	pub fn loop_mode(&self) -> crate::tools::trait_def::LoopMode {
+		self.runtime.loop_mode()
+	}
+
 	pub fn resource_catalog(&self) -> &roku_plugin_tools::ResourceCatalog {
 		self.runtime.resource_catalog()
 	}

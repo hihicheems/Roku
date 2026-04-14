@@ -37,8 +37,9 @@ pub fn build_system_prompt(
 	working_directory: &str,
 	project_instruction: Option<&str>,
 	memory_sections: Option<&RuntimeMemorySections>,
+	plan_mode: bool,
 ) -> String {
-	let mut sections = Vec::with_capacity(5);
+	let mut sections = Vec::with_capacity(6);
 
 	sections.push(identity_section());
 	sections.push(tool_guidance_section());
@@ -53,6 +54,10 @@ pub fn build_system_prompt(
 
 	if let Some(memory) = memory_sections.filter(|m| !m.is_empty()) {
 		sections.push(memory_section(memory));
+	}
+
+	if plan_mode {
+		sections.push(plan_mode_section());
 	}
 
 	sections.join("\n\n")
@@ -119,6 +124,29 @@ fn environment_section(snapshot: &EnvironmentSnapshot, working_directory: &str) 
 /// Project instruction: content from .roku.md and/or ~/.roku/ROKU.md.
 fn project_instruction_section(content: &str) -> String {
 	format!("# Project Instructions\n\n{content}")
+}
+
+/// Plan mode constraint: injected when the loop is in Plan mode.
+fn plan_mode_section() -> String {
+	"\
+# Plan Mode (Active)
+
+You are in **read-only planning mode**. Follow these rules strictly:
+
+1. **DO NOT** write, edit, create, or delete any files.
+2. **DO NOT** execute commands that modify state (e.g. `git commit`, `rm`, write operations).
+3. **DO** read files, search code, explore the codebase, and gather information.
+4. **DO** produce a structured execution plan with clear steps.
+
+Your output should be a plan that describes:
+- What changes are needed and why
+- Which files need to be modified
+- The order of operations
+- Any risks or considerations
+
+The user will review your plan and decide whether to execute it.\
+"
+	.to_string()
 }
 
 /// Maximum character count for injected memory content.
@@ -208,7 +236,7 @@ mod tests {
 
 	#[test]
 	fn system_prompt_contains_all_sections_without_project_instruction() {
-		let prompt = build_system_prompt(&sample_env(), "/home/user/project", None, None);
+		let prompt = build_system_prompt(&sample_env(), "/home/user/project", None, None, false);
 		assert!(prompt.contains("# Identity"));
 		assert!(prompt.contains("# Tool Usage"));
 		assert!(prompt.contains("# Environment"));
@@ -222,6 +250,7 @@ mod tests {
 			"/home/user/project",
 			Some("Always use Rust. Never use JavaScript."),
 			None,
+			false,
 		);
 		assert!(prompt.contains("# Project Instructions"));
 		assert!(prompt.contains("Always use Rust"));
@@ -229,7 +258,13 @@ mod tests {
 
 	#[test]
 	fn system_prompt_skips_empty_project_instruction() {
-		let prompt = build_system_prompt(&sample_env(), "/home/user/project", Some("   "), None);
+		let prompt = build_system_prompt(
+			&sample_env(),
+			"/home/user/project",
+			Some("   "),
+			None,
+			false,
+		);
 		assert!(!prompt.contains("# Project Instructions"));
 	}
 
@@ -305,7 +340,7 @@ mod tests {
 	#[test]
 	fn prompt_token_estimate_within_budget() {
 		// Rough token estimate: ~4 chars per token for English text.
-		let prompt = build_system_prompt(&sample_env(), "/home/user/project", None, None);
+		let prompt = build_system_prompt(&sample_env(), "/home/user/project", None, None, false);
 		let estimated_tokens = prompt.len() / 4;
 		// Target: ~1.5-2K tokens without project instructions.
 		assert!(
@@ -325,7 +360,13 @@ mod tests {
 			long_term_recall: "- rec1 | fact | user prefers dark mode".to_string(),
 			working_memory: String::new(),
 		};
-		let prompt = build_system_prompt(&sample_env(), "/home/user/project", None, Some(&memory));
+		let prompt = build_system_prompt(
+			&sample_env(),
+			"/home/user/project",
+			None,
+			Some(&memory),
+			false,
+		);
 		assert!(prompt.contains("# Memory"));
 		assert!(prompt.contains("Long-term recall:"));
 		assert!(prompt.contains("user prefers dark mode"));
@@ -334,13 +375,19 @@ mod tests {
 	#[test]
 	fn system_prompt_excludes_memory_when_empty() {
 		let memory = RuntimeMemorySections::default();
-		let prompt = build_system_prompt(&sample_env(), "/home/user/project", None, Some(&memory));
+		let prompt = build_system_prompt(
+			&sample_env(),
+			"/home/user/project",
+			None,
+			Some(&memory),
+			false,
+		);
 		assert!(!prompt.contains("# Memory"));
 	}
 
 	#[test]
 	fn system_prompt_excludes_memory_when_none() {
-		let prompt = build_system_prompt(&sample_env(), "/home/user/project", None, None);
+		let prompt = build_system_prompt(&sample_env(), "/home/user/project", None, None, false);
 		assert!(!prompt.contains("# Memory"));
 	}
 
@@ -353,5 +400,19 @@ mod tests {
 		};
 		let section = memory_section(&memory);
 		assert!(section.contains("[Note: memory content truncated"));
+	}
+
+	#[test]
+	fn system_prompt_includes_plan_mode_when_active() {
+		let prompt = build_system_prompt(&sample_env(), "/home/user/project", None, None, true);
+		assert!(prompt.contains("# Plan Mode (Active)"));
+		assert!(prompt.contains("read-only planning mode"));
+		assert!(prompt.contains("DO NOT"));
+	}
+
+	#[test]
+	fn system_prompt_excludes_plan_mode_when_inactive() {
+		let prompt = build_system_prompt(&sample_env(), "/home/user/project", None, None, false);
+		assert!(!prompt.contains("# Plan Mode"));
 	}
 }

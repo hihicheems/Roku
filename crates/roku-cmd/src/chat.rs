@@ -306,6 +306,18 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 				}
 				continue;
 			}
+			"/plan" => {
+				reader.add_history_entry(trimmed);
+				service.set_loop_mode(roku_agent_runtime::LoopMode::Plan);
+				eprintln!("[plan] Entered plan mode (read-only tools only).");
+				continue;
+			}
+			"/plan-execute" => {
+				reader.add_history_entry(trimmed);
+				service.set_loop_mode(roku_agent_runtime::LoopMode::Normal);
+				eprintln!("[plan] Exited plan mode, normal execution resumed.");
+				continue;
+			}
 			"/switch" => {
 				reader.add_history_entry(trimmed);
 				if handle_switch_command(&mut service) {

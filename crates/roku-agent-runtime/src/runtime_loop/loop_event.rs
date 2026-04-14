@@ -26,6 +26,9 @@ pub enum LoopEvent {
 		/// Human-readable summary of the tool arguments (≤80 chars).
 		#[serde(skip_serializing_if = "Option::is_none")]
 		args_summary: Option<String>,
+		/// Identifies the agent that emitted this event. `None` = top-level.
+		#[serde(skip_serializing_if = "Option::is_none")]
+		agent_id: Option<String>,
 	},
 	/// A tool invocation completed (successfully or with an error).
 	ToolEnd {
@@ -36,6 +39,9 @@ pub enum LoopEvent {
 		/// Human-readable summary of the tool result (≤80 chars).
 		#[serde(skip_serializing_if = "Option::is_none")]
 		result_summary: Option<String>,
+		/// Identifies the agent that emitted this event. `None` = top-level.
+		#[serde(skip_serializing_if = "Option::is_none")]
+		agent_id: Option<String>,
 	},
 	/// Context compaction was triggered after this step.
 	CompactTriggered {
@@ -52,7 +58,13 @@ pub enum LoopEvent {
 		elapsed_ms: u64,
 	},
 	/// Incremental text from the LLM during the decision phase.
-	LlmTextDelta { step: u32, text: String },
+	LlmTextDelta {
+		step: u32,
+		text: String,
+		/// Identifies the agent that emitted this event. `None` = top-level.
+		#[serde(skip_serializing_if = "Option::is_none")]
+		agent_id: Option<String>,
+	},
 	/// The LLM finished producing its decision for this step.
 	LlmDecisionComplete { step: u32 },
 	/// One full loop iteration (decide + optional tool execution) is complete.

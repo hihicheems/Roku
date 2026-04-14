@@ -55,6 +55,10 @@ pub const PSEUDO_FINAL_ANSWER: &str = "final_answer";
 pub const PSEUDO_ASK_USER: &str = "ask_user";
 pub const PSEUDO_FAIL: &str = "fail";
 pub const PSEUDO_AGENT: &str = "Agent";
+pub const PSEUDO_TASK_CREATE: &str = "task_create";
+pub const PSEUDO_TASK_UPDATE: &str = "task_update";
+pub const PSEUDO_TASK_LIST: &str = "task_list";
+pub const PSEUDO_TASK_GET: &str = "task_get";
 
 mod availability;
 mod builders;

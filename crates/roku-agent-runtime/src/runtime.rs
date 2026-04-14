@@ -25,11 +25,17 @@ use crate::runtime_loop::{
 	build_tool_definitions, effective_ask_user_payload, intake_request, interpret_observation,
 	next_working_directory_from_observation, runtime_loop_trace,
 };
+use crate::sub_agent::{SubAgentConfig, execute_sub_agent};
+use crate::task_store::{TaskStatus, TaskStore};
 use crate::tool_config::{ToolCatalogConfig, ToolsRuntimeConfig};
 use crate::tools::{
+	LoopMode, MAX_TOOL_RESULT_CHARS, ToolRegistry,
 	build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config,
 	build_llm_tool_runtime_with_plugin_snapshot_and_runtime_config,
 	build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config,
+	execution_elapsed_ms, observation_from_execution,
+	raw_tool_output_from_result, register_catalog_tools, tool_selector_by_name,
+	truncate_raw_tool_output, truncate_tool_result_for_message,
 };
 use crate::workers::{skill_execute_worker_with_config, skill_worker_with_config};
 use roku_common_types::{
@@ -46,7 +52,10 @@ use roku_plugin_llm::{
 	GenerationRequest, LlmRouter, Message, RiskTier, StreamChunk, ThinkingEffort, ToolCallBlock,
 };
 use roku_plugin_skills::SkillRegistry;
-use roku_plugin_tools::{PSEUDO_AGENT, ResourceCatalog, ResourceKind};
+use roku_plugin_tools::{
+	PSEUDO_AGENT, PSEUDO_TASK_CREATE, PSEUDO_TASK_GET, PSEUDO_TASK_LIST, PSEUDO_TASK_UPDATE,
+	ResourceCatalog,
+};
 use roku_plugin_tools::{
 	RuntimeVisibleToolAvailabilitySnapshot, build_runtime_visible_tool_availability_snapshot,
 	canonical_execution_for_builtin_tool_input,
@@ -91,6 +100,14 @@ pub struct GenericAgentRuntime {
 	route_router: Option<Arc<LlmRouter>>,
 	execution_router: Option<Arc<LlmRouter>>,
 	agent_runtime_config: AgentRuntimeConfig,
+	/// Tool registry for mode-aware tool filtering and definition building.
+	tool_registry: ToolRegistry,
+	/// Current operational mode (Normal or Plan).
+	loop_mode: LoopMode,
+	/// Sub-agent execution configuration.
+	sub_agent_config: SubAgentConfig,
+	/// Session-scoped task store for structured progress tracking.
+	task_store: std::sync::Mutex<TaskStore>,
 	/// Keepalive for the MCP bootstrap tokio runtime. The rmcp serve loop tasks
 	/// are spawned on this runtime during MCP server connection. Dropping it
 	/// would kill those tasks and break all MCP tool calls. Never accessed
@@ -139,6 +156,8 @@ impl GenericAgentRuntime {
 				&resource_catalog,
 				&safe_baseline_tool_pool(&agent_runtime_config.r#loop),
 			);
+		let mut tool_registry = ToolRegistry::new();
+		register_catalog_tools(&mut tool_registry, &resource_catalog);
 		let shared_tool_runtime = Arc::new(tool_runtime);
 		let mut runtime = Self {
 			workers: Vec::new(),
@@ -150,6 +169,10 @@ impl GenericAgentRuntime {
 			route_router: None,
 			execution_router: None,
 			agent_runtime_config,
+			tool_registry,
+			loop_mode: LoopMode::Normal,
+			sub_agent_config: SubAgentConfig::default(),
+			task_store: std::sync::Mutex::new(TaskStore::new()),
 			_mcp_runtime: None,
 		};
 		runtime.register_worker(
@@ -454,6 +477,25 @@ impl GenericAgentRuntime {
 
 	pub fn resource_catalog(&self) -> &ResourceCatalog {
 		&self.resource_catalog
+	}
+
+	pub(crate) fn agent_runtime_config(&self) -> &AgentRuntimeConfig {
+		&self.agent_runtime_config
+	}
+
+	/// Access the tool registry for mode-aware queries.
+	pub fn tool_registry(&self) -> &ToolRegistry {
+		&self.tool_registry
+	}
+
+	/// Get the current loop mode.
+	pub fn loop_mode(&self) -> LoopMode {
+		self.loop_mode
+	}
+
+	/// Set the loop mode (Normal or Plan).
+	pub fn set_loop_mode(&mut self, mode: LoopMode) {
+		self.loop_mode = mode;
 	}
 
 	/// Returns the list of model IDs available to the execution router.
@@ -874,8 +916,11 @@ impl GenericAgentRuntime {
 		loop {
 			// Refresh visible tools at the start of each turn.
 			self.refresh_tool_loop_visible_tools(loop_state);
-			let tool_definitions =
-				build_tool_definitions(&loop_state.visible_tools, Some(&self.resource_catalog));
+			let tool_definitions = build_tool_definitions(
+				&loop_state.visible_tools,
+				Some(&self.resource_catalog),
+				&loop_state.disallowed_tools,
+			);
 
 			// Check step budget before calling the LLM.
 			if loop_state.remaining_step_budget == 0 {
@@ -916,6 +961,7 @@ impl GenericAgentRuntime {
 				&loop_state.working_directory,
 				project_instruction.as_deref(),
 				Some(runtime_memory_sections),
+				self.loop_mode == LoopMode::Plan,
 			);
 			let system_prompt_len = system_prompt.len();
 
@@ -964,6 +1010,7 @@ impl GenericAgentRuntime {
 									event_tx.send(crate::runtime_loop::LoopEvent::LlmTextDelta {
 										step,
 										text: delta,
+										agent_id: None,
 									});
 							}
 							StreamChunk::ToolCallStart { id, name } => {
@@ -1008,6 +1055,7 @@ impl GenericAgentRuntime {
 					let _ = sender.send(crate::runtime_loop::LoopEvent::LlmTextDelta {
 						step: current_step_index,
 						text: resp.output.clone(),
+						agent_id: None,
 					});
 				}
 
@@ -1259,6 +1307,21 @@ impl GenericAgentRuntime {
 					}
 				}
 
+				// Intercept task pseudo-tools — non-terminal, return ToolResult and continue.
+				if matches!(
+					tool_name.as_str(),
+					PSEUDO_TASK_CREATE | PSEUDO_TASK_UPDATE | PSEUDO_TASK_LIST | PSEUDO_TASK_GET
+				) {
+					let result_content = self.handle_task_pseudo_tool(tool_name, &arguments);
+					let is_error = result_content.starts_with("Error:");
+					messages.push(Message::ToolResult {
+						tool_use_id: tc.id.clone(),
+						content: result_content,
+						is_error,
+					});
+					continue;
+				}
+
 				// Intercept Agent after the approval gate check.
 				// Agent is a pseudo-tool: it spawns a sub-agent and returns the result as a
 				// ToolResult. Budget is deducted from the parent before the sub-agent runs so that
@@ -1276,21 +1339,23 @@ impl GenericAgentRuntime {
 							args_summary: crate::runtime_loop::loop_event::summarize_tool_args(
 								tool_name, &arguments,
 							),
+							agent_id: None,
 						});
 					}
 					let start_ms = std::time::Instant::now();
 
-					let sub_result = self
-						.execute_sub_agent(
-							task_id,
-							request,
-							loop_state,
-							&arguments,
-							runtime_memory_sections,
-							event_sender,
-							approval_gate,
-						)
-						.await;
+					let sub_result = execute_sub_agent(
+						self,
+						task_id,
+						request,
+						loop_state,
+						&arguments,
+						runtime_memory_sections,
+						event_sender,
+						approval_gate,
+						&self.sub_agent_config,
+					)
+					.await;
 
 					let elapsed_ms = start_ms.elapsed().as_millis() as u64;
 
@@ -1301,6 +1366,7 @@ impl GenericAgentRuntime {
 							tool_name: tool_name.clone(),
 							elapsed_ms: Some(elapsed_ms),
 							result_summary: None,
+							agent_id: None,
 						});
 					}
 
@@ -1321,6 +1387,7 @@ impl GenericAgentRuntime {
 						args_summary: crate::runtime_loop::loop_event::summarize_tool_args(
 							tool_name, &arguments,
 						),
+						agent_id: None,
 					});
 				}
 
@@ -1344,8 +1411,11 @@ impl GenericAgentRuntime {
 				let elapsed = execution_elapsed_ms(&execution.result);
 				let raw_tool_output =
 					truncate_raw_tool_output(raw_tool_output_from_result(&execution.result));
-				let observation =
-					self.loop_observation_from_execution(&tool_name_owned, &execution.result);
+				let observation = observation_from_execution(
+					&tool_name_owned,
+					&execution.result,
+					&self.resource_catalog,
+				);
 
 				let result_summary = crate::runtime_loop::loop_event::summarize_tool_result(
 					&tool_name_owned,
@@ -1360,6 +1430,7 @@ impl GenericAgentRuntime {
 						tool_name: tool_name_owned.clone(),
 						elapsed_ms: elapsed,
 						result_summary,
+						agent_id: None,
 					});
 				}
 				let interpreted = interpret_observation(
@@ -1450,121 +1521,55 @@ impl GenericAgentRuntime {
 		}
 	}
 
-	/// Execute a sub-agent for an `Agent` tool call.
-	///
-	/// The sub-agent runs with a fresh message history and an independent budget drawn
-	/// from the parent loop's remaining budget. The parent budget is deducted **before**
-	/// this method is called (caller responsibility, Class G guard).
-	///
-	/// Recursion is blocked at depth 1: a sub-agent cannot spawn further sub-agents.
-	async fn execute_sub_agent(
-		&self,
-		parent_task_id: &TaskId,
-		parent_request: &RequestEnvelope,
-		parent_loop_state: &mut LoopState,
-		arguments: &Value,
-		runtime_memory_sections: &RuntimeMemorySections,
-		event_sender: Option<&crate::runtime_loop::LoopEventSender>,
-		approval_gate: Option<&dyn crate::runtime_loop::approval::ToolApprovalGate>,
-	) -> (String, bool) {
-		// Recursion guard: sub-agents cannot spawn sub-sub-agents.
-		if parent_loop_state.sub_agent_depth >= 1 {
-			return (
-				"[Sub-agent error] Sub-agents cannot spawn further sub-agents.".to_string(),
-				true,
-			);
+	// execute_sub_agent extracted to crate::sub_agent module.
+
+	/// Handle task pseudo-tool calls (task_create, task_update, task_list, task_get).
+	fn handle_task_pseudo_tool(&self, tool_name: &str, arguments: &Value) -> String {
+		let mut store = self.task_store.lock().unwrap_or_else(|e| e.into_inner());
+		match tool_name {
+			PSEUDO_TASK_CREATE => {
+				let description = arguments
+					.get("description")
+					.and_then(Value::as_str)
+					.unwrap_or("(no description)")
+					.to_string();
+				let status = arguments
+					.get("status")
+					.and_then(Value::as_str)
+					.map(TaskStatus::from_str_loose);
+				let id = store.create(description, status);
+				format!("Task #{id} created successfully.")
+			}
+			PSEUDO_TASK_UPDATE => {
+				let Some(task_id) = parse_u32_from_json(arguments, "task_id") else {
+					return "Error: invalid or missing task_id.".to_string();
+				};
+				let status = arguments
+					.get("status")
+					.and_then(Value::as_str)
+					.map(TaskStatus::from_str_loose);
+				let output = arguments
+					.get("output")
+					.and_then(Value::as_str)
+					.map(str::to_string);
+				if store.update(task_id, status, output) {
+					format!("Task #{task_id} updated.")
+				} else {
+					format!("Error: task #{task_id} not found.")
+				}
+			}
+			PSEUDO_TASK_LIST => store.format_list(),
+			PSEUDO_TASK_GET => {
+				let Some(task_id) = parse_u32_from_json(arguments, "task_id") else {
+					return "Error: invalid or missing task_id.".to_string();
+				};
+				match store.get(task_id) {
+					Some(task) => TaskStore::format_task(task),
+					None => format!("Error: task #{task_id} not found."),
+				}
+			}
+			_ => "Error: unknown task pseudo-tool.".to_string(),
 		}
-
-		let task = arguments
-			.get("task")
-			.and_then(Value::as_str)
-			.unwrap_or("")
-			.trim()
-			.to_string();
-		if task.is_empty() {
-			return ("[Sub-agent error] No task provided.".to_string(), true);
-		}
-
-		// Allocate budget for the sub-agent from the parent's remaining budget.
-		// The parent budget was already decremented by 1 in the caller (Class G).
-		// Give the sub-agent up to 10 steps, capped at what the parent has left.
-		let sub_budget = parent_loop_state.remaining_step_budget.min(10);
-		// Deduct sub-agent budget from parent so total consumption is bounded.
-		parent_loop_state.remaining_step_budget = parent_loop_state
-			.remaining_step_budget
-			.saturating_sub(sub_budget);
-
-		// Build a fresh sub-request with independent message history.
-		let sub_request = RequestEnvelope {
-			request_id: roku_common_types::RequestId(format!(
-				"{}-sub",
-				parent_request.request_id.0
-			)),
-			session_id: parent_request.session_id.clone(),
-			goal: task.clone(),
-			planning_mode_hint: None,
-			conversation_history: Vec::new(),
-			model_override: parent_request.model_override.clone(),
-			thinking_effort: parent_request.thinking_effort.clone(),
-		};
-
-		// Build a minimal LoopContext for the sub-agent.
-		let sub_route_decision = parent_loop_state.route_decision.clone();
-		let sub_context = crate::runtime_loop::LoopContext {
-			request_id: sub_request.request_id.0.clone(),
-			session_id: sub_request.session_id.clone(),
-			goal: task.clone(),
-			workspace_root: parent_loop_state.working_directory.clone(),
-			working_directory: parent_loop_state.working_directory.clone(),
-			visible_tools: parent_loop_state.visible_tools.clone(),
-			bound_resources: parent_loop_state.bound_resources.clone(),
-			route_decision: sub_route_decision,
-			last_observation: None,
-		};
-
-		let recovery_budget = self.agent_runtime_config.r#loop.initial_recovery_budget;
-		let mut sub_loop_state = LoopState::with_budgets(
-			format!("sub-{}", sub_request.request_id.0),
-			&sub_context,
-			sub_budget,
-			recovery_budget,
-		);
-		sub_loop_state.sub_agent_depth = parent_loop_state.sub_agent_depth + 1;
-
-		let result = Box::pin(self.execute_tool_loop(
-			parent_task_id,
-			&sub_request,
-			&mut sub_loop_state,
-			runtime_memory_sections,
-			None,
-			event_sender,
-			approval_gate, // inherit parent's approval gate
-		))
-		.await;
-
-		// Determine error status from the structured result, not message text.
-		let is_error = result.result.status == ResultStatus::Error;
-
-		// Truncate to avoid bloating the parent's context window.
-		// Use char_indices for safe UTF-8 truncation (CJK/emoji safe).
-		const MAX_SUB_AGENT_RESULT_CHARS: usize = 4000;
-		let message = result.message;
-		let char_count = message.chars().count();
-		let content = if char_count > MAX_SUB_AGENT_RESULT_CHARS {
-			let byte_end = message
-				.char_indices()
-				.nth(MAX_SUB_AGENT_RESULT_CHARS)
-				.map(|(i, _)| i)
-				.unwrap_or(message.len());
-			format!(
-				"{}...\n[Sub-agent response truncated to {} chars]",
-				&message[..byte_end],
-				MAX_SUB_AGENT_RESULT_CHARS
-			)
-		} else {
-			message
-		};
-		(content, is_error)
 	}
 
 	pub fn register_worker<W>(&mut self, priority: u8, worker: W)
@@ -1612,7 +1617,26 @@ impl GenericAgentRuntime {
 	}
 
 	fn refresh_tool_loop_visible_tools(&self, loop_state: &mut LoopState) {
-		let visible_tools = self.visible_tools_for_loop_state(loop_state);
+		let mut visible_tools = self.visible_tools_for_loop_state(loop_state);
+		// In Plan mode, filter catalog tools to read-only via the registry,
+		// and block mutating pseudo-tools via disallowed_tools (applied in
+		// build_tool_definitions).
+		if self.loop_mode == LoopMode::Plan {
+			visible_tools.retain(|name| {
+				self.tool_registry
+					.get(name)
+					.is_some_and(|entry| entry.is_read_only())
+			});
+			for blocked in [PSEUDO_TASK_CREATE, PSEUDO_TASK_UPDATE] {
+				if !loop_state.disallowed_tools.iter().any(|d| d == blocked) {
+					loop_state.disallowed_tools.push(blocked.to_string());
+				}
+			}
+		}
+		// Enforce disallowed_tools for catalog tools (sub-agents, plan mode).
+		if !loop_state.disallowed_tools.is_empty() {
+			visible_tools.retain(|name| !loop_state.disallowed_tools.contains(name));
+		}
 		loop_state.visible_tools = visible_tools;
 	}
 
@@ -1900,21 +1924,6 @@ impl GenericAgentRuntime {
 		)
 	}
 
-	fn loop_observation_from_execution(
-		&self,
-		tool_name: &str,
-		result: &ResultEnvelope,
-	) -> ToolObservation {
-		let payload = serde_json::from_str::<Value>(&result.payload)
-			.unwrap_or_else(|_| json!({ "message": result.payload.clone() }));
-		let observation = if result.status == ResultStatus::Ok {
-			ToolObservation::from_result_payload(tool_name, &payload)
-		} else {
-			ToolObservation::from_error_payload(tool_name, &payload, &self.resource_catalog)
-		};
-		normalize_tool_loop_observation(observation)
-	}
-
 	fn synthetic_loop_terminal_result(
 		&self,
 		task_id: &TaskId,
@@ -2107,35 +2116,23 @@ fn route_capabilities(catalog: &ResourceCatalog, resources: &[ResourceSelector])
 	capabilities
 }
 
-fn tool_selector_by_name(catalog: &ResourceCatalog, tool_name: &str) -> Option<ResourceSelector> {
-	catalog
-		.entries()
-		.iter()
-		.find(|entry| entry.kind == ResourceKind::Tool && entry.name == tool_name)
-		.map(|entry| entry.selector.clone())
-}
-
-fn execution_elapsed_ms(result: &ResultEnvelope) -> Option<u64> {
-	serde_json::from_str::<Value>(&result.payload)
-		.ok()
-		.and_then(|payload| payload.get("elapsed_ms").and_then(Value::as_u64))
-}
-
-fn raw_tool_output_from_result(result: &ResultEnvelope) -> Value {
-	let payload = serde_json::from_str::<Value>(&result.payload)
-		.unwrap_or_else(|_| json!({ "message": result.payload.clone() }));
-	if result.status == ResultStatus::Ok {
-		return payload
-			.get("output")
-			.cloned()
-			.unwrap_or_else(|| payload.clone());
-	}
-	payload
-}
+// tool_selector_by_name, execution_elapsed_ms, raw_tool_output_from_result
+// extracted to crate::tools::dispatch module.
 
 fn loop_probe_trace_payload(loop_state: &LoopState) -> Value {
 	serde_json::to_value(runtime_loop_trace(loop_state))
 		.unwrap_or_else(|_| json!({ "schema_version": "runtime_loop_trace.v1" }))
+}
+
+/// Parse a `u32` from a JSON value that may be a string or a number.
+/// Returns `None` for missing keys, non-numeric strings, or values exceeding `u32::MAX`.
+fn parse_u32_from_json(args: &Value, key: &str) -> Option<u32> {
+	let v = args.get(key)?;
+	if let Some(s) = v.as_str() {
+		s.parse::<u32>().ok()
+	} else {
+		v.as_u64().and_then(|n| u32::try_from(n).ok())
+	}
 }
 
 fn terminal_decision(
@@ -2165,69 +2162,8 @@ fn terminal_decision(
 	}
 }
 
-fn normalize_tool_loop_observation(observation: ToolObservation) -> ToolObservation {
-	// general.execute has been removed; observations from all tools are returned as-is.
-	observation
-}
-
-/// Maximum characters for a tool result before truncation in the turn loop.
-/// This protects the LLM context window from oversized single tool outputs.
-const MAX_TOOL_RESULT_CHARS: usize = 80_000;
-
-/// Truncate a tool result to head + tail with an informative note.
-fn truncate_tool_result_for_message(content: &str, max_chars: usize) -> String {
-	if content.len() <= max_chars {
-		return content.to_string();
-	}
-	let head_chars = max_chars * 4 / 5;
-	let tail_chars = max_chars / 5;
-	let head_end = content
-		.char_indices()
-		.nth(head_chars)
-		.map(|(i, _)| i)
-		.unwrap_or(content.len());
-	let tail_start = content
-		.char_indices()
-		.rev()
-		.nth(tail_chars.saturating_sub(1))
-		.map(|(i, _)| i)
-		.unwrap_or(0);
-	let total_lines = content.lines().count();
-	format!(
-		"{}\n\n[Output truncated: showing first and last portions of {} total lines ({} chars). \
-		 Ask the user or use a more specific query to narrow results.]\n\n{}",
-		&content[..head_end],
-		total_lines,
-		content.len(),
-		&content[tail_start..],
-	)
-}
-
-/// Truncate a raw tool output `Value` so it fits within `MAX_TOOL_RESULT_CHARS`.
-///
-/// - `Value::String` that exceeds the limit is head+tail truncated.
-/// - Objects/arrays whose JSON serialization exceeds the limit are replaced with
-///   a truncated string representation plus a note.
-/// - Small values pass through unchanged.
-fn truncate_raw_tool_output(value: Value) -> Value {
-	match &value {
-		Value::String(s) if s.len() > MAX_TOOL_RESULT_CHARS => {
-			Value::String(truncate_tool_result_for_message(s, MAX_TOOL_RESULT_CHARS))
-		}
-		Value::Object(_) | Value::Array(_) => {
-			let serialized = serde_json::to_string(&value).unwrap_or_default();
-			if serialized.len() > MAX_TOOL_RESULT_CHARS {
-				Value::String(truncate_tool_result_for_message(
-					&serialized,
-					MAX_TOOL_RESULT_CHARS,
-				))
-			} else {
-				value
-			}
-		}
-		_ => value,
-	}
-}
+// normalize_tool_loop_observation, MAX_TOOL_RESULT_CHARS, truncate_tool_result_for_message,
+// truncate_raw_tool_output extracted to crate::tools::dispatch module.
 
 fn awaiting_user_resume_prompt(
 	loop_state: &LoopState,
@@ -3428,24 +3364,8 @@ mod tests {
 		);
 	}
 
-	#[test]
-	fn normalize_tool_loop_observation_passes_through_unchanged() {
-		// general.execute has been removed; normalize_tool_loop_observation is now a no-op
-		// that returns observations from all tools without modification.
-		let observation = ToolObservation {
-			ok: true,
-			tool_name: "inventory.describe".to_string(),
-			error_type: None,
-			terminal: true,
-			data: json!({}),
-			message: "some result".to_string(),
-		};
-		let normalized = normalize_tool_loop_observation(observation.clone());
-		assert_eq!(normalized.ok, observation.ok);
-		assert_eq!(normalized.tool_name, observation.tool_name);
-		assert_eq!(normalized.terminal, observation.terminal);
-		assert_eq!(normalized.message, observation.message);
-	}
+	// normalize_tool_loop_observation test removed — function was a no-op identity
+	// and has been removed along with the function extraction to tools::dispatch.
 
 	fn test_skill_archive_bytes() -> Vec<u8> {
 		let mut cursor = Cursor::new(Vec::new());

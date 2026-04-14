@@ -14,10 +14,11 @@
 
 use roku_plugin_llm::ToolDefinition;
 use roku_plugin_tools::{
-	PSEUDO_AGENT, PSEUDO_ASK_USER, PSEUDO_FAIL, PSEUDO_FINAL_ANSWER, ResourceCatalog, TOOL_BASH,
-	TOOL_EDIT, TOOL_EXISTS, TOOL_FIND, TOOL_GLOB, TOOL_GREP, TOOL_INSPECT, TOOL_LISTDIR,
-	TOOL_PYTHON, TOOL_READ, TOOL_SKILL_INSTALL, TOOL_TABLE_INSPECT, TOOL_TABLE_PREVIEW,
-	TOOL_TABLE_SCHEMA, TOOL_TABLE_SHEETS, TOOL_WEB_FETCH, TOOL_WEB_SEARCH, TOOL_WRITE,
+	PSEUDO_AGENT, PSEUDO_ASK_USER, PSEUDO_FAIL, PSEUDO_FINAL_ANSWER, PSEUDO_TASK_CREATE,
+	PSEUDO_TASK_GET, PSEUDO_TASK_LIST, PSEUDO_TASK_UPDATE, ResourceCatalog, TOOL_BASH, TOOL_EDIT,
+	TOOL_EXISTS, TOOL_FIND, TOOL_GLOB, TOOL_GREP, TOOL_INSPECT, TOOL_LISTDIR, TOOL_PYTHON,
+	TOOL_READ, TOOL_SKILL_INSTALL, TOOL_TABLE_INSPECT, TOOL_TABLE_PREVIEW, TOOL_TABLE_SCHEMA,
+	TOOL_TABLE_SHEETS, TOOL_WEB_FETCH, TOOL_WEB_SEARCH, TOOL_WRITE,
 };
 
 /// Read-only path tools that accept a `path` parameter.
@@ -48,6 +49,7 @@ use crate::runtime_loop::grounding::{
 pub(crate) fn build_tool_definitions(
 	visible_tools: &[String],
 	catalog: Option<&ResourceCatalog>,
+	disallowed_tools: &[String],
 ) -> Vec<ToolDefinition> {
 	let mut definitions = Vec::new();
 
@@ -126,6 +128,57 @@ pub(crate) fn build_tool_definitions(
 			"required": ["task"]
 		}),
 	});
+
+	// Task management pseudo-tools.
+	definitions.push(ToolDefinition {
+		name: PSEUDO_TASK_CREATE.to_string(),
+		description: "Create a new task for tracking progress. Returns the task ID.".to_string(),
+		parameters: json!({
+			"type": "object",
+			"properties": {
+				"description": {"type": "string", "description": "What needs to be done."},
+				"status": {"type": "string", "description": "Initial status: pending, in_progress, completed, failed. Defaults to pending."}
+			},
+			"required": ["description"]
+		}),
+	});
+	definitions.push(ToolDefinition {
+		name: PSEUDO_TASK_UPDATE.to_string(),
+		description: "Update an existing task's status and/or output.".to_string(),
+		parameters: json!({
+			"type": "object",
+			"properties": {
+				"task_id": {"type": "string", "description": "The task ID to update."},
+				"status": {"type": "string", "description": "New status: pending, in_progress, completed, failed."},
+				"output": {"type": "string", "description": "Optional output or result message."}
+			},
+			"required": ["task_id"]
+		}),
+	});
+	definitions.push(ToolDefinition {
+		name: PSEUDO_TASK_LIST.to_string(),
+		description: "List all tracked tasks with their status.".to_string(),
+		parameters: json!({
+			"type": "object",
+			"properties": {}
+		}),
+	});
+	definitions.push(ToolDefinition {
+		name: PSEUDO_TASK_GET.to_string(),
+		description: "Get details of a specific task by ID.".to_string(),
+		parameters: json!({
+			"type": "object",
+			"properties": {
+				"task_id": {"type": "string", "description": "The task ID to retrieve."}
+			},
+			"required": ["task_id"]
+		}),
+	});
+
+	// Remove any pseudo-tools that appear in the disallowed list.
+	if !disallowed_tools.is_empty() {
+		definitions.retain(|d| !disallowed_tools.iter().any(|blocked| blocked == &d.name));
+	}
 
 	definitions
 }
