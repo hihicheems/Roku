@@ -108,6 +108,10 @@ pub struct LoopState {
 	/// Sub-agents are not permitted to spawn further sub-agents (max depth = 1).
 	#[serde(default)]
 	pub sub_agent_depth: u32,
+	/// Tool names that must never appear in `visible_tools`, even after refresh.
+	/// Used by sub-agents to enforce `SubAgentConfig::disallowed_tools`.
+	#[serde(default)]
+	pub disallowed_tools: Vec<String>,
 }
 
 impl LoopState {
@@ -147,6 +151,7 @@ impl LoopState {
 			latest_explicit_grounding_fingerprint: explicit_grounding_fingerprint(&context.goal),
 			ambiguity_stagnation: None,
 			sub_agent_depth: 0,
+			disallowed_tools: Vec::new(),
 		}
 	}
 

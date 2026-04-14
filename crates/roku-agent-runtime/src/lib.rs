@@ -20,6 +20,8 @@ mod runtime;
 mod runtime_config;
 mod runtime_loop;
 pub mod service;
+mod sub_agent;
+pub(crate) mod task_store;
 mod tool_config;
 mod tools;
 mod workers;
@@ -65,3 +67,5 @@ pub use tool_config::{
 	ToolWorkerRuntimeConfigPatch, ToolsRuntimeConfig, ToolsRuntimeConfigError,
 	ToolsRuntimeConfigPatch, WebToolRuntimeConfig, WebToolRuntimeConfigPatch,
 };
+pub use tools::registry::ToolRegistry;
+pub use tools::trait_def::LoopMode;
