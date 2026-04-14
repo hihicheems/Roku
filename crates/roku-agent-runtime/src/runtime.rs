@@ -2125,12 +2125,13 @@ fn loop_probe_trace_payload(loop_state: &LoopState) -> Value {
 }
 
 /// Parse a `u32` from a JSON value that may be a string or a number.
+/// Returns `None` for missing keys, non-numeric strings, or values exceeding `u32::MAX`.
 fn parse_u32_from_json(args: &Value, key: &str) -> Option<u32> {
 	let v = args.get(key)?;
 	if let Some(s) = v.as_str() {
 		s.parse::<u32>().ok()
 	} else {
-		v.as_u64().map(|n| n as u32)
+		v.as_u64().and_then(|n| u32::try_from(n).ok())
 	}
 }
 
