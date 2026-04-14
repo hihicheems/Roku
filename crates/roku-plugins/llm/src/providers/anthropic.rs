@@ -222,10 +222,8 @@ pub struct AnthropicConfig {
 
 impl AnthropicConfig {
 	pub fn from_env() -> Result<Self, ProviderCallError> {
-		let api_key = env::var("ROKU_ANTHROPIC_API_KEY").map_err(|_| {
-			ProviderCallError::non_retryable(
-				"ROKU_ANTHROPIC_API_KEY environment variable is not set",
-			)
+		let api_key = env::var("ROKU_ANTHROPIC_API_KEY").map_err(|_| ProviderCallError::Fatal {
+			message: "ROKU_ANTHROPIC_API_KEY environment variable is not set".to_string(),
 		})?;
 		let base_url = env::var("ROKU_ANTHROPIC_BASE_URL")
 			.unwrap_or_else(|_| DEFAULT_ANTHROPIC_URL.to_string());
@@ -338,7 +336,9 @@ impl AnthropicProvider {
 		let client = Client::builder()
 			.connect_timeout(std::time::Duration::from_secs(30))
 			.build()
-			.map_err(|e| ProviderCallError::non_retryable(format!("http client error: {e}")))?;
+			.map_err(|e| ProviderCallError::Fatal {
+				message: format!("http client error: {e}"),
+			})?;
 		Ok(Self { client, config })
 	}
 
@@ -346,8 +346,8 @@ impl AnthropicProvider {
 		let mut headers = HeaderMap::new();
 		headers.insert(
 			"x-api-key",
-			HeaderValue::from_str(&self.config.api_key).map_err(|e| {
-				ProviderCallError::non_retryable(format!("invalid api key header: {e}"))
+			HeaderValue::from_str(&self.config.api_key).map_err(|e| ProviderCallError::Fatal {
+				message: format!("invalid api key header: {e}"),
 			})?,
 		);
 		headers.insert(
@@ -500,9 +500,13 @@ impl LlmProvider for AnthropicProvider {
 			.map_err(classify_request_error)?;
 
 		let status = response.status();
-		let response_body = response.text().await.map_err(|e| {
-			ProviderCallError::retryable(format!("failed to read response body: {e}"))
-		})?;
+		let response_body = response
+			.text()
+			.await
+			.map_err(|e| ProviderCallError::ServerError {
+				status: 0,
+				message: format!("failed to read response body: {e}"),
+			})?;
 
 		if !status.is_success() {
 			log_anthropic(
@@ -594,18 +598,18 @@ impl LlmProvider for AnthropicProvider {
 				Ok(Some(result)) => result,
 				Ok(None) => break,
 				Err(_) => {
-					stream_error = Some(ProviderCallError::retryable(
-						"SSE stream timed out waiting for next event".to_string(),
-					));
+					stream_error = Some(ProviderCallError::Timeout {
+						message: "SSE stream timed out waiting for next event".to_string(),
+					});
 					break;
 				}
 			};
 			let event = match event_result {
 				Ok(event) => event,
 				Err(error) => {
-					stream_error = Some(ProviderCallError::retryable(format!(
-						"SSE stream error: {error}"
-					)));
+					stream_error = Some(ProviderCallError::ConnectionFailed {
+						message: format!("SSE stream error: {error}"),
+					});
 					break;
 				}
 			};
@@ -735,9 +739,10 @@ impl LlmProvider for AnthropicProvider {
 						.and_then(|e| e.get("message"))
 						.and_then(Value::as_str)
 						.unwrap_or("unknown streaming error");
-					stream_error = Some(ProviderCallError::retryable(format!(
-						"anthropic streaming error: {message}"
-					)));
+					stream_error = Some(ProviderCallError::ServerError {
+						status: 0,
+						message: format!("anthropic streaming error: {message}"),
+					});
 					break;
 				}
 				_ => {}
@@ -832,8 +837,11 @@ struct ParsedAnthropicResponse {
 }
 
 fn parse_complete_response(body: &str) -> Result<ParsedAnthropicResponse, ProviderCallError> {
-	let response: Value = serde_json::from_str(body)
-		.map_err(|e| ProviderCallError::retryable(format!("invalid response json: {e}")))?;
+	let response: Value =
+		serde_json::from_str(body).map_err(|e| ProviderCallError::ServerError {
+			status: 0,
+			message: format!("invalid response json: {e}"),
+		})?;
 
 	// Check for API error.
 	if let Some(error) = response.get("error") {
@@ -841,9 +849,10 @@ fn parse_complete_response(body: &str) -> Result<ParsedAnthropicResponse, Provid
 			.get("message")
 			.and_then(Value::as_str)
 			.unwrap_or("unknown error");
-		return Err(ProviderCallError::retryable(format!(
-			"anthropic api error: {message}"
-		)));
+		return Err(ProviderCallError::ServerError {
+			status: 0,
+			message: format!("anthropic api error: {message}"),
+		});
 	}
 
 	let stop_reason = response
@@ -928,18 +937,54 @@ fn normalize_stop_reason(reason: &str) -> String {
 }
 
 fn classify_request_error(error: reqwest::Error) -> ProviderCallError {
-	if error.is_timeout() || error.is_connect() {
-		ProviderCallError::retryable(format!("request failed: {error}"))
+	if error.is_timeout() {
+		ProviderCallError::Timeout {
+			message: format!("request failed: {error}"),
+		}
+	} else if error.is_connect() {
+		ProviderCallError::ConnectionFailed {
+			message: format!("request failed: {error}"),
+		}
 	} else {
-		ProviderCallError::non_retryable(format!("request failed: {error}"))
+		ProviderCallError::Fatal {
+			message: format!("request failed: {error}"),
+		}
 	}
 }
 
 fn classify_status_error(status_code: u16, response_body: String) -> ProviderCallError {
 	let message = format!("anthropic returned status {status_code}: {response_body}");
 	match status_code {
-		408 | 409 | 429 | 500..=599 => ProviderCallError::retryable(message),
-		_ => ProviderCallError::non_retryable(message),
+		401 | 403 => ProviderCallError::AuthenticationFailed { message },
+		429 => ProviderCallError::RateLimit {
+			message,
+			retry_after: None,
+		},
+		400 => {
+			let body_lower = response_body.to_lowercase();
+			if body_lower.contains("context")
+				&& (body_lower.contains("exceeded")
+					|| body_lower.contains("too long")
+					|| body_lower.contains("maximum"))
+			{
+				ProviderCallError::ContextWindowExceeded { detail: message }
+			} else {
+				ProviderCallError::InvalidRequest { message }
+			}
+		}
+		408 | 409 => ProviderCallError::ServerError {
+			status: status_code,
+			message,
+		},
+		529 | 503 => ProviderCallError::ServerOverloaded {
+			message,
+			retry_after: None,
+		},
+		500..=599 => ProviderCallError::ServerError {
+			status: status_code,
+			message,
+		},
+		_ => ProviderCallError::Fatal { message },
 	}
 }
 

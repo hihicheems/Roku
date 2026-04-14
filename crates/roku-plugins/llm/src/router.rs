@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use roku_common_types::{LlmInvocationOutcome, Metrics};
 use serde_json::Value;
 
+use crate::retry::backoff_for_attempt;
 use crate::types::{
 	GenerationRequest, LlmAdapterError, LlmResponse, ModelProfile, ProviderCallError,
 	ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy, StreamChunk,
@@ -336,9 +337,10 @@ impl LlmRouter {
 						});
 					}
 
-					let backoff_ms = backoff_for_attempt(attempt_index, &self.resilience_policy);
-					if backoff_ms > 0 {
-						tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+					let backoff_delay =
+						backoff_for_attempt(attempt_index, &self.resilience_policy, Some(&error));
+					if !backoff_delay.is_zero() {
+						tokio::time::sleep(backoff_delay).await;
 					}
 					last_error = Some(LlmAdapterError::ProviderCallFailed {
 						provider: selected_model.provider.clone(),
@@ -362,9 +364,10 @@ impl LlmRouter {
 						});
 					}
 
-					let backoff_ms = backoff_for_attempt(attempt_index, &self.resilience_policy);
-					if backoff_ms > 0 {
-						tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+					let backoff_delay =
+						backoff_for_attempt(attempt_index, &self.resilience_policy, None);
+					if !backoff_delay.is_zero() {
+						tokio::time::sleep(backoff_delay).await;
 					}
 					last_error = Some(LlmAdapterError::ProviderCallFailed {
 						provider: selected_model.provider.clone(),
@@ -490,9 +493,10 @@ impl LlmRouter {
 						});
 					}
 
-					let backoff_ms = backoff_for_attempt(attempt_index, &self.resilience_policy);
-					if backoff_ms > 0 {
-						tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+					let backoff_delay =
+						backoff_for_attempt(attempt_index, &self.resilience_policy, Some(&error));
+					if !backoff_delay.is_zero() {
+						tokio::time::sleep(backoff_delay).await;
 					}
 				}
 			}
@@ -729,18 +733,6 @@ enum CircuitBreakerState {
 	HalfOpen,
 }
 
-fn backoff_for_attempt(attempt_index: usize, policy: &ProviderResiliencePolicy) -> u64 {
-	if policy.initial_backoff_ms == 0 {
-		return 0;
-	}
-
-	let multiplier = 2_u64.saturating_pow(u32::try_from(attempt_index).unwrap_or(u32::MAX));
-	policy
-		.initial_backoff_ms
-		.saturating_mul(multiplier)
-		.min(policy.max_backoff_ms)
-}
-
 #[cfg(test)]
 mod tests {
 	use std::collections::VecDeque;
@@ -883,9 +875,9 @@ mod tests {
 				.expect("sequence provider responses lock must not be poisoned")
 				.pop_front()
 				.unwrap_or_else(|| {
-					Err(ProviderCallError::non_retryable(
-						"no more responses configured",
-					))
+					Err(ProviderCallError::Fatal {
+						message: "no more responses configured".to_string(),
+					})
 				})
 		}
 	}
@@ -1029,7 +1021,10 @@ mod tests {
 		let provider = Arc::new(SequenceProvider::new(
 			"retrying-provider",
 			vec![
-				Err(ProviderCallError::retryable("transient upstream failure")),
+				Err(ProviderCallError::ServerError {
+					status: 500,
+					message: "transient upstream failure".to_string(),
+				}),
 				Ok(ProviderResponse {
 					output: "recovered".to_string(),
 					finish_reason: None,
@@ -1063,9 +1058,9 @@ mod tests {
 	fn router_does_not_retry_non_retryable_provider_errors() {
 		let provider = Arc::new(SequenceProvider::new(
 			"non-retrying-provider",
-			vec![Err(ProviderCallError::non_retryable(
-				"invalid request payload",
-			))],
+			vec![Err(ProviderCallError::InvalidRequest {
+				message: "invalid request payload".to_string(),
+			})],
 		));
 		let mut router = LlmRouter::new(RoutingPolicy::default()).with_provider_resilience_policy(
 			ProviderResiliencePolicy {
@@ -1091,8 +1086,14 @@ mod tests {
 		let provider = Arc::new(SequenceProvider::new(
 			"breaker-provider",
 			vec![
-				Err(ProviderCallError::retryable("temporary overload")),
-				Err(ProviderCallError::retryable("temporary overload")),
+				Err(ProviderCallError::ServerOverloaded {
+					message: "temporary overload".to_string(),
+					retry_after: None,
+				}),
+				Err(ProviderCallError::ServerOverloaded {
+					message: "temporary overload".to_string(),
+					retry_after: None,
+				}),
 			],
 		));
 		let mut router = LlmRouter::new(RoutingPolicy::default()).with_provider_resilience_policy(
@@ -1133,7 +1134,10 @@ mod tests {
 		let provider = Arc::new(SequenceProvider::new(
 			"recovering-provider",
 			vec![
-				Err(ProviderCallError::retryable("temporary overload")),
+				Err(ProviderCallError::ServerOverloaded {
+					message: "temporary overload".to_string(),
+					retry_after: None,
+				}),
 				Ok(ProviderResponse {
 					output: "healthy-again".to_string(),
 					finish_reason: None,

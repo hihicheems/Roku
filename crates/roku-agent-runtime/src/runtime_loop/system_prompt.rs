@@ -23,6 +23,8 @@ use roku_plugin_tools::{
 	TOOL_READ, TOOL_WEB_FETCH, TOOL_WEB_SEARCH,
 };
 
+use roku_common_types::RuntimeMemorySections;
+
 use super::environment::{EnvironmentSnapshot, format_environment_context};
 
 /// Build the full system prompt from modular fragments.
@@ -34,8 +36,9 @@ pub fn build_system_prompt(
 	env_snapshot: &EnvironmentSnapshot,
 	working_directory: &str,
 	project_instruction: Option<&str>,
+	memory_sections: Option<&RuntimeMemorySections>,
 ) -> String {
-	let mut sections = Vec::with_capacity(4);
+	let mut sections = Vec::with_capacity(5);
 
 	sections.push(identity_section());
 	sections.push(tool_guidance_section());
@@ -46,6 +49,10 @@ pub fn build_system_prompt(
 		if !trimmed.is_empty() {
 			sections.push(project_instruction_section(trimmed));
 		}
+	}
+
+	if let Some(memory) = memory_sections.filter(|m| !m.is_empty()) {
+		sections.push(memory_section(memory));
 	}
 
 	sections.join("\n\n")
@@ -112,6 +119,22 @@ fn environment_section(snapshot: &EnvironmentSnapshot, working_directory: &str) 
 /// Project instruction: content from .roku.md and/or ~/.roku/ROKU.md.
 fn project_instruction_section(content: &str) -> String {
 	format!("# Project Instructions\n\n{content}")
+}
+
+/// Maximum character count for injected memory content.
+/// Prevents unbounded context growth from very large memory stores.
+const MAX_MEMORY_CHARS: usize = 40_000;
+
+/// Memory context: short-term continuity, long-term recall, working memory.
+fn memory_section(memory: &RuntimeMemorySections) -> String {
+	let text = memory.named_sections_text();
+	let capped = if text.chars().count() > MAX_MEMORY_CHARS {
+		let truncated: String = text.chars().take(MAX_MEMORY_CHARS).collect();
+		format!("{truncated}\n\n[Note: memory content truncated at {MAX_MEMORY_CHARS} chars]")
+	} else {
+		text
+	};
+	format!("# Memory\n\n{capped}")
 }
 
 /// Maximum byte size for a single instruction file. Files exceeding this limit
@@ -185,7 +208,7 @@ mod tests {
 
 	#[test]
 	fn system_prompt_contains_all_sections_without_project_instruction() {
-		let prompt = build_system_prompt(&sample_env(), "/home/user/project", None);
+		let prompt = build_system_prompt(&sample_env(), "/home/user/project", None, None);
 		assert!(prompt.contains("# Identity"));
 		assert!(prompt.contains("# Tool Usage"));
 		assert!(prompt.contains("# Environment"));
@@ -198,6 +221,7 @@ mod tests {
 			&sample_env(),
 			"/home/user/project",
 			Some("Always use Rust. Never use JavaScript."),
+			None,
 		);
 		assert!(prompt.contains("# Project Instructions"));
 		assert!(prompt.contains("Always use Rust"));
@@ -205,7 +229,7 @@ mod tests {
 
 	#[test]
 	fn system_prompt_skips_empty_project_instruction() {
-		let prompt = build_system_prompt(&sample_env(), "/home/user/project", Some("   "));
+		let prompt = build_system_prompt(&sample_env(), "/home/user/project", Some("   "), None);
 		assert!(!prompt.contains("# Project Instructions"));
 	}
 
@@ -281,7 +305,7 @@ mod tests {
 	#[test]
 	fn prompt_token_estimate_within_budget() {
 		// Rough token estimate: ~4 chars per token for English text.
-		let prompt = build_system_prompt(&sample_env(), "/home/user/project", None);
+		let prompt = build_system_prompt(&sample_env(), "/home/user/project", None, None);
 		let estimated_tokens = prompt.len() / 4;
 		// Target: ~1.5-2K tokens without project instructions.
 		assert!(
@@ -292,5 +316,42 @@ mod tests {
 			estimated_tokens > 300,
 			"prompt is {estimated_tokens} estimated tokens, should be at least 300"
 		);
+	}
+
+	#[test]
+	fn system_prompt_includes_memory_when_non_empty() {
+		let memory = RuntimeMemorySections {
+			short_term_continuity: String::new(),
+			long_term_recall: "- rec1 | fact | user prefers dark mode".to_string(),
+			working_memory: String::new(),
+		};
+		let prompt = build_system_prompt(&sample_env(), "/home/user/project", None, Some(&memory));
+		assert!(prompt.contains("# Memory"));
+		assert!(prompt.contains("Long-term recall:"));
+		assert!(prompt.contains("user prefers dark mode"));
+	}
+
+	#[test]
+	fn system_prompt_excludes_memory_when_empty() {
+		let memory = RuntimeMemorySections::default();
+		let prompt = build_system_prompt(&sample_env(), "/home/user/project", None, Some(&memory));
+		assert!(!prompt.contains("# Memory"));
+	}
+
+	#[test]
+	fn system_prompt_excludes_memory_when_none() {
+		let prompt = build_system_prompt(&sample_env(), "/home/user/project", None, None);
+		assert!(!prompt.contains("# Memory"));
+	}
+
+	#[test]
+	fn memory_section_is_truncated_when_large() {
+		let memory = RuntimeMemorySections {
+			short_term_continuity: String::new(),
+			long_term_recall: "x".repeat(MAX_MEMORY_CHARS + 1000),
+			working_memory: String::new(),
+		};
+		let section = memory_section(&memory);
+		assert!(section.contains("[Note: memory content truncated"));
 	}
 }

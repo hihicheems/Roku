@@ -178,6 +178,16 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 						{
 							eprintln!("[warn] failed to persist compacted history: {e}");
 						}
+						// Write compact boundary marker to session store.
+						let boundary = crate::session_store::SessionEntry::CompactBoundary {
+							timestamp_ms: crate::turn::now_unix_ms(),
+							summary_turn_index: 0,
+							discarded_turns: result.discarded,
+							retained_turns: result.retained,
+						};
+						if let Err(e) = store.append_entries(&session_id, &[boundary]) {
+							eprintln!("[warn] failed to write compact boundary: {e}");
+						}
 						eprintln!(
 							"[compact] Compacted {} turns into summary. {} turns remain.",
 							result.discarded, result.retained

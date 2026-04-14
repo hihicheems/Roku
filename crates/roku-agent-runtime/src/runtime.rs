@@ -915,6 +915,7 @@ impl GenericAgentRuntime {
 				env_snapshot,
 				&loop_state.working_directory,
 				project_instruction.as_deref(),
+				Some(runtime_memory_sections),
 			);
 			let system_prompt_len = system_prompt.len();
 

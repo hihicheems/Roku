@@ -328,7 +328,9 @@ impl OpenRouterProvider {
 		// the streaming path; the router handles provider-level retries).
 		let requested_model = attempt_models
 			.first()
-			.ok_or_else(|| ProviderCallError::non_retryable("no models available for streaming"))?
+			.ok_or_else(|| ProviderCallError::Fatal {
+				message: "no models available for streaming".to_string(),
+			})?
 			.clone();
 
 		self.stream_once(&headers, &requested_model, request, tx)
@@ -390,18 +392,18 @@ impl OpenRouterProvider {
 				Ok(Some(result)) => result,
 				Ok(None) => break,
 				Err(_) => {
-					stream_error = Some(ProviderCallError::retryable(
-						"SSE stream timed out waiting for next event".to_string(),
-					));
+					stream_error = Some(ProviderCallError::Timeout {
+						message: "SSE stream timed out waiting for next event".to_string(),
+					});
 					break;
 				}
 			};
 			let event = match event_result {
 				Ok(event) => event,
 				Err(error) => {
-					stream_error = Some(ProviderCallError::retryable(format!(
-						"SSE stream error: {error}"
-					)));
+					stream_error = Some(ProviderCallError::ConnectionFailed {
+						message: format!("SSE stream error: {error}"),
+					});
 					break;
 				}
 			};
@@ -413,9 +415,10 @@ impl OpenRouterProvider {
 			let chunk: Value = match serde_json::from_str(&event.data) {
 				Ok(value) => value,
 				Err(error) => {
-					stream_error = Some(ProviderCallError::retryable(format!(
-						"failed to parse SSE chunk: {error}"
-					)));
+					stream_error = Some(ProviderCallError::ServerError {
+						status: 0,
+						message: format!("failed to parse SSE chunk: {error}"),
+					});
 					break;
 				}
 			};
@@ -615,8 +618,8 @@ impl LlmProvider for OpenRouterProvider {
 			}
 		}
 
-		Err(last_error.unwrap_or_else(|| {
-			ProviderCallError::retryable("openrouter exhausted explicit model fallback attempts")
+		Err(last_error.unwrap_or_else(|| ProviderCallError::Fatal {
+			message: "openrouter exhausted explicit model fallback attempts".to_string(),
 		}))
 	}
 
@@ -651,10 +654,18 @@ impl OpenRouterProvider {
 			.map_err(classify_request_error)?;
 		let status = response.status();
 		let response_body = response.text().await.map_err(|error| {
-			if error.is_timeout() || error.is_connect() {
-				ProviderCallError::retryable(format!("failed to read response body: {error}"))
+			if error.is_timeout() {
+				ProviderCallError::Timeout {
+					message: format!("failed to read response body: {error}"),
+				}
+			} else if error.is_connect() {
+				ProviderCallError::ConnectionFailed {
+					message: format!("failed to read response body: {error}"),
+				}
 			} else {
-				ProviderCallError::non_retryable(format!("failed to read response body: {error}"))
+				ProviderCallError::Fatal {
+					message: format!("failed to read response body: {error}"),
+				}
 			}
 		})?;
 		if !status.is_success() {
@@ -721,7 +732,9 @@ fn build_headers(config: &OpenRouterConfig) -> Result<HeaderMap, ProviderCallErr
 	headers.insert(
 		reqwest::header::AUTHORIZATION,
 		HeaderValue::from_str(&format!("Bearer {}", config.api_key)).map_err(|error| {
-			ProviderCallError::non_retryable(format!("invalid authorization header: {error}"))
+			ProviderCallError::Fatal {
+				message: format!("invalid authorization header: {error}"),
+			}
 		})?,
 	);
 	headers.insert(
@@ -731,18 +744,16 @@ fn build_headers(config: &OpenRouterConfig) -> Result<HeaderMap, ProviderCallErr
 	if let Some(site_url) = &config.site_url {
 		headers.insert(
 			HeaderName::from_static("http-referer"),
-			HeaderValue::from_str(site_url).map_err(|error| {
-				ProviderCallError::non_retryable(format!("invalid HTTP-Referer header: {error}"))
+			HeaderValue::from_str(site_url).map_err(|error| ProviderCallError::Fatal {
+				message: format!("invalid HTTP-Referer header: {error}"),
 			})?,
 		);
 	}
 	if let Some(app_name) = &config.app_name {
 		headers.insert(
 			HeaderName::from_static("x-openrouter-title"),
-			HeaderValue::from_str(app_name).map_err(|error| {
-				ProviderCallError::non_retryable(format!(
-					"invalid X-OpenRouter-Title header: {error}"
-				))
+			HeaderValue::from_str(app_name).map_err(|error| ProviderCallError::Fatal {
+				message: format!("invalid X-OpenRouter-Title header: {error}"),
 			})?,
 		);
 	}
@@ -750,36 +761,74 @@ fn build_headers(config: &OpenRouterConfig) -> Result<HeaderMap, ProviderCallErr
 }
 
 fn classify_request_error(error: reqwest::Error) -> ProviderCallError {
-	if error.is_timeout() || error.is_connect() {
-		ProviderCallError::retryable(format!("request failed: {error}"))
+	if error.is_timeout() {
+		ProviderCallError::Timeout {
+			message: format!("request failed: {error}"),
+		}
+	} else if error.is_connect() {
+		ProviderCallError::ConnectionFailed {
+			message: format!("request failed: {error}"),
+		}
 	} else {
-		ProviderCallError::non_retryable(format!("request failed: {error}"))
+		ProviderCallError::Fatal {
+			message: format!("request failed: {error}"),
+		}
 	}
 }
 
 fn classify_status_error(status_code: u16, response_body: String) -> ProviderCallError {
 	let message = format!("openrouter returned status {status_code}: {response_body}");
 	match status_code {
-		408 | 409 | 429 | 500..=599 => ProviderCallError::retryable(message),
-		_ => ProviderCallError::non_retryable(message),
+		401 | 403 => ProviderCallError::AuthenticationFailed { message },
+		429 => ProviderCallError::RateLimit {
+			message,
+			retry_after: None,
+		},
+		400 => {
+			let body_lower = response_body.to_lowercase();
+			if body_lower.contains("context")
+				&& (body_lower.contains("exceeded")
+					|| body_lower.contains("too long")
+					|| body_lower.contains("maximum"))
+			{
+				ProviderCallError::ContextWindowExceeded { detail: message }
+			} else {
+				ProviderCallError::InvalidRequest { message }
+			}
+		}
+		408 | 409 => ProviderCallError::ServerError {
+			status: status_code,
+			message,
+		},
+		529 | 503 => ProviderCallError::ServerOverloaded {
+			message,
+			retry_after: None,
+		},
+		500..=599 => ProviderCallError::ServerError {
+			status: status_code,
+			message,
+		},
+		_ => ProviderCallError::Fatal { message },
 	}
 }
 
 fn classify_parse_error(message: String) -> ProviderCallError {
-	ProviderCallError::retryable(format!("unreadable provider response: {message}"))
+	ProviderCallError::ServerError {
+		status: 0,
+		message: format!("unreadable provider response: {message}"),
+	}
 }
 
 fn should_try_explicit_fallback(error: &ProviderCallError) -> bool {
-	match error {
-		ProviderCallError::Retryable { message } => {
-			message.contains("unreadable provider response")
-				|| message.contains("provider_unreadable_content:")
-				|| message.contains("provider_content_null:")
-				|| message.contains("provider_finish_reason_length:")
-				|| message.contains("no readable assistant content")
-		}
-		ProviderCallError::NonRetryable { .. } => false,
-	}
+	let message = match error {
+		ProviderCallError::ServerError { message, .. } => message.as_str(),
+		_ => return false,
+	};
+	message.contains("unreadable provider response")
+		|| message.contains("provider_unreadable_content:")
+		|| message.contains("provider_content_null:")
+		|| message.contains("provider_finish_reason_length:")
+		|| message.contains("no readable assistant content")
 }
 
 pub fn build_openrouter_router(
