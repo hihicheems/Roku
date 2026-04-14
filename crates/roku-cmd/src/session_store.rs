@@ -17,6 +17,11 @@
 //! Each session is stored as a JSONL file (one `ConversationTurn` per line) under
 //! `{session_history_dir}/{session_id}.jsonl`. Append-only writes make the format
 //! streaming-friendly and crash-resilient.
+//!
+//! In addition to `ConversationTurn` entries, the JSONL file may contain metadata
+//! entries serialized as `SessionEntry`. These use an internally-tagged `"type"` field
+//! so they are skipped by the existing `load()` parser without breaking backward
+//! compatibility.
 
 use std::fs;
 use std::io::{BufRead, Write};
@@ -26,6 +31,38 @@ use std::time::SystemTime;
 use roku_common_types::ConversationTurn;
 
 use crate::storage::LocalStorageLayout;
+
+/// A session store entry — either a conversation turn or a metadata entry.
+///
+/// Uses internally-tagged serde so all variants coexist in the same JSONL stream.
+/// Metadata entries appended to the session JSONL alongside raw `ConversationTurn`
+/// lines. Uses an internally-tagged `"type"` field so `load()` (which deserializes
+/// to `ConversationTurn`) safely skips these lines with a warning.
+///
+/// **Important**: Do NOT add a `Turn` wrapper variant — serializing it would inject
+/// a `"type"` field that `load()` cannot parse, silently dropping conversation data.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type")]
+pub(crate) enum SessionEntry {
+	/// Compact boundary marker written after a compaction event.
+	#[serde(rename = "compact_boundary")]
+	CompactBoundary {
+		timestamp_ms: u64,
+		summary_turn_index: usize,
+		discarded_turns: usize,
+		retained_turns: usize,
+	},
+	/// Token usage metadata for a single turn.
+	#[serde(rename = "token_usage")]
+	TokenUsage {
+		timestamp_ms: u64,
+		prompt_tokens: u64,
+		output_tokens: u64,
+		model_id: Option<String>,
+		session_prompt_total: u64,
+		session_output_total: u64,
+	},
+}
 
 /// Metadata about a stored session.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -96,6 +133,29 @@ impl SessionStore {
 			.open(&path)?;
 		for turn in turns {
 			let json = serde_json::to_string(turn)
+				.map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+			writeln!(file, "{json}")?;
+		}
+		Ok(())
+	}
+
+	/// Append raw session entries (metadata, boundaries, etc.) to a session file.
+	pub fn append_entries(
+		&self,
+		session_id: &str,
+		entries: &[SessionEntry],
+	) -> Result<(), std::io::Error> {
+		if entries.is_empty() {
+			return Ok(());
+		}
+		fs::create_dir_all(&self.root)?;
+		let path = self.session_path(session_id)?;
+		let mut file = fs::OpenOptions::new()
+			.create(true)
+			.append(true)
+			.open(&path)?;
+		for entry in entries {
+			let json = serde_json::to_string(entry)
 				.map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 			writeln!(file, "{json}")?;
 		}

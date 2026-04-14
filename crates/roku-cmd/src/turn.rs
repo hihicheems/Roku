@@ -100,6 +100,21 @@ pub(crate) fn handle_turn_interactive(
 		);
 	}
 
+	// Persist token usage to session store.
+	if turn_tokens.prompt > 0 || turn_tokens.output > 0 {
+		let usage_entry = crate::session_store::SessionEntry::TokenUsage {
+			timestamp_ms: now_unix_ms(),
+			prompt_tokens: turn_tokens.prompt,
+			output_tokens: turn_tokens.output,
+			model_id: turn_tokens.model_id.clone(),
+			session_prompt_total: *session_prompt_tokens,
+			session_output_total: *session_output_tokens,
+		};
+		if let Err(e) = store.append_entries(session_id, &[usage_entry]) {
+			tracing::warn!("failed to write token usage to session store: {e}");
+		}
+	}
+
 	let turn_model = turn_tokens.model_id.clone();
 	let emit_response = |msg: &str, status: &str| {
 		if json_mode {
