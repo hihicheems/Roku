@@ -1032,6 +1032,10 @@ fn execute_turn(
 								LoopEvent::CompactTriggered { step, estimated_tokens } => {
 									eprint!("[compact] step {step} triggered (~{estimated_tokens} tokens)\r\n");
 								}
+								LoopEvent::CompactComplete { elapsed_ms, llm_succeeded, .. } => {
+									let method = if llm_succeeded { "LLM" } else { "mechanical" };
+									eprint!("[compact] completed ({method}, {elapsed_ms}ms)\r\n");
+								}
 								LoopEvent::LlmTextDelta { text, .. } => {
 									streaming_active = true;
 									let rendered = stream_renderer.push(&text);

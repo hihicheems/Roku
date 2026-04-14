@@ -369,6 +369,7 @@ fn tool_emoji(name: &str) -> &'static str {
 		"web_fetch" => "\u{1f4c4}",
 		"python_run" => "\u{1f40d}",
 		"table_query" | "table_edit" => "\u{1f4ca}",
+		"compact" => "\u{1f5dc}\u{fe0f}",
 		_ => "\u{26a1}",
 	}
 }
@@ -549,6 +550,21 @@ impl roku_plugin_telegram::TelegramInteractionHandler for RuntimeServiceTelegram
 												if let Some(entry) = tool_entries.iter_mut().rev().find(|e| !e.finished && e.name == *tool_name) {
 													entry.finished = true;
 													entry.elapsed_ms = *elapsed_ms;
+												}
+											}
+											roku_agent_runtime::LoopEvent::CompactTriggered { .. } => {
+												tool_entries.push(ToolProgressEntry {
+													name: "compact".to_string(),
+													summary: "compacting context...".to_string(),
+													started_at: std::time::Instant::now(),
+													elapsed_ms: None,
+													finished: false,
+												});
+											}
+											roku_agent_runtime::LoopEvent::CompactComplete { elapsed_ms, .. } => {
+												if let Some(entry) = tool_entries.iter_mut().rev().find(|e| !e.finished && e.name == "compact") {
+													entry.finished = true;
+													entry.elapsed_ms = Some(*elapsed_ms);
 												}
 											}
 											roku_agent_runtime::LoopEvent::TokenUsage { prompt_tokens: p, output_tokens: o, .. } => {
