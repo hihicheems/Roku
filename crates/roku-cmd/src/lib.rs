@@ -46,6 +46,7 @@ mod runtime_config;
 mod session_store;
 mod storage;
 mod telegram_session_ux_config;
+mod trace_store;
 mod turn;
 
 #[cfg(test)]

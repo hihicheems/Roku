@@ -15,7 +15,7 @@
 /// Runtime-layer events emitted by `execute_tool_loop` via an optional event sender.
 ///
 /// All variants are `Send + 'static` so the sender can cross async task boundaries.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum LoopEvent {
 	/// A tool invocation is about to begin.
