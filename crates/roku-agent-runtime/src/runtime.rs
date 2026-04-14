@@ -916,8 +916,11 @@ impl GenericAgentRuntime {
 		loop {
 			// Refresh visible tools at the start of each turn.
 			self.refresh_tool_loop_visible_tools(loop_state);
-			let tool_definitions =
-				build_tool_definitions(&loop_state.visible_tools, Some(&self.resource_catalog));
+			let tool_definitions = build_tool_definitions(
+				&loop_state.visible_tools,
+				Some(&self.resource_catalog),
+				&loop_state.disallowed_tools,
+			);
 
 			// Check step budget before calling the LLM.
 			if loop_state.remaining_step_budget == 0 {
@@ -1615,15 +1618,22 @@ impl GenericAgentRuntime {
 
 	fn refresh_tool_loop_visible_tools(&self, loop_state: &mut LoopState) {
 		let mut visible_tools = self.visible_tools_for_loop_state(loop_state);
-		// In Plan mode, filter to read-only tools via the registry.
+		// In Plan mode, filter catalog tools to read-only via the registry,
+		// and block mutating pseudo-tools via disallowed_tools (applied in
+		// build_tool_definitions).
 		if self.loop_mode == LoopMode::Plan {
 			visible_tools.retain(|name| {
 				self.tool_registry
 					.get(name)
 					.is_some_and(|entry| entry.is_read_only())
 			});
+			for blocked in [PSEUDO_TASK_CREATE, PSEUDO_TASK_UPDATE] {
+				if !loop_state.disallowed_tools.iter().any(|d| d == blocked) {
+					loop_state.disallowed_tools.push(blocked.to_string());
+				}
+			}
 		}
-		// Enforce disallowed_tools (used by sub-agents).
+		// Enforce disallowed_tools for catalog tools (sub-agents, plan mode).
 		if !loop_state.disallowed_tools.is_empty() {
 			visible_tools.retain(|name| !loop_state.disallowed_tools.contains(name));
 		}

@@ -49,6 +49,7 @@ use crate::runtime_loop::grounding::{
 pub(crate) fn build_tool_definitions(
 	visible_tools: &[String],
 	catalog: Option<&ResourceCatalog>,
+	disallowed_tools: &[String],
 ) -> Vec<ToolDefinition> {
 	let mut definitions = Vec::new();
 
@@ -173,6 +174,11 @@ pub(crate) fn build_tool_definitions(
 			"required": ["task_id"]
 		}),
 	});
+
+	// Remove any pseudo-tools that appear in the disallowed list.
+	if !disallowed_tools.is_empty() {
+		definitions.retain(|d| !disallowed_tools.iter().any(|blocked| blocked == &d.name));
+	}
 
 	definitions
 }
