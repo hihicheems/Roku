@@ -112,6 +112,12 @@ filter_commits = false
 # Regex to select git tags that represent releases.
 tag_pattern = "v[0-9].*"
 
+# Map commit author names/emails to correct GitHub usernames.
+commit_authors = [
+  { name = "Cheems", username = "itscheems" },
+  { email = "cheems@users.noreply.github.com", username = "itscheems" },
+]
+
 # Order releases topologically instead of chronologically.
 topo_order = false
 # Order of commits in each group/release within the changelog.
