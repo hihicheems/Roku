@@ -138,6 +138,40 @@ pub(crate) fn styled_working_status(
 	format!("{dot} {text}")
 }
 
+/// Styled prefix for AI assistant text output.
+/// Used to visually distinguish AI responses from tool output and system messages.
+#[allow(dead_code)]
+pub(crate) fn styled_assistant_prefix() -> String {
+	if no_color() {
+		return "".to_string();
+	}
+	// No prefix — AI text is distinguished by being the "default" style,
+	// while tool output gets [tool] prefix and system messages get colored.
+	String::new()
+}
+
+/// Styled system info message with severity-based coloring.
+#[allow(dead_code)]
+pub(crate) fn styled_system_message(message: &str, severity: &str) -> String {
+	if no_color() {
+		return message.to_string();
+	}
+	match severity {
+		"warning" => message.with(Color::DarkYellow).to_string(),
+		"error" => message.with(Color::Red).to_string(),
+		"dim" => message.with(Color::DarkGrey).to_string(),
+		_ => message.to_string(),
+	}
+}
+
+/// Styled compact/summary notice (dim grey).
+pub(crate) fn styled_compact_notice(message: &str) -> String {
+	if no_color() {
+		return message.to_string();
+	}
+	message.with(Color::DarkGrey).to_string()
+}
+
 /// Styled token/cost info line.
 pub(crate) fn styled_token_info(
 	prompt: u64,

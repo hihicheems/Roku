@@ -362,8 +362,7 @@ impl LlmRouter {
 						});
 					}
 
-					let backoff_ms =
-						backoff_for_attempt(attempt_index, &self.resilience_policy);
+					let backoff_ms = backoff_for_attempt(attempt_index, &self.resilience_policy);
 					if backoff_ms > 0 {
 						tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
 					}

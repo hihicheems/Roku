@@ -25,6 +25,8 @@ use std::time::SystemTime;
 
 use roku_common_types::ConversationTurn;
 
+use crate::storage::LocalStorageLayout;
+
 /// Metadata about a stored session.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct SessionInfo {
@@ -167,6 +169,43 @@ fn validate_session_id(session_id: &str) -> Result<(), std::io::Error> {
 			format!("invalid session id: {session_id:?}"),
 		));
 	}
+	Ok(())
+}
+
+/// Atomically rewrite the session file with the given history (used after compaction).
+///
+/// Writes to a temporary sibling file first, then renames over the original, so a
+/// crash mid-write does not destroy the existing file.
+pub(crate) fn rewrite_history(
+	store: &SessionStore,
+	session_id: &str,
+	history: &[ConversationTurn],
+) -> Result<(), std::io::Error> {
+	let layout = LocalStorageLayout::from_env();
+	let dir = &layout.session_history_dir;
+	std::fs::create_dir_all(dir)?;
+
+	let target = dir.join(format!("{session_id}.jsonl"));
+	let tmp = dir.join(format!("{session_id}.jsonl.tmp"));
+
+	// Write to temp file.
+	{
+		let mut file = std::fs::File::create(&tmp)?;
+		for turn in history {
+			let json = serde_json::to_string(turn)
+				.map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+			writeln!(file, "{json}")?;
+		}
+		file.flush()?;
+	}
+
+	// Atomic rename over original.
+	std::fs::rename(&tmp, &target)?;
+
+	// Suppress unused-variable warning — store is still needed for other operations,
+	// but rewrite bypasses it for atomicity.
+	let _ = store;
+
 	Ok(())
 }
 
