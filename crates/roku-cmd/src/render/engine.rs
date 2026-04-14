@@ -124,7 +124,7 @@ impl RenderEngine {
 		&mut self,
 		event: LoopEvent,
 		captured_tokens: &Arc<Mutex<TurnTokens>>,
-		_text_streamed_flag: &Arc<AtomicBool>,
+		text_streamed_flag: &Arc<AtomicBool>,
 	) {
 		let s = &mut self.state;
 
@@ -231,6 +231,7 @@ impl RenderEngine {
 					let rendered = s.stream_renderer.push(&text);
 					if !rendered.is_empty() {
 						s.had_text_output = true;
+						text_streamed_flag.store(true, Ordering::Relaxed);
 						eprint!("{}", rendered.replace('\n', "\r\n"));
 					}
 				}
@@ -238,6 +239,7 @@ impl RenderEngine {
 				let flush_output = s.stream_renderer.flush();
 				if !flush_output.is_empty() {
 					s.had_text_output = true;
+					text_streamed_flag.store(true, Ordering::Relaxed);
 					eprint!("{}", flush_output.replace('\n', "\r\n"));
 				}
 				if s.had_text_output {
