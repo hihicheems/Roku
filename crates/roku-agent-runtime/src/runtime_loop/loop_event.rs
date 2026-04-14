@@ -43,6 +43,14 @@ pub enum LoopEvent {
 		/// Estimated token count that caused the trigger.
 		estimated_tokens: u64,
 	},
+	/// Context compaction completed.
+	CompactComplete {
+		step: u32,
+		/// Whether LLM-assisted summarization succeeded (`false` = mechanical fallback).
+		llm_succeeded: bool,
+		/// Wall-clock duration of the compaction in milliseconds.
+		elapsed_ms: u64,
+	},
 	/// Incremental text from the LLM during the decision phase.
 	LlmTextDelta { step: u32, text: String },
 	/// The LLM finished producing its decision for this step.

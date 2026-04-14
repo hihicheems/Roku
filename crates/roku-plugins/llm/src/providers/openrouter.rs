@@ -307,7 +307,9 @@ pub struct OpenRouterProvider {
 
 impl OpenRouterProvider {
 	pub fn new(config: OpenRouterConfig) -> Result<Self, OpenRouterBootstrapError> {
-		let client = Client::builder().build()?;
+		let client = Client::builder()
+			.connect_timeout(std::time::Duration::from_secs(30))
+			.build()?;
 		Ok(Self { client, config })
 	}
 
@@ -381,7 +383,19 @@ impl OpenRouterProvider {
 		let mut tool_call_index_to_id: std::collections::HashMap<u64, String> =
 			std::collections::HashMap::new();
 
-		while let Some(event_result) = stream.next().await {
+		let event_timeout = std::time::Duration::from_secs(120);
+
+		loop {
+			let event_result = match tokio::time::timeout(event_timeout, stream.next()).await {
+				Ok(Some(result)) => result,
+				Ok(None) => break,
+				Err(_) => {
+					stream_error = Some(ProviderCallError::retryable(
+						"SSE stream timed out waiting for next event".to_string(),
+					));
+					break;
+				}
+			};
 			let event = match event_result {
 				Ok(event) => event,
 				Err(error) => {
