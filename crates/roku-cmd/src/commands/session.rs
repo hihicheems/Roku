@@ -209,14 +209,18 @@ fn interactive_resume(
 	}
 }
 
-/// Resume a specific session using compact-boundary-aware loading.
+/// Resume a specific session.
+///
+/// Uses `load()` (all turns) because Roku's compaction model does a
+/// destructive rewrite — the file already contains only summary +
+/// retained turns. Filtering by compact boundary would lose that context.
 fn resume_session(
 	store: &SessionStore,
 	target: &str,
 	session_id: &mut String,
 	conversation_history: &mut Vec<ConversationTurn>,
 ) {
-	match store.load_after_boundary(target) {
+	match store.load(target) {
 		Ok(turns) => {
 			let count = turns.len();
 			*conversation_history = turns;

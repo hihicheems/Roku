@@ -94,6 +94,14 @@ impl SessionStore {
 	/// If the session has a compact boundary marker, only returns turns that
 	/// appear after the last boundary. If no boundary exists, returns all turns
 	/// (same as `load`).
+	///
+	/// **Note**: With Roku's current destructive-rewrite compaction model, the
+	/// file is already rewritten with only summary + retained turns before the
+	/// boundary is appended. Callers that need the full compacted context
+	/// (including the summary) should use `load()` instead. This method is
+	/// reserved for future append-only chain support where pre-boundary content
+	/// genuinely represents discarded history.
+	#[allow(dead_code)]
 	pub fn load_after_boundary(
 		&self,
 		session_id: &str,
