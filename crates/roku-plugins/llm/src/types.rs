@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -96,9 +98,9 @@ pub struct ProviderResiliencePolicy {
 impl Default for ProviderResiliencePolicy {
 	fn default() -> Self {
 		Self {
-			max_retries: 2,
+			max_retries: 5,
 			initial_backoff_ms: 200,
-			max_backoff_ms: 1_000,
+			max_backoff_ms: 30_000,
 			circuit_breaker_failure_threshold: 4,
 			circuit_breaker_cooldown_ms: 30_000,
 		}
@@ -217,27 +219,74 @@ pub struct StructuredJsonResponse {
 
 #[derive(Debug, Error, Clone, PartialEq)]
 pub enum ProviderCallError {
-	#[error("{message}")]
-	Retryable { message: String },
-	#[error("{message}")]
-	NonRetryable { message: String },
+	/// 429 Too Many Requests — rate limited by the provider.
+	#[error("rate limited: {message}")]
+	RateLimit {
+		message: String,
+		retry_after: Option<Duration>,
+	},
+
+	/// 529/503 — provider is overloaded.
+	#[error("server overloaded: {message}")]
+	ServerOverloaded {
+		message: String,
+		retry_after: Option<Duration>,
+	},
+
+	/// Context window exceeded (provider-specific 400 with context signal).
+	#[error("context window exceeded: {detail}")]
+	ContextWindowExceeded { detail: String },
+
+	/// 500/502/504 and other server errors.
+	#[error("server error ({status}): {message}")]
+	ServerError { status: u16, message: String },
+
+	/// Request timed out.
+	#[error("request timed out: {message}")]
+	Timeout { message: String },
+
+	/// Network connection failed.
+	#[error("connection failed: {message}")]
+	ConnectionFailed { message: String },
+
+	/// 401/403 — authentication or authorization failure.
+	#[error("authentication failed: {message}")]
+	AuthenticationFailed { message: String },
+
+	/// 400 — invalid request (not context-related).
+	#[error("invalid request: {message}")]
+	InvalidRequest { message: String },
+
+	/// Quota exhausted (different from rate limit — persistent, not temporary).
+	#[error("quota exceeded: {message}")]
+	QuotaExceeded { message: String },
+
+	/// Unrecoverable error.
+	#[error("fatal: {message}")]
+	Fatal { message: String },
 }
 
 impl ProviderCallError {
-	pub fn retryable(message: impl Into<String>) -> Self {
-		Self::Retryable {
-			message: message.into(),
-		}
-	}
-
-	pub fn non_retryable(message: impl Into<String>) -> Self {
-		Self::NonRetryable {
-			message: message.into(),
-		}
-	}
-
+	/// Whether this error class is eligible for retry.
 	pub fn is_retryable(&self) -> bool {
-		matches!(self, Self::Retryable { .. })
+		matches!(
+			self,
+			Self::RateLimit { .. }
+				| Self::ServerOverloaded { .. }
+				| Self::ServerError { .. }
+				| Self::Timeout { .. }
+				| Self::ConnectionFailed { .. }
+		)
+	}
+
+	/// Server-suggested delay before retrying, if any.
+	pub fn suggested_delay(&self) -> Option<Duration> {
+		match self {
+			Self::RateLimit { retry_after, .. } | Self::ServerOverloaded { retry_after, .. } => {
+				*retry_after
+			}
+			_ => None,
+		}
 	}
 }
 

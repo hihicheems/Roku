@@ -16,6 +16,7 @@
 
 mod bootstrap;
 mod providers;
+mod retry;
 mod router;
 mod types;
 

@@ -152,7 +152,9 @@ impl OpenAiResponsesProvider {
 		let client = Client::builder()
 			.connect_timeout(std::time::Duration::from_secs(30))
 			.build()
-			.map_err(|e| ProviderCallError::non_retryable(format!("http client error: {e}")))?;
+			.map_err(|e| ProviderCallError::Fatal {
+				message: format!("http client error: {e}"),
+			})?;
 		Ok(Self { client, config })
 	}
 
@@ -161,7 +163,9 @@ impl OpenAiResponsesProvider {
 		headers.insert(
 			reqwest::header::AUTHORIZATION,
 			HeaderValue::from_str(&format!("Bearer {}", self.config.api_key)).map_err(|e| {
-				ProviderCallError::non_retryable(format!("invalid authorization header: {e}"))
+				ProviderCallError::Fatal {
+					message: format!("invalid authorization header: {e}"),
+				}
 			})?,
 		);
 		headers.insert(
@@ -667,9 +671,9 @@ impl LlmProvider for OpenAiResponsesProvider {
 			{
 				Ok(result) => result,
 				Err(_) => {
-					stream_error = Some(ProviderCallError::retryable(
-						"SSE stream timed out waiting for next event".to_string(),
-					));
+					stream_error = Some(ProviderCallError::Timeout {
+						message: "SSE stream timed out waiting for next event".to_string(),
+					});
 					break;
 				}
 			};
@@ -685,9 +689,9 @@ impl LlmProvider for OpenAiResponsesProvider {
 					}
 				}
 				Some(Err(e)) => {
-					stream_error = Some(ProviderCallError::retryable(format!(
-						"SSE stream error: {e}"
-					)));
+					stream_error = Some(ProviderCallError::ConnectionFailed {
+						message: format!("SSE stream error: {e}"),
+					});
 					break;
 				}
 				None => break,
@@ -698,9 +702,9 @@ impl LlmProvider for OpenAiResponsesProvider {
 		if stream_error.is_none()
 			&& let Some(msg) = state.stream_error.take()
 		{
-			stream_error = Some(ProviderCallError::non_retryable(format!(
-				"responses api: {msg}"
-			)));
+			stream_error = Some(ProviderCallError::Fatal {
+				message: format!("responses api: {msg}"),
+			});
 		}
 
 		let latency_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -767,18 +771,54 @@ impl LlmProvider for OpenAiResponsesProvider {
 // ---------------------------------------------------------------------------
 
 fn classify_request_error(error: reqwest::Error) -> ProviderCallError {
-	if error.is_timeout() || error.is_connect() {
-		ProviderCallError::retryable(format!("request failed: {error}"))
+	if error.is_timeout() {
+		ProviderCallError::Timeout {
+			message: format!("request failed: {error}"),
+		}
+	} else if error.is_connect() {
+		ProviderCallError::ConnectionFailed {
+			message: format!("request failed: {error}"),
+		}
 	} else {
-		ProviderCallError::non_retryable(format!("request failed: {error}"))
+		ProviderCallError::Fatal {
+			message: format!("request failed: {error}"),
+		}
 	}
 }
 
 fn classify_status_error(status_code: u16, response_body: String) -> ProviderCallError {
 	let message = format!("openai responses returned status {status_code}: {response_body}");
 	match status_code {
-		408 | 409 | 429 | 500..=599 => ProviderCallError::retryable(message),
-		_ => ProviderCallError::non_retryable(message),
+		401 | 403 => ProviderCallError::AuthenticationFailed { message },
+		429 => ProviderCallError::RateLimit {
+			message,
+			retry_after: None,
+		},
+		400 => {
+			let body_lower = response_body.to_lowercase();
+			if body_lower.contains("context")
+				&& (body_lower.contains("exceeded")
+					|| body_lower.contains("too long")
+					|| body_lower.contains("maximum"))
+			{
+				ProviderCallError::ContextWindowExceeded { detail: message }
+			} else {
+				ProviderCallError::InvalidRequest { message }
+			}
+		}
+		408 | 409 => ProviderCallError::ServerError {
+			status: status_code,
+			message,
+		},
+		529 | 503 => ProviderCallError::ServerOverloaded {
+			message,
+			retry_after: None,
+		},
+		500..=599 => ProviderCallError::ServerError {
+			status: status_code,
+			message,
+		},
+		_ => ProviderCallError::Fatal { message },
 	}
 }
 
