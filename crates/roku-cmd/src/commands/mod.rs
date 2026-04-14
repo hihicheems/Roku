@@ -68,6 +68,16 @@ pub(crate) fn slash_commands() -> Vec<CommandEntry> {
 			sub_commands: None,
 		},
 		CommandEntry {
+			name: "plan",
+			description: "Enter plan mode (read-only tools)",
+			sub_commands: None,
+		},
+		CommandEntry {
+			name: "plan-execute",
+			description: "Exit plan mode and resume normal execution",
+			sub_commands: None,
+		},
+		CommandEntry {
 			name: "session",
 			description: "Manage chat sessions",
 			sub_commands: Some(vec![

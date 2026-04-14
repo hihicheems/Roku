@@ -150,6 +150,7 @@ impl RenderEngine {
 				step,
 				tool_name,
 				args_summary,
+				..
 			} => {
 				if s.pending_tool_name.is_some() {
 					eprint!("\r\n");
