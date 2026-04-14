@@ -20,7 +20,7 @@ Closes #
 
 Validation details:
 
-## Suggested Squash Commit Title
+## Suggested Merge Commit Title
 
 `type(scope): summary`
 

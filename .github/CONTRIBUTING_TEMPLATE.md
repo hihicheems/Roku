@@ -70,7 +70,7 @@ Suggested guidance:
 - keep the description short and imperative
 - add a scope when it improves clarity
 - describe breaking changes clearly
-- align squash commit titles with the same convention when possible
+- align merge commit titles with the same convention when possible
 
 ## Pull Request Reviews
 
