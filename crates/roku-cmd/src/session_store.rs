@@ -105,6 +105,11 @@ impl SessionStore {
 			if trimmed.is_empty() {
 				continue;
 			}
+			// Silently skip metadata entries (compact_boundary, token_usage)
+			// which carry a "type" field that ConversationTurn doesn't expect.
+			if trimmed.contains(r#""type":"#) {
+				continue;
+			}
 			match serde_json::from_str::<ConversationTurn>(trimmed) {
 				Ok(turn) => turns.push(turn),
 				Err(e) => {
@@ -269,10 +274,20 @@ pub(crate) fn rewrite_history(
 	Ok(())
 }
 
+/// Count only conversation turn lines, skipping metadata entries.
 fn count_lines(path: &Path) -> Result<usize, std::io::Error> {
 	let file = fs::File::open(path)?;
 	let reader = std::io::BufReader::new(file);
-	Ok(reader.lines().count())
+	let mut count = 0;
+	for line in reader.lines() {
+		let line = line?;
+		let trimmed = line.trim();
+		if trimmed.is_empty() || trimmed.contains(r#""type":"#) {
+			continue;
+		}
+		count += 1;
+	}
+	Ok(count)
 }
 
 fn file_mtime_unix_ms(path: &Path) -> u64 {
