@@ -235,11 +235,9 @@ impl RenderEngine {
 						eprint!("{}", rendered.replace('\n', "\r\n"));
 					}
 				}
-				// Flush the stream renderer
+				// Flush the stream renderer (may contain only ANSI reset)
 				let flush_output = s.stream_renderer.flush();
 				if !flush_output.is_empty() {
-					s.had_text_output = true;
-					text_streamed_flag.store(true, Ordering::Relaxed);
 					eprint!("{}", flush_output.replace('\n', "\r\n"));
 				}
 				if s.had_text_output {

@@ -116,12 +116,25 @@ impl StreamController {
 		}
 	}
 
-	/// Enqueue committed lines for release.
+	/// Enqueue committed text for release. Each newline-terminated line
+	/// becomes a separate queue entry; a trailing fragment without `\n`
+	/// is kept verbatim (no synthetic newline added).
 	pub(crate) fn enqueue(&mut self, text: String) {
 		let now = Instant::now();
-		for line in text.lines() {
+		let mut start = 0;
+		for (i, ch) in text.char_indices() {
+			if ch == '\n' {
+				self.queue.push_back(QueuedLine {
+					text: text[start..=i].to_owned(),
+					enqueued_at: now,
+				});
+				start = i + 1;
+			}
+		}
+		// Remaining fragment without trailing newline (e.g. finalize_and_drain tail)
+		if start < text.len() {
 			self.queue.push_back(QueuedLine {
-				text: format!("{line}\n"),
+				text: text[start..].to_owned(),
 				enqueued_at: now,
 			});
 		}
