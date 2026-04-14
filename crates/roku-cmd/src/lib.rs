@@ -1102,17 +1102,12 @@ fn configure_logging_from_env() -> Result<(), CommandError> {
 		LogLevel::Error => LevelFilter::ERROR,
 	};
 
-	// Set up file-only logging via tracing_appender::non_blocking
+	// Set up file-only logging via tracing_appender with daily rotation
 	let log_dir = layout.log_dir.clone();
 	std::fs::create_dir_all(&log_dir)
 		.map_err(|e| CommandError::LoggingConfiguration(format!("create log dir: {e}")))?;
-	let log_file_path = log_dir.join("roku-cmd.log");
-	let log_file = std::fs::OpenOptions::new()
-		.create(true)
-		.append(true)
-		.open(&log_file_path)
-		.map_err(|e| CommandError::LoggingConfiguration(format!("open log file: {e}")))?;
-	let (non_blocking, guard) = tracing_appender::non_blocking(log_file);
+	let file_appender = tracing_appender::rolling::daily(&log_dir, "roku-cmd.log");
+	let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 	TRACING_GUARD.get_or_init(|| guard);
 
 	// Reloadable level filter for /debug toggle

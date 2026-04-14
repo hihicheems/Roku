@@ -28,15 +28,15 @@ use std::time::Instant;
 /// completes them. This prevents half-rendered markdown from flashing.
 pub(crate) struct MarkdownStreamCollector {
 	buffer: String,
-	/// Number of lines already committed (returned to caller).
-	committed_line_count: usize,
+	/// Byte offset up to which we have already committed (returned to caller).
+	committed_offset: usize,
 }
 
 impl MarkdownStreamCollector {
 	pub(crate) fn new() -> Self {
 		Self {
 			buffer: String::new(),
-			committed_line_count: 0,
+			committed_offset: 0,
 		}
 	}
 
@@ -46,50 +46,30 @@ impl MarkdownStreamCollector {
 	}
 
 	/// Return complete lines (those ending with `\n`) that haven't been
-	/// committed yet. Updates the committed count.
+	/// committed yet. Updates the committed offset.
 	///
-	/// Returns the committed text as a single String (may contain multiple lines).
+	/// Only scans the new portion of the buffer (O(delta) per call, not O(buffer)).
 	pub(crate) fn commit_complete_lines(&mut self) -> Option<String> {
-		// Find the last newline in the buffer.
-		let last_nl = self.buffer.rfind('\n')?;
-		let complete = &self.buffer[..=last_nl];
+		// Only look at the uncommitted tail for the last newline.
+		let tail = &self.buffer[self.committed_offset..];
+		let last_nl_in_tail = tail.rfind('\n')?;
+		let new_end = self.committed_offset + last_nl_in_tail + 1; // byte past the '\n'
 
-		// Count how many lines exist in the complete portion.
-		let total_lines = complete.lines().count();
-		if total_lines <= self.committed_line_count {
-			return None;
-		}
+		let committed_text = self.buffer[self.committed_offset..new_end].to_owned();
+		self.committed_offset = new_end;
 
-		// Extract only the new lines (beyond what we've already committed).
-		let new_lines: Vec<&str> = complete.lines().skip(self.committed_line_count).collect();
-		self.committed_line_count = total_lines;
-
-		if new_lines.is_empty() {
+		if committed_text.is_empty() {
 			None
 		} else {
-			// Rejoin with newlines (each line gets a trailing \n)
-			let mut result = new_lines.join("\n");
-			result.push('\n');
-			Some(result)
+			Some(committed_text)
 		}
 	}
 
 	/// Flush remaining buffer content (including incomplete lines).
 	/// Call this when streaming ends (e.g. on LlmDecisionComplete).
 	pub(crate) fn finalize_and_drain(&mut self) -> Option<String> {
-		let remaining = if !self.buffer.is_empty() {
-			// Lines we haven't committed yet
-			let all_lines: Vec<&str> = self.buffer.lines().collect();
-			let new_lines: Vec<&str> = all_lines
-				.into_iter()
-				.skip(self.committed_line_count)
-				.collect();
-
-			if new_lines.is_empty() {
-				None
-			} else {
-				Some(new_lines.join("\n"))
-			}
+		let remaining = if self.committed_offset < self.buffer.len() {
+			Some(self.buffer[self.committed_offset..].to_owned())
 		} else {
 			None
 		};
@@ -101,7 +81,7 @@ impl MarkdownStreamCollector {
 	/// Reset all state.
 	fn clear(&mut self) {
 		self.buffer.clear();
-		self.committed_line_count = 0;
+		self.committed_offset = 0;
 	}
 }
 
