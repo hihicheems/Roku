@@ -43,8 +43,9 @@
 
 ### Bug Fixes
 
-- **(roku-agent-runtime)** raise step budget default to 200 and hard max to 500 (by @[itscheems](https://github.com/itscheems)) - ([d31d9e4](https://github.com/itscheems/Roku/commit/d31d9e4a306b986ef17e6a6add12a942887012ed))
-- **(roku-agent-runtime)** overhaul context compaction — estimation, budget, UX, and data hygiene (by @[itscheems](https://github.com/itscheems)) - ([645558f](https://github.com/itscheems/Roku/commit/645558f97f38bece51be8664a92b76ee188c5c22))
+- **(config)** correct changelog author mapping and remove false new-contributor entry (by @[cheems](https://github.com/cheems)) - ([9ccc361](https://github.com/itscheems/Roku/commit/9ccc36186cb77082609b06d9e60726557c716743))
+- **(roku-agent-runtime)** raise step budget default to 200 and hard max to 500 (by @[cheems](https://github.com/cheems)) - ([d31d9e4](https://github.com/itscheems/Roku/commit/d31d9e4a306b986ef17e6a6add12a942887012ed))
+- **(roku-agent-runtime)** overhaul context compaction — estimation, budget, UX, and data hygiene (by @[cheems](https://github.com/cheems)) - ([645558f](https://github.com/itscheems/Roku/commit/645558f97f38bece51be8664a92b76ee188c5c22))
 - **(roku-agent-runtime)** raise compact timeout to 5 minutes (#263) (by @[itscheems](https://github.com/itscheems)) - ([b6eec16](https://github.com/itscheems/Roku/commit/b6eec16d318a476a9a9530795abd0d28020c3375))
 - **(roku-agent-runtime)** add 30s timeout to compact LLM calls (#263) (by @[itscheems](https://github.com/itscheems)) - ([28b6146](https://github.com/itscheems/Roku/commit/28b61461debcdad9f102f2e1f3a6958ca1a502f7))
 - **(roku-agent-runtime)** route compact trigger message through log system (by @[itscheems](https://github.com/itscheems)) - ([6c0e948](https://github.com/itscheems/Roku/commit/6c0e94898441d2c6bf30ad52c5aa3dbe9fccdcd6))
@@ -59,7 +60,7 @@
 - **(roku-agent-runtime)** validate streaming LLM result and preserve compaction pairing (by @[itscheems](https://github.com/itscheems)) - ([82bac4c](https://github.com/itscheems/Roku/commit/82bac4c3e6e8e5ee95cf9402153171a125ef2e1f))
 - **(roku-agent-runtime)** sanitize environment values and use per-step cwd (by @[itscheems](https://github.com/itscheems)) - ([ad3e6ef](https://github.com/itscheems/Roku/commit/ad3e6ef8a929997635707fdaa97bd06beb70030d))
 - **(roku-agent-runtime)** complete classifier LLM deletion (resolve agent conflict) (by @[itscheems](https://github.com/itscheems)) - ([9fa69c3](https://github.com/itscheems/Roku/commit/9fa69c3cbe2174cd0f6b314120349dd82bc93387))
-- **(roku-cmd)** update rand 0.10 API — Rng::fill moved to RngExt (by @[itscheems](https://github.com/itscheems)) - ([fa445de](https://github.com/itscheems/Roku/commit/fa445deb88a5be61f68380d1d4a2bd4238ba3050))
+- **(roku-cmd)** update rand 0.10 API — Rng::fill moved to RngExt (by @[cheems](https://github.com/cheems)) - ([fa445de](https://github.com/itscheems/Roku/commit/fa445deb88a5be61f68380d1d4a2bd4238ba3050))
 - **(roku-cmd)** set delivered flag early and send artifacts separately (#261) (by @[itscheems](https://github.com/itscheems)) - ([a001e37](https://github.com/itscheems/Roku/commit/a001e370ef27f01a602ac150c7e95e593b5b89cb))
 - **(roku-cmd)** tick-driven flush so progress refreshes every second (#261) (by @[itscheems](https://github.com/itscheems)) - ([e4f3e3c](https://github.com/itscheems/Roku/commit/e4f3e3c968b2a5b115260021615fa8454bff30b6))
 - **(roku-cmd)** poll-based progress refresh and suppress fast tool durations (#261) (by @[itscheems](https://github.com/itscheems)) - ([9b28833](https://github.com/itscheems/Roku/commit/9b28833ad770c93f394137ad78db8c15d377978f))
@@ -114,17 +115,17 @@
 - **(roku-cmd)** block message dispatch after /logout until re-authentication (by @[itscheems](https://github.com/itscheems)) - ([b097a24](https://github.com/itscheems/Roku/commit/b097a2457df69da3f3c6b01e0ee7b034ee910d06))
 - **(roku-cmd)** check credentials before bootstrap to ensure first-run flow triggers (by @[itscheems](https://github.com/itscheems)) - ([7cbac19](https://github.com/itscheems/Roku/commit/7cbac19a8542b91ca0f57a62760add7626256926))
 - **(roku-cmd)** install denial gate for write operations in pipe mode (by @[itscheems](https://github.com/itscheems)) - ([31c7758](https://github.com/itscheems/Roku/commit/31c77587aeeeaf15c7ec379128335b823c2db5eb))
-- **(roku-plugin-llm)** exclude Done chunks from retry eligibility counting (by @[itscheems](https://github.com/itscheems)) - ([269c15f](https://github.com/itscheems/Roku/commit/269c15f9bcb8d0e6767ec17f19954bcac7ea4eb1))
-- **(roku-plugin-llm)** retry streaming timeouts and fix compact llm_succeeded derivation (by @[itscheems](https://github.com/itscheems)) - ([84ca00b](https://github.com/itscheems/Roku/commit/84ca00b2105d6bcac10b6623a0abc471a72e1b04))
-- **(roku-plugin-llm)** address review — drain forwarder, record timeout failure, combine llm_succeeded (by @[itscheems](https://github.com/itscheems)) - ([686c8da](https://github.com/itscheems/Roku/commit/686c8da7313405c6e9f6f38885b89239487f2d29))
-- **(roku-plugin-llm)** add streaming timeout and retry resilience (by @[itscheems](https://github.com/itscheems)) - ([e07d074](https://github.com/itscheems/Roku/commit/e07d074c31adf67f9ff4fa842017c0943dd04edf))
+- **(roku-plugin-llm)** exclude Done chunks from retry eligibility counting (by @[cheems](https://github.com/cheems)) - ([269c15f](https://github.com/itscheems/Roku/commit/269c15f9bcb8d0e6767ec17f19954bcac7ea4eb1))
+- **(roku-plugin-llm)** retry streaming timeouts and fix compact llm_succeeded derivation (by @[cheems](https://github.com/cheems)) - ([84ca00b](https://github.com/itscheems/Roku/commit/84ca00b2105d6bcac10b6623a0abc471a72e1b04))
+- **(roku-plugin-llm)** address review — drain forwarder, record timeout failure, combine llm_succeeded (by @[cheems](https://github.com/cheems)) - ([686c8da](https://github.com/itscheems/Roku/commit/686c8da7313405c6e9f6f38885b89239487f2d29))
+- **(roku-plugin-llm)** add streaming timeout and retry resilience (by @[cheems](https://github.com/cheems)) - ([e07d074](https://github.com/itscheems/Roku/commit/e07d074c31adf67f9ff4fa842017c0943dd04edf))
 - **(roku-plugin-llm)** add 120s per-event timeout to SSE stream loops (by @[itscheems](https://github.com/itscheems)) - ([56360ec](https://github.com/itscheems/Roku/commit/56360ec82cbc3edd1fea9f70ef7364a19f832ab2))
 - **(roku-plugin-llm)** ensure max_tokens >= budget_tokens for Anthropic thinking (by @[itscheems](https://github.com/itscheems)) - ([1ca2b41](https://github.com/itscheems/Roku/commit/1ca2b4136fe37e10df782b35b2f2e8d5cdca0681))
 - **(roku-plugin-llm)** extract text from response.completed when deltas missing (by @[itscheems](https://github.com/itscheems)) - ([e4dcc88](https://github.com/itscheems/Roku/commit/e4dcc88e25300cebbb808720b96bd1277fd4f81c))
 - **(roku-plugin-llm)** add store=false to Responses API request body (by @[itscheems](https://github.com/itscheems)) - ([ce8dbd2](https://github.com/itscheems/Roku/commit/ce8dbd2afbe95fd3305bc3ef02cc77cbd95ba182))
 - **(roku-plugin-llm)** address review findings for Responses API provider (by @[itscheems](https://github.com/itscheems)) - ([c256922](https://github.com/itscheems/Roku/commit/c256922caa227ee9d8e8031660a6f2ee1486e5f2))
 - **(roku-plugin-llm)** parse streaming tool_calls and resolve model-truncated tool names (by @[itscheems](https://github.com/itscheems)) - ([af5e588](https://github.com/itscheems/Roku/commit/af5e588ea8f1bb006fedc94fd5f23665dd4d696d))
-- **(roku-plugin-telegram)** log callback acknowledgement failures instead of silently dropping (by @[itscheems](https://github.com/itscheems)) - ([8771d3a](https://github.com/itscheems/Roku/commit/8771d3ad68be1895a38e4d3822c8bab9b817dc32))
+- **(roku-plugin-telegram)** log callback acknowledgement failures instead of silently dropping (by @[cheems](https://github.com/cheems)) - ([8771d3a](https://github.com/itscheems/Roku/commit/8771d3ad68be1895a38e4d3822c8bab9b817dc32))
 - **(roku-plugin-telegram)** move blocking I/O off worker threads and bound per-chat queue (#264) (by @[itscheems](https://github.com/itscheems)) - ([04f071b](https://github.com/itscheems/Roku/commit/04f071be092cbde47f0f246b7c3b3c1e3902c5ce))
 - **(roku-plugin-telegram)** add per-chat semaphore to prevent concurrent session access (#264) (by @[itscheems](https://github.com/itscheems)) - ([e5ce63c](https://github.com/itscheems/Roku/commit/e5ce63c18dfe091510670dea669bae9b4bb0868f))
 - **(roku-plugin-telegram)** address codex review findings (#261) (by @[itscheems](https://github.com/itscheems)) - ([9e5194c](https://github.com/itscheems/Roku/commit/9e5194ce74b31104f280268dd8bfd75e5c11ebd7))
@@ -179,6 +180,9 @@
 - **(deps)** Bump rmcp from 1.3.0 to 1.4.0 (by @[dependabot[bot]](https://github.com/dependabot[bot])) - ([521c900](https://github.com/itscheems/Roku/commit/521c90059d0f52d1e779d768f9355cbb013f2224))
 - **(deps)** Bump crossterm from 0.28.1 to 0.29.0 (by @[dependabot[bot]](https://github.com/dependabot[bot])) - ([257db80](https://github.com/itscheems/Roku/commit/257db801b82ae5a3e0e2f7257c7280363bd8caa5))
 
+## New Contributors ❤️
+
+* @cheems made their first contribution
 ## [v0.0.11] - 2026-04-09
 
 ### Features
