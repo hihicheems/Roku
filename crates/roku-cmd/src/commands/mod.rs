@@ -14,6 +14,8 @@
 
 //! Slash command dispatch and definitions.
 
+pub(crate) mod doctor;
+pub(crate) mod provider;
 pub(crate) mod session;
 pub(crate) mod setup;
 
@@ -40,6 +42,11 @@ pub(crate) fn slash_commands() -> Vec<CommandEntry> {
 		CommandEntry {
 			name: "debug",
 			description: "Toggle debug log output",
+			sub_commands: None,
+		},
+		CommandEntry {
+			name: "doctor",
+			description: "Diagnose environment and connectivity",
 			sub_commands: None,
 		},
 		CommandEntry {
@@ -78,6 +85,16 @@ pub(crate) fn slash_commands() -> Vec<CommandEntry> {
 			sub_commands: None,
 		},
 		CommandEntry {
+			name: "provider",
+			description: "List or switch LLM providers",
+			sub_commands: None,
+		},
+		CommandEntry {
+			name: "resume",
+			description: "Resume a previous session",
+			sub_commands: None,
+		},
+		CommandEntry {
 			name: "session",
 			description: "Manage chat sessions",
 			sub_commands: Some(vec![
@@ -103,6 +120,11 @@ pub(crate) fn slash_commands() -> Vec<CommandEntry> {
 		CommandEntry {
 			name: "thinking",
 			description: "Set thinking/reasoning effort",
+			sub_commands: None,
+		},
+		CommandEntry {
+			name: "trace",
+			description: "Show recent execution trace",
 			sub_commands: None,
 		},
 	]

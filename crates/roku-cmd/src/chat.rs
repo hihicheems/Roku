@@ -31,6 +31,9 @@ use roku_common_types::ConversationTurn;
 
 use crate::CommandError;
 use crate::auth::AuthStore;
+use crate::commands::doctor::handle_doctor_command;
+use crate::commands::provider::handle_provider_command;
+use crate::commands::session::handle_resume_command;
 use crate::commands::session::handle_session_command;
 use crate::commands::setup::{handle_switch_command, rebuild_service, run_first_time_setup};
 use crate::commands::slash_commands;
@@ -42,6 +45,7 @@ use crate::runtime::build_live_runtime_service_from_env;
 use crate::runtime::cli_approval_gate;
 use crate::session_store::{SessionStore, rewrite_history};
 use crate::storage::LocalStorageLayout;
+use crate::trace_store::TraceStore;
 use crate::turn::handle_turn_interactive;
 
 /// Options parsed from the `chat` subcommand arguments.
@@ -306,6 +310,11 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 				}
 				continue;
 			}
+			"/doctor" => {
+				reader.add_history_entry(trimmed);
+				handle_doctor_command();
+				continue;
+			}
 			"/plan" => {
 				reader.add_history_entry(trimmed);
 				service.set_loop_mode(roku_agent_runtime::LoopMode::Plan);
@@ -318,11 +327,26 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 				eprintln!("[plan] Exited plan mode, normal execution resumed.");
 				continue;
 			}
+			input if input.starts_with("/provider") => {
+				reader.add_history_entry(trimmed);
+				handle_provider_command(input, &mut service, &mut logged_out);
+				continue;
+			}
+			input if input.starts_with("/resume") => {
+				reader.add_history_entry(trimmed);
+				handle_resume_command(input, &store, &mut session_id, &mut conversation_history);
+				continue;
+			}
 			"/switch" => {
 				reader.add_history_entry(trimmed);
 				if handle_switch_command(&mut service) {
 					logged_out = false;
 				}
+				continue;
+			}
+			input if input.starts_with("/trace") => {
+				reader.add_history_entry(trimmed);
+				handle_trace_command(input);
 				continue;
 			}
 			input if input.starts_with("/session") => {
@@ -364,4 +388,37 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 	reader.save_history();
 
 	Ok(())
+}
+
+/// Handle /trace command.
+fn handle_trace_command(input: &str) {
+	let parts: Vec<&str> = input.split_whitespace().collect();
+	let trace_store = TraceStore::from_env();
+
+	match parts.get(1) {
+		Some(run_id) => {
+			// Show detailed events for a specific run.
+			match trace_store.load_events(run_id) {
+				Some(events) if !events.is_empty() => {
+					eprintln!("{}", crate::trace_store::render_trace_detail(&events));
+				}
+				Some(_) => eprintln!("[trace] Trace '{run_id}' is empty."),
+				None => eprintln!("[trace] Trace '{run_id}' not found."),
+			}
+		}
+		None => {
+			// Show summary of the most recent trace.
+			let recent = trace_store.list_recent(1);
+			match recent.first() {
+				Some(run_id) => {
+					if let Some(summary) = trace_store.summarize(run_id) {
+						eprintln!("{}", crate::trace_store::render_trace_summary(&summary));
+					} else {
+						eprintln!("[trace] No trace data available.");
+					}
+				}
+				None => eprintln!("[trace] No traces found."),
+			}
+		}
+	}
 }
