@@ -120,13 +120,21 @@ pub(crate) fn print_auth_status() {
 }
 
 /// Resolve the display model from runtime config (best-effort).
+///
+/// Reads `[runtime.llm]` to find the active provider, then looks up
+/// `primary_model` from that provider's subsection
+/// (e.g. `[runtime.llm.openrouter]`).
 fn resolve_display_model() -> Option<String> {
 	let layout = crate::storage::LocalStorageLayout::from_env();
 	let contents = std::fs::read_to_string(&layout.runtime_config_path).ok()?;
 	let config: toml::Value = contents.parse().ok()?;
-	config
-		.get("llm")
-		.and_then(|llm| llm.get("model"))
+	let llm = config.get("runtime")?.get("llm")?;
+	let provider = llm
+		.get("provider")
+		.and_then(|p| p.as_str())
+		.unwrap_or("openrouter");
+	llm.get(provider)
+		.and_then(|section| section.get("primary_model"))
 		.and_then(|m| m.as_str())
 		.map(|s| s.to_string())
 }
