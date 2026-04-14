@@ -70,6 +70,8 @@ pub(crate) struct SessionInfo {
 	pub session_id: String,
 	pub turn_count: usize,
 	pub last_modified: u64,
+	/// First user message content (truncated for display).
+	pub first_message: Option<String>,
 }
 
 /// File-backed conversation history store.
@@ -85,6 +87,58 @@ impl SessionStore {
 	fn session_path(&self, session_id: &str) -> Result<PathBuf, std::io::Error> {
 		validate_session_id(session_id)?;
 		Ok(self.root.join(format!("{session_id}.jsonl")))
+	}
+
+	/// Load conversation turns after the last compact boundary.
+	///
+	/// If the session has a compact boundary marker, only returns turns that
+	/// appear after the last boundary. If no boundary exists, returns all turns
+	/// (same as `load`).
+	pub fn load_after_boundary(
+		&self,
+		session_id: &str,
+	) -> Result<Vec<ConversationTurn>, std::io::Error> {
+		let path = self.session_path(session_id)?;
+		if !path.exists() {
+			return Ok(Vec::new());
+		}
+
+		let file = fs::File::open(&path)?;
+		let reader = std::io::BufReader::new(file);
+		let mut all_turns = Vec::new();
+		let mut last_boundary_index: Option<usize> = None;
+		let mut line_index: usize = 0;
+
+		for line in reader.lines() {
+			let line = line?;
+			let trimmed = line.trim();
+			if trimmed.is_empty() {
+				continue;
+			}
+			if trimmed.contains(r#""type":"#) {
+				if trimmed.contains(r#""compact_boundary""#) {
+					last_boundary_index = Some(line_index);
+				}
+				line_index += 1;
+				continue;
+			}
+			match serde_json::from_str::<ConversationTurn>(trimmed) {
+				Ok(turn) => all_turns.push((line_index, turn)),
+				Err(e) => {
+					eprintln!("[warn] skipping malformed line in session {session_id}: {e}");
+				}
+			}
+			line_index += 1;
+		}
+
+		match last_boundary_index {
+			Some(boundary) => Ok(all_turns
+				.into_iter()
+				.filter(|(idx, _)| *idx > boundary)
+				.map(|(_, turn)| turn)
+				.collect()),
+			None => Ok(all_turns.into_iter().map(|(_, turn)| turn).collect()),
+		}
 	}
 
 	/// Load all conversation turns for a session.  Returns an empty vec if the
@@ -190,10 +244,12 @@ impl SessionStore {
 			}
 			let turn_count = count_lines(&path).unwrap_or(0);
 			let last_modified = file_mtime_unix_ms(&path);
+			let first_message = first_turn_summary(&path);
 			sessions.push(SessionInfo {
 				session_id,
 				turn_count,
 				last_modified,
+				first_message,
 			});
 		}
 		sessions.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
@@ -288,6 +344,32 @@ fn count_lines(path: &Path) -> Result<usize, std::io::Error> {
 		count += 1;
 	}
 	Ok(count)
+}
+
+/// Extract a truncated summary of the first conversation turn in a session file.
+fn first_turn_summary(path: &Path) -> Option<String> {
+	let file = fs::File::open(path).ok()?;
+	let reader = std::io::BufReader::new(file);
+	for line in reader.lines() {
+		let line = line.ok()?;
+		let trimmed = line.trim();
+		if trimmed.is_empty() || trimmed.contains(r#""type":"#) {
+			continue;
+		}
+		if let Ok(turn) = serde_json::from_str::<ConversationTurn>(trimmed) {
+			let content = turn.content.trim();
+			if content.is_empty() {
+				continue;
+			}
+			// Truncate to ~60 chars for display.
+			let summary: String = content.chars().take(60).collect();
+			if content.chars().count() > 60 {
+				return Some(format!("{summary}…"));
+			}
+			return Some(summary);
+		}
+	}
+	None
 }
 
 fn file_mtime_unix_ms(path: &Path) -> u64 {
