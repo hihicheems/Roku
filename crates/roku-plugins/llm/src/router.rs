@@ -273,7 +273,12 @@ impl LlmRouter {
 			let counter = Arc::clone(&chunks_forwarded);
 			let forwarder = tokio::spawn(async move {
 				while let Some(chunk) = attempt_rx.recv().await {
-					counter.fetch_add(1, Ordering::Relaxed);
+					// Only count content-bearing chunks for retry eligibility.
+					// Done is terminal metadata — providers may emit it before
+					// returning an error, and counting it would block retries.
+					if !matches!(chunk, StreamChunk::Done { .. }) {
+						counter.fetch_add(1, Ordering::Relaxed);
+					}
 					if real_tx.send(chunk).await.is_err() {
 						break;
 					}
