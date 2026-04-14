@@ -20,7 +20,12 @@
 
 mod diff;
 mod markdown;
-mod style;
+pub(crate) mod style;
+
+pub(crate) mod cells;
+pub(crate) mod engine;
+pub(crate) mod state;
+pub(crate) mod streaming;
 
 pub(crate) use markdown::StreamRenderer;
 pub(crate) use style::{
