@@ -593,12 +593,21 @@ pub fn microcompact_old_tool_results(
 
 	// Older = everything except the trailing `retain_recent` indices.
 	let cutoff = tool_result_indices.len() - retain_recent;
+	let placeholder_bytes = MICROCOMPACT_PLACEHOLDER.len();
 	let placeholder_estimate = byte_estimate_for_text(MICROCOMPACT_PLACEHOLDER);
 	let mut freed_raw: u64 = 0;
 	for &idx in &tool_result_indices[..cutoff] {
 		if let Message::ToolResult { content, .. } = &mut messages[idx] {
 			// Idempotence: leave previously-cleared placeholders untouched.
 			if content == MICROCOMPACT_PLACEHOLDER {
+				continue;
+			}
+			// Short-body skip: if the original is already at or below the
+			// placeholder's byte footprint (e.g. "ok" / "done" / empty),
+			// replacing would expand the message instead of shrinking it.
+			// The saturating_sub below would record zero freed tokens
+			// anyway, so the net effect of a replacement is purely adverse.
+			if content.len() <= placeholder_bytes {
 				continue;
 			}
 			let before = byte_estimate_for_text(content);
@@ -1693,6 +1702,84 @@ mod tests {
 				assert_eq!(ac, bc);
 			}
 		}
+	}
+
+	#[test]
+	fn microcompact_skips_tool_results_at_or_below_placeholder_size() {
+		use roku_plugin_llm::{Message, ToolCallBlock};
+
+		// Short tool-result bodies are at or below MICROCOMPACT_PLACEHOLDER's
+		// byte footprint. Replacing them would grow the message instead of
+		// shrinking it, so Layer 0 must leave them untouched and record 0
+		// freed tokens for those slots.
+		let short_bodies: [&str; 3] = ["ok", "done", ""];
+		assert!(
+			short_bodies
+				.iter()
+				.all(|s| s.len() <= MICROCOMPACT_PLACEHOLDER.len()),
+			"fixture precondition: each short body must fit within the placeholder footprint"
+		);
+
+		let mut messages: Vec<Message> = vec![Message::User {
+			content: "start".to_string(),
+		}];
+		for (i, body) in short_bodies.iter().enumerate() {
+			messages.push(Message::Assistant {
+				text: format!("call {i}"),
+				tool_calls: vec![ToolCallBlock {
+					id: format!("tc-{i}"),
+					name: "Bash".to_string(),
+					arguments: json!({}),
+				}],
+			});
+			messages.push(Message::ToolResult {
+				tool_use_id: format!("tc-{i}"),
+				content: (*body).to_string(),
+				is_error: false,
+			});
+		}
+		// Append one fat tool_result that sits inside the retain_recent
+		// window so the eligible cutoff covers all three short bodies.
+		messages.push(Message::Assistant {
+			text: "call fat".to_string(),
+			tool_calls: vec![ToolCallBlock {
+				id: "tc-fat".to_string(),
+				name: "Bash".to_string(),
+				arguments: json!({}),
+			}],
+		});
+		messages.push(Message::ToolResult {
+			tool_use_id: "tc-fat".to_string(),
+			content: "x".repeat(400),
+			is_error: false,
+		});
+
+		let calibration = EstimatorCalibration::default();
+		let freed = microcompact_old_tool_results(&mut messages, 1, &calibration);
+		assert_eq!(
+			freed, 0,
+			"short tool_results must not contribute freed tokens"
+		);
+
+		let tool_results: Vec<&str> = messages
+			.iter()
+			.filter_map(|m| match m {
+				Message::ToolResult { content, .. } => Some(content.as_str()),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(tool_results.len(), 4);
+		for (i, expected) in short_bodies.iter().enumerate() {
+			assert_eq!(
+				tool_results[i], *expected,
+				"short tool_result {i} must stay byte-identical to its original body"
+			);
+		}
+		assert_eq!(
+			tool_results[3].len(),
+			400,
+			"tool_result inside retain window must stay untouched"
+		);
 	}
 
 	#[test]
