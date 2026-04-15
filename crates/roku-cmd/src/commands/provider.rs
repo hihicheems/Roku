@@ -16,7 +16,7 @@
 
 use roku_agent_runtime::RuntimeService;
 
-use crate::auth::AuthStore;
+use crate::auth::{AuthFile, AuthStore};
 use crate::commands::setup::rebuild_service;
 use crate::display::credential_summary;
 
@@ -84,12 +84,12 @@ fn list_providers() {
 
 fn switch_provider(name: &str, service: &mut RuntimeService, logged_out: &mut bool) {
 	let store = AuthStore::from_env();
+	// If `auth.json` is absent, fall through with a default state so env-var-only
+	// setups can switch provider without requiring /login first. The save below
+	// will create the file with the new active_provider.
 	let mut auth = match store.load() {
 		Ok(Some(a)) => a,
-		Ok(None) => {
-			eprintln!("[provider] No auth store. Use /login first.");
-			return;
-		}
+		Ok(None) => AuthFile::default(),
 		Err(e) => {
 			eprintln!("[provider] Failed to read auth store: {e}");
 			return;
