@@ -109,6 +109,20 @@ fn list_providers() {
 }
 
 fn switch_provider(name: &str, service: &mut RuntimeService, logged_out: &mut bool) {
+	// `build_live_runtime` ignores `auth.active_provider` when `runtime.toml`
+	// sets `[runtime.llm].provider` explicitly. Writing to `auth.json` in that
+	// case would be misleading — the live runtime would keep using the
+	// runtime.toml provider while `/provider` reports success. Refuse early
+	// and point the user at the actual authority.
+	if let Some(pinned) = runtime_explicit_provider() {
+		eprintln!(
+			"[provider] Cannot switch: runtime.toml [runtime.llm].provider is \
+			 explicitly set to {pinned}."
+		);
+		eprintln!("  Edit runtime.toml (or remove the explicit setting) instead.");
+		return;
+	}
+
 	let store = AuthStore::from_env();
 	// If `auth.json` is absent, fall through with a default state so env-var-only
 	// setups can switch provider without requiring /login first. The save below
