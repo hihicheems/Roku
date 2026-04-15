@@ -322,14 +322,13 @@ impl LlmRouter {
 				}
 				Ok(Err(error)) => {
 					let attempts_used = attempt_index.saturating_add(1);
-					let opened_circuit = provider.record_failure(&self.resilience_policy);
-					let any_chunks = chunks_forwarded.load(Ordering::Relaxed) > 0;
 
 					// Surface context-window-exceeded as its own variant so the
 					// runtime can react with compact + retry instead of treating
-					// it as a generic provider failure. This is non-retryable at
-					// the router layer — recovery requires the caller to shrink
-					// the prompt.
+					// it as a generic provider failure. Non-retryable at the
+					// router layer, and must NOT be recorded against the circuit
+					// breaker — the provider is healthy; the caller sent an
+					// oversized prompt.
 					if let ProviderCallError::ContextWindowExceeded { detail } = &error {
 						return Err(LlmAdapterError::ContextWindowExceeded {
 							provider: selected_model.provider.clone(),
@@ -337,6 +336,9 @@ impl LlmRouter {
 							detail: detail.clone(),
 						});
 					}
+
+					let opened_circuit = provider.record_failure(&self.resilience_policy);
+					let any_chunks = chunks_forwarded.load(Ordering::Relaxed) > 0;
 
 					// Never retry once chunks have been forwarded (would duplicate content).
 					if any_chunks
@@ -483,11 +485,11 @@ impl LlmRouter {
 				}
 				Err(error) => {
 					let attempts_used = attempt_index.saturating_add(1);
-					let opened_circuit = provider.record_failure(&self.resilience_policy);
 					// Surface context-window-exceeded as its own variant so the
 					// runtime can react with compact + retry. Non-retryable at
-					// this layer — recovery requires the caller to shrink the
-					// prompt.
+					// this layer, and must NOT be recorded against the circuit
+					// breaker — the provider is healthy; the caller sent an
+					// oversized prompt.
 					if let ProviderCallError::ContextWindowExceeded { detail } = &error {
 						return Err(LlmAdapterError::ContextWindowExceeded {
 							provider: model.provider.clone(),
@@ -495,6 +497,7 @@ impl LlmRouter {
 							detail: detail.clone(),
 						});
 					}
+					let opened_circuit = provider.record_failure(&self.resilience_policy);
 					if !error.is_retryable() {
 						return Err(LlmAdapterError::ProviderCallFailed {
 							provider: model.provider.clone(),
@@ -1302,5 +1305,111 @@ mod tests {
 		// The router must NOT retry context-window-exceeded — recovery is the
 		// caller's responsibility (compact + retry happens in the runtime).
 		assert_eq!(provider.invocations(), 1);
+	}
+
+	#[test]
+	fn context_window_exceeded_does_not_poison_circuit_breaker() {
+		// A context overflow is a caller-side prompt sizing issue, not a
+		// provider-health signal. The router must return without counting it
+		// against the circuit breaker so that subsequent normal calls in the
+		// same run are not rejected with `CircuitOpen`.
+		let provider = Arc::new(SequenceProvider::new(
+			"ctx-overflow-breaker",
+			vec![
+				Err(ProviderCallError::ContextWindowExceeded {
+					detail: "prompt too long".to_string(),
+				}),
+				Ok(ProviderResponse {
+					output: "second call ok".to_string(),
+					finish_reason: None,
+					prompt_tokens: 10,
+					output_tokens: 5,
+					latency_ms: 1,
+					tool_calls: None,
+				}),
+			],
+		));
+		// Threshold 1 + non-zero cooldown — if the overflow were recorded the
+		// breaker would trip after the first call and the second call would
+		// see `CircuitOpen`.
+		let mut router = LlmRouter::new(RoutingPolicy::default()).with_provider_resilience_policy(
+			ProviderResiliencePolicy {
+				max_retries: 0,
+				initial_backoff_ms: 0,
+				max_backoff_ms: 0,
+				circuit_breaker_failure_threshold: 1,
+				circuit_breaker_cooldown_ms: 60_000,
+			},
+		);
+		router.register_provider(Arc::clone(&provider));
+		router.register_model(model_profile("ctx-overflow-breaker"));
+
+		let err = router
+			.generate_blocking(&sample_request(RiskTier::Low))
+			.expect_err("first call must surface ContextWindowExceeded");
+		assert!(matches!(err, LlmAdapterError::ContextWindowExceeded { .. }));
+
+		let response = router
+			.generate_blocking(&sample_request(RiskTier::Low))
+			.expect("second call must succeed; breaker must not have tripped");
+		assert_eq!(response.output, "second call ok");
+		assert_eq!(provider.invocations(), 2);
+	}
+
+	#[test]
+	fn streaming_context_window_exceeded_does_not_poison_circuit_breaker() {
+		// Parallel regression for the streaming retry path. Same invariant:
+		// overflow surfaces as its own variant and must not count against the
+		// provider's circuit breaker.
+		let rt = tokio::runtime::Runtime::new().expect("tokio runtime must initialize");
+		rt.block_on(async {
+			let provider = Arc::new(SequenceProvider::new(
+				"stream-ctx-overflow-breaker",
+				vec![
+					Err(ProviderCallError::ContextWindowExceeded {
+						detail: "prompt too long".to_string(),
+					}),
+					Ok(ProviderResponse {
+						output: "second call ok".to_string(),
+						finish_reason: None,
+						prompt_tokens: 10,
+						output_tokens: 5,
+						latency_ms: 1,
+						tool_calls: None,
+					}),
+				],
+			));
+			let mut router = LlmRouter::new(RoutingPolicy::default())
+				.with_provider_resilience_policy(ProviderResiliencePolicy {
+					max_retries: 0,
+					initial_backoff_ms: 0,
+					max_backoff_ms: 0,
+					circuit_breaker_failure_threshold: 1,
+					circuit_breaker_cooldown_ms: 60_000,
+				});
+			router.register_provider(Arc::clone(&provider));
+			router.register_model(model_profile("stream-ctx-overflow-breaker"));
+
+			let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamChunk>(16);
+			let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+			let err = router
+				.generate_streaming(&sample_request(RiskTier::Low), tx)
+				.await
+				.expect_err("first streaming call must surface ContextWindowExceeded");
+			assert!(matches!(err, LlmAdapterError::ContextWindowExceeded { .. }));
+			let _ = drain.await;
+
+			let response = router
+				.generate(&sample_request(RiskTier::Low))
+				.await
+				.expect("second call must succeed; breaker must not have tripped");
+			assert_eq!(response.output, "second call ok");
+			assert_eq!(provider.invocations(), 2);
+
+			// Avoid dropping the embedded blocking runtime from inside this
+			// async context.
+			std::mem::forget(router);
+		});
 	}
 }
