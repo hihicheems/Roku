@@ -144,6 +144,93 @@ pub(crate) fn switch_to_session(
 	}
 }
 
+/// Handle /resume command: load a session with compact-boundary awareness.
+///
+/// - `/resume` (no args) → show recent sessions, select to resume
+/// - `/resume {session_id}` → directly resume that session
+pub(crate) fn handle_resume_command(
+	input: &str,
+	store: &SessionStore,
+	session_id: &mut String,
+	conversation_history: &mut Vec<ConversationTurn>,
+) {
+	let parts: Vec<&str> = input.split_whitespace().collect();
+	match parts.get(1) {
+		Some(target) => {
+			resume_session(store, target, session_id, conversation_history);
+		}
+		None => {
+			interactive_resume(store, session_id, conversation_history);
+		}
+	}
+}
+
+/// Show an interactive session picker for resuming.
+fn interactive_resume(
+	store: &SessionStore,
+	session_id: &mut String,
+	conversation_history: &mut Vec<ConversationTurn>,
+) {
+	let sessions = match store.list() {
+		Ok(s) if s.is_empty() => {
+			eprintln!("[resume] No sessions found.");
+			return;
+		}
+		Ok(s) => s,
+		Err(e) => {
+			eprintln!("[resume] Failed to list sessions: {e}");
+			return;
+		}
+	};
+	let items: Vec<SelectionItem> = sessions
+		.iter()
+		.take(10)
+		.map(|s| {
+			let active = if s.session_id == session_id.as_str() {
+				" (active)"
+			} else {
+				""
+			};
+			let age = format_age(s.last_modified);
+			let summary = s.first_message.as_deref().unwrap_or("(empty)");
+			SelectionItem {
+				label: format!("{}{active}", s.session_id),
+				description: format!("{} turns, {age} — {summary}", s.turn_count),
+			}
+		})
+		.collect();
+	if let Some(idx) = run_selection(items, "[resume] Select a session to resume:") {
+		resume_session(
+			store,
+			&sessions[idx].session_id,
+			session_id,
+			conversation_history,
+		);
+	}
+}
+
+/// Resume a specific session.
+///
+/// Uses `load()` (all turns) because Roku's compaction model does a
+/// destructive rewrite — the file already contains only summary +
+/// retained turns. Filtering by compact boundary would lose that context.
+fn resume_session(
+	store: &SessionStore,
+	target: &str,
+	session_id: &mut String,
+	conversation_history: &mut Vec<ConversationTurn>,
+) {
+	match store.load(target) {
+		Ok(turns) => {
+			let count = turns.len();
+			*conversation_history = turns;
+			*session_id = target.to_string();
+			eprintln!("[resume] Resumed '{target}' ({count} turns loaded).");
+		}
+		Err(e) => eprintln!("[resume] Failed to load '{target}': {e}"),
+	}
+}
+
 /// Format a unix-ms timestamp as a human-readable relative age.
 pub(crate) fn format_age(unix_ms: u64) -> String {
 	let now = now_unix_ms();

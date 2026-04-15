@@ -309,7 +309,26 @@ pub(crate) fn execute_turn(
 	thinking_effort_arg: Option<&str>,
 ) -> Result<(TurnResult, TurnTokens, bool), CommandError> {
 	rt.block_on(async {
-		let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LoopEvent>();
+		let (tx, runtime_rx) = tokio::sync::mpsc::unbounded_channel::<LoopEvent>();
+
+		// Tee events: forwarder reads from runtime_rx, clones to trace collector
+		// and sends to render_rx for the render task.
+		let (render_tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LoopEvent>();
+		let trace_collector = crate::trace_store::TraceCollector::new(format!("loop-{request_id}"));
+		let trace_ref = trace_collector.events.clone();
+		let forwarder = tokio::spawn({
+			let trace = crate::trace_store::TraceCollector {
+				run_id: trace_collector.run_id.clone(),
+				events: trace_ref,
+			};
+			async move {
+				let mut runtime_rx = runtime_rx;
+				while let Some(event) = runtime_rx.recv().await {
+					trace.record(&event);
+					let _ = render_tx.send(event);
+				}
+			}
+		});
 
 		// Shared token accumulator: the render task writes, execute_turn reads after join.
 		let captured_tokens = std::sync::Arc::new(std::sync::Mutex::new(TurnTokens::default()));
@@ -438,20 +457,26 @@ pub(crate) fn execute_turn(
 		let esc_flag = esc_cancelled.clone();
 		let result = tokio::select! {
 			response = execute_fut => {
-				let response = response.map_err(CommandError::Runtime)?;
 				drop(tx);
+				forwarder.await.ok();
 				render_task.await.ok();
 
-				let tokens = captured_tokens.lock().map(|g| g.clone()).unwrap_or_default();
-				let streamed = text_was_streamed.load(std::sync::atomic::Ordering::Relaxed);
-				if let Ok(Some(_pending)) = service.pending_loop(session_id) {
-					Ok((TurnResult::AwaitingUser(response.message), tokens, streamed))
-				} else {
-					Ok((TurnResult::Completed(response.message), tokens, streamed))
+				match response {
+					Err(e) => Err(CommandError::Runtime(e)),
+					Ok(response) => {
+						let tokens = captured_tokens.lock().map(|g| g.clone()).unwrap_or_default();
+						let streamed = text_was_streamed.load(std::sync::atomic::Ordering::Relaxed);
+						if let Ok(Some(_pending)) = service.pending_loop(session_id) {
+							Ok((TurnResult::AwaitingUser(response.message), tokens, streamed))
+						} else {
+							Ok((TurnResult::Completed(response.message), tokens, streamed))
+						}
+					}
 				}
 			}
 			_ = tokio::signal::ctrl_c() => {
 				drop(tx);
+				forwarder.await.ok();
 				render_task.await.ok();
 				let _ = service.clear_pending_loop(session_id);
 				Ok((TurnResult::Cancelled, TurnTokens::default(), false))
@@ -463,11 +488,17 @@ pub(crate) fn execute_turn(
 				}
 			} => {
 				drop(tx);
+				forwarder.await.ok();
 				render_task.await.ok();
 				let _ = service.clear_pending_loop(session_id);
 				Ok((TurnResult::Cancelled, TurnTokens::default(), false))
 			}
 		};
+
+		// Flush trace to disk (best-effort, don't block the user).
+		if let Err(e) = trace_collector.flush() {
+			tracing::warn!("failed to write trace: {e}");
+		}
 
 		// Stop the key poller and ensure raw mode is disabled.
 		stop_polling.store(true, std::sync::atomic::Ordering::Relaxed);
