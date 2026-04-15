@@ -285,12 +285,20 @@ fn truncate(text: &str, max_chars: usize) -> String {
 /// `total_tokens` is the value callers compare against the per-model
 /// threshold; the other fields are exposed so trace events can attribute
 /// pressure to system / messages / framing during diagnostics.
+///
+/// `raw_total_tokens` carries the **unscaled** sum (system + messages +
+/// framing) before the calibration scale is applied. Callers feeding the
+/// value back into [`EstimatorCalibration::update`] must use this field —
+/// the scale operates on raw input, so folding in the already-scaled
+/// `total_tokens` would compute `real / (raw * scale)` and walk the scale
+/// toward the wrong fixed point.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PromptTokenEstimate {
 	pub system_tokens: u64,
 	pub message_tokens: u64,
 	pub framing_tokens: u64,
 	pub total_tokens: u64,
+	pub raw_total_tokens: u64,
 }
 
 /// Bounded calibration state for the byte-based estimator.
@@ -424,6 +432,7 @@ pub fn estimate_prompt_tokens_calibrated(
 		message_tokens,
 		framing_tokens,
 		total_tokens: total,
+		raw_total_tokens: raw,
 	}
 }
 
@@ -2316,10 +2325,11 @@ mod tests {
 		assert!(est.system_tokens > 0, "system tokens populated");
 		assert!(est.message_tokens > 0, "message tokens populated");
 		assert_eq!(est.framing_tokens, 8, "two messages × 4 tokens framing");
-		assert_eq!(
-			est.total_tokens,
-			est.system_tokens + est.message_tokens + est.framing_tokens
-		);
+		let expected_raw = est.system_tokens + est.message_tokens + est.framing_tokens;
+		assert_eq!(est.raw_total_tokens, expected_raw);
+		// `scale` is 1.0 by default, so the calibrated total matches the
+		// raw sum here; this is not true after calibration updates.
+		assert_eq!(est.total_tokens, expected_raw);
 	}
 
 	#[test]
@@ -2345,11 +2355,13 @@ mod tests {
 		);
 		let pre_err = relative_error(pre_call.total_tokens, real);
 
-		cal.update(pre_call.total_tokens, real);
+		// Always feed the raw (pre-scale) estimate into `update` so the
+		// scale converges on `real / raw`, not on `real / (raw * scale)`.
+		cal.update(pre_call.raw_total_tokens, real);
 		assert_eq!(cal.sample_count(), 1);
 		assert!(
 			(cal.scale() - 0.6).abs() < 1e-6,
-			"single sample should land scale exactly on real/estimated; got {}",
+			"single sample should land scale exactly on real/raw; got {}",
 			cal.scale()
 		);
 
@@ -2358,6 +2370,36 @@ mod tests {
 		assert!(
 			post_err < pre_err,
 			"calibrated estimate should be closer to real: pre_err={pre_err:.3}, post_err={post_err:.3}"
+		);
+	}
+
+	#[test]
+	fn calibration_scale_is_stable_under_repeated_consistent_samples() {
+		// Regression: feeding `total_tokens` (already scaled) back into
+		// `update` computes `real / (raw * scale)` and walks the scale
+		// toward `1.0` over successive calls. Feeding `raw_total_tokens`
+		// keeps the ratio constant, so a consistent provider should pin
+		// the scale at the real/raw ratio.
+		let mut cal = EstimatorCalibration::default();
+		let messages = vec![Message::User {
+			content: "{\"data\":\"".to_string()
+				+ &"x".repeat(800)
+				+ "\",\"more\":\""
+				+ &"y".repeat(800)
+				+ "\"}",
+		}];
+
+		for _ in 0..6 {
+			let est = estimate_prompt_tokens_calibrated(&messages, None, &cal);
+			let real = ((est.raw_total_tokens as f64) * 0.6).round() as u64;
+			cal.update(est.raw_total_tokens, real);
+		}
+
+		assert!(
+			(cal.scale() - 0.6).abs() < 1e-3,
+			"scale must stabilize on the real/raw ratio across repeated \
+			 updates; got {} after 6 samples",
+			cal.scale()
 		);
 	}
 

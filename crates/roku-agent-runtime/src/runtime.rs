@@ -1251,7 +1251,7 @@ impl GenericAgentRuntime {
 								// check is closer to ground truth.
 								loop_state
 									.estimator_calibration
-									.update(pre_call_estimate.total_tokens, resp.prompt_tokens);
+									.update(pre_call_estimate.raw_total_tokens, resp.prompt_tokens);
 								let _ = sender.send(
 									crate::runtime_loop::LoopEvent::EstimatorCalibrated {
 										step: current_step_index,
@@ -1282,7 +1282,7 @@ impl GenericAgentRuntime {
 								last_model_id = Some(resp.model_id.clone());
 								loop_state
 									.estimator_calibration
-									.update(pre_call_estimate.total_tokens, resp.prompt_tokens);
+									.update(pre_call_estimate.raw_total_tokens, resp.prompt_tokens);
 								if let Some(sender) = event_sender {
 									let _ = sender.send(
 										crate::runtime_loop::LoopEvent::EstimatorCalibrated {
