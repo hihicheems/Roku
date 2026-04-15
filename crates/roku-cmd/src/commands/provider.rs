@@ -19,6 +19,21 @@ use roku_agent_runtime::RuntimeService;
 use crate::auth::{AuthFile, AuthStore};
 use crate::commands::setup::rebuild_service;
 use crate::display::credential_summary;
+use crate::runtime_config::load_runtime_configs;
+use crate::storage::LocalStorageLayout;
+
+/// Returns the provider name that `runtime.toml` pins explicitly, if any.
+///
+/// When `[runtime.llm].provider` is set, `build_live_runtime` ignores
+/// `auth.active_provider` (see `crates/roku-cmd/src/runtime.rs` provider
+/// selection). `/provider` must surface this to avoid misreporting.
+fn runtime_explicit_provider() -> Option<&'static str> {
+	let layout = LocalStorageLayout::from_env();
+	let configs = load_runtime_configs(&layout).ok()?;
+	configs
+		.llm_provider_explicit
+		.then(|| configs.llm_provider.as_str())
+}
 
 /// Handle /provider command.
 ///
@@ -38,19 +53,22 @@ pub(crate) fn handle_provider_command(
 
 fn list_providers() {
 	let store = AuthStore::from_env();
+	// Fall through with a default state when `auth.json` is absent so env-var-only
+	// setups still see their providers listed (otherwise the env-probe below
+	// never runs and users get a misleading "no credentials" message).
 	let auth = match store.load() {
 		Ok(Some(a)) => a,
-		Ok(None) => {
-			eprintln!("[provider] No credentials found. Use /login to sign in.");
-			return;
-		}
+		Ok(None) => AuthFile::default(),
 		Err(e) => {
 			eprintln!("[provider] Failed to read auth store: {e}");
 			return;
 		}
 	};
 
-	let active = auth.active_provider.as_deref().unwrap_or("none");
+	let runtime_override = runtime_explicit_provider();
+	let active = runtime_override
+		.or(auth.active_provider.as_deref())
+		.unwrap_or("none");
 
 	eprintln!("[provider] Available providers:");
 	if auth.credentials.is_empty() {
@@ -74,11 +92,19 @@ fn list_providers() {
 			.is_some_and(|v| !v.trim().is_empty())
 			&& !auth.credentials.contains_key(*provider)
 		{
-			eprintln!("  {provider}: (env: {var})");
+			let marker = if *provider == active {
+				" ← active"
+			} else {
+				""
+			};
+			eprintln!("  {provider}: (env: {var}){marker}");
 		}
 	}
 
-	eprintln!("\n  Selection reason: {}", selection_reason(active));
+	eprintln!(
+		"\n  Selection reason: {}",
+		selection_reason(runtime_override.is_some(), active)
+	);
 	eprintln!("  Use /provider {{name}} to switch.");
 }
 
@@ -144,8 +170,10 @@ fn switch_provider(name: &str, service: &mut RuntimeService, logged_out: &mut bo
 	}
 }
 
-fn selection_reason(active: &str) -> &'static str {
-	if active == "none" {
+fn selection_reason(runtime_explicit: bool, active: &str) -> &'static str {
+	if runtime_explicit {
+		"runtime.toml [runtime.llm].provider (overrides auth.json)"
+	} else if active == "none" {
 		"no active provider set"
 	} else {
 		"auth.json active_provider"
