@@ -356,7 +356,7 @@ mod tests {
 
 		let configs = load_runtime_configs(&layout).expect("defaults should load");
 
-		assert_eq!(configs.agent.r#loop.initial_step_budget, 30);
+		assert_eq!(configs.agent.r#loop.initial_step_budget, 200);
 		assert_eq!(configs.agent.router.budget_tokens_remaining, 10_000);
 		assert_eq!(configs.tools.fs.default_max_bytes, 65_536);
 		assert_eq!(configs.openrouter.max_latency_ms, 60_000);
