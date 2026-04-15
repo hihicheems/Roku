@@ -49,7 +49,8 @@ use roku_plugin_host::{
 	PluginRegistrySnapshot, ToolExecutionResult, ToolInvocation, ToolRuntime, ToolRuntimeError,
 };
 use roku_plugin_llm::{
-	GenerationRequest, LlmRouter, Message, RiskTier, StreamChunk, ThinkingEffort, ToolCallBlock,
+	GenerationRequest, LlmAdapterError, LlmRouter, Message, RiskTier, StreamChunk, ThinkingEffort,
+	ToolCallBlock,
 };
 use roku_plugin_skills::SkillRegistry;
 use roku_plugin_tools::{
@@ -768,14 +769,18 @@ impl GenericAgentRuntime {
 		messages: &mut Vec<roku_plugin_llm::Message>,
 		current_step_index: u32,
 		event_sender: Option<&crate::runtime_loop::LoopEventSender>,
-		system_prompt_len: usize,
+		system_prompt: &str,
 	) -> (u64, u64) {
 		// Truncate oversized tool results in messages.
 		let tool_result_max_chars = self.agent_runtime_config.r#loop.working_summary_max_chars;
 		crate::runtime_loop::truncate_large_tool_results(messages, tool_result_max_chars);
 
 		let threshold = self.agent_runtime_config.r#loop.compact_threshold_tokens();
-		let estimated = crate::runtime_loop::estimate_prompt_pressure(messages, system_prompt_len);
+		let estimated = crate::runtime_loop::estimate_prompt_pressure(
+			messages,
+			Some(system_prompt),
+			&loop_state.estimator_calibration,
+		);
 		if estimated > threshold {
 			let _ = roku_common_types::emit_global_log(roku_common_types::LogRecord::new(
 				"roku-runtime-service",
@@ -790,54 +795,137 @@ impl GenericAgentRuntime {
 					estimated_tokens: estimated,
 				});
 			}
-			let compact_config = crate::runtime_loop::CompactConfig {
-				retain_tail_steps: self.agent_runtime_config.r#loop.retain_tail_steps,
-				working_summary_max_chars: self
-					.agent_runtime_config
-					.r#loop
-					.working_summary_max_chars,
-				..Default::default()
-			};
-			let compact_start = std::time::Instant::now();
-			// Compact conversation messages (preserve recent 5).
-			let retain_messages = 5_usize.max(compact_config.retain_tail_steps);
-			let llm_succeeded;
-			let compact_tokens;
-			if let Some(router) = self.route_router.as_deref() {
-				let (_, msg_pt, msg_ot) = crate::runtime_loop::compact_messages_with_llm(
+			return self
+				.run_compaction(loop_state, messages, current_step_index, event_sender)
+				.await;
+		}
+		(0, 0)
+	}
+
+	/// Reactive compaction triggered by a provider `context_window_exceeded` error.
+	///
+	/// Bypasses the threshold check used by [`Self::maybe_compact`] — the
+	/// provider has already told us the prompt is too large, so we always
+	/// compact and emit a [`crate::runtime_loop::LoopEvent::ReactiveCompactTriggered`]
+	/// event before doing the work. Returns the `(prompt_tokens, output_tokens)`
+	/// consumed by any LLM-assisted summarization step so the caller can fold
+	/// the cost into the per-turn accumulators.
+	async fn reactive_compact(
+		&self,
+		loop_state: &mut LoopState,
+		messages: &mut Vec<roku_plugin_llm::Message>,
+		current_step_index: u32,
+		event_sender: Option<&crate::runtime_loop::LoopEventSender>,
+		detail: &str,
+	) -> (u64, u64) {
+		let tool_result_max_chars = self.agent_runtime_config.r#loop.working_summary_max_chars;
+		crate::runtime_loop::truncate_large_tool_results(messages, tool_result_max_chars);
+
+		let _ = roku_common_types::emit_global_log(roku_common_types::LogRecord::new(
+			"roku-runtime-service",
+			roku_common_types::LogLevel::Warn,
+			format!(
+				"reactive compact triggered: provider reported context_window_exceeded: {detail}"
+			),
+		));
+		if let Some(sender) = event_sender {
+			let _ = sender.send(crate::runtime_loop::LoopEvent::ReactiveCompactTriggered {
+				step: current_step_index,
+				detail: detail.to_string(),
+			});
+		}
+		self.run_compaction(loop_state, messages, current_step_index, event_sender)
+			.await
+	}
+
+	/// Shared body used by both threshold-gated [`Self::maybe_compact`] and
+	/// reactive [`Self::reactive_compact`]. Performs LLM-assisted message and
+	/// history compaction (or mechanical fallback when no router is available)
+	/// and emits a `CompactComplete` event when finished.
+	async fn run_compaction(
+		&self,
+		loop_state: &mut LoopState,
+		messages: &mut Vec<roku_plugin_llm::Message>,
+		current_step_index: u32,
+		event_sender: Option<&crate::runtime_loop::LoopEventSender>,
+	) -> (u64, u64) {
+		let compact_config = crate::runtime_loop::CompactConfig {
+			retain_tail_steps: self.agent_runtime_config.r#loop.retain_tail_steps,
+			working_summary_max_chars: self.agent_runtime_config.r#loop.working_summary_max_chars,
+			..Default::default()
+		};
+		let compact_start = std::time::Instant::now();
+		// Compact conversation messages (preserve recent 5).
+		let retain_messages = 5_usize.max(compact_config.retain_tail_steps);
+		let breaker_tripped = loop_state.autocompact_circuit_breaker_tripped();
+		let llm_succeeded;
+		let compact_tokens;
+		match (self.route_router.as_deref(), breaker_tripped) {
+			(Some(router), false) => {
+				let outcome = crate::runtime_loop::compact_messages_with_structured_summary(
 					messages,
 					retain_messages,
 					router,
 					&compact_config,
 				)
 				.await;
-				let history_ok = crate::runtime_loop::compact_history_with_llm(
-					loop_state,
-					&compact_config,
-					router,
-				)
-				.await;
-				// msg_pt > 0 means the LLM path was used for message compaction
-				// (mechanical fallback returns 0 tokens). history_ok is a true
-				// LLM-success indicator from compact_history_with_llm.
-				llm_succeeded = (msg_pt > 0) && history_ok;
-				compact_tokens = (msg_pt, msg_ot);
-			} else {
+				if let Some(sender) = event_sender {
+					let _ = sender.send(
+						crate::runtime_loop::LoopEvent::AutoCompactSummarizerCalled {
+							step: current_step_index,
+							prompt_tokens: outcome.prompt_tokens,
+							output_tokens: outcome.output_tokens,
+							succeeded: outcome.succeeded,
+							drop_oldest_retries: outcome.drop_oldest_retries,
+						},
+					);
+				}
+				if outcome.succeeded {
+					let history_ok = crate::runtime_loop::compact_history_with_llm(
+						loop_state,
+						&compact_config,
+						router,
+					)
+					.await;
+					llm_succeeded = history_ok;
+					loop_state.note_autocompact_success();
+				} else {
+					crate::runtime_loop::compact_history(loop_state, &compact_config);
+					llm_succeeded = false;
+					// Only drive the breaker on real LLM failure paths, not on
+					// `None` (nothing-to-compact, which returns succeeded=false
+					// with no error).
+					if outcome.error.is_some() {
+						let just_tripped = loop_state.note_autocompact_failure();
+						if just_tripped && let Some(sender) = event_sender {
+							let _ = sender.send(
+								crate::runtime_loop::LoopEvent::AutoCompactCircuitBreakerTripped {
+									step: current_step_index,
+									consecutive_failures: loop_state
+										.consecutive_autocompact_failures,
+								},
+							);
+						}
+					}
+				}
+				compact_tokens = (outcome.prompt_tokens, outcome.output_tokens);
+			}
+			_ => {
+				// No router, or breaker tripped — mechanical fallback only.
 				crate::runtime_loop::compact_messages(messages, retain_messages);
 				crate::runtime_loop::compact_history(loop_state, &compact_config);
 				llm_succeeded = false;
 				compact_tokens = (0, 0);
 			}
-			if let Some(sender) = event_sender {
-				let _ = sender.send(crate::runtime_loop::LoopEvent::CompactComplete {
-					step: current_step_index,
-					llm_succeeded,
-					elapsed_ms: compact_start.elapsed().as_millis() as u64,
-				});
-			}
-			return compact_tokens;
 		}
-		(0, 0)
+		if let Some(sender) = event_sender {
+			let _ = sender.send(crate::runtime_loop::LoopEvent::CompactComplete {
+				step: current_step_index,
+				llm_succeeded,
+				elapsed_ms: compact_start.elapsed().as_millis() as u64,
+			});
+		}
+		compact_tokens
 	}
 
 	pub async fn execute_tool_loop(
@@ -963,7 +1051,6 @@ impl GenericAgentRuntime {
 				Some(runtime_memory_sections),
 				self.loop_mode == LoopMode::Plan,
 			);
-			let system_prompt_len = system_prompt.len();
 
 			let config = &self.agent_runtime_config.next_step;
 			let thinking_effort = request.thinking_effort.as_deref().and_then(|s| match s {
@@ -973,150 +1060,284 @@ impl GenericAgentRuntime {
 				"none" => Some(ThinkingEffort::None),
 				_ => None,
 			});
-			let gen_request = GenerationRequest {
-				system_prompt: Some(system_prompt),
-				prompt: String::new(),
-				messages: Some(messages.clone()),
-				expected_output_tokens: config.expected_output_tokens,
-				risk_tier: RiskTier::Low,
-				preferred_provider: None,
-				budget_tokens_remaining: config.budget_tokens_remaining,
-				budget_cost_remaining_usd: config.budget_cost_remaining_usd,
-				tools: if tool_definitions.is_empty() {
-					None
-				} else {
-					Some(tool_definitions)
-				},
-				model_override: request.model_override.clone(),
-				thinking_effort,
-			};
 
 			let current_step_index = loop_state.step_index + 1;
 
-			// Stream the LLM response, accumulating text and tool_calls.
-			let (accumulated_text, accumulated_tool_calls) = if let Some(sender) = event_sender {
-				let step = current_step_index;
-				let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamChunk>(64);
-				let event_tx = sender.clone();
-				let accumulator = tokio::spawn(async move {
-					let mut text = String::new();
-					let mut tool_calls: Vec<ToolCallBlock> = Vec::new();
-					let mut pending_by_id: HashMap<String, (String, String)> = HashMap::new();
-					while let Some(chunk) = rx.recv().await {
-						match chunk {
-							StreamChunk::TextDelta { text: delta } => {
-								text.push_str(&delta);
-								let _ =
-									event_tx.send(crate::runtime_loop::LoopEvent::LlmTextDelta {
-										step,
-										text: delta,
-										agent_id: None,
-									});
-							}
-							StreamChunk::ToolCallStart { id, name } => {
-								pending_by_id.insert(id, (name, String::new()));
-							}
-							StreamChunk::ToolCallDelta {
-								id,
-								arguments_chunk,
-							} => {
-								if let Some((_, args)) = pending_by_id.get_mut(&id) {
-									args.push_str(&arguments_chunk);
-								}
-							}
-							StreamChunk::ToolCallDone { id } => {
-								if let Some((name, args_str)) = pending_by_id.remove(&id) {
-									let arguments =
-										serde_json::from_str(&args_str).unwrap_or(Value::Null);
-									tool_calls.push(ToolCallBlock {
-										id,
-										name,
-										arguments,
-									});
-								}
-							}
-							StreamChunk::Done { .. } => {}
-						}
-					}
-					(text, tool_calls)
-				});
-				let llm_result = router.generate_streaming(&gen_request, tx).await;
-				let (mut text, tool_calls) = accumulator.await.unwrap_or_default();
-
-				// Fallback: if the provider returned text but no streaming deltas
-				// reached the accumulator (e.g. SSE delivered text only in
-				// `response.completed`), emit a synthetic delta so the render
-				// task can display the response.
-				if text.is_empty()
-					&& let Ok(ref resp) = llm_result
-					&& !resp.output.is_empty()
+			// Inner reactive-retry loop: the LLM call may fail with
+			// `ContextWindowExceeded` because our local byte-based estimator
+			// undershoots the provider's tokenizer. When that happens, we run a
+			// single reactive compaction on the current message buffer and try
+			// the call again. After at most one retry per turn we surface the
+			// failure so the loop does not spin indefinitely.
+			let mut reactive_compact_used = false;
+			let (accumulated_text, accumulated_tool_calls) = loop {
+				// Layer 0 pre-flight microcompaction: unconditionally clear
+				// historical tool result content so the prompt only carries the
+				// most recent observations. Pure mechanical mutation, no LLM
+				// call, no threshold — runs on every attempt (including after
+				// reactive compaction) so `pre_call_estimate` reflects the
+				// post-microcompact state.
+				let microcompact_freed = crate::runtime_loop::microcompact_old_tool_results(
+					&mut messages,
+					crate::runtime_loop::MICROCOMPACT_RETAIN_RECENT,
+					&loop_state.estimator_calibration,
+				);
+				// Emit only when the pre-flight pass actually freed tokens. On
+				// retry iterations after reactive compaction the buffer is
+				// already lean; suppressing zero-freed events keeps trace
+				// consumers from attributing a no-op to this attempt.
+				if microcompact_freed > 0
+					&& let Some(sender) = event_sender
 				{
-					text.clone_from(&resp.output);
-					let _ = sender.send(crate::runtime_loop::LoopEvent::LlmTextDelta {
+					let _ = sender.send(crate::runtime_loop::LoopEvent::MicrocompactRan {
 						step: current_step_index,
-						text: resp.output.clone(),
-						agent_id: None,
+						freed_tokens: microcompact_freed,
 					});
 				}
 
-				let _ = sender.send(crate::runtime_loop::LoopEvent::LlmDecisionComplete {
-					step: current_step_index,
-				});
-				match llm_result {
-					Ok(ref resp) => {
-						total_prompt_tokens =
-							total_prompt_tokens.saturating_add(resp.prompt_tokens);
-						total_output_tokens =
-							total_output_tokens.saturating_add(resp.output_tokens);
-						last_model_id = Some(resp.model_id.clone());
-					}
-					Err(_) => {
-						let message =
-							format!("LLM streaming call failed for goal: {}", loop_state.goal);
-						self.record_terminal_step(
-							loop_state,
-							StepAction::Fail,
-							"LLM streaming call failed.",
-							Some(message.clone()),
-						);
-						emit_token_usage(
-							event_sender,
-							current_step_index,
-							total_prompt_tokens,
-							total_output_tokens,
-							COST_PER_M_INPUT_TOKENS_USD,
-							COST_PER_M_OUTPUT_TOKENS_USD,
-							last_model_id.as_deref(),
-						);
-						return self.synthetic_loop_terminal_result(
-							task_id,
-							"tool",
-							message,
-							StepAction::Fail,
-							ResultStatus::Error,
-							Some(loop_state),
-						);
+				// Mid-tier pre-flight (Layer 1 / Layer 2): runs between Layer 0
+				// microcompact and the Layer 3 high-water check. Only fires when
+				// pressure is above the mid-water threshold and reactive compaction
+				// has not already been used this attempt (to avoid double-firing
+				// two compaction layers in the same turn).
+				if !reactive_compact_used {
+					let mid_estimate = crate::runtime_loop::estimate_prompt_pressure(
+						&messages,
+						Some(&system_prompt),
+						&loop_state.estimator_calibration,
+					);
+					let mid_threshold = (self.agent_runtime_config.r#loop.context_window_tokens
+						as f64 * crate::runtime_loop::MID_WATER_TRIGGER_RATIO)
+						as u64;
+					if mid_estimate > mid_threshold {
+						let outcome =
+							crate::runtime_loop::mid_compact_messages(&mut messages, None);
+						if let Some(sender) = event_sender {
+							match &outcome {
+								crate::runtime_loop::MidCompactOutcome::Layer2 {
+									messages_replaced,
+								} => {
+									let _ = sender.send(
+										crate::runtime_loop::LoopEvent::MidCompactLayer2Ran {
+											step: current_step_index,
+											messages_replaced: *messages_replaced,
+										},
+									);
+								}
+								crate::runtime_loop::MidCompactOutcome::Layer1 {
+									messages_collapsed,
+								} => {
+									let _ = sender.send(
+										crate::runtime_loop::LoopEvent::MidCompactLayer1Ran {
+											step: current_step_index,
+											messages_collapsed: *messages_collapsed,
+										},
+									);
+								}
+								crate::runtime_loop::MidCompactOutcome::Noop => {}
+							}
+						}
 					}
 				}
-				(text, tool_calls)
-			} else {
-				// Non-streaming path.
-				match router.generate(&gen_request).await {
-					Ok(resp) => {
-						total_prompt_tokens =
-							total_prompt_tokens.saturating_add(resp.prompt_tokens);
-						total_output_tokens =
-							total_output_tokens.saturating_add(resp.output_tokens);
-						last_model_id = Some(resp.model_id.clone());
-						let tool_calls = resp.tool_calls.unwrap_or_default();
-						(resp.output, tool_calls)
+
+				// Pre-call: snapshot the calibrated byte-based prompt estimate so
+				// we can fold the provider's reported `usage.prompt_tokens` back
+				// into the calibration after the call returns. Recomputed each
+				// attempt because mid-tier or reactive compaction may have mutated
+				// `messages`.
+				let pre_call_estimate = crate::runtime_loop::estimate_prompt_tokens_calibrated(
+					&messages,
+					Some(&system_prompt),
+					&loop_state.estimator_calibration,
+				);
+				let gen_request = GenerationRequest {
+					system_prompt: Some(system_prompt.clone()),
+					prompt: String::new(),
+					messages: Some(messages.clone()),
+					expected_output_tokens: config.expected_output_tokens,
+					risk_tier: RiskTier::Low,
+					preferred_provider: None,
+					budget_tokens_remaining: config.budget_tokens_remaining,
+					budget_cost_remaining_usd: config.budget_cost_remaining_usd,
+					tools: if tool_definitions.is_empty() {
+						None
+					} else {
+						Some(tool_definitions.clone())
+					},
+					model_override: request.model_override.clone(),
+					thinking_effort,
+				};
+
+				// Stream the LLM response, accumulating text and tool_calls.
+				let attempt_result: Result<(String, Vec<ToolCallBlock>), LlmAdapterError> =
+					if let Some(sender) = event_sender {
+						let step = current_step_index;
+						let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamChunk>(64);
+						let event_tx = sender.clone();
+						let accumulator = tokio::spawn(async move {
+							let mut text = String::new();
+							let mut tool_calls: Vec<ToolCallBlock> = Vec::new();
+							let mut pending_by_id: HashMap<String, (String, String)> =
+								HashMap::new();
+							while let Some(chunk) = rx.recv().await {
+								match chunk {
+									StreamChunk::TextDelta { text: delta } => {
+										text.push_str(&delta);
+										let _ = event_tx.send(
+											crate::runtime_loop::LoopEvent::LlmTextDelta {
+												step,
+												text: delta,
+												agent_id: None,
+											},
+										);
+									}
+									StreamChunk::ToolCallStart { id, name } => {
+										pending_by_id.insert(id, (name, String::new()));
+									}
+									StreamChunk::ToolCallDelta {
+										id,
+										arguments_chunk,
+									} => {
+										if let Some((_, args)) = pending_by_id.get_mut(&id) {
+											args.push_str(&arguments_chunk);
+										}
+									}
+									StreamChunk::ToolCallDone { id } => {
+										if let Some((name, args_str)) = pending_by_id.remove(&id) {
+											let arguments = serde_json::from_str(&args_str)
+												.unwrap_or(Value::Null);
+											tool_calls.push(ToolCallBlock {
+												id,
+												name,
+												arguments,
+											});
+										}
+									}
+									StreamChunk::Done { .. } => {}
+								}
+							}
+							(text, tool_calls)
+						});
+						let llm_result = router.generate_streaming(&gen_request, tx).await;
+						let (mut text, tool_calls) = accumulator.await.unwrap_or_default();
+
+						match llm_result {
+							Ok(resp) => {
+								// Fallback: if the provider returned text but no streaming
+								// deltas reached the accumulator (e.g. SSE delivered text
+								// only in `response.completed`), emit a synthetic delta so
+								// the render task can display the response.
+								if text.is_empty() && !resp.output.is_empty() {
+									text.clone_from(&resp.output);
+									let _ =
+										sender.send(crate::runtime_loop::LoopEvent::LlmTextDelta {
+											step: current_step_index,
+											text: resp.output.clone(),
+											agent_id: None,
+										});
+								}
+								let _ = sender.send(
+									crate::runtime_loop::LoopEvent::LlmDecisionComplete {
+										step: current_step_index,
+									},
+								);
+								total_prompt_tokens =
+									total_prompt_tokens.saturating_add(resp.prompt_tokens);
+								total_output_tokens =
+									total_output_tokens.saturating_add(resp.output_tokens);
+								last_model_id = Some(resp.model_id.clone());
+								// Fold the real `usage.prompt_tokens` back into the
+								// estimator calibration so the next turn's pressure
+								// check is closer to ground truth.
+								loop_state
+									.estimator_calibration
+									.update(pre_call_estimate.raw_total_tokens, resp.prompt_tokens);
+								let _ = sender.send(
+									crate::runtime_loop::LoopEvent::EstimatorCalibrated {
+										step: current_step_index,
+										estimated_prompt_tokens: pre_call_estimate.total_tokens,
+										prompt_tokens: resp.prompt_tokens,
+										scale: loop_state.estimator_calibration.scale(),
+									},
+								);
+								Ok((text, tool_calls))
+							}
+							Err(err) => {
+								let _ = sender.send(
+									crate::runtime_loop::LoopEvent::LlmDecisionComplete {
+										step: current_step_index,
+									},
+								);
+								Err(err)
+							}
+						}
+					} else {
+						// Non-streaming path.
+						match router.generate(&gen_request).await {
+							Ok(resp) => {
+								total_prompt_tokens =
+									total_prompt_tokens.saturating_add(resp.prompt_tokens);
+								total_output_tokens =
+									total_output_tokens.saturating_add(resp.output_tokens);
+								last_model_id = Some(resp.model_id.clone());
+								loop_state
+									.estimator_calibration
+									.update(pre_call_estimate.raw_total_tokens, resp.prompt_tokens);
+								if let Some(sender) = event_sender {
+									let _ = sender.send(
+										crate::runtime_loop::LoopEvent::EstimatorCalibrated {
+											step: current_step_index,
+											estimated_prompt_tokens: pre_call_estimate.total_tokens,
+											prompt_tokens: resp.prompt_tokens,
+											scale: loop_state.estimator_calibration.scale(),
+										},
+									);
+								}
+								let tool_calls = resp.tool_calls.unwrap_or_default();
+								Ok((resp.output, tool_calls))
+							}
+							Err(err) => Err(err),
+						}
+					};
+
+				match attempt_result {
+					Ok(pair) => break pair,
+					Err(LlmAdapterError::ContextWindowExceeded { detail, .. })
+						if !reactive_compact_used =>
+					{
+						reactive_compact_used = true;
+						let (compact_pt, compact_ot) = self
+							.reactive_compact(
+								loop_state,
+								&mut messages,
+								current_step_index,
+								event_sender,
+								&detail,
+							)
+							.await;
+						total_prompt_tokens = total_prompt_tokens.saturating_add(compact_pt);
+						total_output_tokens = total_output_tokens.saturating_add(compact_ot);
+						// Retry the LLM call with the compacted message buffer.
+						continue;
 					}
-					Err(_) => {
-						let message = format!("LLM call failed for goal: {}", loop_state.goal);
+					Err(err) => {
+						let message = match &err {
+							LlmAdapterError::ContextWindowExceeded { detail, .. } => format!(
+								"LLM call failed: context window still exceeded after reactive compact ({detail}); goal: {}",
+								loop_state.goal
+							),
+							_ => format!("LLM call failed for goal: {}", loop_state.goal),
+						};
+						let trace_msg = match &err {
+							LlmAdapterError::ContextWindowExceeded { .. } => {
+								"LLM call failed: context window still exceeded after reactive compact."
+							}
+							_ => "LLM call failed.",
+						};
 						self.record_terminal_step(
 							loop_state,
 							StepAction::Fail,
-							"LLM call failed.",
+							trace_msg,
 							Some(message.clone()),
 						);
 						emit_token_usage(
@@ -1506,7 +1727,7 @@ impl GenericAgentRuntime {
 					&mut messages,
 					current_step_index,
 					event_sender,
-					system_prompt_len,
+					&system_prompt,
 				)
 				.await;
 			total_prompt_tokens = total_prompt_tokens.saturating_add(compact_pt);
@@ -2764,6 +2985,120 @@ mod tests {
 		router
 	}
 
+	/// Test provider that returns a sequence of mixed Result entries — useful for
+	/// simulating reactive-compact recovery where the first call fails with
+	/// `ContextWindowExceeded` and a later call succeeds.
+	struct ReactiveCompactProvider {
+		invocations: Arc<std::sync::atomic::AtomicUsize>,
+		responses: Arc<Mutex<VecDeque<Result<String, ProviderCallError>>>>,
+	}
+
+	#[async_trait]
+	impl LlmProvider for ReactiveCompactProvider {
+		fn provider_name(&self) -> &'static str {
+			"reactive-compact-provider"
+		}
+
+		async fn complete(
+			&self,
+			_model: &ModelProfile,
+			_request: &GenerationRequest,
+		) -> Result<ProviderResponse, ProviderCallError> {
+			self.invocations
+				.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+			let next = self
+				.responses
+				.lock()
+				.expect("response lock should succeed")
+				.pop_front()
+				.expect("a canned reactive-compact response should be available");
+			match next {
+				Ok(output) => {
+					let tool_calls = json_fixture_to_tool_calls(&output);
+					Ok(ProviderResponse {
+						output,
+						finish_reason: None,
+						prompt_tokens: 24,
+						output_tokens: 18,
+						latency_ms: 10,
+						tool_calls,
+					})
+				}
+				Err(err) => Err(err),
+			}
+		}
+
+		// Override the default stream() so that tool_call chunks reach the
+		// runtime accumulator (the default implementation only forwards
+		// TextDelta + Done, which would drop the tool_calls field on the
+		// response).
+		async fn stream(
+			&self,
+			model: &ModelProfile,
+			request: &GenerationRequest,
+			tx: tokio::sync::mpsc::Sender<roku_plugin_llm::StreamChunk>,
+		) -> Result<ProviderResponse, ProviderCallError> {
+			let response = self.complete(model, request).await?;
+			if !response.output.is_empty() {
+				let _ = tx
+					.send(roku_plugin_llm::StreamChunk::TextDelta {
+						text: response.output.clone(),
+					})
+					.await;
+			}
+			if let Some(tool_calls) = response.tool_calls.as_ref() {
+				for tc in tool_calls {
+					let _ = tx
+						.send(roku_plugin_llm::StreamChunk::ToolCallStart {
+							id: tc.id.clone(),
+							name: tc.name.clone(),
+						})
+						.await;
+					let _ = tx
+						.send(roku_plugin_llm::StreamChunk::ToolCallDelta {
+							id: tc.id.clone(),
+							arguments_chunk: tc.arguments.to_string(),
+						})
+						.await;
+					let _ = tx
+						.send(roku_plugin_llm::StreamChunk::ToolCallDone { id: tc.id.clone() })
+						.await;
+				}
+			}
+			let _ = tx
+				.send(roku_plugin_llm::StreamChunk::Done {
+					finish_reason: response.finish_reason.clone(),
+					prompt_tokens: response.prompt_tokens,
+					output_tokens: response.output_tokens,
+				})
+				.await;
+			Ok(response)
+		}
+	}
+
+	fn router_with_reactive_compact_provider(
+		responses: Vec<Result<String, ProviderCallError>>,
+	) -> (LlmRouter, Arc<std::sync::atomic::AtomicUsize>) {
+		let invocations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+		let mut router = LlmRouter::new(RoutingPolicy {
+			max_request_cost_usd: 1.0,
+			max_latency_ms: 5_000,
+		});
+		router.register_provider(ReactiveCompactProvider {
+			invocations: Arc::clone(&invocations),
+			responses: Arc::new(Mutex::new(responses.into())),
+		});
+		router.register_model(ModelProfile {
+			model_id: "reactive-compact-model".to_string(),
+			provider: "reactive-compact-provider".to_string(),
+			max_context_tokens: 16_000,
+			cost_per_1k_tokens_usd: 0.0,
+			max_risk_tier: RiskTier::Low,
+			route_priority: 100,
+		});
+		(router, invocations)
+	}
+
 	#[test]
 	fn execute_tool_loop_can_continue_after_non_terminal_success() {
 		let cwd = env::current_dir()
@@ -3366,6 +3701,191 @@ mod tests {
 
 	// normalize_tool_loop_observation test removed — function was a no-op identity
 	// and has been removed along with the function extraction to tools::dispatch.
+
+	#[test]
+	fn execute_tool_loop_recovers_from_context_window_exceeded_via_reactive_compact() {
+		// First LLM call fails with ContextWindowExceeded; the runtime should
+		// run a single reactive compaction on the message buffer, retry the
+		// call, and then succeed with the canned final_answer response.
+		let (route_router, invocations) = router_with_reactive_compact_provider(vec![
+			Err(ProviderCallError::ContextWindowExceeded {
+				detail: "prompt is too long: 215321 tokens > 200000".to_string(),
+			}),
+			Ok(serde_json::json!({
+				"action": "final_answer",
+				"tool_name": null,
+				"arguments": null,
+				"reason": "Recovered after reactive compact.",
+				"final_message": "Loop recovered from context overflow."
+			})
+			.to_string()),
+		]);
+		let execution_router =
+			router_with_text_output("reactive-execution-provider", "unused execution");
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+			);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-reactive".to_string()),
+			session_id: "session-reactive".to_string(),
+			goal: "Reactive compact recovery test".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::Chat,
+			0.95,
+			false,
+			crate::router::RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			"chat request",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+
+		let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+		let execution = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-reactive".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				Some(&event_tx),
+				None,
+			));
+
+		assert_eq!(execution.result.status, ResultStatus::Ok);
+		assert_eq!(
+			execution.terminal_step_action,
+			Some(StepAction::FinalAnswer)
+		);
+		assert_eq!(execution.message, "Loop recovered from context overflow.");
+		assert_eq!(
+			loop_state.status,
+			crate::runtime_loop::LoopStatus::Succeeded
+		);
+		// Provider was called twice: 1 failure + 1 success after compaction.
+		assert_eq!(invocations.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+		// Verify the runtime emitted a ReactiveCompactTriggered event.
+		drop(event_tx);
+		let mut events = Vec::new();
+		while let Ok(event) = event_rx.try_recv() {
+			events.push(event);
+		}
+		let reactive_count = events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e,
+					crate::runtime_loop::LoopEvent::ReactiveCompactTriggered { .. }
+				)
+			})
+			.count();
+		assert_eq!(
+			reactive_count, 1,
+			"exactly one ReactiveCompactTriggered event should be emitted"
+		);
+		assert!(
+			events
+				.iter()
+				.any(|e| matches!(e, crate::runtime_loop::LoopEvent::CompactComplete { .. })),
+			"a CompactComplete event should follow the reactive trigger"
+		);
+	}
+
+	#[test]
+	fn execute_tool_loop_terminates_when_context_window_exceeded_persists_after_compact() {
+		// Both LLM calls fail with ContextWindowExceeded. The runtime allows
+		// at most one reactive compact + retry per turn, so the second failure
+		// must terminate the loop instead of looping forever.
+		let (route_router, invocations) = router_with_reactive_compact_provider(vec![
+			Err(ProviderCallError::ContextWindowExceeded {
+				detail: "prompt is too long: 215321 tokens > 200000".to_string(),
+			}),
+			Err(ProviderCallError::ContextWindowExceeded {
+				detail: "prompt is too long: 214900 tokens > 200000".to_string(),
+			}),
+		]);
+		let execution_router =
+			router_with_text_output("reactive-execution-provider-2", "unused execution");
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+			);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-reactive-fail".to_string()),
+			session_id: "session-reactive-fail".to_string(),
+			goal: "Reactive compact terminal test".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::Chat,
+			0.95,
+			false,
+			crate::router::RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			"chat request",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+
+		let execution = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-reactive-fail".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				None,
+				None,
+			));
+
+		assert_eq!(execution.result.status, ResultStatus::Error);
+		assert_eq!(execution.terminal_step_action, Some(StepAction::Fail));
+		assert!(
+			execution
+				.message
+				.contains("context window still exceeded after reactive compact"),
+			"terminal message must explain the persistent context overflow, got: {}",
+			execution.message
+		);
+		// Exactly two calls — the second failure terminates the loop.
+		assert_eq!(invocations.load(std::sync::atomic::Ordering::SeqCst), 2);
+		assert!(matches!(
+			loop_state.status,
+			crate::runtime_loop::LoopStatus::Failed
+		));
+	}
 
 	fn test_skill_archive_bytes() -> Vec<u8> {
 		let mut cursor = Cursor::new(Vec::new());

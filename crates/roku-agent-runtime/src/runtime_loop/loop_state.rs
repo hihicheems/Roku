@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::router::RouteDecision;
 use crate::runtime_config::LoopRuntimeConfig;
+use crate::runtime_loop::compact::EstimatorCalibration;
 use crate::runtime_loop::grounding::{
 	extract_explicit_path_candidates, extract_explicit_python_code, extract_explicit_shell_command,
 	extract_explicit_table_path, extract_glob_pattern, extract_web_query,
@@ -112,7 +113,28 @@ pub struct LoopState {
 	/// Used by sub-agents to enforce `SubAgentConfig::disallowed_tools`.
 	#[serde(default)]
 	pub disallowed_tools: Vec<String>,
+	/// Run-scoped calibration state for the byte-based prompt token
+	/// estimator. Updated after each successful LLM call from the provider's
+	/// reported `usage.prompt_tokens` so subsequent estimates converge on
+	/// the real token cost. Defaults to an uncalibrated (scale=1.0) state
+	/// for backwards compatibility with serialized snapshots.
+	#[serde(default)]
+	pub estimator_calibration: EstimatorCalibration,
+	/// Run-scoped counter of consecutive Layer 3 structured-summary
+	/// compaction failures. Reset to `0` on any successful LLM-assisted
+	/// compaction. Once it reaches
+	/// [`MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES`] the runtime stops
+	/// attempting further auto-compactions within this run (circuit
+	/// breaker); the cmd layer is notified via
+	/// `LoopEvent::AutoCompactCircuitBreakerTripped`.
+	#[serde(default)]
+	pub consecutive_autocompact_failures: u32,
 }
+
+/// Maximum allowed consecutive Layer 3 structured-summary failures before
+/// the per-run circuit breaker trips and further compaction attempts are
+/// short-circuited to mechanical fallback within the same run.
+pub const MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES: u32 = 3;
 
 impl LoopState {
 	pub fn new(run_id: impl Into<String>, context: &LoopContext) -> Self {
@@ -152,7 +174,35 @@ impl LoopState {
 			ambiguity_stagnation: None,
 			sub_agent_depth: 0,
 			disallowed_tools: Vec::new(),
+			estimator_calibration: EstimatorCalibration::default(),
+			consecutive_autocompact_failures: 0,
 		}
+	}
+
+	/// Returns `true` when the run-scoped auto-compact circuit breaker has
+	/// tripped. Callers should short-circuit further LLM-assisted
+	/// compaction attempts and fall back to mechanical compaction for the
+	/// remainder of this run.
+	pub fn autocompact_circuit_breaker_tripped(&self) -> bool {
+		self.consecutive_autocompact_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES
+	}
+
+	/// Record a Layer 3 auto-compact success: reset the consecutive
+	/// failure counter. Calling this on a tripped circuit breaker will
+	/// untrip it, but the runtime's default wiring never retries after a
+	/// trip within the same run.
+	pub fn note_autocompact_success(&mut self) {
+		self.consecutive_autocompact_failures = 0;
+	}
+
+	/// Record a Layer 3 auto-compact failure. Returns `true` iff the
+	/// circuit breaker transitioned from un-tripped to tripped with this
+	/// call, so the caller can emit the one-shot notice event.
+	pub fn note_autocompact_failure(&mut self) -> bool {
+		let was_tripped = self.autocompact_circuit_breaker_tripped();
+		self.consecutive_autocompact_failures =
+			self.consecutive_autocompact_failures.saturating_add(1);
+		!was_tripped && self.autocompact_circuit_breaker_tripped()
 	}
 
 	pub fn record_step(&mut self, step: StepRecord) {
@@ -491,5 +541,54 @@ mod tests {
 		assert_eq!(deserialized.visible_tools.len(), 3);
 		assert_eq!(deserialized.bound_resources.len(), 2);
 		assert!(deserialized.last_observation.is_some());
+	}
+
+	#[test]
+	fn autocompact_breaker_starts_untripped() {
+		let state = LoopState::new("loop-1", &loop_context());
+
+		assert_eq!(state.consecutive_autocompact_failures, 0);
+		assert!(!state.autocompact_circuit_breaker_tripped());
+	}
+
+	#[test]
+	fn autocompact_breaker_trips_after_three_failures() {
+		let mut state = LoopState::new("loop-1", &loop_context());
+
+		assert!(!state.note_autocompact_failure());
+		assert!(!state.note_autocompact_failure());
+		assert!(
+			state.note_autocompact_failure(),
+			"third failure must be reported as the transition edge"
+		);
+		assert!(state.autocompact_circuit_breaker_tripped());
+		assert_eq!(state.consecutive_autocompact_failures, 3);
+	}
+
+	#[test]
+	fn autocompact_failure_is_edge_triggered() {
+		let mut state = LoopState::new("loop-1", &loop_context());
+
+		state.note_autocompact_failure();
+		state.note_autocompact_failure();
+		state.note_autocompact_failure();
+		// Already tripped → further failures do NOT re-emit the transition.
+		assert!(!state.note_autocompact_failure());
+		assert!(state.autocompact_circuit_breaker_tripped());
+	}
+
+	#[test]
+	fn autocompact_success_resets_counter() {
+		let mut state = LoopState::new("loop-1", &loop_context());
+
+		state.note_autocompact_failure();
+		state.note_autocompact_failure();
+		state.note_autocompact_success();
+		assert_eq!(state.consecutive_autocompact_failures, 0);
+		assert!(!state.autocompact_circuit_breaker_tripped());
+		// Counter must be fresh after reset; two more failures should not trip.
+		state.note_autocompact_failure();
+		assert!(!state.note_autocompact_failure());
+		assert!(!state.autocompact_circuit_breaker_tripped());
 	}
 }

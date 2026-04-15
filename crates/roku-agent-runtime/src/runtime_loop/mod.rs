@@ -40,9 +40,21 @@ pub use approval::{
 pub(crate) use ask_user::effective_ask_user_payload;
 pub use ask_user::{AskUserPayload, AskUserResumeContract, AskUserResumeDirective};
 pub use compact::{
-	CompactConfig, compact_history, compact_history_with_llm, compact_messages,
-	compact_messages_with_llm, estimate_context_tokens, estimate_prompt_pressure,
+	CompactConfig, MICROCOMPACT_RETAIN_RECENT, MID_WATER_TRIGGER_RATIO, MidCompactOutcome,
+	compact_history, compact_history_with_llm, compact_messages,
+	compact_messages_with_structured_summary, estimate_context_tokens, estimate_prompt_pressure,
+	estimate_prompt_tokens_calibrated, microcompact_old_tool_results, mid_compact_messages,
 	summarize_discarded_steps, truncate_large_tool_results,
+};
+// Structured-summary compaction contract surface. Exported so downstream
+// crates can construct / inspect the outcome directly and reuse the
+// validation helper. These names are not referenced by name inside this
+// crate (the return type flows through without destructuring by name), so
+// the re-exports get an explicit `unused_imports` allow.
+#[allow(unused_imports)]
+pub use compact::{
+	MAX_DROP_OLDEST_RETRIES, STRUCTURED_SUMMARY_SECTIONS, StructuredCompactError,
+	StructuredCompactOutcome, validate_structured_summary,
 };
 pub use context_assembly::LoopContext;
 pub(crate) use context_assembly::build_loop_context;

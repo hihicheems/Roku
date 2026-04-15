@@ -276,6 +276,47 @@ pub(crate) fn render_trace_detail(events: &[TimestampedEvent]) -> String {
 				output_tokens,
 				..
 			} => format!("[step {step}] tokens: {prompt_tokens}/{output_tokens}"),
+			LoopEvent::ReactiveCompactTriggered { step, detail } => {
+				format!("[step {step}] reactive_compact_triggered: {detail}")
+			}
+			LoopEvent::MicrocompactRan { step, freed_tokens } => {
+				format!("[step {step}] microcompact_ran: freed {freed_tokens} tokens")
+			}
+			LoopEvent::MidCompactLayer2Ran {
+				step,
+				messages_replaced,
+			} => format!(
+				"[step {step}] mid_compact_layer2_ran: messages_replaced={messages_replaced}"
+			),
+			LoopEvent::MidCompactLayer1Ran {
+				step,
+				messages_collapsed,
+			} => format!(
+				"[step {step}] mid_compact_layer1_ran: messages_collapsed={messages_collapsed}"
+			),
+			LoopEvent::AutoCompactSummarizerCalled {
+				step,
+				prompt_tokens,
+				output_tokens,
+				succeeded,
+				drop_oldest_retries,
+			} => format!(
+				"[step {step}] auto_compact_summarizer: succeeded={succeeded} tokens={prompt_tokens}/{output_tokens} retries={drop_oldest_retries}"
+			),
+			LoopEvent::AutoCompactCircuitBreakerTripped {
+				step,
+				consecutive_failures,
+			} => format!(
+				"[step {step}] auto_compact_breaker_tripped: consecutive_failures={consecutive_failures}"
+			),
+			LoopEvent::EstimatorCalibrated {
+				step,
+				estimated_prompt_tokens,
+				prompt_tokens,
+				scale,
+			} => format!(
+				"[step {step}] estimator_calibrated: estimated={estimated_prompt_tokens} real={prompt_tokens} scale={scale:.3}"
+			),
 		};
 		lines.push(format!("{ts} {desc}"));
 	}

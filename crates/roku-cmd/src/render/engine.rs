@@ -265,6 +265,42 @@ impl RenderEngine {
 					}
 				}
 			}
+			LoopEvent::ReactiveCompactTriggered { step, detail } => {
+				eprint!(
+					"{}\r\n",
+					crate::render::style::styled_compact_notice(&format!(
+						"[compact] step {step} reactive trigger: {detail}"
+					))
+				);
+			}
+			LoopEvent::MicrocompactRan { .. } => {
+				// Layer 0 microcompact runs on every pre-flight; suppress the
+				// per-step line to keep live UX quiet. Trace consumers see the
+				// freed_tokens via the LoopEvent stream.
+			}
+			LoopEvent::MidCompactLayer2Ran { .. } | LoopEvent::MidCompactLayer1Ran { .. } => {
+				// Mid-tier compaction events are diagnostic; no user-facing line.
+				// Trace consumers see the details via the LoopEvent stream.
+			}
+			LoopEvent::AutoCompactSummarizerCalled { .. } => {
+				// The summarizer call is bracketed by CompactTriggered /
+				// CompactComplete; this event only carries diagnostic fields
+				// (tokens, retries) for trace consumers.
+			}
+			LoopEvent::AutoCompactCircuitBreakerTripped {
+				step,
+				consecutive_failures,
+			} => {
+				eprint!(
+					"{}\r\n",
+					crate::render::style::styled_compact_notice(&format!(
+						"[compact] step {step} summarizer circuit breaker tripped after {consecutive_failures} consecutive failures; falling back to mechanical"
+					))
+				);
+			}
+			LoopEvent::EstimatorCalibrated { .. } => {
+				// Calibration samples are diagnostic; no live UX feedback.
+			}
 		}
 	}
 

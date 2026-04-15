@@ -314,6 +314,16 @@ pub enum LlmAdapterError {
 		model_id: String,
 		message: String,
 	},
+	/// The provider rejected the request because the prompt exceeded the
+	/// model's context window. Surfaced as its own variant (rather than
+	/// stringified into [`Self::ProviderCallFailed`]) so callers in the
+	/// runtime can react with compaction + retry.
+	#[error("context window exceeded for {provider}/{model_id}: {detail}")]
+	ContextWindowExceeded {
+		provider: String,
+		model_id: String,
+		detail: String,
+	},
 }
 
 #[derive(Debug, Error, Clone, PartialEq)]
