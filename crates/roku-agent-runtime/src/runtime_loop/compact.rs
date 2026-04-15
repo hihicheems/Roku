@@ -750,22 +750,18 @@ pub fn compact_messages(messages: &mut Vec<Message>, retain_tail: usize) {
 /// progressively halved "discarded" prefix when the provider returns
 /// `ContextWindowExceeded`. After this many retries, the outer attempt is
 /// counted as a single summarization failure for circuit-breaker purposes.
-#[allow(dead_code)]
 pub const MAX_DROP_OLDEST_RETRIES: u32 = 3;
 
 /// Required section headers the LLM must emit, in order. Validation only
 /// checks for presence (case-sensitive substring match on `"<Header>:"`),
 /// not strict ordering.
-#[allow(dead_code)]
 pub const STRUCTURED_SUMMARY_SECTIONS: &[&str] =
 	&["Goal", "Accomplished", "Key Decisions", "Relevant Files"];
 
-#[allow(dead_code)]
 const STRUCTURED_SUMMARY_SYSTEM_PROMPT: &str = "You summarize agent conversation history into a strictly structured form. Output ONLY the four sections requested, each headed by a line of the form `<Section>:` and nothing else outside them.";
 
 /// Outcome of one structured-summary compaction attempt.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub struct StructuredCompactOutcome {
 	/// `true` when the LLM returned a contract-conformant summary that was
 	/// inserted into `messages`. `false` when the function fell back to a
@@ -788,7 +784,6 @@ pub struct StructuredCompactOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub enum StructuredCompactError {
 	/// Provider returned `ContextWindowExceeded` and we exhausted the
 	/// drop-oldest retry budget.
@@ -802,7 +797,6 @@ pub enum StructuredCompactError {
 }
 
 impl StructuredCompactOutcome {
-	#[allow(dead_code)]
 	fn nothing_to_compact() -> Self {
 		Self {
 			succeeded: false,
@@ -830,7 +824,6 @@ impl StructuredCompactOutcome {
 /// instead, so the post-compact `messages` size is always strictly less
 /// than the pre-call size. Callers use [`StructuredCompactOutcome::error`]
 /// to drive their circuit breaker.
-#[allow(dead_code)]
 pub async fn compact_messages_with_structured_summary(
 	messages: &mut Vec<Message>,
 	retain_tail: usize,
@@ -940,7 +933,6 @@ pub async fn compact_messages_with_structured_summary(
 	}
 }
 
-#[allow(dead_code)]
 fn build_structured_summary_prompt(mechanical_digest: &str) -> String {
 	format!(
 		"Summarize this agent conversation excerpt into EXACTLY four sections, in order:\n\n\
@@ -958,7 +950,6 @@ fn build_structured_summary_prompt(mechanical_digest: &str) -> String {
 /// in the form `"<Header>:"`). Order is not enforced — a forgiving check
 /// that survives small LLM formatting drift while still catching outputs
 /// that ignore the contract entirely.
-#[allow(dead_code)]
 pub fn validate_structured_summary(text: &str) -> bool {
 	STRUCTURED_SUMMARY_SECTIONS
 		.iter()
@@ -1551,6 +1542,41 @@ mod tests {
 				}
 			}
 		}
+	}
+
+	#[test]
+	fn microcompact_frees_at_least_30_percent_of_historical_tool_result_tokens() {
+		// Acceptance gate for issue #298: on a tool-heavy run, one pre-flight
+		// pass must free ≥ 30% of the tokens held by historical tool_result
+		// content. The synthetic fixture keeps each tool_result at ~400 bytes
+		// of body text, well above the placeholder's footprint, so the ratio
+		// should land comfortably above the gate.
+		let n = 10usize;
+		let retain = 3usize;
+		let mut messages = synthetic_tool_history(n);
+		let calibration = EstimatorCalibration::default();
+
+		let historical_raw: u64 = messages
+			.iter()
+			.enumerate()
+			.filter_map(|(i, m)| match m {
+				Message::ToolResult { content, .. } if i < n - retain => Some(content.as_str()),
+				_ => None,
+			})
+			.map(byte_estimate_for_text)
+			.sum();
+		let historical_tokens = calibration.apply(historical_raw);
+		assert!(
+			historical_tokens > 0,
+			"fixture must produce a non-zero baseline"
+		);
+
+		let freed = microcompact_old_tool_results(&mut messages, retain, &calibration);
+		let ratio = freed as f64 / historical_tokens as f64;
+		assert!(
+			ratio >= 0.30,
+			"expected freed/historical ≥ 0.30, got {ratio:.3} (freed={freed}, historical={historical_tokens})"
+		);
 	}
 
 	#[test]

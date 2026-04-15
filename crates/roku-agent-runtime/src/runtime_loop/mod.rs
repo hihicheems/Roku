@@ -46,9 +46,11 @@ pub use compact::{
 	estimate_prompt_tokens_calibrated, microcompact_old_tool_results, mid_compact_messages,
 	summarize_discarded_steps, truncate_large_tool_results,
 };
-// Structured-summary compaction contract surface (unit 04). Exported for
-// downstream crates that construct / inspect the outcome directly; not all
-// consumers reference each symbol by name.
+// Structured-summary compaction contract surface. Exported so downstream
+// crates can construct / inspect the outcome directly and reuse the
+// validation helper. These names are not referenced by name inside this
+// crate (the return type flows through without destructuring by name), so
+// the re-exports get an explicit `unused_imports` allow.
 #[allow(unused_imports)]
 pub use compact::{
 	MAX_DROP_OLDEST_RETRIES, STRUCTURED_SUMMARY_SECTIONS, StructuredCompactError,
