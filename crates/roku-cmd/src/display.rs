@@ -103,7 +103,7 @@ pub(crate) fn print_auth_status() {
 		.map(credential_summary)
 		.unwrap_or_default();
 
-	let model_id = resolve_display_model();
+	let model_id = resolve_display_model(auth.active_provider.as_deref());
 	let mut parts = Vec::new();
 	if !detail.is_empty() {
 		parts.push(format!("provider: {provider} ({detail})"));
@@ -121,17 +121,17 @@ pub(crate) fn print_auth_status() {
 
 /// Resolve the display model from runtime config (best-effort).
 ///
-/// Reads `[runtime.llm]` to find the active provider, then looks up
-/// `primary_model` from that provider's subsection
-/// (e.g. `[runtime.llm.openrouter]`).
-fn resolve_display_model() -> Option<String> {
+/// Prefers the caller-supplied active provider (e.g. `auth.active_provider`)
+/// so that `/provider` switches that update only `auth.json` are reflected
+/// in the banner. Falls back to `[runtime.llm].provider` if the caller does
+/// not know, then looks up `primary_model` from `[runtime.llm.{provider}]`.
+fn resolve_display_model(preferred_provider: Option<&str>) -> Option<String> {
 	let layout = crate::storage::LocalStorageLayout::from_env();
 	let contents = std::fs::read_to_string(&layout.runtime_config_path).ok()?;
 	let config: toml::Value = contents.parse().ok()?;
 	let llm = config.get("runtime")?.get("llm")?;
-	let provider = llm
-		.get("provider")
-		.and_then(|p| p.as_str())
+	let provider = preferred_provider
+		.or_else(|| llm.get("provider").and_then(|p| p.as_str()))
 		.unwrap_or("openrouter");
 	llm.get(provider)
 		.and_then(|section| section.get("primary_model"))
