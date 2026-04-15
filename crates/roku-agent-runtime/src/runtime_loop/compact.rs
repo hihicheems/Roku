@@ -497,13 +497,37 @@ fn byte_estimate_for_text(text: &str) -> u64 {
 }
 
 fn looks_like_structured(bytes: &[u8]) -> bool {
-	for &b in bytes {
-		if matches!(b, b' ' | b'\t' | b'\r' | b'\n') {
-			continue;
+	let is_ws = |b: u8| matches!(b, b' ' | b'\t' | b'\r' | b'\n');
+	let mut iter = bytes.iter().copied().skip_while(|&b| is_ws(b));
+	let Some(first) = iter.next() else {
+		return false;
+	};
+	match first {
+		// `{` almost never opens plain prose — treat as JSON/object directly.
+		b'{' => true,
+		// `[` also opens prose placeholders (e.g. "[Old tool result cleared]",
+		// "[compaction summary] ..."). Only classify as structured when the
+		// next non-whitespace byte is unambiguously the start of a JSON array
+		// element — an opening quote, brace, bracket, digit, or the empty-
+		// array closer. `t` / `f` / `n` / `-` are excluded on purpose: they
+		// are valid JSON openers (true / false / null / negative number) but
+		// also appear in prose words ("note", "then", "first"), and prose
+		// false positives are much more frequent in this codebase than
+		// `[true, false, null]`-shaped arrays.
+		b'[' => {
+			let next = iter.find(|&b| !is_ws(b));
+			matches!(next, Some(b'"' | b'{' | b'[' | b']' | b'0'..=b'9'))
 		}
-		return matches!(b, b'{' | b'[' | b'<');
+		// `<` shows up in prose comparisons and ad-hoc placeholders
+		// ("<unknown>", "value was < 5"). Require the next non-whitespace
+		// byte to look like the start of a real tag: '/', '!', '?', or an
+		// ASCII letter.
+		b'<' => {
+			let next = iter.find(|&b| !is_ws(b));
+			matches!(next, Some(b'/' | b'!' | b'?' | b'a'..=b'z' | b'A'..=b'Z'))
+		}
+		_ => false,
 	}
-	false
 }
 
 const CJK_SAMPLE_BYTES: usize = 256;
@@ -2394,6 +2418,57 @@ mod tests {
 		);
 
 		assert_eq!(byte_estimate_for_text(""), 0, "empty string is 0 tokens");
+	}
+
+	#[test]
+	fn structured_heuristic_rejects_bracket_and_angle_prose() {
+		// Bracket-prefixed placeholders / summaries are prose, not JSON.
+		// The estimator must score them at bytes/4 (English default); the
+		// previous `[` shortcut mis-scored them at bytes/2, which matters
+		// because Layer 0's own MICROCOMPACT_PLACEHOLDER starts with `[`.
+		//
+		// `<letter>`-shaped prose like `<unknown>` / `<none>` is a genuine
+		// tie with real tags and is deliberately NOT covered here — the
+		// tightened heuristic still scores those at bytes/2. We only assert
+		// the cases where a cheap lookahead can safely distinguish prose
+		// from structured input.
+		let prose_samples = [
+			MICROCOMPACT_PLACEHOLDER,
+			"[compaction summary] oldest 12 messages collapsed",
+			"[ note: trailing whitespace before the bracket does not matter ]",
+			"[true but not json, actually prose]",
+			"< 5 milliseconds",
+		];
+		for sample in prose_samples {
+			let expected = (sample.len() as u64).div_ceil(4);
+			assert_eq!(
+				byte_estimate_for_text(sample),
+				expected,
+				"prose sample should be byte/4 (not mis-classified as structured): {sample:?}"
+			);
+		}
+
+		// Real JSON arrays, XML / HTML / DOCTYPE markers, and JSON objects
+		// must still resolve to bytes/2 so genuine structured payloads are
+		// protected by the over-estimate safety margin.
+		let structured_samples = [
+			"[1, 2, 3]",
+			"[\n  {\"k\": \"v\"}\n]",
+			"[\"a\", \"b\"]",
+			"[]",
+			"<tag>child</tag>",
+			"<!DOCTYPE html>",
+			"</closing>",
+			"{\"k\": 1}",
+		];
+		for sample in structured_samples {
+			let expected = (sample.len() as u64).div_ceil(2);
+			assert_eq!(
+				byte_estimate_for_text(sample),
+				expected,
+				"structured sample should stay at byte/2: {sample:?}"
+			);
+		}
 	}
 
 	#[test]
