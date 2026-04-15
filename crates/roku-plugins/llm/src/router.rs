@@ -325,6 +325,19 @@ impl LlmRouter {
 					let opened_circuit = provider.record_failure(&self.resilience_policy);
 					let any_chunks = chunks_forwarded.load(Ordering::Relaxed) > 0;
 
+					// Surface context-window-exceeded as its own variant so the
+					// runtime can react with compact + retry instead of treating
+					// it as a generic provider failure. This is non-retryable at
+					// the router layer — recovery requires the caller to shrink
+					// the prompt.
+					if let ProviderCallError::ContextWindowExceeded { detail } = &error {
+						return Err(LlmAdapterError::ContextWindowExceeded {
+							provider: selected_model.provider.clone(),
+							model_id: selected_model.model_id.clone(),
+							detail: detail.clone(),
+						});
+					}
+
 					// Never retry once chunks have been forwarded (would duplicate content).
 					if any_chunks
 						|| !error.is_retryable()
@@ -471,6 +484,17 @@ impl LlmRouter {
 				Err(error) => {
 					let attempts_used = attempt_index.saturating_add(1);
 					let opened_circuit = provider.record_failure(&self.resilience_policy);
+					// Surface context-window-exceeded as its own variant so the
+					// runtime can react with compact + retry. Non-retryable at
+					// this layer — recovery requires the caller to shrink the
+					// prompt.
+					if let ProviderCallError::ContextWindowExceeded { detail } = &error {
+						return Err(LlmAdapterError::ContextWindowExceeded {
+							provider: model.provider.clone(),
+							model_id: model.model_id.clone(),
+							detail: detail.clone(),
+						});
+					}
 					if !error.is_retryable() {
 						return Err(LlmAdapterError::ProviderCallFailed {
 							provider: model.provider.clone(),
@@ -1239,5 +1263,44 @@ mod tests {
 			error,
 			StructuredGenerationError::ParseGuard(StructuredOutputError::FinishReasonLength)
 		));
+	}
+
+	#[test]
+	fn router_surfaces_context_window_exceeded_as_dedicated_variant() {
+		let provider = Arc::new(SequenceProvider::new(
+			"ctx-overflow-provider",
+			vec![Err(ProviderCallError::ContextWindowExceeded {
+				detail: "prompt is too long: 215321 tokens > 200000".to_string(),
+			})],
+		));
+		let mut router = LlmRouter::new(RoutingPolicy::default()).with_provider_resilience_policy(
+			ProviderResiliencePolicy {
+				max_retries: 4,
+				initial_backoff_ms: 0,
+				max_backoff_ms: 0,
+				circuit_breaker_failure_threshold: 4,
+				circuit_breaker_cooldown_ms: 0,
+			},
+		);
+		router.register_provider(Arc::clone(&provider));
+		router.register_model(model_profile("ctx-overflow-provider"));
+
+		let error = router
+			.generate_blocking(&sample_request(RiskTier::Low))
+			.expect_err("context window exceeded should surface as dedicated variant");
+		match error {
+			LlmAdapterError::ContextWindowExceeded {
+				provider: ref provider_name,
+				ref detail,
+				..
+			} => {
+				assert_eq!(provider_name, "ctx-overflow-provider");
+				assert!(detail.contains("215321"));
+			}
+			other => panic!("expected ContextWindowExceeded, got {other:?}"),
+		}
+		// The router must NOT retry context-window-exceeded — recovery is the
+		// caller's responsibility (compact + retry happens in the runtime).
+		assert_eq!(provider.invocations(), 1);
 	}
 }
