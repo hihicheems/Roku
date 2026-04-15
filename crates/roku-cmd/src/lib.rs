@@ -808,6 +808,38 @@ where
 									"[tokens: {prompt_tokens}/{output_tokens}, cost: ~${estimated_cost_usd:.4}]"
 								);
 							}
+							roku_agent_runtime::LoopEvent::ReactiveCompactTriggered {
+								step,
+								detail,
+							} => {
+								eprintln!("[compact] step {step} reactive trigger: {detail}");
+							}
+							roku_agent_runtime::LoopEvent::MicrocompactRan { .. } => {
+								// Layer 0 microcompact runs on every pre-flight; suppress
+								// the per-step line to keep live UX quiet. Trace consumers
+								// see the freed_tokens via the LoopEvent stream.
+							}
+							roku_agent_runtime::LoopEvent::MidCompactLayer2Ran { .. }
+							| roku_agent_runtime::LoopEvent::MidCompactLayer1Ran { .. } => {
+								// Mid-tier compaction events are diagnostic; no user-facing
+								// line. Trace consumers see the details via the LoopEvent
+								// stream.
+							}
+							roku_agent_runtime::LoopEvent::AutoCompactSummarizerCalled { .. } => {
+								// Bracketed by CompactTriggered / CompactComplete; the
+								// summarizer event carries diagnostic fields only.
+							}
+							roku_agent_runtime::LoopEvent::AutoCompactCircuitBreakerTripped {
+								step,
+								consecutive_failures,
+							} => {
+								eprintln!(
+									"[compact] step {step} summarizer circuit breaker tripped after {consecutive_failures} consecutive failures; falling back to mechanical"
+								);
+							}
+							roku_agent_runtime::LoopEvent::EstimatorCalibrated { .. } => {
+								// Calibration samples are diagnostic; no live UX feedback.
+							}
 						}
 					}
 				});

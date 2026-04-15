@@ -57,6 +57,63 @@ pub enum LoopEvent {
 		/// Wall-clock duration of the compaction in milliseconds.
 		elapsed_ms: u64,
 	},
+	/// Reactive compaction was triggered because the provider returned
+	/// `context_window_exceeded`. Emitted once per turn before the retry.
+	ReactiveCompactTriggered {
+		step: u32,
+		/// Provider-reported detail (e.g. "prompt is too long: 215321 tokens > 200000").
+		detail: String,
+	},
+	/// Layer 0 microcompaction ran during pre-flight before this LLM call.
+	///
+	/// `freed_tokens` is the calibrated estimate of tokens released by
+	/// replacing historical tool result content with the placeholder. A value
+	/// of `0` means there were no eligible historical tool results to clear.
+	/// Schema is frozen once introduced — additive fields only.
+	MicrocompactRan { step: u32, freed_tokens: u64 },
+	/// Layer 2 mid-tier compaction consumed a pre-existing session memory
+	/// summary.
+	///
+	/// Emitted when the mid-water threshold is crossed and the caller supplied
+	/// a summary that was spliced into the message buffer, replacing the
+	/// historical segment it covers. `messages_replaced` is the number of
+	/// messages drained from the buffer. The event variant itself discriminates
+	/// Layer 2 from Layer 1; the source-of-truth for which subsystem produced
+	/// the summary is the call site, not this event (additive fields only if
+	/// that needs to change).
+	MidCompactLayer2Ran { step: u32, messages_replaced: usize },
+	/// Layer 1 mid-tier compaction ran a deterministic context collapse.
+	///
+	/// Emitted when the mid-water threshold is crossed and Layer 2 produced
+	/// nothing (no memory summary available). `messages_collapsed` is the
+	/// number of messages replaced by the mechanical summary insertion.
+	/// Schema is stable — additive fields only.
+	MidCompactLayer1Ran {
+		step: u32,
+		messages_collapsed: usize,
+	},
+	/// The structured LLM summarizer (Layer 3) was invoked for auto-compaction.
+	///
+	/// Emitted whether the call succeeded or failed; `succeeded=false` means
+	/// the runtime fell back to mechanical compaction for this step.
+	/// `drop_oldest_retries` reports how many times the summarizer had to
+	/// discard older history before the provider accepted the prompt.
+	AutoCompactSummarizerCalled {
+		step: u32,
+		prompt_tokens: u64,
+		output_tokens: u64,
+		succeeded: bool,
+		drop_oldest_retries: u32,
+	},
+	/// The auto-compact circuit breaker tripped after consecutive failures.
+	///
+	/// After this event, further auto-compaction attempts are suppressed for
+	/// the remainder of the run and the runtime falls back to mechanical
+	/// compaction only.
+	AutoCompactCircuitBreakerTripped {
+		step: u32,
+		consecutive_failures: u32,
+	},
 	/// Incremental text from the LLM during the decision phase.
 	LlmTextDelta {
 		step: u32,
@@ -80,6 +137,19 @@ pub enum LoopEvent {
 		/// actually-served model, which may differ from the configured primary.
 		#[serde(skip_serializing_if = "Option::is_none")]
 		model_id: Option<String>,
+	},
+	/// Calibration sample emitted after each successful LLM call.
+	///
+	/// Pairs the byte-based estimator's pre-call output with the provider's
+	/// reported `usage.prompt_tokens`. Surfaces `estimated_prompt_tokens`
+	/// alongside `prompt_tokens` so trace consumers can verify the unit 01
+	/// accuracy gates (≤20% error for English/code, ≤30% for CJK).
+	EstimatorCalibrated {
+		step: u32,
+		estimated_prompt_tokens: u64,
+		prompt_tokens: u64,
+		/// Effective scale factor in use after this sample is folded in.
+		scale: f64,
 	},
 }
 
