@@ -1598,13 +1598,19 @@ mod tests {
 		let mut messages = synthetic_tool_history(n);
 		let calibration = EstimatorCalibration::default();
 
+		// Baseline must match what microcompact actually clears: the first
+		// `n - retain` ToolResult messages by ToolResult position, NOT by
+		// flat message index. The previous `i < n - retain` filter indexed
+		// into the full `[User, (Assistant, ToolResult) × n]` layout, so it
+		// only collected 3 of the 7 ToolResults the function clears and
+		// made the ratio gate vacuous (any non-zero freed count passed).
 		let historical_raw: u64 = messages
 			.iter()
-			.enumerate()
-			.filter_map(|(i, m)| match m {
-				Message::ToolResult { content, .. } if i < n - retain => Some(content.as_str()),
+			.filter_map(|m| match m {
+				Message::ToolResult { content, .. } => Some(content.as_str()),
 				_ => None,
 			})
+			.take(n - retain)
 			.map(byte_estimate_for_text)
 			.sum();
 		let historical_tokens = calibration.apply(historical_raw);
