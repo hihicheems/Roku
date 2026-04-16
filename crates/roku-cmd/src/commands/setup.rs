@@ -93,6 +93,8 @@ pub(crate) async fn run_first_time_setup() -> Result<(), String> {
 				.id_token_claims
 				.email
 				.clone()
+				.or_else(|| result.id_token_claims.user_id.clone())
+				.or_else(|| result.id_token_claims.account_id.clone())
 				.unwrap_or_else(|| "default".to_string());
 			let mut auth = auth_store.load().ok().flatten().unwrap_or_default();
 			auth.active_provider = Some("openai".to_string());
