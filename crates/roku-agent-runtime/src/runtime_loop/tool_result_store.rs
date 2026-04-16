@@ -133,15 +133,31 @@ impl ToolResultStore {
 }
 
 /// Build the disk path for a tool result file.
+///
+/// `tool_use_id` is external input from the model/provider, so path
+/// separators are replaced to prevent directory traversal.
 fn tool_result_disk_path(run_id: &str, tool_use_id: &str) -> PathBuf {
 	let home = std::env::var("HOME")
 		.or_else(|_| std::env::var("USERPROFILE"))
 		.unwrap_or_else(|_| "/tmp".to_string());
+	let safe_id = sanitize_path_component(tool_use_id);
 	PathBuf::from(home)
 		.join(".roku")
 		.join("tool-results")
 		.join(run_id)
-		.join(format!("{tool_use_id}.txt"))
+		.join(format!("{safe_id}.txt"))
+}
+
+/// Replace path separators and `.` runs so the value is safe as a single
+/// filename component. Keeps alphanumeric, `-`, `_` intact.
+fn sanitize_path_component(s: &str) -> String {
+	s.chars()
+		.map(|c| match c {
+			'/' | '\\' => '_',
+			'.' => '_',
+			_ => c,
+		})
+		.collect()
 }
 
 /// Build a preview string from full content + disk path reference.
@@ -310,5 +326,26 @@ mod tests {
 
 		assert_eq!(store.get_preview("t2"), Some("frozen preview"));
 		assert_eq!(store.get_preview("t3"), Some("reapply preview"));
+	}
+
+	#[test]
+	fn sanitize_strips_traversal_sequences() {
+		assert_eq!(sanitize_path_component("normal_id-123"), "normal_id-123");
+		assert_eq!(
+			sanitize_path_component("../../etc/passwd"),
+			"______etc_passwd"
+		);
+		assert_eq!(sanitize_path_component("a/b\\c"), "a_b_c");
+		assert_eq!(sanitize_path_component(".."), "__");
+	}
+
+	#[test]
+	fn disk_path_contains_sanitized_id() {
+		let path = tool_result_disk_path("run-1", "../../../escape");
+		let file_name = path.file_name().unwrap().to_str().unwrap();
+		assert!(!file_name.contains('/'));
+		assert!(!file_name.contains('\\'));
+		assert!(!file_name.contains(".."));
+		assert!(file_name.ends_with(".txt"));
 	}
 }
