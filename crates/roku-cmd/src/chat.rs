@@ -227,6 +227,8 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 					if let Some(provider) = auth.active_provider.clone() {
 						if let Some(active) = auth.credential_for(&provider) {
 							let label = active.label().to_string();
+							// Snapshot before mutation so we can roll back on rebuild failure.
+							let snapshot = auth.clone();
 							let removed = auth.remove_credential(&provider, &label);
 							if removed {
 								// Check if other accounts remain for this provider.
@@ -245,18 +247,27 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 									} else {
 										// Rebuild so the runtime picks up the new active credential.
 										match rebuild_service() {
-											Ok(s) => service = s,
+											Ok(s) => {
+												service = s;
+												eprintln!(
+													"[logout] Cleared credential for {provider} ({label})."
+												);
+												eprintln!(
+													"[logout] {} other account(s) remain. Use /switch to select.",
+													remaining
+												);
+											}
 											Err(e) => {
-												eprintln!("[logout] Service rebuild failed: {e}")
+												eprintln!("[logout] Service rebuild failed: {e}");
+												if let Err(re) = auth_store.save(&snapshot) {
+													eprintln!("[logout] Failed to roll back: {re}");
+												} else {
+													eprintln!(
+														"[logout] Rolled back credential removal."
+													);
+												}
 											}
 										}
-										eprintln!(
-											"[logout] Cleared credential for {provider} ({label})."
-										);
-										eprintln!(
-											"[logout] {} other account(s) remain. Use /switch to select.",
-											remaining
-										);
 									}
 								} else {
 									// No accounts left for this provider.
