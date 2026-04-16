@@ -1872,7 +1872,7 @@ impl GenericAgentRuntime {
 						.unwrap_or_else(|_| observation.message.clone())
 				};
 
-				// FileRead overflow: return error with offset/limit guidance
+				// FileRead overflow: return error with max_bytes guidance
 				// instead of truncation. Checked BEFORE disk persistence so the
 				// raw content length is still available.
 				let (tool_result_content, is_error) =
@@ -1881,14 +1881,14 @@ impl GenericAgentRuntime {
 						(
 							format!(
 								"Error: file content is too large ({total} chars) to include in \
-							 context. Use the `offset` and `limit` parameters to read a specific \
-							 portion. For example: offset=0, limit=200 to read the first 200 lines."
+							 context. Re-read with a smaller `max_bytes` parameter to retrieve \
+							 a manageable portion of the file."
 							),
 							true,
 						)
 					} else if tool_name_owned == "Read" {
 						// Read delivers full content (TOOL_CAP_NO_TRUNCATE). Skip
-						// disk persistence — the user controls size via offset/limit,
+						// disk persistence — the user controls size via max_bytes,
 						// and preview-replacing a 5KB read would be a regression.
 						(full_tool_result_content, !observation.ok)
 					} else {
