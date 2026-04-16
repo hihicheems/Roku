@@ -243,6 +243,13 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 									if let Err(e) = auth_store.save(&auth) {
 										eprintln!("[logout] Failed to save: {e}");
 									} else {
+										// Rebuild so the runtime picks up the new active credential.
+										match rebuild_service() {
+											Ok(s) => service = s,
+											Err(e) => {
+												eprintln!("[logout] Service rebuild failed: {e}")
+											}
+										}
 										eprintln!(
 											"[logout] Cleared credential for {provider} ({label})."
 										);
