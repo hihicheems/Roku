@@ -1376,6 +1376,11 @@ impl GenericAgentRuntime {
 											if let Ok(retry_resp) =
 												router.generate(&escalated_request).await
 											{
+												// Token totals are billing-oriented: both
+												// the truncated call and the retry were
+												// charged by the provider, so we accumulate
+												// both. Consumers that need "response length"
+												// should use the retry's output_tokens only.
 												total_prompt_tokens = total_prompt_tokens
 													.saturating_add(retry_resp.prompt_tokens);
 												total_output_tokens = total_output_tokens
@@ -1392,6 +1397,23 @@ impl GenericAgentRuntime {
 												// Update model ID so cost reporting uses the
 												// retry response's model, not the original.
 												last_model_id = Some(retry_resp.model_id.clone());
+												// Re-calibrate the estimator with the retry's
+												// prompt_tokens for a tighter next-turn estimate.
+												loop_state.estimator_calibration.update(
+													pre_call_estimate.raw_total_tokens,
+													retry_resp.prompt_tokens,
+												);
+												let _ = sender.send(
+													crate::runtime_loop::LoopEvent::EstimatorCalibrated {
+														step: current_step_index,
+														estimated_prompt_tokens: pre_call_estimate
+															.total_tokens,
+														prompt_tokens: retry_resp.prompt_tokens,
+														scale: loop_state
+															.estimator_calibration
+															.scale(),
+													},
+												);
 												let retry_tool_calls =
 													retry_resp.tool_calls.unwrap_or_default();
 												(retry_resp.output, retry_tool_calls)
@@ -1496,6 +1518,11 @@ impl GenericAgentRuntime {
 											if let Ok(retry_resp) =
 												router.generate(&escalated_request).await
 											{
+												// Token totals are billing-oriented: both
+												// the truncated call and the retry were
+												// charged by the provider, so we accumulate
+												// both. Consumers that need "response length"
+												// should use the retry's output_tokens only.
 												total_prompt_tokens = total_prompt_tokens
 													.saturating_add(retry_resp.prompt_tokens);
 												total_output_tokens = total_output_tokens
@@ -1511,6 +1538,25 @@ impl GenericAgentRuntime {
 													);
 												// Update model ID for cost reporting.
 												last_model_id = Some(retry_resp.model_id.clone());
+												// Re-calibrate the estimator with the retry's
+												// prompt_tokens for a tighter next-turn estimate.
+												loop_state.estimator_calibration.update(
+													pre_call_estimate.raw_total_tokens,
+													retry_resp.prompt_tokens,
+												);
+												if let Some(sender) = event_sender {
+													let _ = sender.send(
+														crate::runtime_loop::LoopEvent::EstimatorCalibrated {
+															step: current_step_index,
+															estimated_prompt_tokens: pre_call_estimate
+																.total_tokens,
+															prompt_tokens: retry_resp.prompt_tokens,
+															scale: loop_state
+																.estimator_calibration
+																.scale(),
+														},
+													);
+												}
 												retry_resp
 											} else {
 												resp
