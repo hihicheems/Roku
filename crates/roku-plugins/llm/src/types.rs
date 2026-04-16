@@ -107,6 +107,66 @@ impl Default for ProviderResiliencePolicy {
 	}
 }
 
+/// A single named block of system prompt content.
+///
+/// The `id` is a stable identifier that downstream cache adapters use to
+/// decide which blocks to mark with `cache_control`. Ids are conventionally
+/// short lowercase snake_case strings (`"identity"`, `"tool_guidance"`,
+/// `"environment"`, `"project_instruction"`, `"memory"`, `"plan_mode"`) and
+/// must be unique within a `SystemPromptSections` value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemPromptBlock {
+	/// Stable identifier for this block.
+	pub id: String,
+	/// The rendered content for this block.
+	pub content: String,
+}
+
+/// System prompt decomposed into static and dynamic groups.
+///
+/// **Static blocks** have byte-identical content across `cd` / timestamp /
+/// runtime-variable changes within the same session. Prompt caching requires
+/// a stable byte-identical prefix; blocks in this group are candidates for
+/// `cache_control` markers.
+///
+/// **Dynamic blocks** contain content that legitimately varies per turn (e.g.
+/// `working_directory`, per-turn environment probe output). They must never
+/// be marked cacheable.
+///
+/// Call [`SystemPromptSections::flatten`] to obtain a single `String` that
+/// is byte-for-byte identical to the legacy `build_system_prompt` output.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemPromptSections {
+	/// Blocks whose content is stable within a session.
+	pub static_blocks: Vec<SystemPromptBlock>,
+	/// Blocks whose content may change between turns.
+	pub dynamic_blocks: Vec<SystemPromptBlock>,
+}
+
+impl SystemPromptSections {
+	/// Flatten the sections into a single string in the same order that
+	/// [`build_system_prompt`] produced: static blocks first, then dynamic
+	/// blocks, joined by `"\n\n"`.
+	///
+	/// This is the backward-compatible rendering path used by provider
+	/// adapters that do not yet implement block-aware serialization.
+	///
+	/// [`build_system_prompt`]: crate::roku_agent_runtime::system_prompt::build_system_prompt
+	pub fn flatten(&self) -> String {
+		self.static_blocks
+			.iter()
+			.chain(self.dynamic_blocks.iter())
+			.map(|b| b.content.as_str())
+			.collect::<Vec<_>>()
+			.join("\n\n")
+	}
+
+	/// Returns `true` when there are no blocks at all.
+	pub fn is_empty(&self) -> bool {
+		self.static_blocks.is_empty() && self.dynamic_blocks.is_empty()
+	}
+}
+
 /// A tool definition sent to the LLM for native tool_use / function calling.
 ///
 /// Follows the OpenAI-compatible format used by OpenRouter:
@@ -177,6 +237,13 @@ pub struct GenerationRequest {
 	/// Defaults to no thinking when None or ThinkingEffort::None.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub thinking_effort: Option<ThinkingEffort>,
+	/// Structured form of the system prompt, decomposed into static and dynamic
+	/// blocks. When `Some`, this is the authoritative source; `system_prompt`
+	/// holds the same content flattened for adapters that do not yet implement
+	/// block-aware serialization. Later cache adapter units will replace the
+	/// flatten call with block-level `cache_control` markers.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub system_prompt_sections: Option<SystemPromptSections>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -195,6 +262,20 @@ pub struct LlmResponse {
 	/// chose to call tools via the native protocol instead of generating text.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub tool_calls: Option<Vec<ToolCallBlock>>,
+	/// Input tokens that were newly written to the provider's prompt cache
+	/// on this turn. Anthropic reports this as `cache_creation_input_tokens`
+	/// in `usage`. OpenAI does not expose a write-side counter, so this
+	/// field stays `0` for every OpenAI turn.
+	#[serde(default)]
+	pub cache_creation_input_tokens: u64,
+	/// Input tokens that were served from the provider's prompt cache on
+	/// this turn. Anthropic reports this as `cache_read_input_tokens`;
+	/// OpenAI reports the equivalent as `input_tokens_details.cached_tokens`
+	/// (Responses API) or `prompt_tokens_details.cached_tokens` (Chat
+	/// Completions). `0` when the provider did not report any cache hit or
+	/// when the field is absent from the raw response.
+	#[serde(default)]
+	pub cache_read_input_tokens: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -209,6 +290,12 @@ pub struct ProviderResponse {
 	/// with text only.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub tool_calls: Option<Vec<ToolCallBlock>>,
+	/// See [`LlmResponse::cache_creation_input_tokens`].
+	#[serde(default)]
+	pub cache_creation_input_tokens: u64,
+	/// See [`LlmResponse::cache_read_input_tokens`].
+	#[serde(default)]
+	pub cache_read_input_tokens: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -439,6 +526,7 @@ mod tests {
 			tools: None,
 			model_override: None,
 			thinking_effort: None,
+			system_prompt_sections: None,
 		}
 	}
 

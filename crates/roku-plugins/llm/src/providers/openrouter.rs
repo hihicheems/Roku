@@ -377,6 +377,7 @@ impl OpenRouterProvider {
 		let mut finish_reason: Option<String> = None;
 		let mut prompt_tokens: u64 = 0;
 		let mut output_tokens: u64 = 0;
+		let mut cache_read_input_tokens: u64 = 0;
 
 		// Track stream errors to report after sending Done.
 		let mut stream_error: Option<ProviderCallError> = None;
@@ -433,6 +434,11 @@ impl OpenRouterProvider {
 					.get("completion_tokens")
 					.and_then(Value::as_u64)
 					.unwrap_or(output_tokens);
+				cache_read_input_tokens = usage
+					.get("prompt_tokens_details")
+					.and_then(|d| d.get("cached_tokens"))
+					.and_then(Value::as_u64)
+					.unwrap_or(cache_read_input_tokens);
 			}
 
 			let choice = chunk
@@ -565,6 +571,8 @@ impl OpenRouterProvider {
 			finish_reason,
 			prompt_tokens,
 			output_tokens,
+			cache_creation_input_tokens: 0,
+			cache_read_input_tokens,
 			latency_ms,
 			tool_calls: None,
 		})
@@ -720,6 +728,8 @@ impl OpenRouterProvider {
 			finish_reason: parsed.finish_reason,
 			prompt_tokens: parsed.prompt_tokens,
 			output_tokens: parsed.output_tokens,
+			cache_creation_input_tokens: 0,
+			cache_read_input_tokens: parsed.cache_read_input_tokens,
 			latency_ms,
 			tool_calls: parsed.tool_calls,
 		})
@@ -970,6 +980,7 @@ struct ParsedOpenRouterResponse {
 	finish_reason: Option<String>,
 	prompt_tokens: u64,
 	output_tokens: u64,
+	cache_read_input_tokens: u64,
 	served_model_id: Option<String>,
 	tool_calls: Option<Vec<ToolCallBlock>>,
 }
@@ -1049,6 +1060,12 @@ fn parse_response(response_body: &str) -> Result<ParsedOpenRouterResponse, Strin
 		.and_then(|usage| usage.get("completion_tokens"))
 		.and_then(Value::as_u64)
 		.unwrap_or_else(|| estimate_prompt_tokens(&output));
+	let cache_read_input_tokens = response
+		.get("usage")
+		.and_then(|usage| usage.get("prompt_tokens_details"))
+		.and_then(|details| details.get("cached_tokens"))
+		.and_then(Value::as_u64)
+		.unwrap_or(0);
 	let served_model_id = response
 		.get("model")
 		.and_then(Value::as_str)
@@ -1059,6 +1076,7 @@ fn parse_response(response_body: &str) -> Result<ParsedOpenRouterResponse, Strin
 		finish_reason,
 		prompt_tokens,
 		output_tokens,
+		cache_read_input_tokens,
 		served_model_id,
 		tool_calls,
 	})
@@ -1402,6 +1420,7 @@ mod tests {
 			tools: None,
 			model_override: None,
 			thinking_effort: None,
+			system_prompt_sections: None,
 		}
 	}
 

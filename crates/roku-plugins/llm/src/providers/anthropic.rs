@@ -373,7 +373,7 @@ impl AnthropicProvider {
 			self.config.max_tokens
 		};
 
-		let messages: Vec<Value> = if let Some(msgs) = &request.messages {
+		let mut messages: Vec<Value> = if let Some(msgs) = &request.messages {
 			msgs.iter()
 				.map(|msg| match msg {
 					Message::User { content } => {
@@ -419,6 +419,15 @@ impl AnthropicProvider {
 		} else {
 			vec![serde_json::json!({"role": "user", "content": request.prompt})]
 		};
+
+		// [decision-L1] Single `cache_control` marker on the last content block
+		// of the last message. Anthropic caches the prefix up to and including
+		// the marker, so each turn creates a fresh write-point while reading the
+		// previous turn's cached prefix. Exactly one marker per request —
+		// multiple markers fragment cache entries and blow up storage cost.
+		if let Some(last_message) = messages.last_mut() {
+			apply_cache_control_marker(last_message);
+		}
 
 		let mut body = serde_json::json!({
 			"model": model_id,
@@ -541,6 +550,8 @@ impl LlmProvider for AnthropicProvider {
 			finish_reason: parsed.finish_reason,
 			prompt_tokens: parsed.prompt_tokens,
 			output_tokens: parsed.output_tokens,
+			cache_creation_input_tokens: parsed.cache_creation_input_tokens,
+			cache_read_input_tokens: parsed.cache_read_input_tokens,
 			latency_ms,
 			tool_calls: parsed.tool_calls,
 		})
@@ -585,6 +596,8 @@ impl LlmProvider for AnthropicProvider {
 		let mut finish_reason: Option<String> = None;
 		let mut prompt_tokens: u64 = 0;
 		let mut output_tokens: u64 = 0;
+		let mut cache_creation_input_tokens: u64 = 0;
+		let mut cache_read_input_tokens: u64 = 0;
 		let mut stream_error: Option<ProviderCallError> = None;
 
 		// Track in-progress tool_use blocks by content_block index.
@@ -626,6 +639,14 @@ impl LlmProvider for AnthropicProvider {
 					if let Some(usage) = data.get("message").and_then(|m| m.get("usage")) {
 						prompt_tokens = usage
 							.get("input_tokens")
+							.and_then(Value::as_u64)
+							.unwrap_or(0);
+						cache_creation_input_tokens = usage
+							.get("cache_creation_input_tokens")
+							.and_then(Value::as_u64)
+							.unwrap_or(0);
+						cache_read_input_tokens = usage
+							.get("cache_read_input_tokens")
 							.and_then(Value::as_u64)
 							.unwrap_or(0);
 					}
@@ -807,6 +828,8 @@ impl LlmProvider for AnthropicProvider {
 			finish_reason,
 			prompt_tokens,
 			output_tokens,
+			cache_creation_input_tokens,
+			cache_read_input_tokens,
 			latency_ms,
 			tool_calls,
 		})
@@ -833,6 +856,8 @@ struct ParsedAnthropicResponse {
 	finish_reason: Option<String>,
 	prompt_tokens: u64,
 	output_tokens: u64,
+	cache_creation_input_tokens: u64,
+	cache_read_input_tokens: u64,
 	tool_calls: Option<Vec<ToolCallBlock>>,
 }
 
@@ -867,6 +892,14 @@ fn parse_complete_response(body: &str) -> Result<ParsedAnthropicResponse, Provid
 		.unwrap_or(0);
 	let output_tokens = usage
 		.and_then(|u| u.get("output_tokens"))
+		.and_then(Value::as_u64)
+		.unwrap_or(0);
+	let cache_creation_input_tokens = usage
+		.and_then(|u| u.get("cache_creation_input_tokens"))
+		.and_then(Value::as_u64)
+		.unwrap_or(0);
+	let cache_read_input_tokens = usage
+		.and_then(|u| u.get("cache_read_input_tokens"))
 		.and_then(Value::as_u64)
 		.unwrap_or(0);
 
@@ -914,6 +947,8 @@ fn parse_complete_response(body: &str) -> Result<ParsedAnthropicResponse, Provid
 		finish_reason: stop_reason,
 		prompt_tokens,
 		output_tokens,
+		cache_creation_input_tokens,
+		cache_read_input_tokens,
 		tool_calls: if tool_calls.is_empty() {
 			None
 		} else {
@@ -925,6 +960,35 @@ fn parse_complete_response(body: &str) -> Result<ParsedAnthropicResponse, Provid
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Attach a single `cache_control: {"type": "ephemeral"}` marker to the last
+/// content block of `message`. If `content` is a plain string it is promoted
+/// to a structured `[{type: text, text, cache_control}]` array. If it is
+/// already an array the marker is added to the last block. No-op on malformed
+/// messages.
+fn apply_cache_control_marker(message: &mut Value) {
+	let Some(content) = message.get_mut("content") else {
+		return;
+	};
+	if let Some(text) = content.as_str() {
+		let text = text.to_string();
+		*content = Value::Array(vec![serde_json::json!({
+			"type": "text",
+			"text": text,
+			"cache_control": {"type": "ephemeral"},
+		})]);
+		return;
+	}
+	if let Some(arr) = content.as_array_mut()
+		&& let Some(last_block) = arr.last_mut()
+		&& let Some(obj) = last_block.as_object_mut()
+	{
+		obj.insert(
+			"cache_control".to_string(),
+			serde_json::json!({"type": "ephemeral"}),
+		);
+	}
+}
 
 /// Normalize Anthropic stop reasons to a common vocabulary.
 /// Anthropic uses `end_turn` / `tool_use` / `max_tokens` / `stop_sequence`.
@@ -1031,7 +1095,31 @@ mod tests {
 		assert_eq!(parsed.finish_reason.as_deref(), Some("stop"));
 		assert_eq!(parsed.prompt_tokens, 10);
 		assert_eq!(parsed.output_tokens, 5);
+		assert_eq!(parsed.cache_creation_input_tokens, 0);
+		assert_eq!(parsed.cache_read_input_tokens, 0);
 		assert!(parsed.tool_calls.is_none());
+	}
+
+	#[test]
+	fn parse_response_populates_cache_usage_fields() {
+		let body = r#"{
+			"id": "msg_cache",
+			"type": "message",
+			"role": "assistant",
+			"content": [{"type": "text", "text": "ok"}],
+			"model": "claude-sonnet-4-5-20250514",
+			"stop_reason": "end_turn",
+			"usage": {
+				"input_tokens": 12,
+				"output_tokens": 3,
+				"cache_creation_input_tokens": 1024,
+				"cache_read_input_tokens": 2048
+			}
+		}"#;
+		let parsed = parse_complete_response(body).unwrap();
+		assert_eq!(parsed.prompt_tokens, 12);
+		assert_eq!(parsed.cache_creation_input_tokens, 1024);
+		assert_eq!(parsed.cache_read_input_tokens, 2048);
 	}
 
 	#[test]
@@ -1142,6 +1230,7 @@ mod tests {
 			}]),
 			model_override: None,
 			thinking_effort: None,
+			system_prompt_sections: None,
 		};
 		let body = provider.build_request_body("claude-sonnet-4-5-20250514", &request, false);
 		assert_eq!(body["model"], "claude-sonnet-4-5-20250514");
@@ -1174,10 +1263,111 @@ mod tests {
 			tools: None,
 			model_override: None,
 			thinking_effort: None,
+			system_prompt_sections: None,
 		};
 		let body = provider.build_request_body("claude-sonnet-4-5-20250514", &request, true);
 		assert_eq!(body["stream"], true);
 		assert!(body.get("system").is_none());
 		assert!(body.get("tools").is_none());
+	}
+
+	fn count_cache_control(value: &Value) -> usize {
+		match value {
+			Value::Object(map) => {
+				let here = if map.contains_key("cache_control") {
+					1
+				} else {
+					0
+				};
+				here + map.values().map(count_cache_control).sum::<usize>()
+			}
+			Value::Array(arr) => arr.iter().map(count_cache_control).sum(),
+			_ => 0,
+		}
+	}
+
+	#[test]
+	fn build_request_body_attaches_single_cache_control_marker_for_string_message() {
+		let config = AnthropicConfig {
+			api_key: "k".to_string(),
+			base_url: DEFAULT_ANTHROPIC_URL.to_string(),
+			max_tokens: DEFAULT_MAX_TOKENS,
+		};
+		let provider = AnthropicProvider::new(config).unwrap();
+		let request = GenerationRequest {
+			system_prompt: Some("sys".to_string()),
+			prompt: "hi".to_string(),
+			messages: None,
+			expected_output_tokens: 256,
+			risk_tier: crate::types::RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: 10_000,
+			budget_cost_remaining_usd: 1.0,
+			tools: None,
+			model_override: None,
+			thinking_effort: None,
+			system_prompt_sections: None,
+		};
+		let body = provider.build_request_body("claude-sonnet-4-5-20250514", &request, false);
+		assert_eq!(count_cache_control(&body), 1);
+		let last = body["messages"].as_array().unwrap().last().unwrap();
+		let blocks = last["content"]
+			.as_array()
+			.expect("content promoted to array");
+		let last_block = blocks.last().unwrap();
+		assert_eq!(last_block["cache_control"]["type"], "ephemeral");
+	}
+
+	#[test]
+	fn build_request_body_attaches_single_cache_control_marker_for_tool_result_tail() {
+		let config = AnthropicConfig {
+			api_key: "k".to_string(),
+			base_url: DEFAULT_ANTHROPIC_URL.to_string(),
+			max_tokens: DEFAULT_MAX_TOKENS,
+		};
+		let provider = AnthropicProvider::new(config).unwrap();
+		let request = GenerationRequest {
+			system_prompt: None,
+			prompt: String::new(),
+			messages: Some(vec![
+				Message::User {
+					content: "read /a.txt".to_string(),
+				},
+				Message::Assistant {
+					text: String::new(),
+					tool_calls: vec![ToolCallBlock {
+						id: "tu_1".to_string(),
+						name: "read_file".to_string(),
+						arguments: serde_json::json!({"path": "/a.txt"}),
+					}],
+				},
+				Message::ToolResult {
+					tool_use_id: "tu_1".to_string(),
+					content: "file body".to_string(),
+					is_error: false,
+				},
+			]),
+			expected_output_tokens: 256,
+			risk_tier: crate::types::RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: 10_000,
+			budget_cost_remaining_usd: 1.0,
+			tools: None,
+			model_override: None,
+			thinking_effort: None,
+			system_prompt_sections: None,
+		};
+		let body = provider.build_request_body("claude-sonnet-4-5-20250514", &request, false);
+		assert_eq!(count_cache_control(&body), 1);
+		let messages = body["messages"].as_array().unwrap();
+		let last = messages.last().unwrap();
+		let blocks = last["content"].as_array().unwrap();
+		let last_block = blocks.last().unwrap();
+		assert_eq!(last_block["type"], "tool_result");
+		assert_eq!(last_block["cache_control"]["type"], "ephemeral");
+		// Earlier messages carry no marker — verifies the "single marker"
+		// invariant from decision L1.
+		assert!(count_cache_control(&messages[0]) == 0);
+		assert!(count_cache_control(&messages[1]) == 0);
 	}
 }

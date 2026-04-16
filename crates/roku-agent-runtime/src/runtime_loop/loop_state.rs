@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use roku_common_types::ResourceSelector;
+use roku_plugin_llm::ToolDefinition;
 use serde::{Deserialize, Serialize};
 
 use crate::router::RouteDecision;
@@ -23,6 +24,18 @@ use crate::runtime_loop::grounding::{
 	extract_explicit_table_path, extract_glob_pattern, extract_web_query,
 };
 use crate::runtime_loop::{AskUserPayload, LoopContext, StepRecord, ToolObservation};
+
+/// Cached serialized-stable snapshot of the tool schema for a session.
+///
+/// Held inside `LoopState` so the per-turn refresh can reuse the same
+/// `Vec<ToolDefinition>` whenever no explicit schema-dirty event has fired —
+/// the provider adapter then sees byte-identical tool blocks across turns,
+/// which is the necessary condition for Anthropic `cache_read_input_tokens`
+/// and OpenAI `cached_tokens` to accumulate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FrozenToolSchema {
+	pub definitions: Vec<ToolDefinition>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -129,6 +142,27 @@ pub struct LoopState {
 	/// `LoopEvent::AutoCompactCircuitBreakerTripped`.
 	#[serde(default)]
 	pub consecutive_autocompact_failures: u32,
+	/// Cached tool schema snapshot. `None` before the first turn and after
+	/// any explicit schema-dirty event; `Some` while the session is in a
+	/// stable window where subsequent turns should reuse the same bytes.
+	///
+	/// Never serialized as part of long-lived state — the `#[serde(skip)]`
+	/// attribute keeps it out of snapshot round-trips, which means cache
+	/// windows do not survive checkpoint reloads (intentional: a freshly
+	/// loaded loop rebuilds the schema once on the first turn, restoring
+	/// the freeze invariant thereafter).
+	#[serde(skip)]
+	pub frozen_tool_schema: Option<FrozenToolSchema>,
+	/// Explicit schema-dirty flag. Set to `true` on construction so the
+	/// first turn always rebuilds. Set back to `true` only via the
+	/// enumerated dirty events (see [`LoopState::mark_tool_schema_dirty`]).
+	#[serde(skip)]
+	pub tool_schema_dirty: bool,
+	/// Last-observed plan-mode state, used by the runtime refresh path to
+	/// detect plan-mode transitions and mark the schema dirty exactly
+	/// once per transition. `None` before the first refresh.
+	#[serde(skip)]
+	pub observed_plan_mode: Option<bool>,
 }
 
 /// Maximum allowed consecutive Layer 3 structured-summary failures before
@@ -176,6 +210,9 @@ impl LoopState {
 			disallowed_tools: Vec::new(),
 			estimator_calibration: EstimatorCalibration::default(),
 			consecutive_autocompact_failures: 0,
+			frozen_tool_schema: None,
+			tool_schema_dirty: true,
+			observed_plan_mode: None,
 		}
 	}
 
@@ -203,6 +240,41 @@ impl LoopState {
 		self.consecutive_autocompact_failures =
 			self.consecutive_autocompact_failures.saturating_add(1);
 		!was_tripped && self.autocompact_circuit_breaker_tripped()
+	}
+
+	/// Mark the tool schema as dirty. The enumerated event sources are:
+	/// - Plan-mode entry or exit (detected in the runtime refresh path)
+	/// - A real mutation of `disallowed_tools` inside the refresh path
+	/// - Sub-agent boundary (a fresh `LoopState` is created, so this flag
+	///   is already `true` on construction — no explicit call needed there)
+	///
+	/// Any new dirty source must route through this method so the set of
+	/// schema-invalidating events stays auditable in one place.
+	pub fn mark_tool_schema_dirty(&mut self) {
+		self.tool_schema_dirty = true;
+	}
+
+	/// Return a `Vec<ToolDefinition>` for the next LLM call, reusing the
+	/// cached bytes when no schema-dirty event fired since the last build.
+	///
+	/// The caller provides `fresh` eagerly — if the freeze is valid the
+	/// value is dropped and the cached definitions are cloned instead. In
+	/// exchange, the caller need not deal with the borrow-checker
+	/// constraints of a lazy closure that reads other fields of `self`.
+	pub fn freeze_or_reuse_tool_schema(
+		&mut self,
+		fresh: Vec<ToolDefinition>,
+	) -> Vec<ToolDefinition> {
+		if !self.tool_schema_dirty
+			&& let Some(frozen) = &self.frozen_tool_schema
+		{
+			return frozen.definitions.clone();
+		}
+		self.frozen_tool_schema = Some(FrozenToolSchema {
+			definitions: fresh.clone(),
+		});
+		self.tool_schema_dirty = false;
+		fresh
 	}
 
 	pub fn record_step(&mut self, step: StepRecord) {
@@ -530,6 +602,13 @@ mod tests {
 		let deserialized: LoopState =
 			serde_json::from_str(&json_str).expect("loop state should deserialize from JSON");
 
+		// `frozen_tool_schema`, `tool_schema_dirty`, and `observed_plan_mode`
+		// are `#[serde(skip)]` — the cache does not survive a snapshot
+		// roundtrip by design, so normalize them before structural compare.
+		state.frozen_tool_schema = None;
+		state.tool_schema_dirty = false;
+		state.observed_plan_mode = None;
+
 		assert_eq!(state, deserialized);
 		assert_eq!(deserialized.history.len(), 3);
 		assert_eq!(deserialized.status, LoopStatus::AwaitingUser);
@@ -590,5 +669,83 @@ mod tests {
 		state.note_autocompact_failure();
 		assert!(!state.note_autocompact_failure());
 		assert!(!state.autocompact_circuit_breaker_tripped());
+	}
+
+	fn tool_def(name: &str) -> roku_plugin_llm::ToolDefinition {
+		roku_plugin_llm::ToolDefinition {
+			name: name.to_string(),
+			description: format!("desc for {name}"),
+			parameters: json!({"type": "object", "properties": {}}),
+		}
+	}
+
+	#[test]
+	fn new_loop_state_starts_with_dirty_tool_schema_and_no_frozen_snapshot() {
+		let state = LoopState::new("loop-1", &loop_context());
+
+		assert!(state.tool_schema_dirty);
+		assert!(state.frozen_tool_schema.is_none());
+		assert_eq!(state.observed_plan_mode, None);
+	}
+
+	#[test]
+	fn freeze_caches_first_build_and_returns_cached_when_clean() {
+		let mut state = LoopState::new("loop-1", &loop_context());
+		let first = vec![tool_def("Read"), tool_def("Grep")];
+
+		let returned_first = state.freeze_or_reuse_tool_schema(first.clone());
+		assert_eq!(returned_first, first);
+		assert!(!state.tool_schema_dirty);
+		assert!(state.frozen_tool_schema.is_some());
+
+		// A later call with completely different `fresh` must still return
+		// the cached bytes as long as no dirty event fired in between.
+		let unrelated = vec![tool_def("Bash")];
+		let returned_second = state.freeze_or_reuse_tool_schema(unrelated);
+		assert_eq!(
+			returned_second, first,
+			"clean turn must reuse the frozen schema, not the fresh input"
+		);
+	}
+
+	#[test]
+	fn mark_tool_schema_dirty_forces_rebuild_on_next_call() {
+		let mut state = LoopState::new("loop-1", &loop_context());
+		let first = vec![tool_def("Read")];
+		state.freeze_or_reuse_tool_schema(first);
+
+		state.mark_tool_schema_dirty();
+		assert!(state.tool_schema_dirty);
+
+		let second = vec![tool_def("Read"), tool_def("Edit")];
+		let returned = state.freeze_or_reuse_tool_schema(second.clone());
+		assert_eq!(returned, second);
+		assert!(!state.tool_schema_dirty);
+	}
+
+	#[test]
+	fn freeze_survives_across_multiple_clean_turns_byte_identical() {
+		let mut state = LoopState::new("loop-1", &loop_context());
+		let canonical = vec![tool_def("Read"), tool_def("Grep"), tool_def("Bash")];
+		let expected_bytes = serde_json::to_vec(&canonical).expect("tool defs serialize");
+
+		// First turn: establishes freeze.
+		state.freeze_or_reuse_tool_schema(canonical.clone());
+
+		// Subsequent clean turns: must produce byte-identical serialization
+		// regardless of what `fresh` the caller passes in.
+		for scramble in 0..5 {
+			let mutated = if scramble % 2 == 0 {
+				vec![]
+			} else {
+				vec![tool_def("Mutated")]
+			};
+			let returned = state.freeze_or_reuse_tool_schema(mutated);
+			let bytes = serde_json::to_vec(&returned).expect("tool defs serialize");
+			assert_eq!(
+				bytes, expected_bytes,
+				"clean turn {scramble} must emit byte-identical tool schema"
+			);
+		}
 	}
 }

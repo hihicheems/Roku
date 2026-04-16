@@ -24,14 +24,23 @@ use roku_plugin_tools::{
 };
 
 use roku_common_types::RuntimeMemorySections;
+use roku_plugin_llm::{SystemPromptBlock, SystemPromptSections};
 
 use super::environment::{EnvironmentSnapshot, format_environment_context};
 
-/// Build the full system prompt from modular fragments.
+/// Build the full system prompt, flattened into a single string.
+///
+/// Convenience wrapper kept for callers that do not need the structured
+/// block form. Internally constructs [`SystemPromptSections`] and flattens
+/// via [`SystemPromptSections::flatten`]; the resulting byte sequence places
+/// every static block before every dynamic block (static prefix + dynamic
+/// suffix). All existing content-presence assertions continue to hold; only
+/// the intra-string section order differs from the pre-split implementation.
 ///
 /// `working_directory` is per-step (may change after `cd`).
 /// `env_snapshot` is per-process (CLI tools, git context).
 /// `project_instruction` is loaded from `.roku.md` / `~/.roku/ROKU.md`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn build_system_prompt(
 	env_snapshot: &EnvironmentSnapshot,
 	working_directory: &str,
@@ -39,28 +48,82 @@ pub fn build_system_prompt(
 	memory_sections: Option<&RuntimeMemorySections>,
 	plan_mode: bool,
 ) -> String {
-	let mut sections = Vec::with_capacity(6);
+	build_system_prompt_sections(
+		env_snapshot,
+		working_directory,
+		project_instruction,
+		memory_sections,
+		plan_mode,
+	)
+	.flatten()
+}
 
-	sections.push(identity_section());
-	sections.push(tool_guidance_section());
-	sections.push(environment_section(env_snapshot, working_directory));
+/// Build the system prompt as structured static / dynamic blocks.
+///
+/// **Static blocks** hold session-stable content (identity, tool guidance,
+/// project instruction). Their serialized bytes must remain byte-identical
+/// across `cd`, timestamp, and other per-turn runtime-variable changes in
+/// the same session. Prompt-cache adapters consume this slice to build a
+/// cache-stable prefix.
+///
+/// **Dynamic blocks** hold per-turn variable content (environment probe +
+/// `working_directory`, memory, plan-mode). Their content may change turn to
+/// turn. Adapters must never mark these as cacheable.
+///
+/// Block ordering within each group is stable (insertion order). The flatten
+/// view emits every static block before every dynamic block.
+pub fn build_system_prompt_sections(
+	env_snapshot: &EnvironmentSnapshot,
+	working_directory: &str,
+	project_instruction: Option<&str>,
+	memory_sections: Option<&RuntimeMemorySections>,
+	plan_mode: bool,
+) -> SystemPromptSections {
+	let mut static_blocks = Vec::with_capacity(3);
+	let mut dynamic_blocks = Vec::with_capacity(3);
+
+	static_blocks.push(SystemPromptBlock {
+		id: "identity".to_string(),
+		content: identity_section(),
+	});
+	static_blocks.push(SystemPromptBlock {
+		id: "tool_guidance".to_string(),
+		content: tool_guidance_section(),
+	});
 
 	if let Some(instruction) = project_instruction {
 		let trimmed = instruction.trim();
 		if !trimmed.is_empty() {
-			sections.push(project_instruction_section(trimmed));
+			static_blocks.push(SystemPromptBlock {
+				id: "project_instruction".to_string(),
+				content: project_instruction_section(trimmed),
+			});
 		}
 	}
 
+	dynamic_blocks.push(SystemPromptBlock {
+		id: "environment".to_string(),
+		content: environment_section(env_snapshot, working_directory),
+	});
+
 	if let Some(memory) = memory_sections.filter(|m| !m.is_empty()) {
-		sections.push(memory_section(memory));
+		dynamic_blocks.push(SystemPromptBlock {
+			id: "memory".to_string(),
+			content: memory_section(memory),
+		});
 	}
 
 	if plan_mode {
-		sections.push(plan_mode_section());
+		dynamic_blocks.push(SystemPromptBlock {
+			id: "plan_mode".to_string(),
+			content: plan_mode_section(),
+		});
 	}
 
-	sections.join("\n\n")
+	SystemPromptSections {
+		static_blocks,
+		dynamic_blocks,
+	}
 }
 
 /// Identity: who Roku is and how it should behave.
@@ -414,5 +477,149 @@ mod tests {
 	fn system_prompt_excludes_plan_mode_when_inactive() {
 		let prompt = build_system_prompt(&sample_env(), "/home/user/project", None, None, false);
 		assert!(!prompt.contains("# Plan Mode"));
+	}
+
+	fn concat_contents(blocks: &[SystemPromptBlock]) -> String {
+		blocks
+			.iter()
+			.map(|b| b.content.as_str())
+			.collect::<Vec<_>>()
+			.join("\n\n")
+	}
+
+	#[test]
+	fn system_prompt_static_segment_stable_across_cd() {
+		// Core cache-stability invariant: the static prefix bytes must be
+		// byte-identical across working-directory changes in the same session.
+		// This is the §9.3 DYNAMIC_BOUNDARY gate for system prompt.
+		let env = sample_env();
+		let sections_a =
+			build_system_prompt_sections(&env, "/home/user/project-a", None, None, false);
+		let sections_b =
+			build_system_prompt_sections(&env, "/home/user/project-b", None, None, false);
+
+		assert_eq!(
+			concat_contents(&sections_a.static_blocks),
+			concat_contents(&sections_b.static_blocks),
+			"static blocks must not shift when working_directory changes"
+		);
+	}
+
+	#[test]
+	fn system_prompt_static_segment_stable_with_project_instruction() {
+		// Project instruction is loaded once per session; the static prefix
+		// stays stable across `cd` even when the instruction is present.
+		let env = sample_env();
+		let instr = Some("Always use Rust. Never use JavaScript.");
+		let sections_a = build_system_prompt_sections(&env, "/a", instr, None, false);
+		let sections_b = build_system_prompt_sections(&env, "/b", instr, None, false);
+
+		assert_eq!(
+			concat_contents(&sections_a.static_blocks),
+			concat_contents(&sections_b.static_blocks)
+		);
+	}
+
+	#[test]
+	fn system_prompt_dynamic_segment_moves_across_cd() {
+		// Negative check: the dynamic segment actually does move when
+		// working_directory changes — otherwise the split is meaningless.
+		let env = sample_env();
+		let sections_a = build_system_prompt_sections(&env, "/dir-a", None, None, false);
+		let sections_b = build_system_prompt_sections(&env, "/dir-b", None, None, false);
+
+		assert_ne!(
+			concat_contents(&sections_a.dynamic_blocks),
+			concat_contents(&sections_b.dynamic_blocks),
+			"dynamic blocks must reflect working_directory changes"
+		);
+	}
+
+	#[test]
+	fn working_directory_lives_in_dynamic_segment_only() {
+		// L3 hard constraint: working_directory must never appear in a
+		// static block — it would break the cache-stable prefix.
+		let env = sample_env();
+		let wd = "/unique-marker-dir-for-test";
+		let sections = build_system_prompt_sections(&env, wd, None, None, false);
+
+		for block in &sections.static_blocks {
+			assert!(
+				!block.content.contains(wd),
+				"static block {} contains working_directory",
+				block.id.as_str()
+			);
+		}
+		let dynamic_joined = concat_contents(&sections.dynamic_blocks);
+		assert!(
+			dynamic_joined.contains(wd),
+			"dynamic segment must contain working_directory"
+		);
+	}
+
+	#[test]
+	fn block_ids_are_distinct_and_stable() {
+		// Cache-marker placement depends on block ids being distinct and
+		// predictable; enforce both.
+		let env = sample_env();
+		let memory = RuntimeMemorySections {
+			short_term_continuity: String::new(),
+			long_term_recall: "- rec1 | fact | user likes dark mode".to_string(),
+			working_memory: String::new(),
+		};
+		let sections = build_system_prompt_sections(
+			&env,
+			"/home/user/project",
+			Some("Rust only."),
+			Some(&memory),
+			true,
+		);
+
+		let static_ids: Vec<&str> = sections
+			.static_blocks
+			.iter()
+			.map(|b| b.id.as_str())
+			.collect();
+		let dynamic_ids: Vec<&str> = sections
+			.dynamic_blocks
+			.iter()
+			.map(|b| b.id.as_str())
+			.collect();
+
+		assert_eq!(
+			static_ids,
+			vec!["identity", "tool_guidance", "project_instruction"]
+		);
+		assert_eq!(dynamic_ids, vec!["environment", "memory", "plan_mode"]);
+	}
+
+	#[test]
+	fn flatten_preserves_content_presence_for_legacy_callers() {
+		// Existing callers that just want a single `String` should still see
+		// every expected header; only the intra-string order changes.
+		let env = sample_env();
+		let memory = RuntimeMemorySections {
+			short_term_continuity: "- a | recent | something".to_string(),
+			long_term_recall: String::new(),
+			working_memory: String::new(),
+		};
+		let prompt = build_system_prompt(
+			&env,
+			"/home/user/project",
+			Some("Use Rust."),
+			Some(&memory),
+			true,
+		);
+
+		for header in [
+			"# Identity",
+			"# Tool Usage",
+			"# Project Instructions",
+			"# Environment",
+			"# Memory",
+			"# Plan Mode (Active)",
+		] {
+			assert!(prompt.contains(header), "missing expected header {header}");
+		}
 	}
 }

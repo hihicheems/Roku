@@ -30,7 +30,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
@@ -145,6 +146,10 @@ pub fn build_openai_responses_router_with_metrics(
 pub struct OpenAiResponsesProvider {
 	client: Client,
 	config: OpenAiResponsesConfig,
+	/// Session-stable key sent as `prompt_cache_key`. Computed once at
+	/// provider construction time so every request in the same session
+	/// carries the same key (prerequisite for cache hits on turn 2+).
+	prompt_cache_key: String,
 }
 
 impl OpenAiResponsesProvider {
@@ -155,7 +160,12 @@ impl OpenAiResponsesProvider {
 			.map_err(|e| ProviderCallError::Fatal {
 				message: format!("http client error: {e}"),
 			})?;
-		Ok(Self { client, config })
+		let prompt_cache_key = derive_session_prompt_cache_key();
+		Ok(Self {
+			client,
+			config,
+			prompt_cache_key,
+		})
 	}
 
 	fn build_headers(&self) -> Result<HeaderMap, ProviderCallError> {
@@ -177,6 +187,36 @@ impl OpenAiResponsesProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Prompt cache key derivation
+// ---------------------------------------------------------------------------
+
+/// Monotonic per-process counter that disambiguates two provider instances
+/// constructed within the same nanosecond tick (e.g. reconnect after init
+/// failure). Combined with `pid + nanos` it makes `prompt_cache_key`
+/// collision-free across restarts even on OSes that recycle pids quickly.
+static PROMPT_CACHE_KEY_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Derive a session-stable opaque key for `prompt_cache_key`.
+///
+/// OpenAI's automatic prefix caching partitions cache entries by
+/// `prompt_cache_key`, so reusing the same key across turns within a session
+/// is what produces cache hits on turn 2+. The key's value is opaque to the
+/// server — only its stability matters.
+///
+/// We combine `pid`, construction time, and a monotonic counter so two
+/// provider instances constructed back-to-back (or after pid reuse) cannot
+/// share a key and accidentally read each other's cached prefix.
+fn derive_session_prompt_cache_key() -> String {
+	let pid = std::process::id();
+	let nanos = SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.map(|d| d.as_nanos())
+		.unwrap_or(0);
+	let counter = PROMPT_CACHE_KEY_COUNTER.fetch_add(1, Ordering::Relaxed);
+	format!("roku-{pid:x}-{nanos:x}-{counter:x}")
+}
+
+// ---------------------------------------------------------------------------
 // Request building
 // ---------------------------------------------------------------------------
 
@@ -191,6 +231,7 @@ fn build_responses_request(
 	request: &GenerationRequest,
 	stream: bool,
 	reasoning_effort: Option<&str>,
+	prompt_cache_key: &str,
 ) -> Value {
 	let mut input: Vec<Value> = Vec::new();
 
@@ -263,6 +304,7 @@ fn build_responses_request(
 		"input": input,
 		"stream": stream,
 		"store": false,
+		"prompt_cache_key": prompt_cache_key,
 	});
 
 	if let Some(tools) = tools_value.filter(|t| !t.is_empty()) {
@@ -308,6 +350,7 @@ struct SseStreamState {
 	finish_reason: Option<String>,
 	prompt_tokens: u64,
 	output_tokens: u64,
+	cache_read_input_tokens: u64,
 	has_function_call: bool,
 	/// Set when an `error` or `response.failed` SSE event is received.
 	stream_error: Option<String>,
@@ -329,6 +372,7 @@ impl SseStreamState {
 			finish_reason: None,
 			prompt_tokens: 0,
 			output_tokens: 0,
+			cache_read_input_tokens: 0,
 			has_function_call: false,
 			stream_error: None,
 		}
@@ -478,6 +522,11 @@ async fn handle_sse_event(
 					.get("output_tokens")
 					.and_then(Value::as_u64)
 					.unwrap_or(state.output_tokens);
+				state.cache_read_input_tokens = usage
+					.get("input_tokens_details")
+					.and_then(|d| d.get("cached_tokens"))
+					.and_then(Value::as_u64)
+					.unwrap_or(state.cache_read_input_tokens);
 			}
 
 			// Fallback: if no text was received via `response.output_text.delta`
@@ -527,6 +576,11 @@ async fn handle_sse_event(
 					.get("output_tokens")
 					.and_then(Value::as_u64)
 					.unwrap_or(state.output_tokens);
+				state.cache_read_input_tokens = usage
+					.get("input_tokens_details")
+					.and_then(|d| d.get("cached_tokens"))
+					.and_then(Value::as_u64)
+					.unwrap_or(state.cache_read_input_tokens);
 			}
 			let reason = parsed
 				.get("response")
@@ -630,6 +684,7 @@ impl LlmProvider for OpenAiResponsesProvider {
 			request,
 			true,
 			self.config.reasoning_effort.as_deref(),
+			&self.prompt_cache_key,
 		);
 		let started_at = Instant::now();
 
@@ -760,6 +815,8 @@ impl LlmProvider for OpenAiResponsesProvider {
 			finish_reason: state.finish_reason,
 			prompt_tokens: state.prompt_tokens,
 			output_tokens: state.output_tokens,
+			cache_creation_input_tokens: 0,
+			cache_read_input_tokens: state.cache_read_input_tokens,
 			latency_ms,
 			tool_calls,
 		})
@@ -872,9 +929,10 @@ mod tests {
 			tools: None,
 			model_override: None,
 			thinking_effort: None,
+			system_prompt_sections: None,
 		};
 
-		let body = build_responses_request("gpt-4.1", &request, false, None);
+		let body = build_responses_request("gpt-4.1", &request, false, None, "test-cache-key");
 		let input = body["input"].as_array().expect("input array");
 		assert_eq!(input.len(), 1);
 		assert_eq!(input[0]["type"], "message");
@@ -901,9 +959,10 @@ mod tests {
 			tools: None,
 			model_override: None,
 			thinking_effort: None,
+			system_prompt_sections: None,
 		};
 
-		let body = build_responses_request("gpt-4.1", &request, false, None);
+		let body = build_responses_request("gpt-4.1", &request, false, None, "test-cache-key");
 		let input = body["input"].as_array().expect("input array");
 		assert_eq!(input.len(), 1);
 		assert_eq!(input[0]["type"], "message");
@@ -933,9 +992,10 @@ mod tests {
 			tools: None,
 			model_override: None,
 			thinking_effort: None,
+			system_prompt_sections: None,
 		};
 
-		let body = build_responses_request("gpt-4.1", &request, false, None);
+		let body = build_responses_request("gpt-4.1", &request, false, None, "test-cache-key");
 		let input = body["input"].as_array().expect("input array");
 		// text was empty so no message item, only function_call
 		assert_eq!(input.len(), 1);
@@ -962,9 +1022,10 @@ mod tests {
 			tools: None,
 			model_override: None,
 			thinking_effort: None,
+			system_prompt_sections: None,
 		};
 
-		let body = build_responses_request("gpt-4.1", &request, false, None);
+		let body = build_responses_request("gpt-4.1", &request, false, None, "test-cache-key");
 		let input = body["input"].as_array().expect("input array");
 		assert_eq!(input.len(), 1);
 		assert_eq!(input[0]["type"], "function_call_output");
@@ -988,9 +1049,10 @@ mod tests {
 			tools: None,
 			model_override: None,
 			thinking_effort: None,
+			system_prompt_sections: None,
 		};
 
-		let body = build_responses_request("gpt-4.1", &request, false, None);
+		let body = build_responses_request("gpt-4.1", &request, false, None, "test-cache-key");
 		assert_eq!(body["instructions"], "You are a helpful assistant.");
 		// input should only contain the user message, not the system prompt
 		let input = body["input"].as_array().expect("input array");
@@ -1012,9 +1074,11 @@ mod tests {
 			tools: None,
 			model_override: None,
 			thinking_effort: None,
+			system_prompt_sections: None,
 		};
 
-		let body = build_responses_request("gpt-4.1", &request, false, Some("high"));
+		let body =
+			build_responses_request("gpt-4.1", &request, false, Some("high"), "test-cache-key");
 		assert_eq!(body["reasoning"]["effort"], "high");
 		assert_eq!(body["reasoning"]["summary"], "auto");
 	}
@@ -1033,9 +1097,10 @@ mod tests {
 			tools: None,
 			model_override: None,
 			thinking_effort: None,
+			system_prompt_sections: None,
 		};
 
-		let body = build_responses_request("gpt-4.1", &request, false, None);
+		let body = build_responses_request("gpt-4.1", &request, false, None, "test-cache-key");
 		assert!(body.get("reasoning").is_none());
 	}
 
@@ -1059,9 +1124,10 @@ mod tests {
 			}]),
 			model_override: None,
 			thinking_effort: None,
+			system_prompt_sections: None,
 		};
 
-		let body = build_responses_request("gpt-4.1", &request, false, None);
+		let body = build_responses_request("gpt-4.1", &request, false, None, "test-cache-key");
 		let tools = body["tools"].as_array().expect("tools array");
 		assert_eq!(tools.len(), 1);
 		assert_eq!(tools[0]["type"], "function");
@@ -1070,4 +1136,100 @@ mod tests {
 
 	// Non-streaming response parsing tests removed — complete() now delegates
 	// to stream() because the ChatGPT backend requires stream=true.
+
+	#[tokio::test]
+	async fn response_completed_populates_cached_prompt_tokens() {
+		let (tx, mut rx) = mpsc::channel::<StreamChunk>(8);
+		let mut state = SseStreamState::new();
+		let data = r#"{
+			"response": {
+				"output": [],
+				"usage": {
+					"input_tokens": 321,
+					"output_tokens": 7,
+					"input_tokens_details": {"cached_tokens": 200}
+				}
+			}
+		}"#;
+		let done = handle_sse_event("response.completed", data, &tx, &mut state).await;
+		assert!(done);
+		assert_eq!(state.prompt_tokens, 321);
+		assert_eq!(state.cache_read_input_tokens, 200);
+		// Drain any chunks the handler produced so the channel closes cleanly.
+		drop(tx);
+		while rx.recv().await.is_some() {}
+	}
+
+	#[test]
+	fn build_request_attaches_prompt_cache_key() {
+		let request = GenerationRequest {
+			system_prompt: None,
+			prompt: "hi".to_string(),
+			messages: None,
+			expected_output_tokens: 100,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: 100_000,
+			budget_cost_remaining_usd: 10.0,
+			tools: None,
+			model_override: None,
+			thinking_effort: None,
+			system_prompt_sections: None,
+		};
+		let body = build_responses_request("gpt-4.1", &request, false, None, "session-abc");
+		assert_eq!(body["prompt_cache_key"], "session-abc");
+	}
+
+	#[test]
+	fn derived_prompt_cache_key_differs_across_back_to_back_constructions() {
+		// Back-to-back construction within the same nanosecond must produce
+		// different keys — otherwise two sessions started in the same tick
+		// would share a cache partition and cross-session prefix reads could
+		// leak between them.
+		let k1 = derive_session_prompt_cache_key();
+		let k2 = derive_session_prompt_cache_key();
+		assert_ne!(k1, k2, "back-to-back derivations must differ");
+	}
+
+	#[test]
+	fn derived_prompt_cache_key_is_non_empty_and_stable_per_instance() {
+		// Key derivation must return a non-empty, session-scoped identifier.
+		let key = derive_session_prompt_cache_key();
+		assert!(!key.is_empty(), "derived key must be non-empty");
+		assert!(
+			key.starts_with("roku-"),
+			"derived key should carry the roku prefix, got: {key}"
+		);
+
+		// A provider instance holds one key for its lifetime — two requests
+		// built from the same instance must share the same cache partition.
+		let config = OpenAiResponsesConfig {
+			api_key: "test-key".to_string(),
+			base_url: "https://example.invalid/v1/responses".to_string(),
+			reasoning_effort: None,
+		};
+		let provider =
+			OpenAiResponsesProvider::new(config).expect("provider construction succeeds");
+		let request = GenerationRequest {
+			system_prompt: None,
+			prompt: "hi".to_string(),
+			messages: None,
+			expected_output_tokens: 100,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: 100_000,
+			budget_cost_remaining_usd: 10.0,
+			tools: None,
+			model_override: None,
+			thinking_effort: None,
+			system_prompt_sections: None,
+		};
+		let first =
+			build_responses_request("gpt-4.1", &request, true, None, &provider.prompt_cache_key);
+		let second =
+			build_responses_request("gpt-4.1", &request, true, None, &provider.prompt_cache_key);
+		assert_eq!(first["prompt_cache_key"], second["prompt_cache_key"]);
+		let k = first["prompt_cache_key"].as_str().expect("string key");
+		assert!(!k.is_empty());
+	}
 }

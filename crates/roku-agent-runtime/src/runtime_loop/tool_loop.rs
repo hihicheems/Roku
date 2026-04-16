@@ -264,3 +264,48 @@ pub(crate) fn attachments_for_tool(
 		Vec::new()
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::build_tool_definitions;
+
+	/// Byte-stability guard: repeated calls with identical inputs must emit
+	/// the same serialized bytes. This is the foundation that 09 / 10 rely
+	/// on — a cached tool block is only usable if its bytes do not drift
+	/// across turns.
+	#[test]
+	fn build_tool_definitions_is_serialization_deterministic() {
+		let visible: Vec<String> = Vec::new();
+		let disallowed: Vec<String> = Vec::new();
+
+		let first = build_tool_definitions(&visible, None, &disallowed);
+		let second = build_tool_definitions(&visible, None, &disallowed);
+
+		let first_bytes = serde_json::to_vec(&first).expect("serialize tool defs");
+		let second_bytes = serde_json::to_vec(&second).expect("serialize tool defs");
+
+		assert_eq!(
+			first_bytes, second_bytes,
+			"pseudo-tool schema must be byte-stable across calls"
+		);
+		assert!(!first.is_empty(), "pseudo-tools should be present");
+	}
+
+	#[test]
+	fn build_tool_definitions_disallowed_removes_tool_deterministically() {
+		let visible: Vec<String> = Vec::new();
+		let disallowed: Vec<String> = vec!["ask_user".to_string()];
+
+		let first = build_tool_definitions(&visible, None, &disallowed);
+		let second = build_tool_definitions(&visible, None, &disallowed);
+
+		let first_bytes = serde_json::to_vec(&first).expect("serialize tool defs");
+		let second_bytes = serde_json::to_vec(&second).expect("serialize tool defs");
+
+		assert_eq!(first_bytes, second_bytes);
+		assert!(
+			!first.iter().any(|d| d.name == "ask_user"),
+			"disallowed entry should not appear in the output"
+		);
+	}
+}
