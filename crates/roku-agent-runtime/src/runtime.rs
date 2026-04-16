@@ -1649,6 +1649,11 @@ impl GenericAgentRuntime {
 				// Intercept tool_search pseudo-tool — loads a deferred tool schema
 				// for the next turn (non-terminal).
 				if tool_name == PSEUDO_TOOL_SEARCH {
+					// Deduct step budget so repeated tool_search calls cannot loop
+					// without consuming budget.
+					loop_state.remaining_step_budget =
+						loop_state.remaining_step_budget.saturating_sub(1);
+
 					let tool_name_arg = arguments
 						.get("tool_name")
 						.and_then(|v| v.as_str())
@@ -1692,6 +1697,11 @@ impl GenericAgentRuntime {
 					tool_name.as_str(),
 					PSEUDO_TASK_CREATE | PSEUDO_TASK_UPDATE | PSEUDO_TASK_LIST | PSEUDO_TASK_GET
 				) {
+					// Deduct step budget so repeated task-tool calls cannot loop
+					// without consuming budget.
+					loop_state.remaining_step_budget =
+						loop_state.remaining_step_budget.saturating_sub(1);
+
 					let result_content = self.handle_task_pseudo_tool(tool_name, &arguments);
 					let is_error = result_content.starts_with("Error:");
 					messages.push(Message::ToolResult {
@@ -1790,8 +1800,10 @@ impl GenericAgentRuntime {
 
 				let elapsed = execution_elapsed_ms(&execution.result);
 				let cap = tool_result_cap(&tool_name_owned);
-				let raw_tool_output =
-					truncate_raw_tool_output(raw_tool_output_from_result(&execution.result), cap);
+				// Keep the full (un-truncated) output for disk persistence.
+				// The truncated copy is used for the StepRecord and LLM context.
+				let full_raw_tool_output = raw_tool_output_from_result(&execution.result);
+				let raw_tool_output = truncate_raw_tool_output(full_raw_tool_output.clone(), cap);
 				let observation = observation_from_execution(
 					&tool_name_owned,
 					&execution.result,
@@ -1850,13 +1862,13 @@ impl GenericAgentRuntime {
 				);
 				loop_state.record_step(step);
 
-				// Build ToolResult message for the next LLM turn.
-				let tool_result_content = if raw_tool_output.is_null() {
+				// Build the full (un-truncated) content string for disk persistence.
+				let full_tool_result_content = if full_raw_tool_output.is_null() {
 					observation.message.clone()
-				} else if let Some(s) = raw_tool_output.as_str() {
+				} else if let Some(s) = full_raw_tool_output.as_str() {
 					s.to_string()
 				} else {
-					serde_json::to_string(&raw_tool_output)
+					serde_json::to_string(&full_raw_tool_output)
 						.unwrap_or_else(|_| observation.message.clone())
 				};
 
@@ -1864,8 +1876,8 @@ impl GenericAgentRuntime {
 				// instead of truncation. Checked BEFORE disk persistence so the
 				// raw content length is still available.
 				let (tool_result_content, is_error) =
-					if tool_name_owned == "Read" && tool_result_content.len() > 100_000 {
-						let total = tool_result_content.len();
+					if tool_name_owned == "Read" && full_tool_result_content.len() > 100_000 {
+						let total = full_tool_result_content.len();
 						(
 							format!(
 								"Error: file content is too large ({total} chars) to include in \
@@ -1875,13 +1887,16 @@ impl GenericAgentRuntime {
 							true,
 						)
 					} else {
-						// Disk persistence: persist large tool results and
+						// Disk persistence: persist full (un-truncated) content and
 						// replace with preview (skipped for FileRead errors).
 						let run_id = loop_state.run_id.clone();
-						let (content, _is_preview) =
-							loop_state
-								.tool_result_store
-								.register(&tc.id, &tool_result_content, &run_id);
+						let (content, _is_preview) = loop_state.tool_result_store.register(
+							&tc.id,
+							&full_tool_result_content,
+							&run_id,
+						);
+						// If register() produced a preview, use it; otherwise
+						// truncate the (already-full) content for LLM context.
 						let tool_cap = tool_result_cap(&tool_name_owned);
 						(
 							truncate_tool_result_for_message(&content, tool_cap),
