@@ -59,6 +59,7 @@ pub const PSEUDO_TASK_CREATE: &str = "task_create";
 pub const PSEUDO_TASK_UPDATE: &str = "task_update";
 pub const PSEUDO_TASK_LIST: &str = "task_list";
 pub const PSEUDO_TASK_GET: &str = "task_get";
+pub const PSEUDO_TOOL_SEARCH: &str = "tool_search";
 
 mod availability;
 mod builders;

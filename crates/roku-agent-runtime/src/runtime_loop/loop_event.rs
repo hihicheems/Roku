@@ -163,6 +163,19 @@ pub enum LoopEvent {
 		/// Effective scale factor in use after this sample is folded in.
 		scale: f64,
 	},
+	/// Per-turn tool result budget check.
+	///
+	/// Emitted after all tool results for a turn have been pushed into the
+	/// message buffer. `per_turn_tool_tokens` is the sum of byte-to-token
+	/// estimates for all `Message::ToolResult` entries produced this turn.
+	/// `exceeded` is `true` when the aggregate exceeds the 200K threshold.
+	ToolBudgetCheck {
+		step: u32,
+		/// Estimated tokens from all tool results this turn.
+		per_turn_tool_tokens: u64,
+		/// Whether the budget was exceeded.
+		exceeded: bool,
+	},
 	/// A cache break was detected: `cache_read_input_tokens` dropped
 	/// significantly relative to the session baseline.
 	///

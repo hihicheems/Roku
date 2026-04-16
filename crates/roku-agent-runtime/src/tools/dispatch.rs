@@ -71,16 +71,46 @@ pub(crate) fn observation_from_execution(
 	}
 }
 
+/// Per-tool output cap in characters.
+pub(crate) fn tool_result_cap(tool_name: &str) -> usize {
+	match tool_name {
+		"Bash" => 30_000,
+		"Grep" => 20_000,
+		"Glob" => 10_000, // ~100 file paths
+		"WebFetch" => 25_000,
+		"WebSearch" => 25_000,
+		// Read is handled separately — never truncated, returns error instead
+		"Read" => TOOL_CAP_NO_TRUNCATE,
+		_ => 50_000, // default for all other tools
+	}
+}
+
+/// Sentinel value indicating a tool uses error-based overflow handling
+/// instead of truncation.
+pub(crate) const TOOL_CAP_NO_TRUNCATE: usize = usize::MAX;
+
 /// Maximum characters for a tool result before truncation in the turn loop.
+///
+/// Deprecated: use `tool_result_cap(tool_name)` for per-tool caps.
+#[allow(dead_code)]
 pub(crate) const MAX_TOOL_RESULT_CHARS: usize = 80_000;
 
-/// Truncate a tool result to head + tail with an informative note.
+/// Truncate a tool result to head + tail with a stable middle marker.
 pub(crate) fn truncate_tool_result_for_message(content: &str, max_chars: usize) -> String {
-	if content.len() <= max_chars {
+	if max_chars == TOOL_CAP_NO_TRUNCATE || content.len() <= max_chars {
 		return content.to_string();
 	}
-	let head_chars = max_chars * 4 / 5;
-	let tail_chars = max_chars / 5;
+	let total_chars = content.chars().count();
+	// For content whose byte length exceeds the cap but char count does not
+	// (common with multibyte UTF-8), return the full content unmodified.
+	if total_chars <= max_chars {
+		return content.to_string();
+	}
+	// Reserve space for the marker (approx 40 chars for the marker text).
+	let marker_reserve = 40;
+	let available = max_chars.saturating_sub(marker_reserve);
+	let head_chars = available / 2;
+	let tail_chars = available - head_chars;
 	let head_end = content
 		.char_indices()
 		.nth(head_chars)
@@ -92,34 +122,111 @@ pub(crate) fn truncate_tool_result_for_message(content: &str, max_chars: usize) 
 		.nth(tail_chars.saturating_sub(1))
 		.map(|(i, _)| i)
 		.unwrap_or(0);
-	let total_lines = content.lines().count();
+	// Guard against overlap when head and tail meet or cross (possible when
+	// char count barely exceeds available).
+	if head_end >= tail_start {
+		return content.to_string();
+	}
+	let truncated_chars = total_chars - head_chars - tail_chars;
 	format!(
-		"{}\n\n[Output truncated: showing first and last portions of {} total lines ({} chars). \
-         Ask the user or use a more specific query to narrow results.]\n\n{}",
+		"{}\n\n…{} chars truncated…\n\n{}",
 		&content[..head_end],
-		total_lines,
-		content.len(),
+		truncated_chars,
 		&content[tail_start..],
 	)
 }
 
-/// Truncate a raw tool output `Value` so it fits within `MAX_TOOL_RESULT_CHARS`.
-pub(crate) fn truncate_raw_tool_output(value: Value) -> Value {
+/// Truncate a raw tool output `Value` so it fits within the given cap.
+pub(crate) fn truncate_raw_tool_output(value: Value, max_chars: usize) -> Value {
+	if max_chars == TOOL_CAP_NO_TRUNCATE {
+		return value;
+	}
 	match &value {
-		Value::String(s) if s.len() > MAX_TOOL_RESULT_CHARS => {
-			Value::String(truncate_tool_result_for_message(s, MAX_TOOL_RESULT_CHARS))
+		Value::String(s) if s.len() > max_chars => {
+			Value::String(truncate_tool_result_for_message(s, max_chars))
 		}
 		Value::Object(_) | Value::Array(_) => {
 			let serialized = serde_json::to_string(&value).unwrap_or_default();
-			if serialized.len() > MAX_TOOL_RESULT_CHARS {
-				Value::String(truncate_tool_result_for_message(
-					&serialized,
-					MAX_TOOL_RESULT_CHARS,
-				))
+			if serialized.len() > max_chars {
+				Value::String(truncate_tool_result_for_message(&serialized, max_chars))
 			} else {
 				value
 			}
 		}
 		_ => value,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn per_tool_caps_are_within_bounds() {
+		assert_eq!(tool_result_cap("Bash"), 30_000);
+		assert_eq!(tool_result_cap("Grep"), 20_000);
+		assert_eq!(tool_result_cap("Glob"), 10_000);
+		assert_eq!(tool_result_cap("Read"), TOOL_CAP_NO_TRUNCATE);
+		assert_eq!(tool_result_cap("UnknownTool"), 50_000);
+	}
+
+	#[test]
+	fn truncation_preserves_head_and_tail() {
+		let content = "A".repeat(1000);
+		let result = truncate_tool_result_for_message(&content, 200);
+		assert!(result.contains('…'));
+		assert!(result.contains("chars truncated"));
+		assert!(result.len() <= 300); // some overhead for marker
+		// Verify head and tail are present
+		assert!(result.starts_with("AAAA"));
+		assert!(result.ends_with("AAAA"));
+	}
+
+	#[test]
+	fn no_truncation_below_cap() {
+		let content = "short content";
+		let result = truncate_tool_result_for_message(content, 50_000);
+		assert_eq!(result, content);
+	}
+
+	#[test]
+	fn fileread_cap_is_no_truncate() {
+		let long_content = "X".repeat(200_000);
+		let result = truncate_tool_result_for_message(&long_content, TOOL_CAP_NO_TRUNCATE);
+		assert_eq!(result, long_content);
+	}
+
+	#[test]
+	fn multibyte_content_does_not_underflow() {
+		// 10000 CJK chars = 30000 bytes. Cap is 20000 (bytes > cap but
+		// char count < cap). Should return content unmodified.
+		let content = "你".repeat(10_000);
+		assert_eq!(content.len(), 30_000); // 3 bytes each
+		let result = truncate_tool_result_for_message(&content, 20_000);
+		assert_eq!(result, content);
+	}
+
+	#[test]
+	fn multibyte_truncation_produces_valid_marker() {
+		// 40000 CJK chars = 120000 bytes. Cap is 20000. Char count (40000)
+		// exceeds cap, so truncation should fire and produce a valid marker.
+		let content = "你".repeat(40_000);
+		let result = truncate_tool_result_for_message(&content, 20_000);
+		assert!(result.contains("chars truncated"));
+		// Verify no panic occurred and result is valid UTF-8.
+		assert!(result.len() < content.len());
+	}
+
+	#[test]
+	fn truncate_raw_respects_per_tool_cap() {
+		let long_string = Value::String("Z".repeat(40_000));
+		let result = truncate_raw_tool_output(long_string, 30_000);
+		match result {
+			Value::String(s) => {
+				assert!(s.len() <= 31_000); // cap + marker overhead
+				assert!(s.contains("chars truncated"));
+			}
+			_ => panic!("expected string"),
+		}
 	}
 }

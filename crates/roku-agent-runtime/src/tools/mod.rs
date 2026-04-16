@@ -28,9 +28,8 @@ pub(crate) mod visibility;
 // Re-exports for runtime.rs and other consumers.
 pub(crate) use definitions::register_catalog_tools;
 pub(crate) use dispatch::{
-	MAX_TOOL_RESULT_CHARS, execution_elapsed_ms, observation_from_execution,
-	raw_tool_output_from_result, tool_selector_by_name, truncate_raw_tool_output,
-	truncate_tool_result_for_message,
+	execution_elapsed_ms, observation_from_execution, raw_tool_output_from_result, tool_result_cap,
+	tool_selector_by_name, truncate_raw_tool_output, truncate_tool_result_for_message,
 };
 pub(crate) use registry::ToolRegistry;
 pub(crate) use trait_def::LoopMode;

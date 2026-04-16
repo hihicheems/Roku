@@ -301,6 +301,20 @@ impl RenderEngine {
 			LoopEvent::EstimatorCalibrated { .. } => {
 				// Calibration samples are diagnostic; no live UX feedback.
 			}
+			LoopEvent::ToolBudgetCheck {
+				step,
+				per_turn_tool_tokens,
+				exceeded,
+			} => {
+				if exceeded {
+					eprint!(
+						"{}\r\n",
+						crate::render::style::styled_compact_notice(&format!(
+							"[budget] step {step} tool result budget exceeded (~{per_turn_tool_tokens} tokens)"
+						))
+					);
+				}
+			}
 			LoopEvent::CacheBreakDetected {
 				step, tokens_lost, ..
 			} => {

@@ -32,6 +32,7 @@ mod step_record;
 mod summarizer;
 pub(crate) mod system_prompt;
 mod tool_loop;
+pub(crate) mod tool_result_store;
 mod trace;
 
 pub use approval::{
@@ -42,10 +43,10 @@ pub(crate) use ask_user::effective_ask_user_payload;
 pub use ask_user::{AskUserPayload, AskUserResumeContract, AskUserResumeDirective};
 pub use compact::{
 	CompactConfig, MICROCOMPACT_RETAIN_RECENT, MID_WATER_TRIGGER_RATIO, MidCompactOutcome,
-	compact_history, compact_history_with_llm, compact_messages,
+	PER_TURN_TOOL_BUDGET_TOKENS, compact_history, compact_history_with_llm, compact_messages,
 	compact_messages_with_structured_summary, estimate_context_tokens, estimate_prompt_pressure,
-	estimate_prompt_tokens_calibrated, microcompact_old_tool_results, mid_compact_messages,
-	summarize_discarded_steps, truncate_large_tool_results,
+	estimate_prompt_tokens_calibrated, estimate_turn_tool_tokens, microcompact_old_tool_results,
+	mid_compact_messages, summarize_discarded_steps, truncate_large_tool_results,
 };
 // Structured-summary compaction contract surface. Exported so downstream
 // crates can construct / inspect the outcome directly and reuse the
@@ -60,7 +61,8 @@ pub use compact::{
 pub use context_assembly::LoopContext;
 pub(crate) use context_assembly::build_loop_context;
 pub use loop_event::{LoopEvent, LoopEventSender};
-pub use loop_state::{LoopState, LoopStatus};
+#[allow(unused_imports)]
+pub use loop_state::{DeferredToolState, LoopState, LoopStatus};
 pub use next_step::{NextStepAction, NextStepDecision, NextStepDecisionSchemaError};
 pub use observation::{StepObservation, ToolObservation};
 pub use probe_check::{ToolProbeCheckReport, check_seed_tool_probe};
@@ -74,7 +76,7 @@ pub use state_update::{InterpretedObservation, interpret_observation};
 pub use step_record::{StepAction, StepRecord};
 pub use summarizer::FinalAnswerPayload;
 pub(crate) use tool_loop::{
-	attachments_for_tool, build_tool_definitions, ground_tool_arguments,
+	apply_deferred_mode, attachments_for_tool, build_tool_definitions, ground_tool_arguments,
 	next_working_directory_from_observation,
 };
 pub use trace::{RuntimeLoopTraceCheckReport, check_runtime_loop_trace, runtime_loop_trace};

@@ -840,6 +840,18 @@ where
 							roku_agent_runtime::LoopEvent::EstimatorCalibrated { .. } => {
 								// Calibration samples are diagnostic; no live UX feedback.
 							}
+							roku_agent_runtime::LoopEvent::ToolBudgetCheck {
+								step,
+								per_turn_tool_tokens,
+								exceeded,
+							} => {
+								if exceeded {
+									eprintln!(
+										"[budget] step {} tool result budget exceeded (~{} tokens)",
+										step, per_turn_tool_tokens
+									);
+								}
+							}
 							roku_agent_runtime::LoopEvent::CacheBreakDetected {
 								step,
 								tokens_lost,

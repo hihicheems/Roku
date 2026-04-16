@@ -29,12 +29,12 @@ use crate::sub_agent::{SubAgentConfig, execute_sub_agent};
 use crate::task_store::{TaskStatus, TaskStore};
 use crate::tool_config::{ToolCatalogConfig, ToolsRuntimeConfig};
 use crate::tools::{
-	LoopMode, MAX_TOOL_RESULT_CHARS, ToolRegistry,
+	LoopMode, ToolRegistry,
 	build_builtin_tool_runtime_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config,
 	build_llm_tool_runtime_with_plugin_snapshot_and_runtime_config,
 	build_resource_catalog_with_plugin_snapshot_and_runtime_capabilities_and_runtime_config,
 	execution_elapsed_ms, observation_from_execution, raw_tool_output_from_result,
-	register_catalog_tools, tool_selector_by_name, truncate_raw_tool_output,
+	register_catalog_tools, tool_result_cap, tool_selector_by_name, truncate_raw_tool_output,
 	truncate_tool_result_for_message,
 };
 use crate::workers::{skill_execute_worker_with_config, skill_worker_with_config};
@@ -55,7 +55,7 @@ use roku_plugin_llm::{
 use roku_plugin_skills::SkillRegistry;
 use roku_plugin_tools::{
 	PSEUDO_AGENT, PSEUDO_TASK_CREATE, PSEUDO_TASK_GET, PSEUDO_TASK_LIST, PSEUDO_TASK_UPDATE,
-	ResourceCatalog,
+	PSEUDO_TOOL_SEARCH, ResourceCatalog,
 };
 use roku_plugin_tools::{
 	RuntimeVisibleToolAvailabilitySnapshot, build_runtime_visible_tool_availability_snapshot,
@@ -1025,6 +1025,16 @@ impl GenericAgentRuntime {
 			// cached `Vec<ToolDefinition>` so the provider adapter sees
 			// byte-identical tool bytes and cache markers stay valid.
 			let tool_definitions = loop_state.freeze_or_reuse_tool_schema(fresh_tool_definitions);
+			// Apply threshold-based deferred schema loading: when the total
+			// estimated schema token cost exceeds the configured fraction of
+			// the context window, non-core tool schemas are withheld from the
+			// LLM and a `tool_search` pseudo-tool is injected so the model can
+			// load them on demand.
+			let tool_definitions = crate::runtime_loop::apply_deferred_mode(
+				tool_definitions,
+				loop_state,
+				self.agent_runtime_config.r#loop.context_window_tokens,
+			);
 
 			// Check step budget before calling the LLM.
 			if loop_state.remaining_step_budget == 0 {
@@ -1608,6 +1618,7 @@ impl GenericAgentRuntime {
 			}
 
 			// Execute regular tool calls and collect ToolResult messages.
+			let mut turn_tool_ids: Vec<String> = Vec::new();
 			for tc in &accumulated_tool_calls {
 				let tool_name = &tc.name;
 				let arguments = tc.arguments.clone();
@@ -1635,11 +1646,62 @@ impl GenericAgentRuntime {
 					}
 				}
 
+				// Intercept tool_search pseudo-tool — loads a deferred tool schema
+				// for the next turn (non-terminal).
+				if tool_name == PSEUDO_TOOL_SEARCH {
+					// Deduct step budget so repeated tool_search calls cannot loop
+					// without consuming budget.
+					loop_state.remaining_step_budget =
+						loop_state.remaining_step_budget.saturating_sub(1);
+
+					let tool_name_arg = arguments
+						.get("tool_name")
+						.and_then(|v| v.as_str())
+						.unwrap_or("");
+
+					let result = if let Some(ref mut deferred) = loop_state.deferred_tools {
+						if deferred.deferred_names.contains(&tool_name_arg.to_string()) {
+							if !deferred.loaded_names.contains(&tool_name_arg.to_string()) {
+								deferred.loaded_names.push(tool_name_arg.to_string());
+								// Schema must be rebuilt next turn to include the newly loaded tool.
+								loop_state.mark_tool_schema_dirty();
+							}
+							format!(
+								"Tool '{}' schema will be available in the next turn.",
+								tool_name_arg
+							)
+						} else {
+							format!(
+								"Tool '{}' is not in the deferred list. Available deferred tools: {}",
+								tool_name_arg,
+								deferred.deferred_names.join(", ")
+							)
+						}
+					} else {
+						format!(
+							"All tools are already loaded. '{}' is available.",
+							tool_name_arg
+						)
+					};
+
+					messages.push(Message::ToolResult {
+						tool_use_id: tc.id.clone(),
+						content: result,
+						is_error: false,
+					});
+					continue;
+				}
+
 				// Intercept task pseudo-tools — non-terminal, return ToolResult and continue.
 				if matches!(
 					tool_name.as_str(),
 					PSEUDO_TASK_CREATE | PSEUDO_TASK_UPDATE | PSEUDO_TASK_LIST | PSEUDO_TASK_GET
 				) {
+					// Deduct step budget so repeated task-tool calls cannot loop
+					// without consuming budget.
+					loop_state.remaining_step_budget =
+						loop_state.remaining_step_budget.saturating_sub(1);
+
 					let result_content = self.handle_task_pseudo_tool(tool_name, &arguments);
 					let is_error = result_content.starts_with("Error:");
 					messages.push(Message::ToolResult {
@@ -1737,8 +1799,11 @@ impl GenericAgentRuntime {
 				});
 
 				let elapsed = execution_elapsed_ms(&execution.result);
-				let raw_tool_output =
-					truncate_raw_tool_output(raw_tool_output_from_result(&execution.result));
+				let cap = tool_result_cap(&tool_name_owned);
+				// Keep the full (un-truncated) output for disk persistence.
+				// The truncated copy is used for the StepRecord and LLM context.
+				let full_raw_tool_output = raw_tool_output_from_result(&execution.result);
+				let raw_tool_output = truncate_raw_tool_output(full_raw_tool_output.clone(), cap);
 				let observation = observation_from_execution(
 					&tool_name_owned,
 					&execution.result,
@@ -1797,23 +1862,58 @@ impl GenericAgentRuntime {
 				);
 				loop_state.record_step(step);
 
-				// Build ToolResult message for the next LLM turn.
-				let tool_result_content = if raw_tool_output.is_null() {
+				// Build the full (un-truncated) content string for disk persistence.
+				let full_tool_result_content = if full_raw_tool_output.is_null() {
 					observation.message.clone()
-				} else if let Some(s) = raw_tool_output.as_str() {
+				} else if let Some(s) = full_raw_tool_output.as_str() {
 					s.to_string()
 				} else {
-					serde_json::to_string(&raw_tool_output)
+					serde_json::to_string(&full_raw_tool_output)
 						.unwrap_or_else(|_| observation.message.clone())
 				};
-				let tool_result_content =
-					truncate_tool_result_for_message(&tool_result_content, MAX_TOOL_RESULT_CHARS);
-				let is_error = !observation.ok;
+
+				// FileRead overflow: return error with max_bytes guidance
+				// instead of truncation. Checked BEFORE disk persistence so the
+				// raw content length is still available.
+				let (tool_result_content, is_error) =
+					if tool_name_owned == "Read" && full_tool_result_content.len() > 100_000 {
+						let total = full_tool_result_content.len();
+						(
+							format!(
+								"Error: file content is too large ({total} chars) to include in \
+							 context. Re-read with a smaller `max_bytes` parameter to retrieve \
+							 a manageable portion of the file."
+							),
+							true,
+						)
+					} else if tool_name_owned == "Read" {
+						// Read delivers full content (TOOL_CAP_NO_TRUNCATE). Skip
+						// disk persistence — the user controls size via max_bytes,
+						// and preview-replacing a 5KB read would be a regression.
+						(full_tool_result_content, !observation.ok)
+					} else {
+						// Disk persistence: persist full (un-truncated) content and
+						// replace with preview (skipped for Read tool).
+						let run_id = loop_state.run_id.clone();
+						let (content, _is_preview) = loop_state.tool_result_store.register(
+							&tc.id,
+							&full_tool_result_content,
+							&run_id,
+						);
+						// If register() produced a preview, use it; otherwise
+						// truncate the (already-full) content for LLM context.
+						let tool_cap = tool_result_cap(&tool_name_owned);
+						(
+							truncate_tool_result_for_message(&content, tool_cap),
+							!observation.ok,
+						)
+					};
 				messages.push(Message::ToolResult {
 					tool_use_id: tc.id.clone(),
 					content: tool_result_content,
 					is_error,
 				});
+				turn_tool_ids.push(tc.id.clone());
 
 				// If budget is exhausted after this step, inject a warning message.
 				if interpreted.budget_exhausted || interpreted.recovery_exhausted {
@@ -1825,6 +1925,41 @@ impl GenericAgentRuntime {
 							interpreted.remaining_recovery_budget,
 						),
 					});
+				}
+			}
+
+			// Advance tool result store state at end of turn.
+			loop_state.tool_result_store.advance_turn();
+
+			// Per-turn tool budget check.
+			if !turn_tool_ids.is_empty() {
+				let per_turn_tool_tokens =
+					crate::runtime_loop::estimate_turn_tool_tokens(&messages, &turn_tool_ids);
+				let exceeded =
+					per_turn_tool_tokens > crate::runtime_loop::PER_TURN_TOOL_BUDGET_TOKENS;
+				if let Some(sender) = event_sender {
+					let _ = sender.send(crate::runtime_loop::LoopEvent::ToolBudgetCheck {
+						step: current_step_index,
+						per_turn_tool_tokens,
+						exceeded,
+					});
+				}
+				// When budget exceeded, trigger Layer 0 microcompact to free pressure.
+				if exceeded {
+					let freed = crate::runtime_loop::microcompact_old_tool_results(
+						&mut messages,
+						crate::runtime_loop::MICROCOMPACT_RETAIN_RECENT,
+						&loop_state.estimator_calibration,
+					);
+					if freed > 0 {
+						loop_state.cache_break_detector.notify_compaction();
+						if let Some(sender) = event_sender {
+							let _ = sender.send(crate::runtime_loop::LoopEvent::MicrocompactRan {
+								step: current_step_index,
+								freed_tokens: freed,
+							});
+						}
+					}
 				}
 			}
 
@@ -2528,7 +2663,7 @@ fn terminal_decision(
 	}
 }
 
-// normalize_tool_loop_observation, MAX_TOOL_RESULT_CHARS, truncate_tool_result_for_message,
+// normalize_tool_loop_observation, tool_result_cap, truncate_tool_result_for_message,
 // truncate_raw_tool_output extracted to crate::tools::dispatch module.
 
 fn awaiting_user_resume_prompt(
