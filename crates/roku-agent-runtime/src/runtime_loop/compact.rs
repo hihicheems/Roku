@@ -200,6 +200,7 @@ pub async fn compact_history_with_llm(
 			tools: None,
 			model_override: None,
 			thinking_effort: None,
+			system_prompt_sections: None,
 		}),
 	)
 	.await;
@@ -912,6 +913,7 @@ pub async fn compact_messages_with_structured_summary(
 				tools: None,
 				model_override: None,
 				thinking_effort: None,
+				system_prompt_sections: None,
 			}),
 		)
 		.await;
@@ -1083,6 +1085,9 @@ mod tests {
 			disallowed_tools: Vec::new(),
 			estimator_calibration: EstimatorCalibration::default(),
 			consecutive_autocompact_failures: 0,
+			frozen_tool_schema: None,
+			tool_schema_dirty: true,
+			observed_plan_mode: None,
 		}
 	}
 
@@ -1963,6 +1968,8 @@ mod tests {
 			finish_reason: None,
 			prompt_tokens: 50,
 			output_tokens: 30,
+			cache_creation_input_tokens: 0,
+			cache_read_input_tokens: 0,
 			latency_ms: 10,
 			tool_calls: None,
 		})

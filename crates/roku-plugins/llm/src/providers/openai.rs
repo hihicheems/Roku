@@ -516,6 +516,7 @@ struct ParsedChatCompletion {
 	finish_reason: Option<String>,
 	prompt_tokens: u64,
 	output_tokens: u64,
+	cache_read_input_tokens: u64,
 	tool_calls: Option<Vec<ToolCallBlock>>,
 }
 
@@ -573,12 +574,18 @@ fn parse_complete_response(body: &str) -> Result<ParsedChatCompletion, ProviderC
 		.and_then(|u| u.get("completion_tokens"))
 		.and_then(Value::as_u64)
 		.unwrap_or(0);
+	let cache_read_input_tokens = usage
+		.and_then(|u| u.get("prompt_tokens_details"))
+		.and_then(|d| d.get("cached_tokens"))
+		.and_then(Value::as_u64)
+		.unwrap_or(0);
 
 	Ok(ParsedChatCompletion {
 		output,
 		finish_reason,
 		prompt_tokens,
 		output_tokens,
+		cache_read_input_tokens,
 		tool_calls,
 	})
 }
@@ -784,6 +791,8 @@ impl LlmProvider for OpenAiProvider {
 			finish_reason: parsed.finish_reason,
 			prompt_tokens: parsed.prompt_tokens,
 			output_tokens: parsed.output_tokens,
+			cache_creation_input_tokens: 0,
+			cache_read_input_tokens: parsed.cache_read_input_tokens,
 			latency_ms,
 			tool_calls: parsed.tool_calls,
 		})
@@ -834,6 +843,7 @@ impl LlmProvider for OpenAiProvider {
 		let mut finish_reason: Option<String> = None;
 		let mut prompt_tokens: u64 = 0;
 		let mut output_tokens: u64 = 0;
+		let mut cache_read_input_tokens: u64 = 0;
 		let mut stream_error: Option<ProviderCallError> = None;
 		let mut pending_tools: HashMap<u32, PendingToolCall> = HashMap::new();
 
@@ -886,6 +896,11 @@ impl LlmProvider for OpenAiProvider {
 					.get("completion_tokens")
 					.and_then(Value::as_u64)
 					.unwrap_or(output_tokens);
+				cache_read_input_tokens = usage
+					.get("prompt_tokens_details")
+					.and_then(|d| d.get("cached_tokens"))
+					.and_then(Value::as_u64)
+					.unwrap_or(cache_read_input_tokens);
 			}
 
 			let choice = chunk
@@ -1000,6 +1015,8 @@ impl LlmProvider for OpenAiProvider {
 			finish_reason,
 			prompt_tokens,
 			output_tokens,
+			cache_creation_input_tokens: 0,
+			cache_read_input_tokens,
 			latency_ms,
 			tool_calls,
 		})
@@ -1105,7 +1122,30 @@ mod tests {
 		assert_eq!(parsed.finish_reason.as_deref(), Some("stop"));
 		assert_eq!(parsed.prompt_tokens, 10);
 		assert_eq!(parsed.output_tokens, 5);
+		assert_eq!(parsed.cache_read_input_tokens, 0);
 		assert!(parsed.tool_calls.is_none());
+	}
+
+	#[test]
+	fn parse_response_populates_cached_prompt_tokens() {
+		let body = r#"{
+			"id": "chatcmpl-cache",
+			"object": "chat.completion",
+			"choices": [{
+				"index": 0,
+				"message": {"role": "assistant", "content": "cached"},
+				"finish_reason": "stop"
+			}],
+			"usage": {
+				"prompt_tokens": 200,
+				"completion_tokens": 2,
+				"total_tokens": 202,
+				"prompt_tokens_details": {"cached_tokens": 128}
+			}
+		}"#;
+		let parsed = parse_complete_response(body).unwrap();
+		assert_eq!(parsed.prompt_tokens, 200);
+		assert_eq!(parsed.cache_read_input_tokens, 128);
 	}
 
 	#[test]
@@ -1199,6 +1239,7 @@ mod tests {
 			}]),
 			model_override: None,
 			thinking_effort: None,
+			system_prompt_sections: None,
 		};
 		let body = build_request("gpt-4o", &request, false, DEFAULT_MAX_TOKENS, None);
 		let json = serde_json::to_value(&body).unwrap();
@@ -1227,6 +1268,7 @@ mod tests {
 			tools: None,
 			model_override: None,
 			thinking_effort: None,
+			system_prompt_sections: None,
 		};
 		let body = build_request("gpt-4o", &request, true, DEFAULT_MAX_TOKENS, None);
 		let json = serde_json::to_value(&body).unwrap();

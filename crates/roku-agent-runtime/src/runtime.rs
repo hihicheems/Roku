@@ -553,6 +553,7 @@ impl GenericAgentRuntime {
 				tools: None,
 				model_override: None,
 				thinking_effort: None,
+				system_prompt_sections: None,
 			})
 			.await
 		{
@@ -994,6 +995,14 @@ impl GenericAgentRuntime {
 		// Per-turn token accumulators: summed across all LLM calls in this loop execution.
 		let mut total_prompt_tokens: u64 = 0;
 		let mut total_output_tokens: u64 = 0;
+		// Per-tier cache accumulators — additive counters mirroring the
+		// provider's `usage.cache_*_input_tokens` (Anthropic) and
+		// `usage.*_tokens_details.cached_tokens` (OpenAI). Stay at `0`
+		// through every turn until 09 / 10 land the cache markers /
+		// prompt_cache_key; after that they track the real cache activity
+		// emitted alongside `prompt_tokens` / `output_tokens`.
+		let mut total_cache_creation_input_tokens: u64 = 0;
+		let mut total_cache_read_input_tokens: u64 = 0;
 		// Track the model that served this request (updated on each successful LLM call).
 		let mut last_model_id: Option<String> = None;
 
@@ -1002,13 +1011,20 @@ impl GenericAgentRuntime {
 		const COST_PER_M_OUTPUT_TOKENS_USD: f64 = 15.0;
 
 		loop {
-			// Refresh visible tools at the start of each turn.
+			// Refresh visible tools at the start of each turn. This also
+			// detects plan-mode transitions and `disallowed_tools` pushes,
+			// marking `loop_state.tool_schema_dirty` on the turn the
+			// transition occurs.
 			self.refresh_tool_loop_visible_tools(loop_state);
-			let tool_definitions = build_tool_definitions(
+			let fresh_tool_definitions = build_tool_definitions(
 				&loop_state.visible_tools,
 				Some(&self.resource_catalog),
 				&loop_state.disallowed_tools,
 			);
+			// Freeze on first build; on subsequent clean turns return the
+			// cached `Vec<ToolDefinition>` so the provider adapter sees
+			// byte-identical tool bytes and cache markers stay valid.
+			let tool_definitions = loop_state.freeze_or_reuse_tool_schema(fresh_tool_definitions);
 
 			// Check step budget before calling the LLM.
 			if loop_state.remaining_step_budget == 0 {
@@ -1030,6 +1046,8 @@ impl GenericAgentRuntime {
 					COST_PER_M_INPUT_TOKENS_USD,
 					COST_PER_M_OUTPUT_TOKENS_USD,
 					last_model_id.as_deref(),
+					total_cache_creation_input_tokens,
+					total_cache_read_input_tokens,
 				);
 				return self.synthetic_loop_terminal_result(
 					task_id,
@@ -1043,14 +1061,19 @@ impl GenericAgentRuntime {
 
 			// Build the modular system prompt with environment + project instructions.
 			// Environment is re-probed each turn; project instruction is stable (loaded once above).
+			// The structured `sections` form carries the static/dynamic split that
+			// prompt-cache adapters will consume; `system_prompt` keeps the single
+			// String shape for adapters that haven't migrated yet.
 			let env_snapshot = crate::runtime_loop::environment::probe_environment();
-			let system_prompt = crate::runtime_loop::system_prompt::build_system_prompt(
-				env_snapshot,
-				&loop_state.working_directory,
-				project_instruction.as_deref(),
-				Some(runtime_memory_sections),
-				self.loop_mode == LoopMode::Plan,
-			);
+			let system_prompt_sections =
+				crate::runtime_loop::system_prompt::build_system_prompt_sections(
+					env_snapshot,
+					&loop_state.working_directory,
+					project_instruction.as_deref(),
+					Some(runtime_memory_sections),
+					self.loop_mode == LoopMode::Plan,
+				);
+			let system_prompt = system_prompt_sections.flatten();
 
 			let config = &self.agent_runtime_config.next_step;
 			let thinking_effort = request.thinking_effort.as_deref().and_then(|s| match s {
@@ -1166,6 +1189,7 @@ impl GenericAgentRuntime {
 					},
 					model_override: request.model_override.clone(),
 					thinking_effort,
+					system_prompt_sections: Some(system_prompt_sections.clone()),
 				};
 
 				// Stream the LLM response, accumulating text and tool_calls.
@@ -1245,6 +1269,11 @@ impl GenericAgentRuntime {
 									total_prompt_tokens.saturating_add(resp.prompt_tokens);
 								total_output_tokens =
 									total_output_tokens.saturating_add(resp.output_tokens);
+								total_cache_creation_input_tokens =
+									total_cache_creation_input_tokens
+										.saturating_add(resp.cache_creation_input_tokens);
+								total_cache_read_input_tokens = total_cache_read_input_tokens
+									.saturating_add(resp.cache_read_input_tokens);
 								last_model_id = Some(resp.model_id.clone());
 								// Fold the real `usage.prompt_tokens` back into the
 								// estimator calibration so the next turn's pressure
@@ -1279,6 +1308,11 @@ impl GenericAgentRuntime {
 									total_prompt_tokens.saturating_add(resp.prompt_tokens);
 								total_output_tokens =
 									total_output_tokens.saturating_add(resp.output_tokens);
+								total_cache_creation_input_tokens =
+									total_cache_creation_input_tokens
+										.saturating_add(resp.cache_creation_input_tokens);
+								total_cache_read_input_tokens = total_cache_read_input_tokens
+									.saturating_add(resp.cache_read_input_tokens);
 								last_model_id = Some(resp.model_id.clone());
 								loop_state
 									.estimator_calibration
@@ -1348,6 +1382,8 @@ impl GenericAgentRuntime {
 							COST_PER_M_INPUT_TOKENS_USD,
 							COST_PER_M_OUTPUT_TOKENS_USD,
 							last_model_id.as_deref(),
+							total_cache_creation_input_tokens,
+							total_cache_read_input_tokens,
 						);
 						return self.synthetic_loop_terminal_result(
 							task_id,
@@ -1388,6 +1424,8 @@ impl GenericAgentRuntime {
 					COST_PER_M_INPUT_TOKENS_USD,
 					COST_PER_M_OUTPUT_TOKENS_USD,
 					last_model_id.as_deref(),
+					total_cache_creation_input_tokens,
+					total_cache_read_input_tokens,
 				);
 				return self.synthetic_loop_terminal_result(
 					task_id,
@@ -1423,6 +1461,8 @@ impl GenericAgentRuntime {
 							COST_PER_M_INPUT_TOKENS_USD,
 							COST_PER_M_OUTPUT_TOKENS_USD,
 							last_model_id.as_deref(),
+							total_cache_creation_input_tokens,
+							total_cache_read_input_tokens,
 						);
 						return self.synthetic_loop_terminal_result(
 							task_id,
@@ -1455,6 +1495,8 @@ impl GenericAgentRuntime {
 							COST_PER_M_INPUT_TOKENS_USD,
 							COST_PER_M_OUTPUT_TOKENS_USD,
 							last_model_id.as_deref(),
+							total_cache_creation_input_tokens,
+							total_cache_read_input_tokens,
 						);
 						return self.synthetic_loop_terminal_result(
 							task_id,
@@ -1486,6 +1528,8 @@ impl GenericAgentRuntime {
 							COST_PER_M_INPUT_TOKENS_USD,
 							COST_PER_M_OUTPUT_TOKENS_USD,
 							last_model_id.as_deref(),
+							total_cache_creation_input_tokens,
+							total_cache_read_input_tokens,
 						);
 						return self.synthetic_loop_terminal_result(
 							task_id,
@@ -1838,11 +1882,24 @@ impl GenericAgentRuntime {
 	}
 
 	fn refresh_tool_loop_visible_tools(&self, loop_state: &mut LoopState) {
+		let currently_plan_mode = self.loop_mode == LoopMode::Plan;
+		// Schema-dirty event: plan-mode entered or exited since last refresh.
+		// First refresh of a loop state has `observed_plan_mode == None` and
+		// starts already-dirty, so we only need to invalidate on actual
+		// transitions.
+		if loop_state
+			.observed_plan_mode
+			.is_some_and(|prev| prev != currently_plan_mode)
+		{
+			loop_state.mark_tool_schema_dirty();
+		}
+		loop_state.observed_plan_mode = Some(currently_plan_mode);
+
 		let mut visible_tools = self.visible_tools_for_loop_state(loop_state);
 		// In Plan mode, filter catalog tools to read-only via the registry,
 		// and block mutating pseudo-tools via disallowed_tools (applied in
 		// build_tool_definitions).
-		if self.loop_mode == LoopMode::Plan {
+		if currently_plan_mode {
 			visible_tools.retain(|name| {
 				self.tool_registry
 					.get(name)
@@ -1850,13 +1907,26 @@ impl GenericAgentRuntime {
 			});
 			for blocked in [PSEUDO_TASK_CREATE, PSEUDO_TASK_UPDATE] {
 				if !loop_state.disallowed_tools.iter().any(|d| d == blocked) {
+					// Schema-dirty event: disallowed_tools gained a new entry.
+					// Idempotent on repeat turns — mark dirty only on the
+					// turn that actually pushes.
 					loop_state.disallowed_tools.push(blocked.to_string());
+					loop_state.mark_tool_schema_dirty();
 				}
 			}
 		}
 		// Enforce disallowed_tools for catalog tools (sub-agents, plan mode).
 		if !loop_state.disallowed_tools.is_empty() {
 			visible_tools.retain(|name| !loop_state.disallowed_tools.contains(name));
+		}
+		// Schema-dirty event: the visible tool set diverged from the previous
+		// turn for any reason (route_decision shifted candidates, runtime
+		// availability snapshot changed, etc.). Without this guard, a stale
+		// frozen schema would be served to the model while `build_tool_definitions`
+		// is called with a different visible set — the cache hit would be
+		// a silent correctness bug, not a missed optimization.
+		if loop_state.visible_tools != visible_tools {
+			loop_state.mark_tool_schema_dirty();
 		}
 		loop_state.visible_tools = visible_tools;
 	}
@@ -2251,6 +2321,11 @@ impl Default for GenericAgentRuntime {
 /// Emit a `LoopEvent::TokenUsage` event if a sender is present.
 ///
 /// Computes estimated cost using the supplied per-million-token rates.
+/// `cache_creation_input_tokens` and `cache_read_input_tokens` are
+/// additive per-tier counters sourced from the provider's `usage` block;
+/// they are `0` when the provider did not report any cache activity (which
+/// is the current default until 09 / 10 land).
+#[allow(clippy::too_many_arguments)]
 fn emit_token_usage(
 	event_sender: Option<&crate::runtime_loop::LoopEventSender>,
 	step: u32,
@@ -2259,6 +2334,8 @@ fn emit_token_usage(
 	cost_per_m_input_usd: f64,
 	cost_per_m_output_usd: f64,
 	model_id: Option<&str>,
+	cache_creation_input_tokens: u64,
+	cache_read_input_tokens: u64,
 ) {
 	if let Some(sender) = event_sender {
 		let total_tokens = prompt_tokens.saturating_add(output_tokens);
@@ -2271,6 +2348,8 @@ fn emit_token_usage(
 			total_tokens,
 			estimated_cost_usd,
 			model_id: model_id.map(str::to_string),
+			cache_creation_input_tokens,
+			cache_read_input_tokens,
 		});
 	}
 }
@@ -2907,6 +2986,8 @@ mod tests {
 				finish_reason: None,
 				prompt_tokens: 24,
 				output_tokens: 18,
+				cache_creation_input_tokens: 0,
+				cache_read_input_tokens: 0,
 				latency_ms: 10,
 				tool_calls,
 			})
@@ -2962,6 +3043,8 @@ mod tests {
 				finish_reason: None,
 				prompt_tokens: 20,
 				output_tokens: 16,
+				cache_creation_input_tokens: 0,
+				cache_read_input_tokens: 0,
 				latency_ms: 10,
 				tool_calls: None,
 			})
@@ -3020,6 +3103,8 @@ mod tests {
 						finish_reason: None,
 						prompt_tokens: 24,
 						output_tokens: 18,
+						cache_creation_input_tokens: 0,
+						cache_read_input_tokens: 0,
 						latency_ms: 10,
 						tool_calls,
 					})

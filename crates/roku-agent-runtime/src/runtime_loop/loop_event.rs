@@ -137,6 +137,18 @@ pub enum LoopEvent {
 		/// actually-served model, which may differ from the configured primary.
 		#[serde(skip_serializing_if = "Option::is_none")]
 		model_id: Option<String>,
+		/// Input tokens newly written to the provider's prompt cache this
+		/// turn. Always `0` for OpenAI (no write counter); populated from
+		/// Anthropic's `cache_creation_input_tokens`. Defaults to `0` when
+		/// legacy emitters omit the field.
+		#[serde(default)]
+		cache_creation_input_tokens: u64,
+		/// Input tokens served from the provider's prompt cache this turn.
+		/// Populated from Anthropic's `cache_read_input_tokens` and OpenAI's
+		/// `input_tokens_details.cached_tokens` / `prompt_tokens_details.cached_tokens`.
+		/// Defaults to `0` when the provider did not report any cache hit.
+		#[serde(default)]
+		cache_read_input_tokens: u64,
 	},
 	/// Calibration sample emitted after each successful LLM call.
 	///

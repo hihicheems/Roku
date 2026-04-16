@@ -2110,6 +2110,8 @@ mod tests {
 				finish_reason: None,
 				prompt_tokens: 64,
 				output_tokens: 24,
+				cache_creation_input_tokens: 0,
+				cache_read_input_tokens: 0,
 				latency_ms: 10,
 				tool_calls: None,
 			})

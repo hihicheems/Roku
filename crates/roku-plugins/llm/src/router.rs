@@ -234,6 +234,8 @@ impl LlmRouter {
 			estimated_cost_usd,
 			latency_ms: provider_response.latency_ms,
 			tool_calls: provider_response.tool_calls.clone(),
+			cache_creation_input_tokens: provider_response.cache_creation_input_tokens,
+			cache_read_input_tokens: provider_response.cache_read_input_tokens,
 		})
 	}
 
@@ -318,6 +320,8 @@ impl LlmRouter {
 						estimated_cost_usd,
 						latency_ms: response.latency_ms,
 						tool_calls: response.tool_calls.clone(),
+						cache_creation_input_tokens: response.cache_creation_input_tokens,
+						cache_read_input_tokens: response.cache_read_input_tokens,
 					});
 				}
 				Ok(Err(error)) => {
@@ -801,6 +805,8 @@ mod tests {
 				finish_reason: None,
 				prompt_tokens: self.prompt_tokens,
 				output_tokens: self.output_tokens,
+				cache_creation_input_tokens: 0,
+				cache_read_input_tokens: 0,
 				latency_ms: self.latency_ms,
 				tool_calls: None,
 			})
@@ -820,6 +826,7 @@ mod tests {
 			tools: None,
 			model_override: None,
 			thinking_effort: None,
+			system_prompt_sections: None,
 		}
 	}
 
@@ -1057,6 +1064,8 @@ mod tests {
 					finish_reason: None,
 					prompt_tokens: 40,
 					output_tokens: 12,
+					cache_creation_input_tokens: 0,
+					cache_read_input_tokens: 0,
 					latency_ms: 80,
 					tool_calls: None,
 				}),
@@ -1170,6 +1179,8 @@ mod tests {
 					finish_reason: None,
 					prompt_tokens: 30,
 					output_tokens: 10,
+					cache_creation_input_tokens: 0,
+					cache_read_input_tokens: 0,
 					latency_ms: 60,
 					tool_calls: None,
 				}),
@@ -1242,6 +1253,8 @@ mod tests {
 					finish_reason: Some("length".to_string()),
 					prompt_tokens: 10,
 					output_tokens: 5,
+					cache_creation_input_tokens: 0,
+					cache_read_input_tokens: 0,
 					latency_ms: 20,
 					tool_calls: None,
 				})
@@ -1324,6 +1337,8 @@ mod tests {
 					finish_reason: None,
 					prompt_tokens: 10,
 					output_tokens: 5,
+					cache_creation_input_tokens: 0,
+					cache_read_input_tokens: 0,
 					latency_ms: 1,
 					tool_calls: None,
 				}),
@@ -1374,6 +1389,8 @@ mod tests {
 						finish_reason: None,
 						prompt_tokens: 10,
 						output_tokens: 5,
+						cache_creation_input_tokens: 0,
+						cache_read_input_tokens: 0,
 						latency_ms: 1,
 						tool_calls: None,
 					}),
