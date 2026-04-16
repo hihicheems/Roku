@@ -539,8 +539,8 @@ api_key = "should-not-be-configurable"
 provider = "anthropic"
 
 [runtime.llm.anthropic]
-primary_model = "claude-opus-4-20250805"
-fallback_models = ["claude-sonnet-4-5-20250929"]
+primary_model = "claude-opus-4-6"
+fallback_models = ["claude-haiku-4-5-20251001"]
 max_tokens = 4096
 "#,
 		);
@@ -548,10 +548,10 @@ max_tokens = 4096
 		let configs = load_runtime_configs(&layout).expect("anthropic config should load");
 
 		assert_eq!(configs.llm_provider, LlmProviderKind::Anthropic);
-		assert_eq!(configs.anthropic.primary_model, "claude-opus-4-20250805");
+		assert_eq!(configs.anthropic.primary_model, "claude-opus-4-6");
 		assert_eq!(
 			configs.anthropic.fallback_models,
-			vec!["claude-sonnet-4-5-20250929".to_string()]
+			vec!["claude-haiku-4-5-20251001".to_string()]
 		);
 		assert_eq!(configs.anthropic.max_tokens, 4096);
 	}
@@ -570,8 +570,8 @@ max_tokens = 4096
 provider = "openai"
 
 [runtime.llm.openai]
-primary_model = "gpt-4o-2024-11-20"
-fallback_models = ["gpt-4o-mini"]
+primary_model = "gpt-5.4"
+fallback_models = ["gpt-5.1-codex-mini"]
 max_tokens = 2048
 "#,
 		);
@@ -579,10 +579,10 @@ max_tokens = 2048
 		let configs = load_runtime_configs(&layout).expect("openai config should load");
 
 		assert_eq!(configs.llm_provider, LlmProviderKind::Openai);
-		assert_eq!(configs.openai.primary_model, "gpt-4o-2024-11-20");
+		assert_eq!(configs.openai.primary_model, "gpt-5.4");
 		assert_eq!(
 			configs.openai.fallback_models,
-			vec!["gpt-4o-mini".to_string()]
+			vec!["gpt-5.1-codex-mini".to_string()]
 		);
 		assert_eq!(configs.openai.max_tokens, 2048);
 	}

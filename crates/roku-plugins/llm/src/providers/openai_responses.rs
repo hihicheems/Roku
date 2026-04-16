@@ -43,6 +43,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::sync::mpsc;
 
+use crate::providers::openai_ws::{OpenAiWsSession, SharedWsSession};
 use crate::router::{LlmProvider, LlmRouter};
 use crate::types::{
 	GenerationRequest, Message, ModelProfile, ProviderCallError, ProviderResponse, RiskTier,
@@ -67,14 +68,22 @@ pub struct OpenAiResponsesConfig {
 	pub base_url: String,
 	/// Optional reasoning effort (`low`, `medium`, `high`).
 	pub reasoning_effort: Option<String>,
+	/// Enable delta mode: include `previous_response_id` on subsequent turns
+	/// to reduce upstream payload size. Controlled by `ROKU_OPENAI_WEBSOCKET_MODE`.
+	/// Default: `false`.
+	pub websocket_mode: bool,
 }
 
 impl OpenAiResponsesConfig {
 	pub fn new(api_key: String) -> Self {
+		let websocket_mode = std::env::var("ROKU_OPENAI_WEBSOCKET_MODE")
+			.map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+			.unwrap_or(false);
 		Self {
 			api_key,
 			base_url: DEFAULT_RESPONSES_URL.to_string(),
 			reasoning_effort: None,
+			websocket_mode,
 		}
 	}
 }
@@ -150,6 +159,9 @@ pub struct OpenAiResponsesProvider {
 	/// provider construction time so every request in the same session
 	/// carries the same key (prerequisite for cache hits on turn 2+).
 	prompt_cache_key: String,
+	/// Per-session delta state. Tracks `previous_response_id` across turns
+	/// when `config.websocket_mode` is enabled.
+	ws_session: SharedWsSession,
 }
 
 impl OpenAiResponsesProvider {
@@ -161,10 +173,14 @@ impl OpenAiResponsesProvider {
 				message: format!("http client error: {e}"),
 			})?;
 		let prompt_cache_key = derive_session_prompt_cache_key();
+		let ws_session = std::sync::Arc::new(tokio::sync::Mutex::new(OpenAiWsSession::new(
+			config.websocket_mode,
+		)));
 		Ok(Self {
 			client,
 			config,
 			prompt_cache_key,
+			ws_session,
 		})
 	}
 
@@ -226,12 +242,16 @@ fn derive_session_prompt_cache_key() -> String {
 /// appear as a top-level `instructions` string. Tool results become
 /// `function_call_output` items. Assistant messages with tool calls emit
 /// separate `function_call` items for each call.
+///
+/// When `previous_response_id` is `Some`, it is added to the request body to
+/// enable delta mode: the server can skip reprocessing already-seen context.
 fn build_responses_request(
 	model_id: &str,
 	request: &GenerationRequest,
 	stream: bool,
 	reasoning_effort: Option<&str>,
 	prompt_cache_key: &str,
+	previous_response_id: Option<&str>,
 ) -> Value {
 	let mut input: Vec<Value> = Vec::new();
 
@@ -311,12 +331,25 @@ fn build_responses_request(
 		body["tools"] = json!(tools);
 	}
 
+	// Delta mode: include the prior response ID so the server can skip
+	// reprocessing already-processed context from the previous turn.
+	if let Some(prev_id) = previous_response_id {
+		body["previous_response_id"] = serde_json::json!(prev_id);
+	}
+
 	// Reasoning config — only attach when requested.
 	if let Some(effort) = reasoning_effort {
 		body["reasoning"] = json!({
 			"effort": effort,
 			"summary": "auto",
 		});
+	}
+
+	// For reasoning-capable models, request that encrypted reasoning content
+	// is included in the response so it can be passed back in subsequent turns,
+	// enabling the provider to reuse prior reasoning traces.
+	if crate::model_cost::is_reasoning_model(model_id) {
+		body["include"] = json!(["reasoning.encrypted_content"]);
 	}
 
 	body
@@ -354,6 +387,9 @@ struct SseStreamState {
 	has_function_call: bool,
 	/// Set when an `error` or `response.failed` SSE event is received.
 	stream_error: Option<String>,
+	/// The response `id` from the server, captured from `response.created` or
+	/// `response.completed` for delta mode (`previous_response_id` next turn).
+	response_id: Option<String>,
 }
 
 struct PendingResponsesToolCall {
@@ -375,6 +411,7 @@ impl SseStreamState {
 			cache_read_input_tokens: 0,
 			has_function_call: false,
 			stream_error: None,
+			response_id: None,
 		}
 	}
 }
@@ -512,6 +549,16 @@ async fn handle_sse_event(
 
 		// --- Response lifecycle ---
 		"response.completed" => {
+			// Capture response ID as fallback (in case response.created was missed).
+			if state.response_id.is_none()
+				&& let Some(id) = parsed
+					.get("response")
+					.and_then(|r| r.get("id"))
+					.and_then(Value::as_str)
+			{
+				state.response_id = Some(id.to_string());
+			}
+
 			// Extract usage.
 			if let Some(usage) = parsed.get("response").and_then(|r| r.get("usage")) {
 				state.prompt_tokens = usage
@@ -593,12 +640,13 @@ async fn handle_sse_event(
 		}
 
 		"response.created" => {
-			// Log for observability; no action needed.
+			// Capture the response ID for delta mode and log for observability.
 			if let Some(id) = parsed
 				.get("response")
 				.and_then(|r| r.get("id"))
 				.and_then(Value::as_str)
 			{
+				state.response_id = Some(id.to_string());
 				log_responses(
 					LogLevel::Debug,
 					"response created",
@@ -678,6 +726,20 @@ impl LlmProvider for OpenAiResponsesProvider {
 		tx: mpsc::Sender<StreamChunk>,
 	) -> Result<ProviderResponse, ProviderCallError> {
 		let headers = self.build_headers()?;
+
+		// Read delta session state before building the request body.
+		let (previous_response_id, delta_reuse_count) = {
+			let session = self.ws_session.lock().await;
+			if session.is_enabled() {
+				(
+					session.previous_response_id().map(str::to_owned),
+					session.reuse_count(),
+				)
+			} else {
+				(None, 0)
+			}
+		};
+
 		// Always stream=true — ChatGPT backend requires it.
 		let body = build_responses_request(
 			&model.model_id,
@@ -685,6 +747,7 @@ impl LlmProvider for OpenAiResponsesProvider {
 			true,
 			self.config.reasoning_effort.as_deref(),
 			&self.prompt_cache_key,
+			previous_response_id.as_deref(),
 		);
 		let started_at = Instant::now();
 
@@ -795,7 +858,22 @@ impl LlmProvider for OpenAiResponsesProvider {
 			.await;
 
 		if let Some(error) = stream_error {
+			// On failure, reset delta session state so the next turn starts
+			// fresh rather than sending a stale previous_response_id.
+			if self.config.websocket_mode {
+				let mut session = self.ws_session.lock().await;
+				session.reset();
+			}
 			return Err(error);
+		}
+
+		// Update delta session state on success.
+		let response_id = state.response_id.clone();
+		if self.config.websocket_mode
+			&& let Some(ref rid) = response_id
+		{
+			let mut session = self.ws_session.lock().await;
+			session.record_response(rid.clone());
 		}
 
 		log_responses(
@@ -807,6 +885,14 @@ impl LlmProvider for OpenAiResponsesProvider {
 				("latency_ms", latency_ms.to_string()),
 				("prompt_tokens", state.prompt_tokens.to_string()),
 				("output_tokens", state.output_tokens.to_string()),
+				(
+					"delta_reuse_count",
+					if self.config.websocket_mode {
+						delta_reuse_count.to_string()
+					} else {
+						"disabled".to_string()
+					},
+				),
 			],
 		);
 
@@ -819,6 +905,7 @@ impl LlmProvider for OpenAiResponsesProvider {
 			cache_read_input_tokens: state.cache_read_input_tokens,
 			latency_ms,
 			tool_calls,
+			response_id,
 		})
 	}
 }
@@ -932,7 +1019,8 @@ mod tests {
 			system_prompt_sections: None,
 		};
 
-		let body = build_responses_request("gpt-4.1", &request, false, None, "test-cache-key");
+		let body =
+			build_responses_request("gpt-4.1", &request, false, None, "test-cache-key", None);
 		let input = body["input"].as_array().expect("input array");
 		assert_eq!(input.len(), 1);
 		assert_eq!(input[0]["type"], "message");
@@ -962,7 +1050,8 @@ mod tests {
 			system_prompt_sections: None,
 		};
 
-		let body = build_responses_request("gpt-4.1", &request, false, None, "test-cache-key");
+		let body =
+			build_responses_request("gpt-4.1", &request, false, None, "test-cache-key", None);
 		let input = body["input"].as_array().expect("input array");
 		assert_eq!(input.len(), 1);
 		assert_eq!(input[0]["type"], "message");
@@ -995,7 +1084,8 @@ mod tests {
 			system_prompt_sections: None,
 		};
 
-		let body = build_responses_request("gpt-4.1", &request, false, None, "test-cache-key");
+		let body =
+			build_responses_request("gpt-4.1", &request, false, None, "test-cache-key", None);
 		let input = body["input"].as_array().expect("input array");
 		// text was empty so no message item, only function_call
 		assert_eq!(input.len(), 1);
@@ -1025,7 +1115,8 @@ mod tests {
 			system_prompt_sections: None,
 		};
 
-		let body = build_responses_request("gpt-4.1", &request, false, None, "test-cache-key");
+		let body =
+			build_responses_request("gpt-4.1", &request, false, None, "test-cache-key", None);
 		let input = body["input"].as_array().expect("input array");
 		assert_eq!(input.len(), 1);
 		assert_eq!(input[0]["type"], "function_call_output");
@@ -1052,7 +1143,8 @@ mod tests {
 			system_prompt_sections: None,
 		};
 
-		let body = build_responses_request("gpt-4.1", &request, false, None, "test-cache-key");
+		let body =
+			build_responses_request("gpt-4.1", &request, false, None, "test-cache-key", None);
 		assert_eq!(body["instructions"], "You are a helpful assistant.");
 		// input should only contain the user message, not the system prompt
 		let input = body["input"].as_array().expect("input array");
@@ -1077,8 +1169,14 @@ mod tests {
 			system_prompt_sections: None,
 		};
 
-		let body =
-			build_responses_request("gpt-4.1", &request, false, Some("high"), "test-cache-key");
+		let body = build_responses_request(
+			"gpt-4.1",
+			&request,
+			false,
+			Some("high"),
+			"test-cache-key",
+			None,
+		);
 		assert_eq!(body["reasoning"]["effort"], "high");
 		assert_eq!(body["reasoning"]["summary"], "auto");
 	}
@@ -1100,8 +1198,70 @@ mod tests {
 			system_prompt_sections: None,
 		};
 
-		let body = build_responses_request("gpt-4.1", &request, false, None, "test-cache-key");
+		let body =
+			build_responses_request("gpt-4.1", &request, false, None, "test-cache-key", None);
 		assert!(body.get("reasoning").is_none());
+	}
+
+	#[test]
+	fn reasoning_model_includes_encrypted_content_field() {
+		let request = GenerationRequest {
+			system_prompt: None,
+			prompt: "test".to_string(),
+			messages: None,
+			expected_output_tokens: 100,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: 100_000,
+			budget_cost_remaining_usd: 10.0,
+			tools: None,
+			model_override: None,
+			thinking_effort: None,
+			system_prompt_sections: None,
+		};
+
+		// o3-mini is a reasoning model — should include encrypted_content
+		let body = build_responses_request(
+			"o3-mini",
+			&request,
+			false,
+			Some("medium"),
+			"test-cache-key",
+			None,
+		);
+		let include = body["include"].as_array().expect("include array");
+		assert!(
+			include
+				.iter()
+				.any(|v| v.as_str() == Some("reasoning.encrypted_content")),
+			"reasoning model must request encrypted_content"
+		);
+	}
+
+	#[test]
+	fn non_reasoning_model_does_not_include_encrypted_content_field() {
+		let request = GenerationRequest {
+			system_prompt: None,
+			prompt: "test".to_string(),
+			messages: None,
+			expected_output_tokens: 100,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: 100_000,
+			budget_cost_remaining_usd: 10.0,
+			tools: None,
+			model_override: None,
+			thinking_effort: None,
+			system_prompt_sections: None,
+		};
+
+		// gpt-4.1 is not a reasoning model — no include field
+		let body =
+			build_responses_request("gpt-4.1", &request, false, None, "test-cache-key", None);
+		assert!(
+			body.get("include").is_none(),
+			"non-reasoning model must not have include field"
+		);
 	}
 
 	#[test]
@@ -1127,7 +1287,8 @@ mod tests {
 			system_prompt_sections: None,
 		};
 
-		let body = build_responses_request("gpt-4.1", &request, false, None, "test-cache-key");
+		let body =
+			build_responses_request("gpt-4.1", &request, false, None, "test-cache-key", None);
 		let tools = body["tools"].as_array().expect("tools array");
 		assert_eq!(tools.len(), 1);
 		assert_eq!(tools[0]["type"], "function");
@@ -1176,7 +1337,7 @@ mod tests {
 			thinking_effort: None,
 			system_prompt_sections: None,
 		};
-		let body = build_responses_request("gpt-4.1", &request, false, None, "session-abc");
+		let body = build_responses_request("gpt-4.1", &request, false, None, "session-abc", None);
 		assert_eq!(body["prompt_cache_key"], "session-abc");
 	}
 
@@ -1207,6 +1368,7 @@ mod tests {
 			api_key: "test-key".to_string(),
 			base_url: "https://example.invalid/v1/responses".to_string(),
 			reasoning_effort: None,
+			websocket_mode: false,
 		};
 		let provider =
 			OpenAiResponsesProvider::new(config).expect("provider construction succeeds");
@@ -1224,12 +1386,66 @@ mod tests {
 			thinking_effort: None,
 			system_prompt_sections: None,
 		};
-		let first =
-			build_responses_request("gpt-4.1", &request, true, None, &provider.prompt_cache_key);
-		let second =
-			build_responses_request("gpt-4.1", &request, true, None, &provider.prompt_cache_key);
+		let first = build_responses_request(
+			"gpt-4.1",
+			&request,
+			true,
+			None,
+			&provider.prompt_cache_key,
+			None,
+		);
+		let second = build_responses_request(
+			"gpt-4.1",
+			&request,
+			true,
+			None,
+			&provider.prompt_cache_key,
+			None,
+		);
 		assert_eq!(first["prompt_cache_key"], second["prompt_cache_key"]);
 		let k = first["prompt_cache_key"].as_str().expect("string key");
 		assert!(!k.is_empty());
+	}
+
+	#[test]
+	fn test_delta_request_includes_previous_response_id() {
+		// When previous_response_id is Some, the request body must carry it.
+		let request = GenerationRequest {
+			system_prompt: None,
+			prompt: "hi".to_string(),
+			messages: None,
+			expected_output_tokens: 100,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: 100_000,
+			budget_cost_remaining_usd: 10.0,
+			tools: None,
+			model_override: None,
+			thinking_effort: None,
+			system_prompt_sections: None,
+		};
+
+		// With previous_response_id — delta request.
+		let body = build_responses_request(
+			"gpt-4.1",
+			&request,
+			true,
+			None,
+			"cache-key",
+			Some("resp_abc"),
+		);
+		assert_eq!(
+			body.get("previous_response_id").and_then(|v| v.as_str()),
+			Some("resp_abc"),
+			"previous_response_id must be present in delta request"
+		);
+
+		// Without previous_response_id — first turn, no delta field.
+		let body_no_delta =
+			build_responses_request("gpt-4.1", &request, true, None, "cache-key", None);
+		assert!(
+			body_no_delta.get("previous_response_id").is_none(),
+			"previous_response_id must be absent when no prior response"
+		);
 	}
 }

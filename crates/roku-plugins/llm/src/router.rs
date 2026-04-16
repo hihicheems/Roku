@@ -809,6 +809,7 @@ mod tests {
 				cache_read_input_tokens: 0,
 				latency_ms: self.latency_ms,
 				tool_calls: None,
+				response_id: None,
 			})
 		}
 	}
@@ -1068,6 +1069,7 @@ mod tests {
 					cache_read_input_tokens: 0,
 					latency_ms: 80,
 					tool_calls: None,
+					response_id: None,
 				}),
 			],
 		));
@@ -1183,6 +1185,7 @@ mod tests {
 					cache_read_input_tokens: 0,
 					latency_ms: 60,
 					tool_calls: None,
+					response_id: None,
 				}),
 			],
 		));
@@ -1257,6 +1260,7 @@ mod tests {
 					cache_read_input_tokens: 0,
 					latency_ms: 20,
 					tool_calls: None,
+					response_id: None,
 				})
 			}
 		}
@@ -1341,6 +1345,7 @@ mod tests {
 					cache_read_input_tokens: 0,
 					latency_ms: 1,
 					tool_calls: None,
+					response_id: None,
 				}),
 			],
 		));
@@ -1393,6 +1398,7 @@ mod tests {
 						cache_read_input_tokens: 0,
 						latency_ms: 1,
 						tool_calls: None,
+						response_id: None,
 					}),
 				],
 			));

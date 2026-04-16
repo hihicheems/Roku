@@ -1355,6 +1355,7 @@ mod tests {
 				cache_read_input_tokens: 0,
 				latency_ms: 10,
 				tool_calls: None,
+				response_id: None,
 			})
 		}
 	}

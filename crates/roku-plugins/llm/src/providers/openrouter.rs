@@ -575,6 +575,7 @@ impl OpenRouterProvider {
 			cache_read_input_tokens,
 			latency_ms,
 			tool_calls: None,
+			response_id: None,
 		})
 	}
 }
@@ -732,6 +733,7 @@ impl OpenRouterProvider {
 			cache_read_input_tokens: parsed.cache_read_input_tokens,
 			latency_ms,
 			tool_calls: parsed.tool_calls,
+			response_id: None,
 		})
 	}
 }

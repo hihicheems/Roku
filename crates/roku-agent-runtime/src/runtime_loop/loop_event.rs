@@ -149,6 +149,22 @@ pub enum LoopEvent {
 		/// Defaults to `0` when the provider did not report any cache hit.
 		#[serde(default)]
 		cache_read_input_tokens: u64,
+		/// Cost of uncached (regular) input tokens in USD. `0.0` when a
+		/// cost profile was not found for the model.
+		#[serde(default)]
+		uncached_input_cost_usd: f64,
+		/// Cost of cache-write input tokens in USD. `0.0` for OpenAI
+		/// (which does not charge separately for cache writes) and when
+		/// no cost profile was found.
+		#[serde(default)]
+		cache_write_cost_usd: f64,
+		/// Cost of cache-read input tokens in USD. `0.0` when the provider
+		/// did not report any cache hits or no profile was found.
+		#[serde(default)]
+		cache_read_cost_usd: f64,
+		/// Cost of output tokens in USD. `0.0` when no cost profile was found.
+		#[serde(default)]
+		output_cost_usd: f64,
 	},
 	/// Calibration sample emitted after each successful LLM call.
 	///
@@ -176,6 +192,14 @@ pub enum LoopEvent {
 		/// Whether the budget was exceeded.
 		exceeded: bool,
 	},
+	/// Thinking content was stripped from assistant messages before sending
+	/// to the LLM summarizer.
+	///
+	/// Emitted when `strip_thinking_content` removes `<thinking>...</thinking>`
+	/// blocks from one or more messages in the compaction input. `messages_stripped`
+	/// is the count of messages that had content removed.
+	/// Schema is stable — additive fields only.
+	ReasoningContentStripped { step: u32, messages_stripped: u32 },
 	/// A cache break was detected: `cache_read_input_tokens` dropped
 	/// significantly relative to the session baseline.
 	///
@@ -196,6 +220,36 @@ pub enum LoopEvent {
 		/// Path to the diagnostic file, if it was written successfully.
 		#[serde(skip_serializing_if = "Option::is_none")]
 		diagnostic_path: Option<String>,
+	},
+	/// The output slot was exhausted (`finish_reason == "max_tokens"` /
+	/// `"length"`) and the runtime retried with the per-model ceiling.
+	///
+	/// Emitted at most once per turn, before the retry response is consumed.
+	/// If no cost profile exists for the model the escalation is skipped and
+	/// this event is never emitted. Schema is frozen — additive fields only.
+	OutputSlotEscalated {
+		/// Step index (1-based, matches `StepRecord::step_index`).
+		step: u32,
+		/// The `expected_output_tokens` value used in the original request.
+		initial_max_tokens: u64,
+		/// The `max_output_tokens` ceiling from the model cost profile,
+		/// used for the single retry.
+		escalated_max_tokens: u64,
+		/// The model that was serving the truncated response.
+		model_id: String,
+	},
+	/// A delta request was sent using `previous_response_id`, reducing the
+	/// upstream payload by omitting already-processed context.
+	///
+	/// Emitted when the OpenAI Responses API adapter sends a request that
+	/// includes `previous_response_id`. Schema is stable — additive fields only.
+	WebSocketDelta {
+		/// Step index (1-based, matches `StepRecord::step_index`).
+		step: u32,
+		/// Number of turns that have reused this session's delta chain so far.
+		reuse_count: u32,
+		/// Whether `previous_response_id` was included in this request.
+		has_previous_response_id: bool,
 	},
 }
 

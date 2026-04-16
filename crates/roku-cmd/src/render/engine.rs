@@ -254,12 +254,22 @@ impl RenderEngine {
 			LoopEvent::TokenUsage {
 				prompt_tokens,
 				output_tokens,
+				estimated_cost_usd,
+				uncached_input_cost_usd,
+				cache_write_cost_usd,
+				cache_read_cost_usd,
+				output_cost_usd,
 				model_id,
 				..
 			} => {
 				if let Ok(mut guard) = captured_tokens.lock() {
 					guard.prompt = guard.prompt.saturating_add(prompt_tokens);
 					guard.output = guard.output.saturating_add(output_tokens);
+					guard.estimated_cost_usd += estimated_cost_usd;
+					guard.uncached_input_cost_usd += uncached_input_cost_usd;
+					guard.cache_write_cost_usd += cache_write_cost_usd;
+					guard.cache_read_cost_usd += cache_read_cost_usd;
+					guard.output_cost_usd += output_cost_usd;
 					if let Some(id) = model_id {
 						guard.model_id = Some(id);
 					}
@@ -324,6 +334,37 @@ impl RenderEngine {
 						"[cache] step {step} prefix cache break detected (~{tokens_lost} tokens lost)"
 					))
 				);
+			}
+			LoopEvent::ReasoningContentStripped { .. } => {
+				// Thinking-block stripping is a diagnostic detail for trace consumers;
+				// no live UX line emitted.
+			}
+			LoopEvent::OutputSlotEscalated {
+				step,
+				initial_max_tokens,
+				escalated_max_tokens,
+				model_id,
+			} => {
+				eprint!(
+					"{}\r\n",
+					crate::render::style::styled_compact_notice(&format!(
+						"[output_slot] step {step} escalated {initial_max_tokens}->{escalated_max_tokens} for {model_id}"
+					))
+				);
+			}
+			LoopEvent::WebSocketDelta {
+				step,
+				reuse_count,
+				has_previous_response_id,
+			} => {
+				if has_previous_response_id {
+					eprint!(
+						"{}\r\n",
+						crate::render::style::styled_compact_notice(&format!(
+							"[ws_delta] step {step} delta request (reuse_count={reuse_count})"
+						))
+					);
+				}
 			}
 		}
 	}

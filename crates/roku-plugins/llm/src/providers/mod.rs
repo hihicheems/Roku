@@ -15,4 +15,5 @@
 pub mod anthropic;
 pub mod openai;
 pub mod openai_responses;
+pub mod openai_ws;
 pub mod openrouter;

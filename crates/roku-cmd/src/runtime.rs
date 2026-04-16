@@ -1066,6 +1066,9 @@ fn build_live_llm_routers(
 					api_key,
 					base_url: "https://chatgpt.com/backend-api/codex/responses".to_string(),
 					reasoning_effort: openai.reasoning_effort.clone(),
+					websocket_mode: std::env::var("ROKU_OPENAI_WEBSOCKET_MODE")
+						.map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+						.unwrap_or(false),
 				};
 				let route_router = build_openai_responses_router_with_metrics(
 					responses_config.clone(),

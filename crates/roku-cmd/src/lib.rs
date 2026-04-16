@@ -802,10 +802,19 @@ where
 								prompt_tokens,
 								output_tokens,
 								estimated_cost_usd,
+								uncached_input_cost_usd,
+								cache_write_cost_usd,
+								cache_read_cost_usd,
+								output_cost_usd,
 								..
 							} => {
 								eprintln!(
-									"[tokens: {prompt_tokens}/{output_tokens}, cost: ~${estimated_cost_usd:.4}]"
+									"[tokens: {prompt_tokens}/{output_tokens}, \
+									cost: ${estimated_cost_usd:.4} \
+									(in: ${uncached_input_cost_usd:.4}, \
+									cache_w: ${cache_write_cost_usd:.4}, \
+									cache_r: ${cache_read_cost_usd:.4}, \
+									out: ${output_cost_usd:.4})]"
 								);
 							}
 							roku_agent_runtime::LoopEvent::ReactiveCompactTriggered {
@@ -860,6 +869,30 @@ where
 								eprintln!(
 									"[cache] step {step} prefix cache break detected (~{tokens_lost} tokens lost)"
 								);
+							}
+							roku_agent_runtime::LoopEvent::OutputSlotEscalated {
+								step,
+								initial_max_tokens,
+								escalated_max_tokens,
+								model_id,
+							} => {
+								eprintln!(
+									"[output_slot] step {step} escalated {initial_max_tokens}->{escalated_max_tokens} for {model_id}"
+								);
+							}
+							roku_agent_runtime::LoopEvent::ReasoningContentStripped { .. } => {
+								// Diagnostic only — reasoning content stripped during compaction.
+							}
+							roku_agent_runtime::LoopEvent::WebSocketDelta {
+								step,
+								reuse_count,
+								has_previous_response_id,
+							} => {
+								if has_previous_response_id {
+									eprintln!(
+										"[ws_delta] step {step} delta request (reuse_count={reuse_count})"
+									);
+								}
 							}
 						}
 					}

@@ -15,6 +15,7 @@
 //! Multi-provider model routing with budget and risk-aware controls.
 
 mod bootstrap;
+pub mod model_cost;
 mod providers;
 mod retry;
 mod router;
@@ -39,8 +40,8 @@ pub use providers::openrouter::{
 };
 pub use router::{LlmProvider, LlmRouter};
 pub use types::{
-	GenerationRequest, LlmAdapterError, LlmResponse, Message, ModelProfile, ProviderCallError,
-	ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy, StreamChunk,
-	StructuredGenerationError, StructuredJsonResponse, StructuredOutputError, SystemPromptBlock,
-	SystemPromptSections, ThinkingEffort, ToolCallBlock, ToolDefinition,
+	GenerationRequest, LlmAdapterError, LlmResponse, Message, ModelCostProfile, ModelProfile,
+	ProviderCallError, ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy,
+	StreamChunk, StructuredGenerationError, StructuredJsonResponse, StructuredOutputError,
+	SystemPromptBlock, SystemPromptSections, ThinkingEffort, ToolCallBlock, ToolDefinition,
 };

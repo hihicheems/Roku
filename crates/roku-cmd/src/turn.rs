@@ -43,6 +43,16 @@ pub(crate) struct TurnTokens {
 	pub(crate) output: u64,
 	/// Model that served the request (from the last TokenUsage event).
 	pub(crate) model_id: Option<String>,
+	/// Total estimated cost in USD. `0.0` when not yet populated.
+	pub(crate) estimated_cost_usd: f64,
+	/// Uncached input cost in USD.
+	pub(crate) uncached_input_cost_usd: f64,
+	/// Cache-write cost in USD.
+	pub(crate) cache_write_cost_usd: f64,
+	/// Cache-read cost in USD.
+	pub(crate) cache_read_cost_usd: f64,
+	/// Output cost in USD.
+	pub(crate) output_cost_usd: f64,
 }
 
 /// Returns the current time as Unix milliseconds.
@@ -85,8 +95,7 @@ pub(crate) fn handle_turn_interactive(
 	*session_prompt_tokens = session_prompt_tokens.saturating_add(turn_tokens.prompt);
 	*session_output_tokens = session_output_tokens.saturating_add(turn_tokens.output);
 	if !json_mode && (turn_tokens.prompt > 0 || turn_tokens.output > 0) {
-		let turn_cost = (turn_tokens.prompt as f64 / 1_000_000.0) * 3.0
-			+ (turn_tokens.output as f64 / 1_000_000.0) * 15.0;
+		let turn_cost = turn_tokens.estimated_cost_usd;
 		let session_total = session_prompt_tokens.saturating_add(*session_output_tokens);
 		eprintln!(
 			"{}",
@@ -176,8 +185,7 @@ pub(crate) fn handle_turn_interactive(
 						*session_output_tokens =
 							session_output_tokens.saturating_add(inner_tokens.output);
 						if inner_tokens.prompt > 0 || inner_tokens.output > 0 {
-							let cost = (inner_tokens.prompt as f64 / 1_000_000.0) * 3.0
-								+ (inner_tokens.output as f64 / 1_000_000.0) * 15.0;
+							let cost = inner_tokens.estimated_cost_usd;
 							let session_total =
 								session_prompt_tokens.saturating_add(*session_output_tokens);
 							eprintln!(
@@ -346,12 +354,22 @@ pub(crate) fn execute_turn(
 					if let LoopEvent::TokenUsage {
 						prompt_tokens,
 						output_tokens,
+						estimated_cost_usd,
+						uncached_input_cost_usd,
+						cache_write_cost_usd,
+						cache_read_cost_usd,
+						output_cost_usd,
 						model_id,
 						..
 					} = &event && let Ok(mut guard) = captured_tokens_task.lock()
 					{
 						guard.prompt = guard.prompt.saturating_add(*prompt_tokens);
 						guard.output = guard.output.saturating_add(*output_tokens);
+						guard.estimated_cost_usd += estimated_cost_usd;
+						guard.uncached_input_cost_usd += uncached_input_cost_usd;
+						guard.cache_write_cost_usd += cache_write_cost_usd;
+						guard.cache_read_cost_usd += cache_read_cost_usd;
+						guard.output_cost_usd += output_cost_usd;
 						if let Some(id) = model_id {
 							guard.model_id = Some(id.clone());
 						}
@@ -366,12 +384,22 @@ pub(crate) fn execute_turn(
 					if let LoopEvent::TokenUsage {
 						prompt_tokens,
 						output_tokens,
+						estimated_cost_usd,
+						uncached_input_cost_usd,
+						cache_write_cost_usd,
+						cache_read_cost_usd,
+						output_cost_usd,
 						model_id,
 						..
 					} = &event && let Ok(mut guard) = captured_tokens_task.lock()
 					{
 						guard.prompt = guard.prompt.saturating_add(*prompt_tokens);
 						guard.output = guard.output.saturating_add(*output_tokens);
+						guard.estimated_cost_usd += estimated_cost_usd;
+						guard.uncached_input_cost_usd += uncached_input_cost_usd;
+						guard.cache_write_cost_usd += cache_write_cost_usd;
+						guard.cache_read_cost_usd += cache_read_cost_usd;
+						guard.output_cost_usd += output_cost_usd;
 						if let Some(id) = model_id {
 							guard.model_id = Some(id.clone());
 						}
