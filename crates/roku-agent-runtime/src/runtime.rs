@@ -1075,6 +1075,16 @@ impl GenericAgentRuntime {
 				);
 			let system_prompt = system_prompt_sections.flatten();
 
+			// Cache break detector: snapshot the prompt prefix components
+			// (static system blocks + tool schema + model) so the post-call
+			// check can identify which component diverged when a break fires.
+			let model_for_fingerprint = request.model_override.as_deref().unwrap_or("");
+			loop_state.cache_break_detector.record_prompt_state(
+				&system_prompt_sections.static_blocks,
+				&tool_definitions,
+				model_for_fingerprint,
+			);
+
 			let config = &self.agent_runtime_config.next_step;
 			let thinking_effort = request.thinking_effort.as_deref().and_then(|s| match s {
 				"low" => Some(ThinkingEffort::Low),
@@ -1105,6 +1115,10 @@ impl GenericAgentRuntime {
 					crate::runtime_loop::MICROCOMPACT_RETAIN_RECENT,
 					&loop_state.estimator_calibration,
 				);
+				// Notify the cache break detector that message content changed.
+				if microcompact_freed > 0 {
+					loop_state.cache_break_detector.notify_compaction();
+				}
 				// Emit only when the pre-flight pass actually freed tokens. On
 				// retry iterations after reactive compaction the buffer is
 				// already lean; suppressing zero-freed events keeps trace
@@ -1135,6 +1149,9 @@ impl GenericAgentRuntime {
 					if mid_estimate > mid_threshold {
 						let outcome =
 							crate::runtime_loop::mid_compact_messages(&mut messages, None);
+						if !matches!(outcome, crate::runtime_loop::MidCompactOutcome::Noop) {
+							loop_state.cache_break_detector.notify_compaction();
+						}
 						if let Some(sender) = event_sender {
 							match &outcome {
 								crate::runtime_loop::MidCompactOutcome::Layer2 {
@@ -1289,6 +1306,28 @@ impl GenericAgentRuntime {
 										scale: loop_state.estimator_calibration.scale(),
 									},
 								);
+								// Cache break detection: compare this turn's
+								// cache_read against the session baseline.
+								if let Some(report) =
+									loop_state.cache_break_detector.check_response(
+										resp.cache_read_input_tokens,
+										&resp.model_id,
+										&resp.provider,
+									) {
+									let diag_path =
+										crate::runtime_loop::cache_break::write_cache_break_diagnostic(&report)
+											.ok()
+											.map(|p| p.display().to_string());
+									let _ = sender.send(
+										crate::runtime_loop::LoopEvent::CacheBreakDetected {
+											step: current_step_index,
+											reason: report.reason,
+											tokens_lost: report.tokens_lost,
+											component_changed: report.component_changed,
+											diagnostic_path: diag_path,
+										},
+									);
+								}
 								Ok((text, tool_calls))
 							}
 							Err(err) => {
@@ -1327,6 +1366,29 @@ impl GenericAgentRuntime {
 										},
 									);
 								}
+								// Cache break detection (non-streaming path).
+								if let Some(report) =
+									loop_state.cache_break_detector.check_response(
+										resp.cache_read_input_tokens,
+										&resp.model_id,
+										&resp.provider,
+									) {
+									let diag_path =
+										crate::runtime_loop::cache_break::write_cache_break_diagnostic(&report)
+											.ok()
+											.map(|p| p.display().to_string());
+									if let Some(sender) = event_sender {
+										let _ = sender.send(
+											crate::runtime_loop::LoopEvent::CacheBreakDetected {
+												step: current_step_index,
+												reason: report.reason,
+												tokens_lost: report.tokens_lost,
+												component_changed: report.component_changed,
+												diagnostic_path: diag_path,
+											},
+										);
+									}
+								}
 								let tool_calls = resp.tool_calls.unwrap_or_default();
 								Ok((resp.output, tool_calls))
 							}
@@ -1340,6 +1402,7 @@ impl GenericAgentRuntime {
 						if !reactive_compact_used =>
 					{
 						reactive_compact_used = true;
+						loop_state.cache_break_detector.notify_compaction();
 						let (compact_pt, compact_ot) = self
 							.reactive_compact(
 								loop_state,
@@ -1774,6 +1837,9 @@ impl GenericAgentRuntime {
 					&system_prompt,
 				)
 				.await;
+			if compact_pt > 0 || compact_ot > 0 {
+				loop_state.cache_break_detector.notify_compaction();
+			}
 			total_prompt_tokens = total_prompt_tokens.saturating_add(compact_pt);
 			total_output_tokens = total_output_tokens.saturating_add(compact_ot);
 

@@ -840,6 +840,15 @@ where
 							roku_agent_runtime::LoopEvent::EstimatorCalibrated { .. } => {
 								// Calibration samples are diagnostic; no live UX feedback.
 							}
+							roku_agent_runtime::LoopEvent::CacheBreakDetected {
+								step,
+								tokens_lost,
+								..
+							} => {
+								eprintln!(
+									"[cache] step {step} prefix cache break detected (~{tokens_lost} tokens lost)"
+								);
+							}
 						}
 					}
 				});

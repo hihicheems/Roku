@@ -163,6 +163,27 @@ pub enum LoopEvent {
 		/// Effective scale factor in use after this sample is folded in.
 		scale: f64,
 	},
+	/// A cache break was detected: `cache_read_input_tokens` dropped
+	/// significantly relative to the session baseline.
+	///
+	/// Emitted alongside a diagnostic file written to
+	/// `~/.roku/diagnostics/cache-break-<ts>.txt`. The `component_changed`
+	/// field identifies which prefix component diverged from the previous
+	/// turn's fingerprint (e.g. `"system_prompt"`, `"tool_schema"`,
+	/// `"model"`). Schema is frozen once introduced — additive fields only.
+	CacheBreakDetected {
+		step: u32,
+		/// Human-readable explanation of the break.
+		reason: String,
+		/// `cache_read_input_tokens` drop relative to session baseline.
+		tokens_lost: u64,
+		/// Which fingerprint components changed (may be empty if the
+		/// fingerprint was identical and the break is message-level).
+		component_changed: Vec<String>,
+		/// Path to the diagnostic file, if it was written successfully.
+		#[serde(skip_serializing_if = "Option::is_none")]
+		diagnostic_path: Option<String>,
+	},
 }
 
 /// Convenience alias for the sending half of a `LoopEvent` channel.
