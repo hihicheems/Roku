@@ -24,7 +24,23 @@ use crate::runtime_loop::grounding::{
 	extract_explicit_path_candidates, extract_explicit_python_code, extract_explicit_shell_command,
 	extract_explicit_table_path, extract_glob_pattern, extract_web_query,
 };
+use crate::runtime_loop::tool_result_store::ToolResultStore;
 use crate::runtime_loop::{AskUserPayload, LoopContext, StepRecord, ToolObservation};
+
+/// State for deferred tool schema loading.
+///
+/// When the total estimated schema tokens exceed the configured threshold, non-core
+/// tools are withheld from the LLM until the model explicitly loads them via
+/// the `tool_search` pseudo-tool. Once loaded, a tool stays loaded for the
+/// remainder of the session (monotonic — no unloading).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DeferredToolState {
+	/// Tool names that are deferred (schema not in the current LLM request).
+	pub deferred_names: Vec<String>,
+	/// Tool names that were deferred but have been loaded via `tool_search`.
+	/// Monotonic — once loaded a tool is never removed from this list.
+	pub loaded_names: Vec<String>,
+}
 
 /// Cached serialized-stable snapshot of the tool schema for a session.
 ///
@@ -171,6 +187,17 @@ pub struct LoopState {
 	#[serde(skip)]
 	#[allow(private_interfaces)]
 	pub(crate) cache_break_detector: CacheBreakDetector,
+	/// Tools that have been deferred (schema not sent to LLM until loaded via
+	/// `tool_search`). `None` means deferred mode is not active (tool schemas
+	/// fit within threshold). Not serialized — a freshly restored loop
+	/// re-evaluates the threshold on the first turn.
+	#[serde(skip)]
+	pub deferred_tools: Option<DeferredToolState>,
+	/// Per-run tool result disk persistence store.
+	/// Tracks content replacement state for cache byte stability.
+	/// Not serialized — a freshly restored loop starts with an empty store.
+	#[serde(skip)]
+	pub(crate) tool_result_store: ToolResultStore,
 }
 
 /// Maximum allowed consecutive Layer 3 structured-summary failures before
@@ -222,6 +249,8 @@ impl LoopState {
 			tool_schema_dirty: true,
 			observed_plan_mode: None,
 			cache_break_detector: CacheBreakDetector::default(),
+			deferred_tools: None,
+			tool_result_store: ToolResultStore::default(),
 		}
 	}
 
@@ -425,6 +454,7 @@ mod tests {
 	use crate::runtime_loop::observation::{StepObservation, ToolObservation};
 	use crate::runtime_loop::state_update::InterpretedObservation;
 	use crate::runtime_loop::step_record::{StepAction, StepRecord};
+	use crate::runtime_loop::tool_result_store::ToolResultStore;
 
 	fn loop_context() -> LoopContext {
 		LoopContext {
@@ -612,13 +642,16 @@ mod tests {
 		let deserialized: LoopState =
 			serde_json::from_str(&json_str).expect("loop state should deserialize from JSON");
 
-		// `frozen_tool_schema`, `tool_schema_dirty`, `observed_plan_mode`, and
-		// `cache_break_detector` are `#[serde(skip)]` — they do not survive
-		// a snapshot roundtrip by design, so normalize before structural compare.
+		// `frozen_tool_schema`, `tool_schema_dirty`, `observed_plan_mode`,
+		// `cache_break_detector`, `deferred_tools`, and `tool_result_store`
+		// are `#[serde(skip)]` — they do not survive a snapshot roundtrip
+		// by design, so normalize before structural compare.
 		state.frozen_tool_schema = None;
 		state.tool_schema_dirty = false;
 		state.observed_plan_mode = None;
 		state.cache_break_detector = CacheBreakDetector::default();
+		state.deferred_tools = None;
+		state.tool_result_store = ToolResultStore::default();
 
 		assert_eq!(state, deserialized);
 		assert_eq!(deserialized.history.len(), 3);

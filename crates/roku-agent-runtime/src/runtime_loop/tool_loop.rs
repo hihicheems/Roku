@@ -15,10 +15,10 @@
 use roku_plugin_llm::ToolDefinition;
 use roku_plugin_tools::{
 	PSEUDO_AGENT, PSEUDO_ASK_USER, PSEUDO_FAIL, PSEUDO_FINAL_ANSWER, PSEUDO_TASK_CREATE,
-	PSEUDO_TASK_GET, PSEUDO_TASK_LIST, PSEUDO_TASK_UPDATE, ResourceCatalog, TOOL_BASH, TOOL_EDIT,
-	TOOL_EXISTS, TOOL_FIND, TOOL_GLOB, TOOL_GREP, TOOL_INSPECT, TOOL_LISTDIR, TOOL_PYTHON,
-	TOOL_READ, TOOL_SKILL_INSTALL, TOOL_TABLE_INSPECT, TOOL_TABLE_PREVIEW, TOOL_TABLE_SCHEMA,
-	TOOL_TABLE_SHEETS, TOOL_WEB_FETCH, TOOL_WEB_SEARCH, TOOL_WRITE,
+	PSEUDO_TASK_GET, PSEUDO_TASK_LIST, PSEUDO_TASK_UPDATE, PSEUDO_TOOL_SEARCH, ResourceCatalog,
+	TOOL_BASH, TOOL_EDIT, TOOL_EXISTS, TOOL_FIND, TOOL_GLOB, TOOL_GREP, TOOL_INSPECT, TOOL_LISTDIR,
+	TOOL_PYTHON, TOOL_READ, TOOL_SKILL_INSTALL, TOOL_TABLE_INSPECT, TOOL_TABLE_PREVIEW,
+	TOOL_TABLE_SCHEMA, TOOL_TABLE_SHEETS, TOOL_WEB_FETCH, TOOL_WEB_SEARCH, TOOL_WRITE,
 };
 
 /// Read-only path tools that accept a `path` parameter.
@@ -183,6 +183,116 @@ pub(crate) fn build_tool_definitions(
 	definitions
 }
 
+/// Default fraction of the context window that tool schemas may occupy before
+/// deferred mode activates.
+pub(crate) const DEFAULT_DEFERRED_TOOL_SCHEMA_THRESHOLD: f64 = 0.10;
+
+/// Tools that are never deferred — they must always have full schemas in every
+/// LLM request regardless of schema size.
+const CORE_TOOLS: &[&str] = &[
+	TOOL_BASH,
+	TOOL_READ,
+	TOOL_WRITE,
+	TOOL_EDIT,
+	TOOL_GLOB,
+	TOOL_GREP,
+	PSEUDO_FINAL_ANSWER,
+	PSEUDO_ASK_USER,
+	PSEUDO_FAIL,
+	PSEUDO_AGENT,
+	PSEUDO_TASK_CREATE,
+	PSEUDO_TASK_UPDATE,
+	PSEUDO_TASK_LIST,
+	PSEUDO_TASK_GET,
+];
+
+/// Check whether deferred mode should activate and apply it.
+///
+/// Returns the (potentially filtered) tool definitions and updates the
+/// deferred state on `loop_state`. When the total estimated schema tokens
+/// exceed `context_window_tokens * DEFAULT_DEFERRED_TOOL_SCHEMA_THRESHOLD`,
+/// non-core tools are removed and a `tool_search` pseudo-tool is appended
+/// so the model can request individual schemas on demand.
+///
+/// Once a tool has been loaded via `tool_search`, it remains loaded for the
+/// rest of the session (monotonic — no unloading).
+pub(crate) fn apply_deferred_mode(
+	definitions: Vec<ToolDefinition>,
+	loop_state: &mut super::loop_state::LoopState,
+	context_window_tokens: u64,
+) -> Vec<ToolDefinition> {
+	let threshold = (context_window_tokens as f64 * DEFAULT_DEFERRED_TOOL_SCHEMA_THRESHOLD) as u64;
+
+	// Estimate total schema tokens from all definitions.
+	let total_schema_tokens: u64 = definitions
+		.iter()
+		.map(|d| {
+			let name_bytes = d.name.len() as u64;
+			let desc_bytes = d.description.len() as u64;
+			let params_bytes = d.parameters.to_string().len() as u64;
+			// name/desc: bytes→chars (÷4 for token estimate); params JSON: ÷2 (structured)
+			name_bytes.div_ceil(4) + desc_bytes.div_ceil(4) + params_bytes.div_ceil(2)
+		})
+		.sum();
+
+	if total_schema_tokens <= threshold {
+		// Below threshold — deferred mode not needed.
+		// Preserve loaded_names so already-loaded tools stay visible if the
+		// schema grows above threshold again later in the session. Clear
+		// deferred_names since nothing is currently deferred.
+		if let Some(ref mut state) = loop_state.deferred_tools {
+			state.deferred_names.clear();
+		}
+		return definitions;
+	}
+
+	// Above threshold: enter or continue deferred mode.
+	let deferred = loop_state
+		.deferred_tools
+		.get_or_insert_with(super::loop_state::DeferredToolState::default);
+
+	let mut result = Vec::new();
+	let mut new_deferred_names = Vec::new();
+
+	for def in &definitions {
+		let is_core = CORE_TOOLS.contains(&def.name.as_str());
+		let is_loaded = deferred.loaded_names.contains(&def.name);
+
+		if is_core || is_loaded {
+			result.push(def.clone());
+		} else {
+			new_deferred_names.push(def.name.clone());
+		}
+	}
+
+	deferred.deferred_names = new_deferred_names;
+
+	// Append the ToolSearch pseudo-tool when there are deferred schemas.
+	if !deferred.deferred_names.is_empty() {
+		let deferred_list = deferred.deferred_names.join(", ");
+		result.push(ToolDefinition {
+			name: PSEUDO_TOOL_SEARCH.to_string(),
+			description: format!(
+				"Search for and load a deferred tool's schema. \
+				 Available deferred tools: {deferred_list}. \
+				 Call this with the tool name to load its full schema for the next turn.",
+			),
+			parameters: serde_json::json!({
+				"type": "object",
+				"properties": {
+					"tool_name": {
+						"type": "string",
+						"description": "The name of the deferred tool to load."
+					}
+				},
+				"required": ["tool_name"]
+			}),
+		});
+	}
+
+	result
+}
+
 pub(crate) fn ground_tool_arguments(tool_name: &str, grounding_input: &str) -> Option<Value> {
 	if PATH_READ_TOOLS.contains(&tool_name) {
 		extract_concrete_path_candidates(grounding_input)
@@ -267,7 +377,48 @@ pub(crate) fn attachments_for_tool(
 
 #[cfg(test)]
 mod tests {
-	use super::build_tool_definitions;
+	use super::{apply_deferred_mode, build_tool_definitions};
+	use crate::runtime_loop::loop_state::DeferredToolState;
+	use roku_plugin_llm::ToolDefinition;
+
+	fn test_loop_state() -> crate::runtime_loop::LoopState {
+		use crate::router::{IntentFamily, RouteDecision, RouteRisk};
+		use crate::runtime_loop::LoopContext;
+		let ctx = LoopContext {
+			request_id: "req-test".to_string(),
+			session_id: "session-test".to_string(),
+			goal: "test".to_string(),
+			workspace_root: "/workspace".to_string(),
+			working_directory: "/workspace".to_string(),
+			visible_tools: Vec::new(),
+			bound_resources: Vec::new(),
+			route_decision: RouteDecision::new(
+				IntentFamily::Chat,
+				0.9,
+				false,
+				RouteRisk::Low,
+				Vec::new(),
+				Vec::new(),
+				Vec::new(),
+				"test",
+			),
+			last_observation: None,
+		};
+		crate::runtime_loop::LoopState::new("test", &ctx)
+	}
+
+	fn fat_tool(name: &str) -> ToolDefinition {
+		ToolDefinition {
+			name: name.to_string(),
+			description: "A".repeat(500),
+			parameters: serde_json::json!({
+				"type": "object",
+				"properties": {
+					"arg1": {"type": "string", "description": "B".repeat(500)}
+				}
+			}),
+		}
+	}
 
 	/// Byte-stability guard: repeated calls with identical inputs must emit
 	/// the same serialized bytes. This is the foundation that 09 / 10 rely
@@ -306,6 +457,115 @@ mod tests {
 		assert!(
 			!first.iter().any(|d| d.name == "ask_user"),
 			"disallowed entry should not appear in the output"
+		);
+	}
+
+	#[test]
+	fn deferred_mode_activates_above_threshold() {
+		// Build 50 fat non-core tools that will push schema tokens past 10% of
+		// 200_000 (threshold = 20_000 tokens).
+		let mut definitions: Vec<ToolDefinition> = (0..50)
+			.map(|i| fat_tool(&format!("CustomTool{i}")))
+			.collect();
+		definitions.push(ToolDefinition {
+			name: "Bash".to_string(),
+			description: "Run bash".to_string(),
+			parameters: serde_json::json!({"type": "object", "properties": {}}),
+		});
+
+		let mut loop_state = test_loop_state();
+		let result = apply_deferred_mode(definitions, &mut loop_state, 200_000);
+
+		// Core tool must be present.
+		assert!(
+			result.iter().any(|d| d.name == "Bash"),
+			"Bash must be present"
+		);
+		// ToolSearch pseudo-tool must have been injected.
+		assert!(
+			result.iter().any(|d| d.name == "tool_search"),
+			"tool_search must be present when deferred mode activates"
+		);
+		// Non-core custom tools must be absent (deferred).
+		assert!(
+			!result.iter().any(|d| d.name == "CustomTool0"),
+			"CustomTool0 must be deferred (not in result)"
+		);
+		// Deferred state must be set.
+		assert!(
+			loop_state.deferred_tools.is_some(),
+			"deferred_tools must be populated"
+		);
+		let deferred = loop_state.deferred_tools.as_ref().unwrap();
+		assert!(
+			deferred.deferred_names.contains(&"CustomTool0".to_string()),
+			"CustomTool0 must appear in deferred_names"
+		);
+	}
+
+	#[test]
+	fn deferred_mode_does_not_activate_below_threshold() {
+		// A single small tool — well below 10% of 200_000 token threshold.
+		let definitions = vec![ToolDefinition {
+			name: "Bash".to_string(),
+			description: "Run bash".to_string(),
+			parameters: serde_json::json!({"type": "object", "properties": {}}),
+		}];
+
+		let mut loop_state = test_loop_state();
+		let result = apply_deferred_mode(definitions.clone(), &mut loop_state, 200_000);
+
+		assert_eq!(
+			result.len(),
+			1,
+			"no deferred mode — result must equal input"
+		);
+		assert!(
+			loop_state.deferred_tools.is_none(),
+			"deferred_tools must be None below threshold"
+		);
+	}
+
+	#[test]
+	fn loaded_tools_stay_loaded() {
+		// Pre-seed deferred state with MyTool already loaded.
+		let mut loop_state = test_loop_state();
+		loop_state.deferred_tools = Some(DeferredToolState {
+			deferred_names: vec!["MyTool".to_string()],
+			loaded_names: vec!["MyTool".to_string()],
+		});
+
+		// Build definitions with 50 fat custom tools + MyTool + Bash.
+		let mut definitions: Vec<ToolDefinition> = (0..50)
+			.map(|i| fat_tool(&format!("CustomTool{i}")))
+			.collect();
+		definitions.push(ToolDefinition {
+			name: "MyTool".to_string(),
+			description: "Already loaded".to_string(),
+			parameters: serde_json::json!({"type": "object", "properties": {}}),
+		});
+		definitions.push(ToolDefinition {
+			name: "Bash".to_string(),
+			description: "Run bash".to_string(),
+			parameters: serde_json::json!({"type": "object", "properties": {}}),
+		});
+
+		let result = apply_deferred_mode(definitions, &mut loop_state, 200_000);
+
+		// MyTool must still be present because it was previously loaded.
+		assert!(
+			result.iter().any(|d| d.name == "MyTool"),
+			"MyTool must stay loaded (monotonic)"
+		);
+		// Core tool must be present.
+		assert!(
+			result.iter().any(|d| d.name == "Bash"),
+			"Bash must be present"
+		);
+		// Non-loaded custom tools must still be deferred.
+		assert!(
+			!result.iter().any(|d| d.name == "CustomTool0"),
+			"CustomTool0 must remain deferred"
 		);
 	}
 }

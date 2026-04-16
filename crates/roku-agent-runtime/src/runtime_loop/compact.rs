@@ -583,6 +583,36 @@ pub const MICROCOMPACT_PLACEHOLDER: &str = "[Old tool result content cleared]";
 /// last few observations it produced.
 pub const MICROCOMPACT_RETAIN_RECENT: usize = 3;
 
+/// Maximum estimated tokens from tool results in a single turn before
+/// the runtime triggers degradation (Layer 0 microcompact). Configurable
+/// default from master plan §9.4.
+pub const PER_TURN_TOOL_BUDGET_TOKENS: u64 = 200_000;
+
+/// Estimate the total tokens from tool results produced in this turn.
+///
+/// `turn_tool_ids` contains the `tool_use_id` values of tool results
+/// pushed during this turn. The function scans `messages` for matching
+/// `Message::ToolResult` entries and sums their byte-to-token estimates.
+pub fn estimate_turn_tool_tokens(
+	messages: &[roku_plugin_llm::Message],
+	turn_tool_ids: &[String],
+) -> u64 {
+	let id_set: std::collections::HashSet<&str> =
+		turn_tool_ids.iter().map(|s| s.as_str()).collect();
+	let mut total = 0u64;
+	for msg in messages {
+		if let roku_plugin_llm::Message::ToolResult {
+			tool_use_id,
+			content,
+			..
+		} = msg && id_set.contains(tool_use_id.as_str())
+		{
+			total = total.saturating_add(byte_estimate_for_text(content));
+		}
+	}
+	total
+}
+
 /// Pre-flight Layer 0 microcompaction.
 ///
 /// Replaces the `content` of every `Message::ToolResult` older than the last
@@ -1089,6 +1119,8 @@ mod tests {
 			tool_schema_dirty: true,
 			observed_plan_mode: None,
 			cache_break_detector: crate::runtime_loop::cache_break::CacheBreakDetector::default(),
+			deferred_tools: None,
+			tool_result_store: crate::runtime_loop::tool_result_store::ToolResultStore::default(),
 		}
 	}
 
@@ -2839,5 +2871,53 @@ mod tests {
 			MidCompactOutcome::Noop,
 			"should have compacted without any LLM call"
 		);
+	}
+
+	#[test]
+	fn estimate_turn_tool_tokens_sums_matching_ids() {
+		use roku_plugin_llm::Message;
+
+		let messages = vec![
+			Message::ToolResult {
+				tool_use_id: "t1".to_string(),
+				content: "A".repeat(4000), // ~1000 tokens (4000/4)
+				is_error: false,
+			},
+			Message::ToolResult {
+				tool_use_id: "t2".to_string(),
+				content: "B".repeat(8000), // ~2000 tokens (8000/4)
+				is_error: false,
+			},
+			Message::ToolResult {
+				tool_use_id: "t3".to_string(),
+				content: "C".repeat(4000),
+				is_error: false,
+			},
+		];
+
+		let turn_ids = vec!["t1".to_string(), "t2".to_string()];
+		let total = estimate_turn_tool_tokens(&messages, &turn_ids);
+		// t1: 4000/4 = 1000, t2: 8000/4 = 2000
+		assert_eq!(total, 3000);
+	}
+
+	#[test]
+	fn estimate_turn_tool_tokens_ignores_non_matching() {
+		use roku_plugin_llm::Message;
+
+		let messages = vec![
+			Message::ToolResult {
+				tool_use_id: "old".to_string(),
+				content: "X".repeat(100_000),
+				is_error: false,
+			},
+			Message::User {
+				content: "hello".to_string(),
+			},
+		];
+
+		let turn_ids = vec!["t1".to_string()];
+		let total = estimate_turn_tool_tokens(&messages, &turn_ids);
+		assert_eq!(total, 0);
 	}
 }

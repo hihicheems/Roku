@@ -317,6 +317,16 @@ pub(crate) fn render_trace_detail(events: &[TimestampedEvent]) -> String {
 			} => format!(
 				"[step {step}] estimator_calibrated: estimated={estimated_prompt_tokens} real={prompt_tokens} scale={scale:.3}"
 			),
+			LoopEvent::ToolBudgetCheck {
+				step,
+				per_turn_tool_tokens,
+				exceeded,
+			} => {
+				format!(
+					"[step {}] tool_budget_check: per_turn_tool_tokens={} exceeded={}",
+					step, per_turn_tool_tokens, exceeded
+				)
+			}
 			LoopEvent::CacheBreakDetected {
 				step,
 				tokens_lost,
