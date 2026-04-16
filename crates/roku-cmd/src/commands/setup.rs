@@ -17,7 +17,7 @@
 use roku_agent_runtime::RuntimeService;
 
 use crate::CommandError;
-use crate::auth::{AuthStore, CredentialEntry};
+use crate::auth::{AuthStore, CredentialEntry, IdTokenClaims};
 use crate::display::{credential_summary, print_auth_status};
 use crate::input::{SelectionItem, read_text_input, run_selection};
 use crate::runtime::{
@@ -57,11 +57,19 @@ pub(crate) async fn run_first_time_setup() -> Result<(), String> {
 				Some(_) => return Err("empty API key".to_string()),
 				None => return Err("setup cancelled".to_string()),
 			};
+			let label = read_text_input("Label for this key (default: \"default\"): ")
+				.filter(|s| !s.trim().is_empty())
+				.map(|s| s.trim().to_string())
+				.unwrap_or_else(|| "default".to_string());
 			let mut auth = auth_store.load().ok().flatten().unwrap_or_default();
 			auth.active_provider = Some("openrouter".to_string());
-			auth.credentials.insert(
-				"openrouter".to_string(),
-				CredentialEntry::ApiKey { api_key: key },
+			auth.active_account = Some(label.clone());
+			auth.upsert_credential(
+				"openrouter",
+				CredentialEntry::ApiKey {
+					label,
+					api_key: key,
+				},
 			);
 			auth_store.save(&auth).map_err(|e| format!("save: {e}"))?;
 			eprintln!("[setup] OpenRouter API key saved.");
@@ -81,14 +89,25 @@ pub(crate) async fn run_first_time_setup() -> Result<(), String> {
 				.duration_since(std::time::UNIX_EPOCH)
 				.map(|d| d.as_millis() as i64)
 				.unwrap_or(0);
+			let label = result
+				.id_token_claims
+				.email
+				.clone()
+				.unwrap_or_else(|| "default".to_string());
 			let mut auth = auth_store.load().ok().flatten().unwrap_or_default();
 			auth.active_provider = Some("openai".to_string());
-			auth.credentials.insert(
-				"openai".to_string(),
+			auth.active_account = Some(label.clone());
+			auth.upsert_credential(
+				"openai",
 				CredentialEntry::OAuth {
+					label,
 					access_token: result.api_key,
 					refresh_token: result.refresh_token,
-					id_token_claims: result.id_token_claims,
+					id_token_claims: IdTokenClaims {
+						email: result.id_token_claims.email,
+						user_id: result.id_token_claims.user_id,
+						account_id: result.id_token_claims.account_id,
+					},
 					last_refresh_unix_ms: now_ms,
 				},
 			);
@@ -100,53 +119,59 @@ pub(crate) async fn run_first_time_setup() -> Result<(), String> {
 	}
 }
 
-/// Handle /switch command — list stored credentials, pick one.
+/// Handle /switch command — flat list of all provider/account pairs.
 /// Returns `true` if the switch succeeded and the service was rebuilt.
 pub(crate) fn handle_switch_command(service: &mut RuntimeService) -> bool {
 	let auth_store = AuthStore::from_env();
 	let auth = match auth_store.load() {
-		Ok(Some(a)) if !a.credentials.is_empty() => a,
+		Ok(Some(a)) if a.has_any_credential() => a,
 		_ => {
 			eprintln!("[switch] No stored credentials. Use /login first.");
 			return false;
 		}
 	};
 
+	// Build flat list of (provider, entry) tuples sorted by provider name.
+	let mut flat: Vec<(&str, &CredentialEntry)> = Vec::new();
 	let mut providers: Vec<&String> = auth.credentials.keys().collect();
 	providers.sort();
-	if providers.len() < 2 && auth.active_provider.is_some() {
-		eprintln!(
-			"[switch] Only one credential stored ({}). Use /login to add another.",
-			providers.first().map(|s| s.as_str()).unwrap_or("?")
-		);
-		return false;
+	for provider in &providers {
+		if let Some(creds) = auth.credentials.get(*provider) {
+			for entry in creds {
+				flat.push((provider.as_str(), entry));
+			}
+		}
 	}
-	if providers.is_empty() {
-		eprintln!("[switch] No stored credentials. Use /login first.");
+
+	if flat.len() < 2 {
+		if let Some((provider, entry)) = flat.first() {
+			eprintln!(
+				"[switch] Only one credential stored ({} / {}). Use /login to add another.",
+				provider,
+				entry.label()
+			);
+		} else {
+			eprintln!("[switch] No stored credentials. Use /login first.");
+		}
 		return false;
 	}
 
-	let items: Vec<SelectionItem> = providers
+	let items: Vec<SelectionItem> = flat
 		.iter()
-		.map(|provider| {
-			let active = if auth.active_provider.as_deref() == Some(provider.as_str()) {
-				" (active)"
-			} else {
-				""
-			};
-			let summary = auth
-				.credentials
-				.get(*provider)
-				.map(credential_summary)
-				.unwrap_or_default();
+		.map(|(provider, entry)| {
+			let is_active = auth.active_provider.as_deref() == Some(*provider)
+				&& auth
+					.credential_for(provider)
+					.is_some_and(|active| active.label() == entry.label());
+			let active_marker = if is_active { " (active)" } else { "" };
 			SelectionItem {
-				label: format!("{provider}{active}"),
-				description: summary,
+				label: format!("{} / {}{}", provider, entry.label(), active_marker),
+				description: credential_summary(entry),
 			}
 		})
 		.collect();
 
-	let idx = match run_selection(items, "[switch] Available providers:") {
+	let idx = match run_selection(items, "[switch] Available accounts:") {
 		Some(i) => i,
 		None => {
 			eprintln!("[switch] Cancelled.");
@@ -154,9 +179,12 @@ pub(crate) fn handle_switch_command(service: &mut RuntimeService) -> bool {
 		}
 	};
 
-	let target = providers[idx].clone();
+	let (target_provider, target_entry) = flat[idx];
+	let target_label = target_entry.label().to_string();
+
 	let mut updated = auth.clone();
-	updated.active_provider = Some(target.clone());
+	updated.active_provider = Some(target_provider.to_string());
+	updated.active_account = Some(target_label.clone());
 	if let Err(e) = auth_store.save(&updated) {
 		eprintln!("[switch] Failed to update active provider: {e}");
 		return false;
@@ -164,7 +192,10 @@ pub(crate) fn handle_switch_command(service: &mut RuntimeService) -> bool {
 	match rebuild_service() {
 		Ok(s) => {
 			*service = s;
-			eprintln!("[switch] Switched to {target}.");
+			eprintln!(
+				"[switch] Switched to {} / {}.",
+				target_provider, target_label
+			);
 			print_auth_status();
 			true
 		}

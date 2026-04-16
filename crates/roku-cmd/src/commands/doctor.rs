@@ -36,20 +36,22 @@ fn check_auth() {
 	let store = AuthStore::from_env();
 	match store.load() {
 		Ok(Some(auth)) => {
-			if auth.credentials.is_empty() {
+			if !auth.has_any_credential() {
 				eprintln!("    ✗ No credentials stored. Use /login to sign in.");
 			} else {
-				for (provider, entry) in &auth.credentials {
-					let summary = credential_summary(entry);
-					let active = if auth.active_provider.as_deref() == Some(provider.as_str()) {
-						" (active)"
-					} else {
-						""
-					};
-					eprintln!("    ✓ {provider}: {summary}{active}");
+				for (provider, entries) in &auth.credentials {
+					for entry in entries {
+						let summary = credential_summary(entry);
+						let is_active = auth.active_provider.as_deref() == Some(provider.as_str())
+							&& auth
+								.credential_for(provider)
+								.is_some_and(|ae| ae.label() == entry.label());
+						let active = if is_active { " (active)" } else { "" };
+						eprintln!("    ✓ {provider} / {}: {summary}{active}", entry.label());
+					}
 				}
 			}
-			if auth.active_provider.is_none() && !auth.credentials.is_empty() {
+			if auth.active_provider.is_none() && auth.has_any_credential() {
 				eprintln!("    ! No active provider set. Use /provider to select one.");
 			}
 		}

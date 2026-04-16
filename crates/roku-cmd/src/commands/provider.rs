@@ -71,13 +71,38 @@ fn list_providers() {
 		.unwrap_or("none");
 
 	eprintln!("[provider] Available providers:");
-	if auth.credentials.is_empty() {
+	if !auth.has_any_credential() {
 		eprintln!("  (none)");
 	}
-	for (name, entry) in &auth.credentials {
-		let summary = credential_summary(entry);
-		let marker = if name == active { " ← active" } else { "" };
-		eprintln!("  {name}: {summary}{marker}");
+	let mut sorted_providers: Vec<&String> = auth.credentials.keys().collect();
+	sorted_providers.sort();
+	for name in &sorted_providers {
+		let entries = match auth.credentials.get(*name) {
+			Some(v) if !v.is_empty() => v,
+			_ => continue,
+		};
+		let active_entry = if name.as_str() == active {
+			auth.credential_for(name)
+		} else {
+			None
+		};
+		let show_label = entries.len() > 1;
+		for (i, entry) in entries.iter().enumerate() {
+			let is_active = active_entry.is_some_and(|ae| ae.label() == entry.label());
+			let marker = if is_active { " ← active" } else { "" };
+			let summary = credential_summary(entry);
+			let label_part = if show_label {
+				format!("{} ({})", entry.label(), summary)
+			} else {
+				summary
+			};
+			if i == 0 {
+				eprintln!("  {name}: {label_part}{marker}");
+			} else {
+				let indent = " ".repeat(name.len() + 2);
+				eprintln!("  {indent}{label_part}{marker}");
+			}
+		}
 	}
 
 	// Show env var providers.
@@ -105,7 +130,8 @@ fn list_providers() {
 		"\n  Selection reason: {}",
 		selection_reason(runtime_override.is_some(), active)
 	);
-	eprintln!("  Use /provider {{name}} to switch.");
+	eprintln!("  Use /provider {{name}} to switch provider.");
+	eprintln!("  Use /switch to switch between accounts.");
 }
 
 fn switch_provider(name: &str, service: &mut RuntimeService, logged_out: &mut bool) {
@@ -157,9 +183,16 @@ fn switch_provider(name: &str, service: &mut RuntimeService, logged_out: &mut bo
 		return;
 	}
 
-	// Save the previous provider so we can roll back if rebuild fails.
+	// Save the previous state so we can roll back if rebuild fails.
 	let previous_provider = auth.active_provider.clone();
+	let previous_account = auth.active_account.clone();
 	auth.active_provider = Some(name.to_string());
+	// Point active_account to the first credential for the new provider.
+	auth.active_account = auth
+		.credentials
+		.get(name)
+		.and_then(|v| v.first())
+		.map(|e| e.label().to_string());
 	if let Err(e) = store.save(&auth) {
 		eprintln!("[provider] Failed to save auth store: {e}");
 		return;
@@ -175,6 +208,7 @@ fn switch_provider(name: &str, service: &mut RuntimeService, logged_out: &mut bo
 			eprintln!("[provider] Service rebuild failed: {e}");
 			// Roll back auth.json to previous provider.
 			auth.active_provider = previous_provider;
+			auth.active_account = previous_account;
 			if let Err(rollback_err) = store.save(&auth) {
 				eprintln!("[provider] Failed to roll back auth store: {rollback_err}");
 			} else {

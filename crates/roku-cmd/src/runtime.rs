@@ -1116,12 +1116,12 @@ fn resolve_api_key_for_provider(
 	if let Some(key) = env_fn() {
 		return Some(key);
 	}
-	// Priority 2: auth.json credential.
+	// Priority 2: auth.json credential (respects active_account for multi-account).
 	let store = crate::auth::AuthStore::from_env();
 	let auth_file = store.load().ok().flatten()?;
-	let entry = auth_file.credentials.get(provider)?;
+	let entry = auth_file.credential_for(provider)?;
 	match entry {
-		crate::auth::CredentialEntry::ApiKey { api_key } => Some(api_key.clone()),
+		crate::auth::CredentialEntry::ApiKey { api_key, .. } => Some(api_key.clone()),
 		crate::auth::CredentialEntry::OAuth { access_token, .. } => Some(access_token.clone()),
 	}
 }
