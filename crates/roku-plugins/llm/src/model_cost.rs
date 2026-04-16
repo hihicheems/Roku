@@ -253,58 +253,6 @@ pub static KNOWN_COST_PROFILES: &[ModelCostProfile] = &[
 		max_output_tokens: 100000,
 		as_of: "2026-04",
 	},
-	// GPT-4.1 family — still active in API (not deprecated)
-	ModelCostProfile {
-		model_id_prefix: "gpt-4.1-nano",
-		provider: "openai",
-		input_per_mtok: 0.10,
-		cache_write_per_mtok: 0.10,
-		cache_read_per_mtok: 0.025,
-		output_per_mtok: 0.40,
-		max_output_tokens: 32768,
-		as_of: "2026-04",
-	},
-	ModelCostProfile {
-		model_id_prefix: "gpt-4.1-mini",
-		provider: "openai",
-		input_per_mtok: 0.40,
-		cache_write_per_mtok: 0.40,
-		cache_read_per_mtok: 0.10,
-		output_per_mtok: 1.60,
-		max_output_tokens: 32768,
-		as_of: "2026-04",
-	},
-	ModelCostProfile {
-		model_id_prefix: "gpt-4.1",
-		provider: "openai",
-		input_per_mtok: 2.00,
-		cache_write_per_mtok: 2.00,
-		cache_read_per_mtok: 0.50,
-		output_per_mtok: 8.00,
-		max_output_tokens: 32768,
-		as_of: "2026-04",
-	},
-	// GPT-4o family — still active in API (retired from ChatGPT only)
-	ModelCostProfile {
-		model_id_prefix: "gpt-4o-mini",
-		provider: "openai",
-		input_per_mtok: 0.15,
-		cache_write_per_mtok: 0.15,
-		cache_read_per_mtok: 0.075,
-		output_per_mtok: 0.60,
-		max_output_tokens: 16384,
-		as_of: "2026-04",
-	},
-	ModelCostProfile {
-		model_id_prefix: "gpt-4o",
-		provider: "openai",
-		input_per_mtok: 2.50,
-		cache_write_per_mtok: 2.50,
-		cache_read_per_mtok: 1.25,
-		output_per_mtok: 10.00,
-		max_output_tokens: 16384,
-		as_of: "2026-04",
-	},
 ];
 
 /// Returns true if the model is a reasoning-capable model.
@@ -421,28 +369,10 @@ mod tests {
 	}
 
 	#[test]
-	fn test_openai_gpt41_cost() {
-		let profile = lookup_cost_profile("gpt-4.1").expect("should match gpt-4.1");
-		let cost = compute_turn_cost_usd(profile, 500_000, 50_000, 0, 300_000);
-		assert!((cost.uncached_input_usd - 0.40).abs() < 1e-9);
-		assert!((cost.cache_read_usd - 0.15).abs() < 1e-9);
-		assert!((cost.output_usd - 0.40).abs() < 1e-9);
-		assert!((cost.total_usd - 0.95).abs() < 1e-9);
-	}
-
-	#[test]
 	fn test_longest_prefix_match() {
 		// gpt-5.4-mini must match the more specific "gpt-5.4-mini" entry, not "gpt-5.4"
 		let p = lookup_cost_profile("gpt-5.4-mini-2026-01-01").unwrap();
 		assert_eq!(p.model_id_prefix, "gpt-5.4-mini");
-
-		// gpt-4.1-mini must match "gpt-4.1-mini", not "gpt-4.1"
-		let p = lookup_cost_profile("gpt-4.1-mini-2025-04-14").unwrap();
-		assert_eq!(p.model_id_prefix, "gpt-4.1-mini");
-
-		// gpt-4o-mini must match "gpt-4o-mini", not "gpt-4o"
-		let p = lookup_cost_profile("gpt-4o-mini-2024-07-18").unwrap();
-		assert_eq!(p.model_id_prefix, "gpt-4o-mini");
 
 		// o3-mini must match "o3-mini", not "o3"
 		let p = lookup_cost_profile("o3-mini-2025-01-31").unwrap();
@@ -459,6 +389,12 @@ mod tests {
 		assert!(lookup_cost_profile("").is_none());
 		// Retired models should not match
 		assert!(lookup_cost_profile("claude-3-5-haiku-20241022").is_none());
+		// Removed GPT-4 series should not match
+		assert!(lookup_cost_profile("gpt-4o").is_none());
+		assert!(lookup_cost_profile("gpt-4o-mini").is_none());
+		assert!(lookup_cost_profile("gpt-4.1").is_none());
+		assert!(lookup_cost_profile("gpt-4.1-mini").is_none());
+		assert!(lookup_cost_profile("gpt-4.1-nano").is_none());
 	}
 
 	#[test]
