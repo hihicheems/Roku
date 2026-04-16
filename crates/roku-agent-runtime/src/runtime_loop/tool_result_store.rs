@@ -134,17 +134,20 @@ impl ToolResultStore {
 
 /// Build the disk path for a tool result file.
 ///
-/// `tool_use_id` is external input from the model/provider, so path
-/// separators are replaced to prevent directory traversal.
+/// Both `run_id` and `tool_use_id` can contain external input (run_id
+/// derives from user goal via request_id; tool_use_id comes from the
+/// model/provider), so path separators are replaced to prevent
+/// directory traversal.
 fn tool_result_disk_path(run_id: &str, tool_use_id: &str) -> PathBuf {
 	let home = std::env::var("HOME")
 		.or_else(|_| std::env::var("USERPROFILE"))
 		.unwrap_or_else(|_| "/tmp".to_string());
+	let safe_run_id = sanitize_path_component(run_id);
 	let safe_id = sanitize_path_component(tool_use_id);
 	PathBuf::from(home)
 		.join(".roku")
 		.join("tool-results")
-		.join(run_id)
+		.join(safe_run_id)
 		.join(format!("{safe_id}.txt"))
 }
 
@@ -347,5 +350,16 @@ mod tests {
 		assert!(!file_name.contains('\\'));
 		assert!(!file_name.contains(".."));
 		assert!(file_name.ends_with(".txt"));
+	}
+
+	#[test]
+	fn disk_path_sanitizes_run_id() {
+		let path = tool_result_disk_path("loop-req-../../etc", "tool-1");
+		let path_str = path.to_str().unwrap();
+		// run_id segment must not contain traversal sequences.
+		assert!(path_str.contains("loop-req-______etc"));
+		assert!(!path_str.contains("../../"));
+		// tool_use_id segment is also sanitized.
+		assert!(path_str.ends_with("tool-1.txt"));
 	}
 }
