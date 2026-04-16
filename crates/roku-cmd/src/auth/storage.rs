@@ -135,7 +135,11 @@ pub enum CredentialEntry {
 		api_key: String,
 	},
 	/// An OAuth credential that includes tokens and id-token claims.
-	#[serde(rename = "oauth")]
+	///
+	/// `rename_all = "snake_case"` maps `OAuth` → `"o_auth"` which is the
+	/// tag written by v1. We rename to `"oauth"` for v2 clarity but keep
+	/// `"o_auth"` as a deserialization alias so existing files still load.
+	#[serde(rename = "oauth", alias = "o_auth")]
 	OAuth {
 		#[serde(default = "default_label")]
 		label: String,
@@ -454,7 +458,7 @@ mod tests {
             "active_provider": "openai",
             "credentials": {
                 "openai": {
-                    "kind": "oauth",
+                    "kind": "o_auth",
                     "access_token": "sk-old",
                     "refresh_token": "rt-old",
                     "id_token_claims": { "email": "old@example.com" },
