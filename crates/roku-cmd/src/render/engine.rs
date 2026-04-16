@@ -301,6 +301,16 @@ impl RenderEngine {
 			LoopEvent::EstimatorCalibrated { .. } => {
 				// Calibration samples are diagnostic; no live UX feedback.
 			}
+			LoopEvent::CacheBreakDetected {
+				step, tokens_lost, ..
+			} => {
+				eprint!(
+					"{}\r\n",
+					crate::render::style::styled_compact_notice(&format!(
+						"[cache] step {step} prefix cache break detected (~{tokens_lost} tokens lost)"
+					))
+				);
+			}
 		}
 	}
 

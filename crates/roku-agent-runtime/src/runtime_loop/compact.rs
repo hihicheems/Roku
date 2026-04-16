@@ -1088,6 +1088,7 @@ mod tests {
 			frozen_tool_schema: None,
 			tool_schema_dirty: true,
 			observed_plan_mode: None,
+			cache_break_detector: crate::runtime_loop::cache_break::CacheBreakDetector::default(),
 		}
 	}
 

@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::router::RouteDecision;
 use crate::runtime_config::LoopRuntimeConfig;
+use crate::runtime_loop::cache_break::CacheBreakDetector;
 use crate::runtime_loop::compact::EstimatorCalibration;
 use crate::runtime_loop::grounding::{
 	extract_explicit_path_candidates, extract_explicit_python_code, extract_explicit_shell_command,
@@ -163,6 +164,13 @@ pub struct LoopState {
 	/// once per transition. `None` before the first refresh.
 	#[serde(skip)]
 	pub observed_plan_mode: Option<bool>,
+	/// Session-scoped cache break detector. Tracks the prompt-state
+	/// fingerprint and `cache_read_input_tokens` baseline across turns.
+	/// Intentionally not serialized — a freshly restored loop starts with
+	/// no baseline (first turn after restore → skip detection).
+	#[serde(skip)]
+	#[allow(private_interfaces)]
+	pub(crate) cache_break_detector: CacheBreakDetector,
 }
 
 /// Maximum allowed consecutive Layer 3 structured-summary failures before
@@ -213,6 +221,7 @@ impl LoopState {
 			frozen_tool_schema: None,
 			tool_schema_dirty: true,
 			observed_plan_mode: None,
+			cache_break_detector: CacheBreakDetector::default(),
 		}
 	}
 
@@ -411,6 +420,7 @@ mod tests {
 	use crate::router::{IntentFamily, RouteDecision, RouteRisk};
 	use crate::runtime_loop::LoopContext;
 	use crate::runtime_loop::ask_user::{AskUserPayload, AskUserResumeContract};
+	use crate::runtime_loop::cache_break::CacheBreakDetector;
 	use crate::runtime_loop::next_step::{NextStepAction, NextStepDecision};
 	use crate::runtime_loop::observation::{StepObservation, ToolObservation};
 	use crate::runtime_loop::state_update::InterpretedObservation;
@@ -602,12 +612,13 @@ mod tests {
 		let deserialized: LoopState =
 			serde_json::from_str(&json_str).expect("loop state should deserialize from JSON");
 
-		// `frozen_tool_schema`, `tool_schema_dirty`, and `observed_plan_mode`
-		// are `#[serde(skip)]` — the cache does not survive a snapshot
-		// roundtrip by design, so normalize them before structural compare.
+		// `frozen_tool_schema`, `tool_schema_dirty`, `observed_plan_mode`, and
+		// `cache_break_detector` are `#[serde(skip)]` — they do not survive
+		// a snapshot roundtrip by design, so normalize before structural compare.
 		state.frozen_tool_schema = None;
 		state.tool_schema_dirty = false;
 		state.observed_plan_mode = None;
+		state.cache_break_detector = CacheBreakDetector::default();
 
 		assert_eq!(state, deserialized);
 		assert_eq!(deserialized.history.len(), 3);

@@ -317,6 +317,15 @@ pub(crate) fn render_trace_detail(events: &[TimestampedEvent]) -> String {
 			} => format!(
 				"[step {step}] estimator_calibrated: estimated={estimated_prompt_tokens} real={prompt_tokens} scale={scale:.3}"
 			),
+			LoopEvent::CacheBreakDetected {
+				step,
+				tokens_lost,
+				component_changed,
+				..
+			} => format!(
+				"[step {step}] cache_break_detected: tokens_lost={tokens_lost} changed=[{}]",
+				component_changed.join(", ")
+			),
 		};
 		lines.push(format!("{ts} {desc}"));
 	}

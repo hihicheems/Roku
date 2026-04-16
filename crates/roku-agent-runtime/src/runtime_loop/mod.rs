@@ -14,6 +14,7 @@
 
 pub mod approval;
 mod ask_user;
+pub(crate) mod cache_break;
 mod compact;
 mod context_assembly;
 pub(crate) mod environment;
