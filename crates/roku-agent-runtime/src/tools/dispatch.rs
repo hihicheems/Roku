@@ -100,6 +100,12 @@ pub(crate) fn truncate_tool_result_for_message(content: &str, max_chars: usize) 
 	if max_chars == TOOL_CAP_NO_TRUNCATE || content.len() <= max_chars {
 		return content.to_string();
 	}
+	let total_chars = content.chars().count();
+	// For content whose byte length exceeds the cap but char count does not
+	// (common with multibyte UTF-8), return the full content unmodified.
+	if total_chars <= max_chars {
+		return content.to_string();
+	}
 	// Reserve space for the marker (approx 40 chars for the marker text).
 	let marker_reserve = 40;
 	let available = max_chars.saturating_sub(marker_reserve);
@@ -116,7 +122,12 @@ pub(crate) fn truncate_tool_result_for_message(content: &str, max_chars: usize) 
 		.nth(tail_chars.saturating_sub(1))
 		.map(|(i, _)| i)
 		.unwrap_or(0);
-	let truncated_chars = content.len() - head_end - (content.len() - tail_start);
+	// Guard against overlap when head and tail meet or cross (possible when
+	// char count barely exceeds available).
+	if head_end >= tail_start {
+		return content.to_string();
+	}
+	let truncated_chars = total_chars - head_chars - tail_chars;
 	format!(
 		"{}\n\n…{} chars truncated…\n\n{}",
 		&content[..head_end],
@@ -183,6 +194,27 @@ mod tests {
 		let long_content = "X".repeat(200_000);
 		let result = truncate_tool_result_for_message(&long_content, TOOL_CAP_NO_TRUNCATE);
 		assert_eq!(result, long_content);
+	}
+
+	#[test]
+	fn multibyte_content_does_not_underflow() {
+		// 10000 CJK chars = 30000 bytes. Cap is 20000 (bytes > cap but
+		// char count < cap). Should return content unmodified.
+		let content = "你".repeat(10_000);
+		assert_eq!(content.len(), 30_000); // 3 bytes each
+		let result = truncate_tool_result_for_message(&content, 20_000);
+		assert_eq!(result, content);
+	}
+
+	#[test]
+	fn multibyte_truncation_produces_valid_marker() {
+		// 40000 CJK chars = 120000 bytes. Cap is 20000. Char count (40000)
+		// exceeds cap, so truncation should fire and produce a valid marker.
+		let content = "你".repeat(40_000);
+		let result = truncate_tool_result_for_message(&content, 20_000);
+		assert!(result.contains("chars truncated"));
+		// Verify no panic occurred and result is valid UTF-8.
+		assert!(result.len() < content.len());
 	}
 
 	#[test]
