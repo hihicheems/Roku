@@ -1886,9 +1886,14 @@ impl GenericAgentRuntime {
 							),
 							true,
 						)
+					} else if tool_name_owned == "Read" {
+						// Read delivers full content (TOOL_CAP_NO_TRUNCATE). Skip
+						// disk persistence — the user controls size via offset/limit,
+						// and preview-replacing a 5KB read would be a regression.
+						(full_tool_result_content, !observation.ok)
 					} else {
 						// Disk persistence: persist full (un-truncated) content and
-						// replace with preview (skipped for FileRead errors).
+						// replace with preview (skipped for Read tool).
 						let run_id = loop_state.run_id.clone();
 						let (content, _is_preview) = loop_state.tool_result_store.register(
 							&tc.id,
