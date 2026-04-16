@@ -26,7 +26,7 @@ pub mod pkce;
 pub mod storage;
 
 pub(crate) use oauth::run_openai_oauth;
-pub(crate) use storage::{AuthFile, AuthStore, CredentialEntry};
+pub(crate) use storage::{AuthFile, AuthStore, CredentialEntry, IdTokenClaims};
 
 /// Errors produced by the auth subsystem.
 #[derive(Debug, thiserror::Error)]

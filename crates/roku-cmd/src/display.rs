@@ -76,7 +76,7 @@ pub(crate) fn has_no_credentials() -> bool {
 	// Check auth.json for any credential.
 	let store = AuthStore::from_env();
 	match store.load() {
-		Ok(Some(auth)) => auth.credentials.is_empty(),
+		Ok(Some(auth)) => !auth.has_any_credential(),
 		_ => true,
 	}
 }
@@ -92,16 +92,9 @@ pub(crate) fn print_auth_status() {
 		}
 	};
 	let provider = auth.active_provider.as_deref().unwrap_or("none");
-	let auth_method = auth
-		.credentials
-		.get(provider)
-		.map(auth_method_label)
-		.unwrap_or_default();
-	let detail = auth
-		.credentials
-		.get(provider)
-		.map(credential_summary)
-		.unwrap_or_default();
+	let active_entry = auth.credential_for(provider);
+	let auth_method = active_entry.map(auth_method_label).unwrap_or_default();
+	let detail = active_entry.map(credential_summary).unwrap_or_default();
 
 	let model_id = resolve_display_model(auth.active_provider.as_deref());
 	let mut parts = Vec::new();
@@ -150,7 +143,7 @@ fn auth_method_label(entry: &CredentialEntry) -> String {
 /// One-line summary of a credential entry (email or key prefix).
 pub(crate) fn credential_summary(entry: &CredentialEntry) -> String {
 	match entry {
-		CredentialEntry::ApiKey { api_key } => {
+		CredentialEntry::ApiKey { api_key, .. } => {
 			// Show only the last 4 characters to minimize key exposure.
 			let suffix: String = api_key
 				.chars()

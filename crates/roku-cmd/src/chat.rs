@@ -223,26 +223,66 @@ fn run_interactive(rt: &tokio::runtime::Runtime, options: ChatOptions) -> Result
 			"/logout" => {
 				reader.add_history_entry(trimmed);
 				let auth_store = AuthStore::from_env();
-				if let Ok(Some(auth)) = auth_store.load() {
-					if let Some(provider) = auth.active_provider.as_deref() {
-						if let Err(e) = auth_store.delete_credential(provider) {
-							eprintln!("[logout] Failed to clear credentials: {e}");
+				if let Ok(Some(mut auth)) = auth_store.load() {
+					if let Some(provider) = auth.active_provider.clone() {
+						if let Some(active) = auth.credential_for(&provider) {
+							let label = active.label().to_string();
+							let removed = auth.remove_credential(&provider, &label);
+							if removed {
+								// Check if other accounts remain for this provider.
+								let remaining = auth
+									.credentials
+									.get(&provider)
+									.map(|v| v.len())
+									.unwrap_or(0);
+								if remaining > 0 {
+									// Fall back to first remaining account.
+									let next_label =
+										auth.credentials[&provider][0].label().to_string();
+									auth.active_account = Some(next_label);
+									if let Err(e) = auth_store.save(&auth) {
+										eprintln!("[logout] Failed to save: {e}");
+									} else {
+										eprintln!(
+											"[logout] Cleared credential for {provider} ({label})."
+										);
+										eprintln!(
+											"[logout] {} other account(s) remain. Use /switch to select.",
+											remaining
+										);
+									}
+								} else {
+									// No accounts left for this provider.
+									auth.active_provider = None;
+									auth.active_account = None;
+									if let Err(e) = auth_store.save(&auth) {
+										eprintln!("[logout] Failed to save: {e}");
+									} else {
+										logged_out = true;
+										eprintln!(
+											"[logout] Cleared credential for {provider} ({label}). Use /login to sign in again."
+										);
+									}
+								}
+							} else {
+								eprintln!("[logout] No credentials found.");
+							}
+						} else {
+							eprintln!("[logout] No active credential found.");
+						}
+					} else if auth.has_any_credential() {
+						let count = auth.credential_count();
+						auth.credentials.clear();
+						auth.active_account = None;
+						if let Err(e) = auth_store.save(&auth) {
+							eprintln!("[logout] Failed to save: {e}");
 						} else {
 							logged_out = true;
 							eprintln!(
-								"[logout] Credentials cleared for {provider}. Use /login to sign in again."
+								"[logout] Cleared {} stored credential(s). Use /login to sign in again.",
+								count
 							);
 						}
-					} else if !auth.credentials.is_empty() {
-						let providers: Vec<String> = auth.credentials.keys().cloned().collect();
-						for p in &providers {
-							let _ = auth_store.delete_credential(p);
-						}
-						logged_out = true;
-						eprintln!(
-							"[logout] Cleared {} stored credential(s). Use /login to sign in again.",
-							providers.len()
-						);
 					} else {
 						eprintln!("[logout] No credentials found.");
 					}
