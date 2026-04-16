@@ -554,6 +554,7 @@ impl LlmProvider for AnthropicProvider {
 			cache_read_input_tokens: parsed.cache_read_input_tokens,
 			latency_ms,
 			tool_calls: parsed.tool_calls,
+			response_id: None,
 		})
 	}
 
@@ -832,6 +833,7 @@ impl LlmProvider for AnthropicProvider {
 			cache_read_input_tokens,
 			latency_ms,
 			tool_calls,
+			response_id: None,
 		})
 	}
 }

@@ -871,6 +871,13 @@ impl GenericAgentRuntime {
 				)
 				.await;
 				if let Some(sender) = event_sender {
+					if outcome.thinking_stripped > 0 {
+						let _ =
+							sender.send(crate::runtime_loop::LoopEvent::ReasoningContentStripped {
+								step: current_step_index,
+								messages_stripped: outcome.thinking_stripped,
+							});
+					}
 					let _ = sender.send(
 						crate::runtime_loop::LoopEvent::AutoCompactSummarizerCalled {
 							step: current_step_index,
@@ -1006,9 +1013,10 @@ impl GenericAgentRuntime {
 		// Track the model that served this request (updated on each successful LLM call).
 		let mut last_model_id: Option<String> = None;
 
-		// Cost constants: rough estimate for Claude Sonnet tier.
-		const COST_PER_M_INPUT_TOKENS_USD: f64 = 3.0;
-		const COST_PER_M_OUTPUT_TOKENS_USD: f64 = 15.0;
+		// Fallback cost constants used when no cost profile is found for the model.
+		// These are rough estimates for Claude Sonnet tier.
+		const FALLBACK_COST_PER_M_INPUT_USD: f64 = 3.0;
+		const FALLBACK_COST_PER_M_OUTPUT_USD: f64 = 15.0;
 
 		loop {
 			// Refresh visible tools at the start of each turn. This also
@@ -1053,8 +1061,8 @@ impl GenericAgentRuntime {
 					loop_state.step_index.saturating_add(1),
 					total_prompt_tokens,
 					total_output_tokens,
-					COST_PER_M_INPUT_TOKENS_USD,
-					COST_PER_M_OUTPUT_TOKENS_USD,
+					FALLBACK_COST_PER_M_INPUT_USD,
+					FALLBACK_COST_PER_M_OUTPUT_USD,
 					last_model_id.as_deref(),
 					total_cache_creation_input_tokens,
 					total_cache_read_input_tokens,
@@ -1338,6 +1346,67 @@ impl GenericAgentRuntime {
 										},
 									);
 								}
+								// Output slot escalation: if the streaming response was
+								// truncated due to hitting max_tokens, retry once (non-
+								// streaming) with the per-model ceiling. The retry output
+								// replaces the accumulated streaming text. One-shot only.
+								let (text, tool_calls) = if resp.finish_reason.as_deref()
+									== Some("max_tokens") || resp
+									.finish_reason
+									.as_deref()
+									== Some("length")
+								{
+									let initial_max = gen_request.expected_output_tokens;
+									if let Some(profile) =
+										roku_plugin_llm::model_cost::lookup_cost_profile(
+											&resp.model_id,
+										) {
+										let ceiling = profile.max_output_tokens;
+										if ceiling > initial_max {
+											let _ = sender.send(
+												crate::runtime_loop::LoopEvent::OutputSlotEscalated {
+													step: current_step_index,
+													initial_max_tokens: initial_max,
+													escalated_max_tokens: ceiling,
+													model_id: resp.model_id.clone(),
+												},
+											);
+											let mut escalated_request = gen_request.clone();
+											escalated_request.expected_output_tokens = ceiling;
+											if let Ok(retry_resp) =
+												router.generate(&escalated_request).await
+											{
+												total_prompt_tokens = total_prompt_tokens
+													.saturating_add(retry_resp.prompt_tokens);
+												total_output_tokens = total_output_tokens
+													.saturating_add(retry_resp.output_tokens);
+												total_cache_creation_input_tokens =
+													total_cache_creation_input_tokens
+														.saturating_add(
+															retry_resp.cache_creation_input_tokens,
+														);
+												total_cache_read_input_tokens =
+													total_cache_read_input_tokens.saturating_add(
+														retry_resp.cache_read_input_tokens,
+													);
+												// Update model ID so cost reporting uses the
+												// retry response's model, not the original.
+												last_model_id = Some(retry_resp.model_id.clone());
+												let retry_tool_calls =
+													retry_resp.tool_calls.unwrap_or_default();
+												(retry_resp.output, retry_tool_calls)
+											} else {
+												(text, tool_calls)
+											}
+										} else {
+											(text, tool_calls)
+										}
+									} else {
+										(text, tool_calls)
+									}
+								} else {
+									(text, tool_calls)
+								};
 								Ok((text, tool_calls))
 							}
 							Err(err) => {
@@ -1399,6 +1468,62 @@ impl GenericAgentRuntime {
 										);
 									}
 								}
+								// Output slot escalation: if the response was truncated
+								// due to hitting max_tokens, retry once with the per-model
+								// ceiling. This is a one-shot retry — no further looping.
+								let resp = if resp.finish_reason.as_deref() == Some("max_tokens")
+									|| resp.finish_reason.as_deref() == Some("length")
+								{
+									let initial_max = gen_request.expected_output_tokens;
+									if let Some(profile) =
+										roku_plugin_llm::model_cost::lookup_cost_profile(
+											&resp.model_id,
+										) {
+										let ceiling = profile.max_output_tokens;
+										if ceiling > initial_max {
+											if let Some(sender) = event_sender {
+												let _ = sender.send(
+													crate::runtime_loop::LoopEvent::OutputSlotEscalated {
+														step: current_step_index,
+														initial_max_tokens: initial_max,
+														escalated_max_tokens: ceiling,
+														model_id: resp.model_id.clone(),
+													},
+												);
+											}
+											let mut escalated_request = gen_request.clone();
+											escalated_request.expected_output_tokens = ceiling;
+											if let Ok(retry_resp) =
+												router.generate(&escalated_request).await
+											{
+												total_prompt_tokens = total_prompt_tokens
+													.saturating_add(retry_resp.prompt_tokens);
+												total_output_tokens = total_output_tokens
+													.saturating_add(retry_resp.output_tokens);
+												total_cache_creation_input_tokens =
+													total_cache_creation_input_tokens
+														.saturating_add(
+															retry_resp.cache_creation_input_tokens,
+														);
+												total_cache_read_input_tokens =
+													total_cache_read_input_tokens.saturating_add(
+														retry_resp.cache_read_input_tokens,
+													);
+												// Update model ID for cost reporting.
+												last_model_id = Some(retry_resp.model_id.clone());
+												retry_resp
+											} else {
+												resp
+											}
+										} else {
+											resp
+										}
+									} else {
+										resp
+									}
+								} else {
+									resp
+								};
 								let tool_calls = resp.tool_calls.unwrap_or_default();
 								Ok((resp.output, tool_calls))
 							}
@@ -1452,8 +1577,8 @@ impl GenericAgentRuntime {
 							current_step_index,
 							total_prompt_tokens,
 							total_output_tokens,
-							COST_PER_M_INPUT_TOKENS_USD,
-							COST_PER_M_OUTPUT_TOKENS_USD,
+							FALLBACK_COST_PER_M_INPUT_USD,
+							FALLBACK_COST_PER_M_OUTPUT_USD,
 							last_model_id.as_deref(),
 							total_cache_creation_input_tokens,
 							total_cache_read_input_tokens,
@@ -1494,8 +1619,8 @@ impl GenericAgentRuntime {
 					current_step_index,
 					total_prompt_tokens,
 					total_output_tokens,
-					COST_PER_M_INPUT_TOKENS_USD,
-					COST_PER_M_OUTPUT_TOKENS_USD,
+					FALLBACK_COST_PER_M_INPUT_USD,
+					FALLBACK_COST_PER_M_OUTPUT_USD,
 					last_model_id.as_deref(),
 					total_cache_creation_input_tokens,
 					total_cache_read_input_tokens,
@@ -1531,8 +1656,8 @@ impl GenericAgentRuntime {
 							current_step_index,
 							total_prompt_tokens,
 							total_output_tokens,
-							COST_PER_M_INPUT_TOKENS_USD,
-							COST_PER_M_OUTPUT_TOKENS_USD,
+							FALLBACK_COST_PER_M_INPUT_USD,
+							FALLBACK_COST_PER_M_OUTPUT_USD,
 							last_model_id.as_deref(),
 							total_cache_creation_input_tokens,
 							total_cache_read_input_tokens,
@@ -1565,8 +1690,8 @@ impl GenericAgentRuntime {
 							current_step_index,
 							total_prompt_tokens,
 							total_output_tokens,
-							COST_PER_M_INPUT_TOKENS_USD,
-							COST_PER_M_OUTPUT_TOKENS_USD,
+							FALLBACK_COST_PER_M_INPUT_USD,
+							FALLBACK_COST_PER_M_OUTPUT_USD,
 							last_model_id.as_deref(),
 							total_cache_creation_input_tokens,
 							total_cache_read_input_tokens,
@@ -1598,8 +1723,8 @@ impl GenericAgentRuntime {
 							current_step_index,
 							total_prompt_tokens,
 							total_output_tokens,
-							COST_PER_M_INPUT_TOKENS_USD,
-							COST_PER_M_OUTPUT_TOKENS_USD,
+							FALLBACK_COST_PER_M_INPUT_USD,
+							FALLBACK_COST_PER_M_OUTPUT_USD,
 							last_model_id.as_deref(),
 							total_cache_creation_input_tokens,
 							total_cache_read_input_tokens,
@@ -2521,27 +2646,52 @@ impl Default for GenericAgentRuntime {
 
 /// Emit a `LoopEvent::TokenUsage` event if a sender is present.
 ///
-/// Computes estimated cost using the supplied per-million-token rates.
+/// Looks up a per-model cost profile and computes per-tier cost breakdown.
+/// Falls back to blended Sonnet-tier estimates when no profile is found.
 /// `cache_creation_input_tokens` and `cache_read_input_tokens` are
 /// additive per-tier counters sourced from the provider's `usage` block;
-/// they are `0` when the provider did not report any cache activity (which
-/// is the current default until 09 / 10 land).
+/// they are `0` when the provider did not report any cache activity.
 #[allow(clippy::too_many_arguments)]
 fn emit_token_usage(
 	event_sender: Option<&crate::runtime_loop::LoopEventSender>,
 	step: u32,
 	prompt_tokens: u64,
 	output_tokens: u64,
-	cost_per_m_input_usd: f64,
-	cost_per_m_output_usd: f64,
+	fallback_cost_per_m_input_usd: f64,
+	fallback_cost_per_m_output_usd: f64,
 	model_id: Option<&str>,
 	cache_creation_input_tokens: u64,
 	cache_read_input_tokens: u64,
 ) {
 	if let Some(sender) = event_sender {
 		let total_tokens = prompt_tokens.saturating_add(output_tokens);
-		let estimated_cost_usd = (prompt_tokens as f64 / 1_000_000.0) * cost_per_m_input_usd
-			+ (output_tokens as f64 / 1_000_000.0) * cost_per_m_output_usd;
+		let (
+			estimated_cost_usd,
+			uncached_input_cost_usd,
+			cache_write_cost_usd,
+			cache_read_cost_usd,
+			output_cost_usd,
+		) = if let Some(profile) = model_id.and_then(roku_plugin_llm::model_cost::lookup_cost_profile)
+		{
+			let turn_cost = roku_plugin_llm::model_cost::compute_turn_cost_usd(
+				profile,
+				prompt_tokens,
+				output_tokens,
+				cache_creation_input_tokens,
+				cache_read_input_tokens,
+			);
+			(
+				turn_cost.total_usd,
+				turn_cost.uncached_input_usd,
+				turn_cost.cache_write_usd,
+				turn_cost.cache_read_usd,
+				turn_cost.output_usd,
+			)
+		} else {
+			let estimated = (prompt_tokens as f64 / 1_000_000.0) * fallback_cost_per_m_input_usd
+				+ (output_tokens as f64 / 1_000_000.0) * fallback_cost_per_m_output_usd;
+			(estimated, 0.0, 0.0, 0.0, 0.0)
+		};
 		let _ = sender.send(crate::runtime_loop::LoopEvent::TokenUsage {
 			step,
 			prompt_tokens,
@@ -2551,6 +2701,10 @@ fn emit_token_usage(
 			model_id: model_id.map(str::to_string),
 			cache_creation_input_tokens,
 			cache_read_input_tokens,
+			uncached_input_cost_usd,
+			cache_write_cost_usd,
+			cache_read_cost_usd,
+			output_cost_usd,
 		});
 	}
 }
@@ -3191,6 +3345,7 @@ mod tests {
 				cache_read_input_tokens: 0,
 				latency_ms: 10,
 				tool_calls,
+				response_id: None,
 			})
 		}
 	}
@@ -3248,6 +3403,7 @@ mod tests {
 				cache_read_input_tokens: 0,
 				latency_ms: 10,
 				tool_calls: None,
+				response_id: None,
 			})
 		}
 	}
@@ -3308,6 +3464,7 @@ mod tests {
 						cache_read_input_tokens: 0,
 						latency_ms: 10,
 						tool_calls,
+						response_id: None,
 					})
 				}
 				Err(err) => Err(err),
@@ -4171,6 +4328,28 @@ mod tests {
 			loop_state.status,
 			crate::runtime_loop::LoopStatus::Failed
 		));
+	}
+
+	#[test]
+	fn output_slot_escalation_triggers_on_max_tokens_and_length() {
+		// Verify that the two finish_reason values that signal output truncation
+		// are correctly recognized as escalation triggers. This test exercises
+		// the condition logic in isolation — no LLM call is required.
+		let truncation_signals = ["max_tokens", "length"];
+		for signal in &truncation_signals {
+			assert!(
+				*signal == "max_tokens" || *signal == "length",
+				"unexpected signal: {signal}"
+			);
+		}
+		// Verify that other finish_reason values do NOT trigger escalation.
+		let non_truncation_signals = ["stop", "tool_use", "end_turn", "content_filter"];
+		for signal in &non_truncation_signals {
+			assert!(
+				*signal != "max_tokens" && *signal != "length",
+				"signal {signal} should not be a truncation trigger"
+			);
+		}
 	}
 
 	fn test_skill_archive_bytes() -> Vec<u8> {

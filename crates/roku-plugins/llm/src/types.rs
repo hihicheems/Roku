@@ -35,6 +35,22 @@ pub enum ThinkingEffort {
 	High,
 }
 
+/// Per-model, per-tier pricing in USD per million tokens.
+/// Anthropic uses 4 tiers; OpenAI uses 3 tiers (cache_write is free).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelCostProfile {
+	pub model_id_prefix: &'static str,
+	pub provider: &'static str,
+	pub input_per_mtok: f64,
+	pub cache_write_per_mtok: f64,
+	pub cache_read_per_mtok: f64,
+	pub output_per_mtok: f64,
+	/// Maximum output tokens for this model family.
+	pub max_output_tokens: u64,
+	/// Pricing table timestamp for staleness detection.
+	pub as_of: &'static str,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelProfile {
 	pub model_id: String,
@@ -296,6 +312,10 @@ pub struct ProviderResponse {
 	/// See [`LlmResponse::cache_read_input_tokens`].
 	#[serde(default)]
 	pub cache_read_input_tokens: u64,
+	/// OpenAI Responses API response ID for delta mode (`previous_response_id`
+	/// on the next turn). `None` for providers that do not return a response ID.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub response_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

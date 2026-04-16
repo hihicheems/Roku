@@ -274,8 +274,20 @@ pub(crate) fn render_trace_detail(events: &[TimestampedEvent]) -> String {
 				step,
 				prompt_tokens,
 				output_tokens,
+				estimated_cost_usd,
+				uncached_input_cost_usd,
+				cache_write_cost_usd,
+				cache_read_cost_usd,
+				output_cost_usd,
 				..
-			} => format!("[step {step}] tokens: {prompt_tokens}/{output_tokens}"),
+			} => format!(
+				"[step {step}] tokens: {prompt_tokens}/{output_tokens} \
+				${estimated_cost_usd:.4} \
+				(in: ${uncached_input_cost_usd:.4}, \
+				cache_w: ${cache_write_cost_usd:.4}, \
+				cache_r: ${cache_read_cost_usd:.4}, \
+				out: ${output_cost_usd:.4})"
+			),
 			LoopEvent::ReactiveCompactTriggered { step, detail } => {
 				format!("[step {step}] reactive_compact_triggered: {detail}")
 			}
@@ -335,6 +347,27 @@ pub(crate) fn render_trace_detail(events: &[TimestampedEvent]) -> String {
 			} => format!(
 				"[step {step}] cache_break_detected: tokens_lost={tokens_lost} changed=[{}]",
 				component_changed.join(", ")
+			),
+			LoopEvent::ReasoningContentStripped {
+				step,
+				messages_stripped,
+			} => format!(
+				"[step {step}] reasoning_content_stripped: messages_stripped={messages_stripped}"
+			),
+			LoopEvent::OutputSlotEscalated {
+				step,
+				initial_max_tokens,
+				escalated_max_tokens,
+				model_id,
+			} => format!(
+				"[step {step}] output_slot_escalated: {initial_max_tokens}->{escalated_max_tokens} model={model_id}"
+			),
+			LoopEvent::WebSocketDelta {
+				step,
+				reuse_count,
+				has_previous_response_id,
+			} => format!(
+				"[step {step}] ws_delta: reuse_count={reuse_count} has_previous_response_id={has_previous_response_id}"
 			),
 		};
 		lines.push(format!("{ts} {desc}"));

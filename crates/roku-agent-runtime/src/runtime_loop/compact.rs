@@ -264,6 +264,36 @@ fn truncate(text: &str, max_chars: usize) -> String {
 // Message-level compaction (operates on Vec<Message>)
 // ---------------------------------------------------------------------------
 
+/// Strip `<thinking>...</thinking>` blocks from assistant messages.
+///
+/// Anthropic's parser already drops thinking-typed content blocks at the API
+/// level (only "text" and "tool_use" blocks are extracted). This function
+/// provides a defensive layer for any thinking-like content that might
+/// appear in message strings before they reach the summarizer LLM — for
+/// example, if the parser is changed later or content arrives from a path
+/// that does not go through Anthropic's parser.
+///
+/// Returns the number of messages that had content modified.
+///
+/// Stripping is performed once per `<thinking>` prefix found. Nested or
+/// multiple thinking blocks are not expected in practice but are handled
+/// by the caller repeating until stable if needed. This function is designed
+/// for the straightforward single-block case Anthropic produces.
+pub(crate) fn strip_thinking_content(messages: &mut [roku_plugin_llm::Message]) -> u32 {
+	let mut stripped_count: u32 = 0;
+	for msg in messages.iter_mut() {
+		if let roku_plugin_llm::Message::Assistant { text, .. } = msg
+			&& let Some(after_open) = text.strip_prefix("<thinking>")
+			&& let Some(end_pos) = after_open.find("</thinking>")
+		{
+			let after_close = &after_open[end_pos + "</thinking>".len()..];
+			*text = after_close.trim_start().to_string();
+			stripped_count += 1;
+		}
+	}
+	stripped_count
+}
+
 // ---------------------------------------------------------------------------
 // Calibrated byte-based prompt token estimator (unit 01: token pressure)
 // ---------------------------------------------------------------------------
@@ -854,6 +884,10 @@ pub struct StructuredCompactOutcome {
 	pub discarded_count: usize,
 	/// Why the LLM path failed, if it failed. `None` on success.
 	pub error: Option<StructuredCompactError>,
+	/// Number of assistant messages that had `<thinking>...</thinking>` content
+	/// stripped before the mechanical digest was built. `0` when no thinking
+	/// blocks were present in the discarded messages.
+	pub thinking_stripped: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -878,6 +912,7 @@ impl StructuredCompactOutcome {
 			drop_oldest_retries: 0,
 			discarded_count: 0,
 			error: None,
+			thinking_stripped: 0,
 		}
 	}
 }
@@ -916,6 +951,11 @@ pub async fn compact_messages_with_structured_summary(
 	}
 
 	let mut discarded: Vec<Message> = messages.drain(1..split).collect();
+	// Strip any <thinking>...</thinking> blocks from assistant messages
+	// before building the mechanical digest. Anthropic's parser already
+	// drops thinking blocks at the API level, but this is a defensive check
+	// for any content that might carry thinking-like patterns.
+	let thinking_stripped = strip_thinking_content(&mut discarded);
 	let original_discarded = discarded.clone();
 	let original_discarded_len = original_discarded.len();
 	let mut drop_oldest_retries: u32 = 0;
@@ -1004,6 +1044,7 @@ pub async fn compact_messages_with_structured_summary(
 		drop_oldest_retries,
 		discarded_count: original_discarded_len,
 		error,
+		thinking_stripped,
 	}
 }
 
@@ -2005,6 +2046,7 @@ mod tests {
 			cache_read_input_tokens: 0,
 			latency_ms: 10,
 			tool_calls: None,
+			response_id: None,
 		})
 	}
 
@@ -2919,5 +2961,90 @@ mod tests {
 		let turn_ids = vec!["t1".to_string()];
 		let total = estimate_turn_tool_tokens(&messages, &turn_ids);
 		assert_eq!(total, 0);
+	}
+
+	// -------------------------------------------------------------------
+	// strip_thinking_content tests
+	// -------------------------------------------------------------------
+
+	#[test]
+	fn strip_thinking_content_removes_block_from_assistant_message() {
+		let mut messages = vec![
+			roku_plugin_llm::Message::User {
+				content: "hello".to_string(),
+			},
+			roku_plugin_llm::Message::Assistant {
+				text: "<thinking>I am reasoning here</thinking>The answer is 42.".to_string(),
+				tool_calls: vec![],
+			},
+		];
+		let count = strip_thinking_content(&mut messages);
+		assert_eq!(count, 1);
+		// Thinking block is removed; only the trailing text remains
+		if let roku_plugin_llm::Message::Assistant { text, .. } = &messages[1] {
+			assert_eq!(text, "The answer is 42.");
+		} else {
+			panic!("expected Assistant message");
+		}
+		// User message is untouched
+		if let roku_plugin_llm::Message::User { content } = &messages[0] {
+			assert_eq!(content, "hello");
+		}
+	}
+
+	#[test]
+	fn strip_thinking_content_no_op_when_no_thinking_block() {
+		let mut messages = vec![roku_plugin_llm::Message::Assistant {
+			text: "No thinking here.".to_string(),
+			tool_calls: vec![],
+		}];
+		let count = strip_thinking_content(&mut messages);
+		assert_eq!(count, 0);
+		if let roku_plugin_llm::Message::Assistant { text, .. } = &messages[0] {
+			assert_eq!(text, "No thinking here.");
+		}
+	}
+
+	#[test]
+	fn strip_thinking_content_only_affects_assistant_messages() {
+		let user_content = "<thinking>user content</thinking>".to_string();
+		let mut messages = vec![roku_plugin_llm::Message::User {
+			content: user_content.clone(),
+		}];
+		let count = strip_thinking_content(&mut messages);
+		// User messages are not touched
+		assert_eq!(count, 0);
+		if let roku_plugin_llm::Message::User { content } = &messages[0] {
+			assert_eq!(*content, user_content);
+		}
+	}
+
+	#[test]
+	fn strip_thinking_content_empty_text_after_block() {
+		let mut messages = vec![roku_plugin_llm::Message::Assistant {
+			text: "<thinking>all thinking, no output</thinking>".to_string(),
+			tool_calls: vec![],
+		}];
+		let count = strip_thinking_content(&mut messages);
+		assert_eq!(count, 1);
+		if let roku_plugin_llm::Message::Assistant { text, .. } = &messages[0] {
+			assert_eq!(text, "");
+		}
+	}
+
+	#[test]
+	fn strip_thinking_content_idempotent() {
+		let mut messages = vec![roku_plugin_llm::Message::Assistant {
+			text: "<thinking>reasoning</thinking>result".to_string(),
+			tool_calls: vec![],
+		}];
+		let count1 = strip_thinking_content(&mut messages);
+		let count2 = strip_thinking_content(&mut messages);
+		assert_eq!(count1, 1);
+		// Second pass finds no block — idempotent
+		assert_eq!(count2, 0);
+		if let roku_plugin_llm::Message::Assistant { text, .. } = &messages[0] {
+			assert_eq!(text, "result");
+		}
 	}
 }
