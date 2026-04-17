@@ -40,8 +40,9 @@ pub use providers::openrouter::{
 };
 pub use router::{LlmProvider, LlmRouter};
 pub use types::{
-	GenerationRequest, LlmAdapterError, LlmResponse, Message, ModelCostProfile, ModelProfile,
-	ProviderCallError, ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy,
-	StreamChunk, StructuredGenerationError, StructuredJsonResponse, StructuredOutputError,
-	SystemPromptBlock, SystemPromptSections, ThinkingEffort, ToolCallBlock, ToolDefinition,
+	CompactRequest, CompactResponse, CompactUsageSummary, GenerationRequest, LlmAdapterError,
+	LlmResponse, Message, ModelCostProfile, ModelProfile, ProviderCallError,
+	ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy, StreamChunk,
+	StructuredGenerationError, StructuredJsonResponse, StructuredOutputError, SystemPromptBlock,
+	SystemPromptSections, ThinkingEffort, ToolCallBlock, ToolDefinition,
 };

@@ -206,6 +206,58 @@ pub struct ToolCallBlock {
 	pub arguments: Value,
 }
 
+/// Request body for the `/responses/compact` endpoint.
+///
+/// Fields follow the OpenAI Responses API compact contract. Fields that are
+/// not applicable to compaction (`stream`, `store`, `include`,
+/// `prompt_cache_key`, `max_output_tokens`) are intentionally omitted.
+///
+/// `input` uses the provider-neutral [`Message`] type; each provider
+/// implementation is responsible for converting to its own wire format.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompactRequest {
+	/// The model to use for compaction.
+	pub model: String,
+	/// Top-level system instructions (same role as `instructions` in normal requests).
+	pub instructions: String,
+	/// The conversation history to compact, in provider-neutral form.
+	pub input: Vec<Message>,
+	/// Tool definitions available in the conversation.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub tools: Vec<ToolDefinition>,
+	/// Whether the model may call multiple tools in parallel.
+	#[serde(default)]
+	pub parallel_tool_calls: bool,
+	/// Optional reasoning configuration (`effort`, `summary`).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub reasoning: Option<Value>,
+}
+
+/// Token usage reported by the `/responses/compact` endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CompactUsageSummary {
+	#[serde(default)]
+	pub prompt_tokens: u64,
+	#[serde(default)]
+	pub output_tokens: u64,
+	#[serde(default)]
+	pub cached_input_tokens: u64,
+}
+
+/// Response from the `/responses/compact` endpoint.
+///
+/// `output` contains the compacted conversation in provider-neutral form;
+/// each provider implementation is responsible for converting from its own
+/// wire format back to [`Message`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompactResponse {
+	/// Compacted conversation messages in provider-neutral form.
+	pub output: Vec<Message>,
+	/// Token usage for the compaction call.
+	#[serde(default)]
+	pub usage: CompactUsageSummary,
+}
+
 /// A provider-neutral conversation message for the turn loop.
 ///
 /// System prompt is NOT a variant here — it stays in `GenerationRequest::system_prompt`
