@@ -880,6 +880,15 @@ where
 									"[output_slot] step {step} escalated {initial_max_tokens}->{escalated_max_tokens} for {model_id}"
 								);
 							}
+							roku_agent_runtime::LoopEvent::OutputSlotEscalationUnsupported {
+								step,
+								model_id,
+								provider,
+							} => {
+								eprintln!(
+									"[output_slot] step {step} escalation skipped (unsupported by {provider}/{model_id})"
+								);
+							}
 							roku_agent_runtime::LoopEvent::ReasoningContentStripped { .. } => {
 								// Diagnostic only — reasoning content stripped during compaction.
 							}

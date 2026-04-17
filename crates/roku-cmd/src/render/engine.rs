@@ -352,6 +352,18 @@ impl RenderEngine {
 					))
 				);
 			}
+			LoopEvent::OutputSlotEscalationUnsupported {
+				step,
+				model_id,
+				provider,
+			} => {
+				eprint!(
+					"{}\r\n",
+					crate::render::style::styled_compact_notice(&format!(
+						"[output_slot] step {step} escalation skipped (unsupported by {provider}/{model_id})"
+					))
+				);
+			}
 			LoopEvent::WebSocketDelta {
 				step,
 				reuse_count,

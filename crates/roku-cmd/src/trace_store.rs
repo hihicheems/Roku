@@ -362,6 +362,13 @@ pub(crate) fn render_trace_detail(events: &[TimestampedEvent]) -> String {
 			} => format!(
 				"[step {step}] output_slot_escalated: {initial_max_tokens}->{escalated_max_tokens} model={model_id}"
 			),
+			LoopEvent::OutputSlotEscalationUnsupported {
+				step,
+				model_id,
+				provider,
+			} => format!(
+				"[step {step}] output_slot_escalation_unsupported: model={model_id} provider={provider}"
+			),
 			LoopEvent::WebSocketDelta {
 				step,
 				reuse_count,

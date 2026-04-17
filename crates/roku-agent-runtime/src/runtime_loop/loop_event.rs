@@ -238,6 +238,21 @@ pub enum LoopEvent {
 		/// The model that was serving the truncated response.
 		model_id: String,
 	},
+	/// The output slot was exhausted (`finish_reason == "max_tokens"` /
+	/// `"length"`) but the provider does not support client-side output-slot
+	/// escalation. The runtime keeps the original (truncated) response and
+	/// skips the retry.
+	///
+	/// Emitted in place of `OutputSlotEscalated` when the provider capability
+	/// check returns `false`. Schema is stable — additive fields only.
+	OutputSlotEscalationUnsupported {
+		/// Step index (1-based, matches `StepRecord::step_index`).
+		step: u32,
+		/// The model that reported the truncated finish reason.
+		model_id: String,
+		/// The provider name for the model above.
+		provider: String,
+	},
 	/// A delta request was sent using `previous_response_id`, reducing the
 	/// upstream payload by omitting already-processed context.
 	///
