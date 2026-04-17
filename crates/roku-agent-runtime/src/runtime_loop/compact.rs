@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use roku_plugin_llm::{GenerationRequest, LlmAdapterError, LlmRouter, Message, RiskTier};
+use roku_plugin_llm::{
+	CompactRequest, GenerationRequest, LlmAdapterError, LlmRouter, Message, RiskTier,
+};
 use serde::{Deserialize, Serialize};
 
 /// Maximum time to wait for an LLM compact summarization call before falling
@@ -861,6 +863,9 @@ pub const MAX_DROP_OLDEST_RETRIES: u32 = 3;
 pub const STRUCTURED_SUMMARY_SECTIONS: &[&str] =
 	&["Goal", "Accomplished", "Key Decisions", "Relevant Files"];
 
+/// Guards the one-time per-process stderr warning for remote compaction failure.
+static REMOTE_COMPACT_WARN_ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
 const STRUCTURED_SUMMARY_SYSTEM_PROMPT: &str = "You summarize agent conversation history into a strictly structured form. Output ONLY the four sections requested, each headed by a line of the form `<Section>:` and nothing else outside them.";
 
 /// Outcome of one structured-summary compaction attempt.
@@ -958,6 +963,73 @@ pub async fn compact_messages_with_structured_summary(
 	let thinking_stripped = strip_thinking_content(&mut discarded);
 	let original_discarded = discarded.clone();
 	let original_discarded_len = original_discarded.len();
+
+	// --- Remote compact path (Layer 3a) ---
+	// When the router's provider exposes a dedicated /responses/compact
+	// endpoint, prefer it over the local LLM summarizer: it is synchronous,
+	// has a 90s timeout (vs 300s for the streaming path), and avoids the
+	// SSE hang that occurs on the ChatGPT Responses backend.
+	if router.supports_remote_compaction() {
+		let model = router
+			.available_models()
+			.into_iter()
+			.next()
+			.unwrap_or_default();
+		let compact_req = CompactRequest {
+			model,
+			instructions: STRUCTURED_SUMMARY_SYSTEM_PROMPT.to_string(),
+			input: discarded.clone(),
+			tools: vec![],
+			parallel_tool_calls: false,
+			reasoning: None,
+		};
+		match router.compact_history(&compact_req).await {
+			Some(Ok(resp)) => {
+				// Replace the drained segment with the compacted output.
+				// Prepend a [Conversation summary] marker so the model knows
+				// context was condensed.
+				let mut replaced = resp.output;
+				if replaced.is_empty() {
+					// Empty output — treat as failure and fall through to LLM path.
+					REMOTE_COMPACT_WARN_ONCE.get_or_init(|| {
+						eprintln!(
+							"\x1b[1;33m[warn] remote compaction returned empty output; falling back to LLM summarizer\x1b[0m"
+						);
+					});
+				} else {
+					// Insert back into messages at position 1 (after system message).
+					for (i, msg) in replaced.drain(..).enumerate() {
+						messages.insert(1 + i, msg);
+					}
+					return StructuredCompactOutcome {
+						succeeded: true,
+						prompt_tokens: resp.usage.prompt_tokens,
+						output_tokens: resp.usage.output_tokens,
+						drop_oldest_retries: 0,
+						discarded_count: original_discarded_len,
+						error: None,
+						thinking_stripped,
+					};
+				}
+			}
+			Some(Err(e)) => {
+				REMOTE_COMPACT_WARN_ONCE.get_or_init(|| {
+					eprintln!(
+						"\x1b[1;33m[warn] remote compaction failed ({e}); falling back to LLM summarizer\x1b[0m"
+					);
+				});
+				// Fall through to local LLM summarizer below.
+			}
+			None => {
+				// No provider supports compact — should not happen since we
+				// checked supports_remote_compaction() above, but fall through.
+			}
+		}
+		// Restore discarded so the LLM path can use it.
+		// (discarded was cloned above, so it still holds the original data)
+	}
+
+	// --- Local LLM summarizer path (Layer 3b) ---
 	let mut drop_oldest_retries: u32 = 0;
 	let mut total_prompt_tokens: u64 = 0;
 	let mut total_output_tokens: u64 = 0;
