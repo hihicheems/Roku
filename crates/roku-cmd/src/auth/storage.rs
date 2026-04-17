@@ -122,6 +122,12 @@ pub struct IdTokenClaims {
 	pub email: Option<String>,
 	pub user_id: Option<String>,
 	pub account_id: Option<String>,
+	/// Whether the account is FedRAMP-eligible, as signalled by the
+	/// `chatgpt_account_is_fedramp` claim in the `https://api.openai.com/auth`
+	/// namespace. Defaults to `false` so existing auth.json files round-trip
+	/// without migration. Omitted on write when `false` to keep auth.json minimal.
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	pub account_is_fedramp: bool,
 }
 
 /// Discriminated union of credential types stored per provider.
@@ -374,6 +380,7 @@ mod tests {
 					email: Some("user@example.com".to_string()),
 					user_id: Some("uid-1".to_string()),
 					account_id: Some("acc-1".to_string()),
+					account_is_fedramp: false,
 				},
 				last_refresh_unix_ms: 1_712_880_000_000,
 			},
@@ -601,5 +608,81 @@ mod tests {
 
 		let entry = auth.credential_for("openai").unwrap();
 		assert_eq!(entry.label(), "bob@example.com");
+	}
+
+	#[test]
+	fn id_token_claims_account_is_fedramp_defaults_false_on_missing_field() {
+		// Simulate an older auth.json that predates account_is_fedramp.
+		let json = r#"{"email":"user@example.com","user_id":"uid-1","account_id":"acc-1"}"#;
+		let claims: IdTokenClaims = serde_json::from_str(json).expect("deserialize");
+		assert!(
+			!claims.account_is_fedramp,
+			"missing field should default to false"
+		);
+	}
+
+	#[test]
+	fn id_token_claims_account_is_fedramp_round_trips_true() {
+		let claims = IdTokenClaims {
+			email: Some("fed@example.gov".to_string()),
+			user_id: Some("uid-f".to_string()),
+			account_id: Some("acc-f".to_string()),
+			account_is_fedramp: true,
+		};
+		let json = serde_json::to_string(&claims).expect("serialize");
+		let parsed: IdTokenClaims = serde_json::from_str(&json).expect("deserialize");
+		assert!(parsed.account_is_fedramp);
+	}
+
+	#[test]
+	fn id_token_claims_account_id_missing_deserializes_ok() {
+		// Simulate an auth.json without account_id — the field is Option so it
+		// must default to None rather than failing.
+		let json = r#"{"email":"user@example.com"}"#;
+		let claims: IdTokenClaims = serde_json::from_str(json).expect("deserialize");
+		assert!(
+			claims.account_id.is_none(),
+			"absent account_id should be None"
+		);
+		assert!(!claims.account_is_fedramp);
+	}
+
+	#[test]
+	fn account_is_fedramp_false_omitted_from_serialized_json() {
+		// When account_is_fedramp is false the field must be absent from the
+		// serialized output so auth.json stays minimal.
+		let claims = IdTokenClaims {
+			email: Some("user@example.com".to_string()),
+			user_id: None,
+			account_id: None,
+			account_is_fedramp: false,
+		};
+		let json = serde_json::to_string(&claims).expect("serialize");
+		assert!(
+			!json.contains("account_is_fedramp"),
+			"account_is_fedramp must be absent when false, got: {json}"
+		);
+		// Round-trip: missing field should deserialize back to false.
+		let parsed: IdTokenClaims = serde_json::from_str(&json).expect("deserialize");
+		assert!(!parsed.account_is_fedramp);
+	}
+
+	#[test]
+	fn account_is_fedramp_true_present_in_serialized_json() {
+		// When account_is_fedramp is true the field must be included.
+		let claims = IdTokenClaims {
+			email: Some("fed@example.gov".to_string()),
+			user_id: None,
+			account_id: None,
+			account_is_fedramp: true,
+		};
+		let json = serde_json::to_string(&claims).expect("serialize");
+		assert!(
+			json.contains("account_is_fedramp"),
+			"account_is_fedramp must be present when true, got: {json}"
+		);
+		// Round-trip: field must deserialize back to true.
+		let parsed: IdTokenClaims = serde_json::from_str(&json).expect("deserialize");
+		assert!(parsed.account_is_fedramp);
 	}
 }

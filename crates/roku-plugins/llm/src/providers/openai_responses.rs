@@ -64,7 +64,7 @@ const DEFAULT_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/respo
 #[derive(Debug, Clone)]
 pub struct OpenAiResponsesConfig {
 	pub api_key: String,
-	/// Default: `https://api.openai.com/v1/responses`
+	/// Default: `https://chatgpt.com/backend-api/codex/responses`
 	pub base_url: String,
 	/// Optional reasoning effort (`low`, `medium`, `high`).
 	pub reasoning_effort: Option<String>,
@@ -72,6 +72,21 @@ pub struct OpenAiResponsesConfig {
 	/// to reduce upstream payload size. Controlled by `ROKU_OPENAI_WEBSOCKET_MODE`.
 	/// Default: `false`.
 	pub websocket_mode: bool,
+	/// ChatGPT account ID from the OAuth id_token `chatgpt_account_id` claim.
+	/// Present only for OAuth-authenticated sessions. When `Some`, the
+	/// `ChatGPT-Account-ID` request header is emitted.
+	pub chatgpt_account_id: Option<String>,
+	/// Whether the authenticated account is FedRAMP-eligible. When `true` and
+	/// `chatgpt_account_id` is `Some`, the `X-OpenAI-Fedramp: true` header is
+	/// emitted.
+	pub chatgpt_account_is_fedramp: bool,
+	/// Fixed originator string recognised by the Codex backend.
+	pub originator: String,
+	/// Stable per-installation UUID read from `~/.roku/state/installation-id`.
+	pub installation_id: String,
+	/// Per-session stable identifier used for identity headers and as the basis
+	/// of the `prompt_cache_key` body field.
+	pub session_id: String,
 }
 
 impl OpenAiResponsesConfig {
@@ -84,6 +99,11 @@ impl OpenAiResponsesConfig {
 			base_url: DEFAULT_RESPONSES_URL.to_string(),
 			reasoning_effort: None,
 			websocket_mode,
+			chatgpt_account_id: None,
+			chatgpt_account_is_fedramp: false,
+			originator: "codex_cli_rs".to_string(),
+			installation_id: String::new(),
+			session_id: String::new(),
 		}
 	}
 }
@@ -148,6 +168,38 @@ pub fn build_openai_responses_router_with_metrics(
 }
 
 // ---------------------------------------------------------------------------
+// Reachability probe
+// ---------------------------------------------------------------------------
+
+/// Issue a single HEAD request against `base_url` with a 5-second timeout to
+/// check whether the Responses endpoint is reachable.
+///
+/// - 2xx / 3xx / non-auth 4xx → silent (returns `Ok(())`).
+/// - 401 / 403 → deferred to the normal auth error path (`Ok(())`); no warning.
+/// - Connect failure, DNS failure, timeout → returns `Err(description)`.
+///
+/// Callers should print a yellow `[warn]` line to stderr on `Err`.
+pub fn probe_responses_reachability(base_url: &str) -> Result<(), String> {
+	let client = reqwest::blocking::Client::builder()
+		.timeout(std::time::Duration::from_secs(5))
+		.build()
+		.map_err(|e| format!("failed to build probe client: {e}"))?;
+
+	match client.head(base_url).send() {
+		Ok(resp) => {
+			let status = resp.status().as_u16();
+			// 401/403 → treat as auth issue, not a reachability issue.
+			if status == 401 || status == 403 {
+				return Ok(());
+			}
+			// Any other response (2xx/3xx/4xx/5xx) means the endpoint was reachable.
+			Ok(())
+		}
+		Err(e) => Err(e.to_string()),
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Provider struct
 // ---------------------------------------------------------------------------
 
@@ -172,7 +224,7 @@ impl OpenAiResponsesProvider {
 			.map_err(|e| ProviderCallError::Fatal {
 				message: format!("http client error: {e}"),
 			})?;
-		let prompt_cache_key = derive_session_prompt_cache_key();
+		let prompt_cache_key = derive_session_prompt_cache_key(&config.session_id);
 		let ws_session = std::sync::Arc::new(tokio::sync::Mutex::new(OpenAiWsSession::new(
 			config.websocket_mode,
 		)));
@@ -185,7 +237,11 @@ impl OpenAiResponsesProvider {
 	}
 
 	fn build_headers(&self) -> Result<HeaderMap, ProviderCallError> {
+		use reqwest::header::HeaderName;
+
 		let mut headers = HeaderMap::new();
+
+		// Authorization
 		headers.insert(
 			reqwest::header::AUTHORIZATION,
 			HeaderValue::from_str(&format!("Bearer {}", self.config.api_key)).map_err(|e| {
@@ -194,10 +250,107 @@ impl OpenAiResponsesProvider {
 				}
 			})?,
 		);
+
+		// Content-Type
 		headers.insert(
 			reqwest::header::CONTENT_TYPE,
 			HeaderValue::from_static("application/json"),
 		);
+
+		// Accept
+		headers.insert(
+			reqwest::header::ACCEPT,
+			HeaderValue::from_static("text/event-stream"),
+		);
+
+		// User-Agent: codex_cli_rs/{version} ({os} {arch})
+		let user_agent = format!(
+			"codex_cli_rs/{} ({} {})",
+			env!("CARGO_PKG_VERSION"),
+			std::env::consts::OS,
+			std::env::consts::ARCH,
+		);
+		headers.insert(
+			reqwest::header::USER_AGENT,
+			HeaderValue::from_str(&user_agent).map_err(|e| ProviderCallError::Fatal {
+				message: format!("invalid user-agent header: {e}"),
+			})?,
+		);
+
+		// originator
+		headers.insert(
+			HeaderName::from_static("originator"),
+			HeaderValue::from_str(&self.config.originator).map_err(|e| ProviderCallError::Fatal {
+				message: format!("invalid originator header: {e}"),
+			})?,
+		);
+
+		// session_id
+		if !self.config.session_id.is_empty() {
+			headers.insert(
+				HeaderName::from_static("session_id"),
+				HeaderValue::from_str(&self.config.session_id).map_err(|e| {
+					ProviderCallError::Fatal {
+						message: format!("invalid session_id header: {e}"),
+					}
+				})?,
+			);
+
+			// x-client-request-id
+			headers.insert(
+				HeaderName::from_static("x-client-request-id"),
+				HeaderValue::from_str(&self.config.session_id).map_err(|e| {
+					ProviderCallError::Fatal {
+						message: format!("invalid x-client-request-id header: {e}"),
+					}
+				})?,
+			);
+
+			// x-codex-window-id: {session_id}:0
+			let window_id = format!("{}:0", self.config.session_id);
+			headers.insert(
+				HeaderName::from_static("x-codex-window-id"),
+				HeaderValue::from_str(&window_id).map_err(|e| ProviderCallError::Fatal {
+					message: format!("invalid x-codex-window-id header: {e}"),
+				})?,
+			);
+		}
+
+		// x-codex-installation-id
+		if !self.config.installation_id.is_empty() {
+			headers.insert(
+				HeaderName::from_static("x-codex-installation-id"),
+				HeaderValue::from_str(&self.config.installation_id).map_err(|e| {
+					ProviderCallError::Fatal {
+						message: format!("invalid x-codex-installation-id header: {e}"),
+					}
+				})?,
+			);
+		}
+
+		// x-openai-internal-codex-residency
+		headers.insert(
+			HeaderName::from_static("x-openai-internal-codex-residency"),
+			HeaderValue::from_static("us"),
+		);
+
+		// OAuth-only headers
+		if let Some(account_id) = &self.config.chatgpt_account_id {
+			headers.insert(
+				HeaderName::from_static("chatgpt-account-id"),
+				HeaderValue::from_str(account_id).map_err(|e| ProviderCallError::Fatal {
+					message: format!("invalid chatgpt-account-id header: {e}"),
+				})?,
+			);
+
+			if self.config.chatgpt_account_is_fedramp {
+				headers.insert(
+					HeaderName::from_static("x-openai-fedramp"),
+					HeaderValue::from_static("true"),
+				);
+			}
+		}
+
 		Ok(headers)
 	}
 }
@@ -208,21 +361,23 @@ impl OpenAiResponsesProvider {
 
 /// Monotonic per-process counter that disambiguates two provider instances
 /// constructed within the same nanosecond tick (e.g. reconnect after init
-/// failure). Combined with `pid + nanos` it makes `prompt_cache_key`
-/// collision-free across restarts even on OSes that recycle pids quickly.
+/// failure). Used only when no explicit session_id is provided.
 static PROMPT_CACHE_KEY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Derive a session-stable opaque key for `prompt_cache_key`.
 ///
-/// OpenAI's automatic prefix caching partitions cache entries by
-/// `prompt_cache_key`, so reusing the same key across turns within a session
-/// is what produces cache hits on turn 2+. The key's value is opaque to the
-/// server — only its stability matters.
+/// When `session_id` is non-empty, the key is the raw `session_id` so that
+/// the `prompt_cache_key` body field and the `session_id` identity header
+/// carry the byte-identical value, letting the backend index on a single
+/// dimension.
 ///
-/// We combine `pid`, construction time, and a monotonic counter so two
-/// provider instances constructed back-to-back (or after pid reuse) cannot
-/// share a key and accidentally read each other's cached prefix.
-fn derive_session_prompt_cache_key() -> String {
+/// When `session_id` is empty (legacy / test path), falls back to a
+/// `pid+nanos+counter` derivation that is still stable per provider instance
+/// and collision-free across restarts.
+fn derive_session_prompt_cache_key(session_id: &str) -> String {
+	if !session_id.is_empty() {
+		return session_id.to_string();
+	}
 	let pid = std::process::id();
 	let nanos = SystemTime::now()
 		.duration_since(UNIX_EPOCH)
@@ -1343,23 +1498,32 @@ mod tests {
 
 	#[test]
 	fn derived_prompt_cache_key_differs_across_back_to_back_constructions() {
-		// Back-to-back construction within the same nanosecond must produce
-		// different keys — otherwise two sessions started in the same tick
-		// would share a cache partition and cross-session prefix reads could
-		// leak between them.
-		let k1 = derive_session_prompt_cache_key();
-		let k2 = derive_session_prompt_cache_key();
+		// When no session_id is given, back-to-back derivations must produce
+		// different keys (pid+nanos+counter fallback path).
+		let k1 = derive_session_prompt_cache_key("");
+		let k2 = derive_session_prompt_cache_key("");
 		assert_ne!(k1, k2, "back-to-back derivations must differ");
 	}
 
 	#[test]
+	fn derived_prompt_cache_key_equals_session_id() {
+		// When a session_id is provided, the cache key must equal the raw session_id
+		// so that the prompt_cache_key body field and the session_id header are
+		// byte-identical, letting the backend index on a single dimension.
+		let session_id = "test-session-abc-123";
+		let key = derive_session_prompt_cache_key(session_id);
+		assert_eq!(key, session_id, "cache key must equal the raw session_id");
+	}
+
+	#[test]
 	fn derived_prompt_cache_key_is_non_empty_and_stable_per_instance() {
-		// Key derivation must return a non-empty, session-scoped identifier.
-		let key = derive_session_prompt_cache_key();
+		// Key derivation must return a non-empty, session-scoped identifier equal
+		// to the raw session_id when one is provided.
+		let key = derive_session_prompt_cache_key("stable-session");
 		assert!(!key.is_empty(), "derived key must be non-empty");
-		assert!(
-			key.starts_with("roku-"),
-			"derived key should carry the roku prefix, got: {key}"
+		assert_eq!(
+			key, "stable-session",
+			"derived key must equal the raw session_id, got: {key}"
 		);
 
 		// A provider instance holds one key for its lifetime — two requests
@@ -1369,6 +1533,11 @@ mod tests {
 			base_url: "https://example.invalid/v1/responses".to_string(),
 			reasoning_effort: None,
 			websocket_mode: false,
+			chatgpt_account_id: None,
+			chatgpt_account_is_fedramp: false,
+			originator: "codex_cli_rs".to_string(),
+			installation_id: "install-abc".to_string(),
+			session_id: "session-test-123".to_string(),
 		};
 		let provider =
 			OpenAiResponsesProvider::new(config).expect("provider construction succeeds");
@@ -1447,5 +1616,177 @@ mod tests {
 			body_no_delta.get("previous_response_id").is_none(),
 			"previous_response_id must be absent when no prior response"
 		);
+	}
+
+	// --- build_headers tests ---
+
+	fn make_test_config_api_key() -> OpenAiResponsesConfig {
+		OpenAiResponsesConfig {
+			api_key: "sk-test-key".to_string(),
+			base_url: "https://example.invalid/v1/responses".to_string(),
+			reasoning_effort: None,
+			websocket_mode: false,
+			chatgpt_account_id: None,
+			chatgpt_account_is_fedramp: false,
+			originator: "codex_cli_rs".to_string(),
+			installation_id: "install-test-uuid".to_string(),
+			session_id: "session-test-uuid".to_string(),
+		}
+	}
+
+	fn make_test_config_oauth(account_id: Option<&str>, is_fedramp: bool) -> OpenAiResponsesConfig {
+		OpenAiResponsesConfig {
+			api_key: "oauth-token-abc".to_string(),
+			base_url: "https://example.invalid/v1/responses".to_string(),
+			reasoning_effort: None,
+			websocket_mode: false,
+			chatgpt_account_id: account_id.map(str::to_string),
+			chatgpt_account_is_fedramp: is_fedramp,
+			originator: "codex_cli_rs".to_string(),
+			installation_id: "install-test-uuid".to_string(),
+			session_id: "session-test-uuid".to_string(),
+		}
+	}
+
+	#[test]
+	fn build_headers_api_key_mode_emits_base_headers() {
+		let config = make_test_config_api_key();
+		let provider = OpenAiResponsesProvider::new(config).expect("construction");
+		let headers = provider.build_headers().expect("headers");
+
+		// Must have Authorization, Content-Type, Accept.
+		assert!(headers.contains_key(reqwest::header::AUTHORIZATION));
+		assert!(headers.contains_key(reqwest::header::CONTENT_TYPE));
+		assert!(headers.contains_key(reqwest::header::ACCEPT));
+		assert!(headers.contains_key(reqwest::header::USER_AGENT));
+
+		// Must have originator and residency.
+		assert!(headers.contains_key("originator"));
+		assert!(headers.contains_key("x-openai-internal-codex-residency"));
+
+		// Must have session_id and related.
+		assert!(headers.contains_key("session_id"));
+		assert!(headers.contains_key("x-client-request-id"));
+		assert!(headers.contains_key("x-codex-installation-id"));
+		assert!(headers.contains_key("x-codex-window-id"));
+
+		// Must NOT have ChatGPT-Account-ID or Fedramp in API-key mode.
+		assert!(!headers.contains_key("chatgpt-account-id"));
+		assert!(!headers.contains_key("x-openai-fedramp"));
+	}
+
+	#[test]
+	fn build_headers_api_key_mode_omits_chatgpt_account_headers() {
+		let config = make_test_config_api_key();
+		let provider = OpenAiResponsesProvider::new(config).expect("construction");
+		let headers = provider.build_headers().expect("headers");
+		assert!(
+			!headers.contains_key("chatgpt-account-id"),
+			"ChatGPT-Account-ID must be absent in API-key mode"
+		);
+		assert!(
+			!headers.contains_key("x-openai-fedramp"),
+			"X-OpenAI-Fedramp must be absent in API-key mode"
+		);
+	}
+
+	#[test]
+	fn build_headers_oauth_mode_with_account_id_emits_all_headers() {
+		let config = make_test_config_oauth(Some("acc-123"), false);
+		let provider = OpenAiResponsesProvider::new(config).expect("construction");
+		let headers = provider.build_headers().expect("headers");
+
+		assert!(headers.contains_key("chatgpt-account-id"));
+		// Fedramp absent because is_fedramp = false.
+		assert!(!headers.contains_key("x-openai-fedramp"));
+
+		// Common identity headers still present.
+		assert!(headers.contains_key("session_id"));
+		assert!(headers.contains_key("x-codex-installation-id"));
+		assert!(headers.contains_key("originator"));
+		assert!(headers.contains_key("x-openai-internal-codex-residency"));
+	}
+
+	#[test]
+	fn build_headers_oauth_fedramp_emits_fedramp_header() {
+		let config = make_test_config_oauth(Some("acc-fed"), true);
+		let provider = OpenAiResponsesProvider::new(config).expect("construction");
+		let headers = provider.build_headers().expect("headers");
+
+		assert!(headers.contains_key("chatgpt-account-id"));
+		assert!(headers.contains_key("x-openai-fedramp"));
+		let fedramp_val = headers.get("x-openai-fedramp").unwrap().to_str().unwrap();
+		assert_eq!(fedramp_val, "true");
+	}
+
+	#[test]
+	fn build_headers_oauth_missing_account_id_omits_chatgpt_headers_no_crash() {
+		// account_id is None — must not include ChatGPT-Account-ID and must not panic.
+		let config = make_test_config_oauth(None, false);
+		let provider = OpenAiResponsesProvider::new(config).expect("construction");
+		let headers = provider.build_headers().expect("headers");
+		assert!(!headers.contains_key("chatgpt-account-id"));
+		assert!(!headers.contains_key("x-openai-fedramp"));
+	}
+
+	#[test]
+	fn build_headers_originator_reflects_config_value() {
+		// Provider must emit the configured originator, not a hardcoded literal.
+		let config = OpenAiResponsesConfig {
+			api_key: "test".to_string(),
+			base_url: "https://example.invalid".to_string(),
+			reasoning_effort: None,
+			websocket_mode: false,
+			chatgpt_account_id: None,
+			chatgpt_account_is_fedramp: false,
+			originator: "something-else".to_string(),
+			installation_id: "install-x".to_string(),
+			session_id: "session-x".to_string(),
+		};
+		let provider = OpenAiResponsesProvider::new(config).expect("construction");
+		let headers = provider.build_headers().expect("headers");
+		let originator_val = headers.get("originator").unwrap().to_str().unwrap();
+		assert_eq!(originator_val, "something-else");
+	}
+
+	#[test]
+	fn build_headers_window_id_is_session_id_colon_zero() {
+		let session_id = "session-abc-123";
+		let config = OpenAiResponsesConfig {
+			api_key: "test".to_string(),
+			base_url: "https://example.invalid".to_string(),
+			reasoning_effort: None,
+			websocket_mode: false,
+			chatgpt_account_id: None,
+			chatgpt_account_is_fedramp: false,
+			originator: "codex_cli_rs".to_string(),
+			installation_id: "install-x".to_string(),
+			session_id: session_id.to_string(),
+		};
+		let provider = OpenAiResponsesProvider::new(config).expect("construction");
+		let headers = provider.build_headers().expect("headers");
+		let window_id = headers.get("x-codex-window-id").unwrap().to_str().unwrap();
+		assert_eq!(window_id, format!("{session_id}:0"));
+	}
+
+	// --- probe tests ---
+
+	#[test]
+	#[ignore = "network call; run with --ignored locally"]
+	fn probe_connect_refused_returns_err_with_description() {
+		// Port 1 is always refused on all OSes in test environments.
+		let result = probe_responses_reachability("http://127.0.0.1:1");
+		assert!(
+			result.is_err(),
+			"connect-refused probe must return Err, got: {result:?}"
+		);
+	}
+
+	#[test]
+	#[ignore = "network call; run with --ignored locally"]
+	fn probe_unreachable_host_returns_err() {
+		// An invalid domain that will never resolve.
+		let result = probe_responses_reachability("http://this-host-does-not-exist.invalid/test");
+		assert!(result.is_err(), "DNS-failure probe must return Err");
 	}
 }

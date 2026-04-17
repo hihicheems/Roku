@@ -109,6 +109,7 @@ pub(crate) async fn run_first_time_setup() -> Result<(), String> {
 						email: result.id_token_claims.email,
 						user_id: result.id_token_claims.user_id,
 						account_id: result.id_token_claims.account_id,
+						account_is_fedramp: result.id_token_claims.account_is_fedramp,
 					},
 					last_refresh_unix_ms: now_ms,
 				},
