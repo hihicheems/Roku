@@ -990,12 +990,32 @@ pub async fn compact_messages_with_structured_summary(
 				// context was condensed.
 				let mut replaced = resp.output;
 				if replaced.is_empty() {
-					// Empty output — treat as failure and fall through to LLM path.
+					// Empty output — treat as a remote compact failure. Insert a
+					// mechanical fallback so the buffer is still compacted, then
+					// return succeeded=false so the caller applies Layer 1.
+					// Do NOT fall through to the SSE summarizer (Layer 3b): that
+					// path has a 300s hang risk on the Responses backend.
 					REMOTE_COMPACT_WARN_ONCE.get_or_init(|| {
 						eprintln!(
-							"\x1b[1;33m[warn] remote compaction returned empty output; falling back to LLM summarizer\x1b[0m"
+							"\x1b[1;33m[warn] remote compaction returned empty output; using mechanical fallback\x1b[0m"
 						);
 					});
+					let fallback = summarize_discarded_messages(&original_discarded);
+					messages.insert(
+						1,
+						Message::User {
+							content: format!("[Conversation summary]\n{fallback}"),
+						},
+					);
+					return StructuredCompactOutcome {
+						succeeded: false,
+						prompt_tokens: 0,
+						output_tokens: 0,
+						drop_oldest_retries: 0,
+						discarded_count: original_discarded_len,
+						error: Some(StructuredCompactError::ProviderFailure),
+						thinking_stripped,
+					};
 				} else {
 					// Insert back into messages at position 1 (after system message).
 					for (i, msg) in replaced.drain(..).enumerate() {
@@ -1013,16 +1033,39 @@ pub async fn compact_messages_with_structured_summary(
 				}
 			}
 			Some(Err(e)) => {
+				// Remote compact failed (e.g. 403, 404, timeout). Insert a
+				// mechanical fallback so the buffer is still compacted, then
+				// return succeeded=false so the caller applies Layer 1.
+				// Do NOT fall through to the SSE summarizer (Layer 3b): that
+				// path has a 300s hang risk on the Responses backend, and is
+				// exactly the hang this remote-compact path was designed to avoid.
 				REMOTE_COMPACT_WARN_ONCE.get_or_init(|| {
 					eprintln!(
-						"\x1b[1;33m[warn] remote compaction failed ({e}); falling back to LLM summarizer\x1b[0m"
+						"\x1b[1;33m[warn] remote compaction failed ({e}); using mechanical fallback\x1b[0m"
 					);
 				});
-				// Fall through to local LLM summarizer below.
+				let fallback = summarize_discarded_messages(&original_discarded);
+				messages.insert(
+					1,
+					Message::User {
+						content: format!("[Conversation summary]\n{fallback}"),
+					},
+				);
+				return StructuredCompactOutcome {
+					succeeded: false,
+					prompt_tokens: 0,
+					output_tokens: 0,
+					drop_oldest_retries: 0,
+					discarded_count: original_discarded_len,
+					error: Some(StructuredCompactError::ProviderFailure),
+					thinking_stripped,
+				};
 			}
 			None => {
 				// No provider supports compact — should not happen since we
-				// checked supports_remote_compaction() above, but fall through.
+				// checked supports_remote_compaction() above, but fall through
+				// to the SSE summarizer (Layer 3b). This is the correct path
+				// for non-OpenAI providers that return None from compact_history.
 			}
 		}
 		// Restore discarded so the LLM path can use it.
@@ -3118,5 +3161,261 @@ mod tests {
 		if let roku_plugin_llm::Message::Assistant { text, .. } = &messages[0] {
 			assert_eq!(text, "result");
 		}
+	}
+
+	// ------------------------------------------------------------------
+	// Remote compact failure tests (Finding F1)
+	// ------------------------------------------------------------------
+
+	use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+	use std::sync::Arc;
+
+	/// A mock provider that supports compact_history and returns a fixed
+	/// result for it, while also counting `complete()` invocations so tests
+	/// can assert that router.generate() was NOT called.
+	struct MockCompactProvider {
+		compact_result: Option<Result<roku_plugin_llm::CompactResponse, roku_plugin_llm::ProviderCallError>>,
+		complete_calls: Arc<AtomicU64>,
+	}
+
+	impl MockCompactProvider {
+		fn returning_error(err: roku_plugin_llm::ProviderCallError, counter: Arc<AtomicU64>) -> Self {
+			Self {
+				compact_result: Some(Err(err)),
+				complete_calls: counter,
+			}
+		}
+
+		fn returning_empty_output(counter: Arc<AtomicU64>) -> Self {
+			Self {
+				compact_result: Some(Ok(roku_plugin_llm::CompactResponse {
+					output: vec![],
+					usage: roku_plugin_llm::CompactUsageSummary::default(),
+				})),
+				complete_calls: counter,
+			}
+		}
+
+		fn returning_success(output: Vec<Message>, counter: Arc<AtomicU64>) -> Self {
+			Self {
+				compact_result: Some(Ok(roku_plugin_llm::CompactResponse {
+					output,
+					usage: roku_plugin_llm::CompactUsageSummary {
+						prompt_tokens: 100,
+						output_tokens: 20,
+						cached_input_tokens: 0,
+					},
+				})),
+				complete_calls: counter,
+			}
+		}
+	}
+
+	#[async_trait]
+	impl roku_plugin_llm::LlmProvider for MockCompactProvider {
+		fn provider_name(&self) -> &'static str {
+			"mock-compact"
+		}
+
+		async fn complete(
+			&self,
+			_model: &roku_plugin_llm::ModelProfile,
+			_request: &GenerationRequest,
+		) -> Result<roku_plugin_llm::ProviderResponse, roku_plugin_llm::ProviderCallError> {
+			self.complete_calls.fetch_add(1, AtomicOrdering::SeqCst);
+			Err(roku_plugin_llm::ProviderCallError::Fatal {
+				message: "mock compact provider does not support generate".to_string(),
+			})
+		}
+
+		fn supports_compact_history(&self) -> bool {
+			true
+		}
+
+		async fn compact_history(
+			&self,
+			_request: &roku_plugin_llm::CompactRequest,
+		) -> Option<Result<roku_plugin_llm::CompactResponse, roku_plugin_llm::ProviderCallError>> {
+			self.compact_result.clone()
+		}
+
+		fn supports_output_slot_cap(&self) -> bool {
+			false
+		}
+	}
+
+	fn make_compact_router(
+		provider: MockCompactProvider,
+	) -> roku_plugin_llm::LlmRouter {
+		use roku_plugin_llm::{ModelProfile, RiskTier, RoutingPolicy};
+		let mut router = roku_plugin_llm::LlmRouter::new(RoutingPolicy::default());
+		router.register_provider(provider);
+		router.register_model(ModelProfile {
+			model_id: "mock-compact-model".to_string(),
+			provider: "mock-compact".to_string(),
+			max_context_tokens: 100_000,
+			cost_per_1k_tokens_usd: 0.01,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		});
+		router
+	}
+
+	#[tokio::test]
+	async fn remote_compact_error_returns_failed_outcome_without_generate_call() {
+		// When compact_history returns Some(Err(...)), the function must:
+		// 1. Return succeeded=false with prompt_tokens=0.
+		// 2. NOT call router.generate() (which would re-enter the SSE path).
+		// 3. Insert a mechanical fallback into messages so the buffer shrinks.
+		let counter = Arc::new(AtomicU64::new(0));
+		let provider = MockCompactProvider::returning_error(
+			roku_plugin_llm::ProviderCallError::Fatal {
+				message: "simulated 403 from compact endpoint".to_string(),
+			},
+			counter.clone(),
+		);
+		let router = make_compact_router(provider);
+
+		let mut messages = build_messages(5);
+		messages.push(Message::Assistant {
+			text: "final step".to_string(),
+			tool_calls: vec![],
+		});
+		let before_len = messages.len();
+		let config = CompactConfig::default();
+
+		let outcome =
+			compact_messages_with_structured_summary(&mut messages, 4, &router, &config).await;
+
+		std::mem::forget(router);
+
+		// Must report failure.
+		assert!(!outcome.succeeded, "remote compact error must yield succeeded=false");
+		assert_eq!(
+			outcome.prompt_tokens, 0,
+			"no prompt_tokens should be charged on remote compact error"
+		);
+		assert!(
+			outcome.error.is_some(),
+			"error field must be populated on remote compact error"
+		);
+		// Must NOT have called complete() (which is what router.generate() routes through).
+		assert_eq!(
+			counter.load(AtomicOrdering::SeqCst),
+			0,
+			"router.generate() must not be called when remote compact fails"
+		);
+		// Buffer must still be compacted (shorter than before).
+		assert!(
+			messages.len() < before_len,
+			"messages must be shorter after failed remote compact (mechanical fallback inserted)"
+		);
+	}
+
+	#[tokio::test]
+	async fn remote_compact_empty_output_returns_failed_outcome_without_generate_call() {
+		// When compact_history returns Some(Ok(response)) with empty output,
+		// the function must return succeeded=false and NOT call router.generate().
+		let counter = Arc::new(AtomicU64::new(0));
+		let provider = MockCompactProvider::returning_empty_output(counter.clone());
+		let router = make_compact_router(provider);
+
+		let mut messages = build_messages(5);
+		messages.push(Message::Assistant {
+			text: "final step".to_string(),
+			tool_calls: vec![],
+		});
+		let before_len = messages.len();
+		let config = CompactConfig::default();
+
+		let outcome =
+			compact_messages_with_structured_summary(&mut messages, 4, &router, &config).await;
+
+		std::mem::forget(router);
+
+		assert!(
+			!outcome.succeeded,
+			"empty remote compact output must yield succeeded=false"
+		);
+		assert_eq!(
+			outcome.prompt_tokens, 0,
+			"no prompt_tokens should be charged for empty remote compact output"
+		);
+		assert!(
+			outcome.error.is_some(),
+			"error field must be populated for empty remote compact output"
+		);
+		assert_eq!(
+			counter.load(AtomicOrdering::SeqCst),
+			0,
+			"router.generate() must not be called when remote compact returns empty output"
+		);
+		assert!(
+			messages.len() < before_len,
+			"messages must be shorter after empty remote compact (mechanical fallback inserted)"
+		);
+	}
+
+	#[tokio::test]
+	async fn remote_compact_success_still_works() {
+		// Regression guard: a successful remote compact still returns
+		// succeeded=true and inserts the provider's output messages.
+		let counter = Arc::new(AtomicU64::new(0));
+		let summary_msg = Message::User {
+			content: "[Conversation summary]\nGoal: test\nAccomplished:\n- done\nKey Decisions:\n- none\nRelevant Files:\n- src/lib.rs\n".to_string(),
+		};
+		let provider = MockCompactProvider::returning_success(
+			vec![summary_msg.clone()],
+			counter.clone(),
+		);
+		let router = make_compact_router(provider);
+
+		let mut messages = build_messages(5);
+		messages.push(Message::Assistant {
+			text: "final step".to_string(),
+			tool_calls: vec![],
+		});
+		let config = CompactConfig::default();
+
+		let outcome =
+			compact_messages_with_structured_summary(&mut messages, 4, &router, &config).await;
+
+		std::mem::forget(router);
+
+		assert!(outcome.succeeded, "remote compact success must yield succeeded=true");
+		assert_eq!(outcome.error, None);
+		assert_eq!(outcome.prompt_tokens, 100);
+		assert_eq!(outcome.output_tokens, 20);
+		// generate() should not have been called on the success path either.
+		assert_eq!(
+			counter.load(AtomicOrdering::SeqCst),
+			0,
+			"router.generate() must not be called when remote compact succeeds"
+		);
+	}
+
+	#[tokio::test]
+	async fn non_remote_compact_provider_still_calls_generate() {
+		// When the router has no compact-capable provider (supports_remote_compaction()
+		// returns false), the function must fall through to the SSE/LLM path.
+		// The existing MockSequenceProvider does not support compact_history.
+		let router = make_router(vec![ok_response(&valid_structured_summary())]);
+		let mut messages = build_messages(5);
+		messages.push(Message::Assistant {
+			text: "final step".to_string(),
+			tool_calls: vec![],
+		});
+		let config = CompactConfig::default();
+
+		let outcome =
+			compact_messages_with_structured_summary(&mut messages, 4, &router, &config).await;
+
+		std::mem::forget(router);
+
+		// The non-compact provider path must still succeed via the LLM summarizer.
+		assert!(
+			outcome.succeeded,
+			"non-compact provider path must still call generate() and succeed"
+		);
 	}
 }
