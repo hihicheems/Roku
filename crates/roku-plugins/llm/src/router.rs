@@ -24,9 +24,10 @@ use serde_json::Value;
 
 use crate::retry::backoff_for_attempt;
 use crate::types::{
-	GenerationRequest, LlmAdapterError, LlmResponse, ModelProfile, ProviderCallError,
-	ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy, StreamChunk,
-	StructuredGenerationError, StructuredJsonResponse, StructuredOutputError, estimate_cost_usd,
+	CompactRequest, CompactResponse, GenerationRequest, LlmAdapterError, LlmResponse, ModelProfile,
+	ProviderCallError, ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy,
+	StreamChunk, StructuredGenerationError, StructuredJsonResponse, StructuredOutputError,
+	estimate_cost_usd,
 };
 
 #[async_trait]
@@ -62,6 +63,40 @@ pub trait LlmProvider: Send + Sync {
 			})
 			.await;
 		Ok(response)
+	}
+
+	/// Returns `true` when this provider can handle a [`compact_history`] call.
+	///
+	/// Default is `false`. Providers that implement the compact endpoint
+	/// override this to `true` so that the router can check capability
+	/// synchronously before making an async call.
+	fn supports_compact_history(&self) -> bool {
+		false
+	}
+
+	/// Attempt remote context compaction via a dedicated compact endpoint.
+	///
+	/// Returns `None` when the provider does not support remote compaction
+	/// (the default). Providers that implement a compact endpoint return
+	/// `Some(Ok(...))` on success or `Some(Err(...))` on failure.
+	///
+	/// Callers should fall back to local LLM-assisted summarization when
+	/// this returns `None`, and to mechanical compaction when `Some(Err(...))`.
+	async fn compact_history(
+		&self,
+		_request: &CompactRequest,
+	) -> Option<Result<CompactResponse, ProviderCallError>> {
+		None
+	}
+
+	/// Whether this provider supports client-side output-slot escalation
+	/// (retrying with `max_output_tokens` set to the model ceiling when
+	/// `finish_reason == "max_tokens"`).
+	///
+	/// Returns `true` by default. Providers where the server controls the
+	/// output budget (e.g. the OpenAI Responses API link) return `false`.
+	fn supports_output_slot_cap(&self) -> bool {
+		true
 	}
 }
 
@@ -629,6 +664,57 @@ impl LlmRouter {
 	/// Returns a list of all registered model IDs.
 	pub fn available_models(&self) -> Vec<String> {
 		self.models.iter().map(|m| m.model_id.clone()).collect()
+	}
+
+	/// Returns `true` when at least one registered provider supports remote
+	/// context compaction via the compact endpoint.
+	pub fn supports_remote_compaction(&self) -> bool {
+		self.providers
+			.values()
+			.any(|p| p.provider.supports_compact_history())
+	}
+
+	/// Forward a compaction request to the first provider that supports it.
+	///
+	/// Returns `None` when no registered provider supports remote compaction.
+	/// Returns `Some(Err(...))` when the supporting provider returned an error.
+	pub async fn compact_history(
+		&self,
+		req: &CompactRequest,
+	) -> Option<Result<CompactResponse, LlmAdapterError>> {
+		for registered in self.providers.values() {
+			let result = registered.provider.compact_history(req).await;
+			if let Some(r) = result {
+				return Some(r.map_err(|e| LlmAdapterError::ProviderCallFailed {
+					provider: "compact".to_string(),
+					model_id: req.model.clone(),
+					message: e.to_string(),
+				}));
+			}
+		}
+		None
+	}
+
+	/// Returns `true` when the provider that would serve `model_id` reports
+	/// that it supports output-slot escalation.
+	///
+	/// Defaults to `true` when the model is not registered (preserves existing
+	/// behavior for callers that do not call this guard).
+	pub fn provider_supports_output_slot_cap(&self, model_id: &str) -> bool {
+		// Find the model profile to resolve its provider name.
+		let provider_name = self
+			.models
+			.iter()
+			.find(|m| m.model_id == model_id)
+			.map(|m| m.provider.as_str());
+		match provider_name {
+			Some(name) => self
+				.providers
+				.get(name)
+				.map(|p| p.provider.supports_output_slot_cap())
+				.unwrap_or(true),
+			None => true,
+		}
 	}
 }
 
@@ -1434,5 +1520,224 @@ mod tests {
 			// async context.
 			std::mem::forget(router);
 		});
+	}
+
+	// ---------------------------------------------------------------------------
+	// compact_history and supports_remote_compaction dispatch tests
+	// ---------------------------------------------------------------------------
+
+	/// A provider that supports compact_history and returns a fixed response.
+	struct CompactCapableProvider {
+		response: CompactResponse,
+	}
+
+	#[async_trait]
+	impl LlmProvider for CompactCapableProvider {
+		fn provider_name(&self) -> &'static str {
+			"compact-capable"
+		}
+
+		async fn complete(
+			&self,
+			_model: &ModelProfile,
+			_request: &GenerationRequest,
+		) -> Result<ProviderResponse, ProviderCallError> {
+			Ok(ProviderResponse {
+				output: String::new(),
+				finish_reason: None,
+				prompt_tokens: 0,
+				output_tokens: 0,
+				cache_creation_input_tokens: 0,
+				cache_read_input_tokens: 0,
+				latency_ms: 0,
+				tool_calls: None,
+				response_id: None,
+			})
+		}
+
+		fn supports_compact_history(&self) -> bool {
+			true
+		}
+
+		async fn compact_history(
+			&self,
+			_request: &CompactRequest,
+		) -> Option<Result<CompactResponse, ProviderCallError>> {
+			Some(Ok(self.response.clone()))
+		}
+
+		fn supports_output_slot_cap(&self) -> bool {
+			false
+		}
+	}
+
+	/// A regular provider with no compact support (uses all defaults).
+	struct NoCompactProvider;
+
+	#[async_trait]
+	impl LlmProvider for NoCompactProvider {
+		fn provider_name(&self) -> &'static str {
+			"no-compact"
+		}
+
+		async fn complete(
+			&self,
+			_model: &ModelProfile,
+			_request: &GenerationRequest,
+		) -> Result<ProviderResponse, ProviderCallError> {
+			Ok(ProviderResponse {
+				output: String::new(),
+				finish_reason: None,
+				prompt_tokens: 0,
+				output_tokens: 0,
+				cache_creation_input_tokens: 0,
+				cache_read_input_tokens: 0,
+				latency_ms: 0,
+				tool_calls: None,
+				response_id: None,
+			})
+		}
+		// All defaults: supports_compact_history() = false, supports_output_slot_cap() = true
+	}
+
+	#[test]
+	fn supports_remote_compaction_is_true_when_capable_provider_registered() {
+		let mut router = LlmRouter::new(RoutingPolicy::default());
+		let compact_resp = CompactResponse {
+			output: vec![crate::types::Message::User {
+				content: "summary".to_string(),
+			}],
+			usage: crate::types::CompactUsageSummary::default(),
+		};
+		router.register_provider(CompactCapableProvider {
+			response: compact_resp,
+		});
+		router.register_model(ModelProfile {
+			model_id: "compact-capable-model".to_string(),
+			provider: "compact-capable".to_string(),
+			max_context_tokens: 8_000,
+			cost_per_1k_tokens_usd: 0.01,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		});
+		assert!(router.supports_remote_compaction());
+		std::mem::forget(router);
+	}
+
+	#[test]
+	fn supports_remote_compaction_is_false_for_non_compact_provider() {
+		let mut router = LlmRouter::new(RoutingPolicy::default());
+		router.register_provider(NoCompactProvider);
+		router.register_model(model_profile("no-compact"));
+		assert!(!router.supports_remote_compaction());
+		std::mem::forget(router);
+	}
+
+	#[tokio::test]
+	async fn router_compact_history_forwards_to_capable_provider() {
+		let mut router = LlmRouter::new(RoutingPolicy::default());
+		let expected_output = vec![crate::types::Message::User {
+			content: "compacted result".to_string(),
+		}];
+		router.register_provider(CompactCapableProvider {
+			response: CompactResponse {
+				output: expected_output.clone(),
+				usage: crate::types::CompactUsageSummary {
+					prompt_tokens: 200,
+					output_tokens: 40,
+					cached_input_tokens: 0,
+				},
+			},
+		});
+		router.register_model(ModelProfile {
+			model_id: "compact-capable-model".to_string(),
+			provider: "compact-capable".to_string(),
+			max_context_tokens: 8_000,
+			cost_per_1k_tokens_usd: 0.01,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		});
+
+		let req = CompactRequest {
+			model: "compact-capable-model".to_string(),
+			instructions: "summarize".to_string(),
+			input: vec![],
+			tools: vec![],
+			parallel_tool_calls: false,
+			reasoning: None,
+		};
+		let result = router.compact_history(&req).await;
+		assert!(result.is_some(), "router must forward to capable provider");
+		let resp = result.unwrap().expect("capable provider returns Ok");
+		assert_eq!(resp.output, expected_output);
+		assert_eq!(resp.usage.prompt_tokens, 200);
+		std::mem::forget(router);
+	}
+
+	#[tokio::test]
+	async fn router_compact_history_returns_none_when_no_capable_provider() {
+		let mut router = LlmRouter::new(RoutingPolicy::default());
+		router.register_provider(NoCompactProvider);
+		router.register_model(model_profile("no-compact"));
+
+		let req = CompactRequest {
+			model: "no-compact-model".to_string(),
+			instructions: "summarize".to_string(),
+			input: vec![],
+			tools: vec![],
+			parallel_tool_calls: false,
+			reasoning: None,
+		};
+		let result = router.compact_history(&req).await;
+		assert!(
+			result.is_none(),
+			"router must return None when no provider supports compact"
+		);
+		std::mem::forget(router);
+	}
+
+	#[test]
+	fn provider_supports_output_slot_cap_false_for_no_cap_provider() {
+		let mut router = LlmRouter::new(RoutingPolicy::default());
+		router.register_provider(CompactCapableProvider {
+			response: CompactResponse {
+				output: vec![],
+				usage: crate::types::CompactUsageSummary::default(),
+			},
+		});
+		router.register_model(ModelProfile {
+			model_id: "compact-capable-model".to_string(),
+			provider: "compact-capable".to_string(),
+			max_context_tokens: 8_000,
+			cost_per_1k_tokens_usd: 0.01,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		});
+		// CompactCapableProvider::supports_output_slot_cap() = false
+		assert!(
+			!router.provider_supports_output_slot_cap("compact-capable-model"),
+			"router must reflect provider's false capability"
+		);
+	}
+
+	#[test]
+	fn provider_supports_output_slot_cap_true_for_default_provider() {
+		let mut router = LlmRouter::new(RoutingPolicy::default());
+		router.register_provider(NoCompactProvider);
+		router.register_model(model_profile("no-compact"));
+		// NoCompactProvider uses default (true)
+		assert!(
+			router.provider_supports_output_slot_cap("no-compact-model"),
+			"default provider must support output-slot escalation"
+		);
+	}
+
+	#[test]
+	fn provider_supports_output_slot_cap_defaults_to_true_for_unknown_model() {
+		let router = LlmRouter::new(RoutingPolicy::default()); // empty
+		assert!(
+			router.provider_supports_output_slot_cap("unknown-model"),
+			"unknown model must default to true (safe fallback)"
+		);
 	}
 }

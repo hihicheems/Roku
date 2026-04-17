@@ -1356,14 +1356,26 @@ impl GenericAgentRuntime {
 									.as_deref()
 									== Some("length")
 								{
-									let initial_max = gen_request.expected_output_tokens;
-									if let Some(profile) =
-										roku_plugin_llm::model_cost::lookup_cost_profile(
-											&resp.model_id,
-										) {
-										let ceiling = profile.max_output_tokens;
-										if ceiling > initial_max {
-											let _ = sender.send(
+									// Gate: skip escalation for providers that do not
+									// support client-side output-slot capping.
+									if !router.provider_supports_output_slot_cap(&resp.model_id) {
+										let _ = sender.send(
+											crate::runtime_loop::LoopEvent::OutputSlotEscalationUnsupported {
+												step: current_step_index,
+												model_id: resp.model_id.clone(),
+												provider: resp.provider.clone(),
+											},
+										);
+										(text, tool_calls)
+									} else {
+										let initial_max = gen_request.expected_output_tokens;
+										if let Some(profile) =
+											roku_plugin_llm::model_cost::lookup_cost_profile(
+												&resp.model_id,
+											) {
+											let ceiling = profile.max_output_tokens;
+											if ceiling > initial_max {
+												let _ = sender.send(
 												crate::runtime_loop::LoopEvent::OutputSlotEscalated {
 													step: current_step_index,
 													initial_max_tokens: initial_max,
@@ -1371,39 +1383,42 @@ impl GenericAgentRuntime {
 													model_id: resp.model_id.clone(),
 												},
 											);
-											let mut escalated_request = gen_request.clone();
-											escalated_request.expected_output_tokens = ceiling;
-											if let Ok(retry_resp) =
-												router.generate(&escalated_request).await
-											{
-												// Token totals are billing-oriented: both
-												// the truncated call and the retry were
-												// charged by the provider, so we accumulate
-												// both. Consumers that need "response length"
-												// should use the retry's output_tokens only.
-												total_prompt_tokens = total_prompt_tokens
-													.saturating_add(retry_resp.prompt_tokens);
-												total_output_tokens = total_output_tokens
-													.saturating_add(retry_resp.output_tokens);
-												total_cache_creation_input_tokens =
-													total_cache_creation_input_tokens
-														.saturating_add(
-															retry_resp.cache_creation_input_tokens,
-														);
-												total_cache_read_input_tokens =
-													total_cache_read_input_tokens.saturating_add(
-														retry_resp.cache_read_input_tokens,
+												let mut escalated_request = gen_request.clone();
+												escalated_request.expected_output_tokens = ceiling;
+												if let Ok(retry_resp) =
+													router.generate(&escalated_request).await
+												{
+													// Token totals are billing-oriented: both
+													// the truncated call and the retry were
+													// charged by the provider, so we accumulate
+													// both. Consumers that need "response length"
+													// should use the retry's output_tokens only.
+													total_prompt_tokens = total_prompt_tokens
+														.saturating_add(retry_resp.prompt_tokens);
+													total_output_tokens = total_output_tokens
+														.saturating_add(retry_resp.output_tokens);
+													total_cache_creation_input_tokens =
+														total_cache_creation_input_tokens
+															.saturating_add(
+																retry_resp
+																	.cache_creation_input_tokens,
+															);
+													total_cache_read_input_tokens =
+														total_cache_read_input_tokens
+															.saturating_add(
+																retry_resp.cache_read_input_tokens,
+															);
+													// Update model ID so cost reporting uses the
+													// retry response's model, not the original.
+													last_model_id =
+														Some(retry_resp.model_id.clone());
+													// Re-calibrate the estimator with the retry's
+													// prompt_tokens for a tighter next-turn estimate.
+													loop_state.estimator_calibration.update(
+														pre_call_estimate.raw_total_tokens,
+														retry_resp.prompt_tokens,
 													);
-												// Update model ID so cost reporting uses the
-												// retry response's model, not the original.
-												last_model_id = Some(retry_resp.model_id.clone());
-												// Re-calibrate the estimator with the retry's
-												// prompt_tokens for a tighter next-turn estimate.
-												loop_state.estimator_calibration.update(
-													pre_call_estimate.raw_total_tokens,
-													retry_resp.prompt_tokens,
-												);
-												let _ = sender.send(
+													let _ = sender.send(
 													crate::runtime_loop::LoopEvent::EstimatorCalibrated {
 														step: current_step_index,
 														estimated_prompt_tokens: pre_call_estimate
@@ -1414,18 +1429,19 @@ impl GenericAgentRuntime {
 															.scale(),
 													},
 												);
-												let retry_tool_calls =
-													retry_resp.tool_calls.unwrap_or_default();
-												(retry_resp.output, retry_tool_calls)
+													let retry_tool_calls =
+														retry_resp.tool_calls.unwrap_or_default();
+													(retry_resp.output, retry_tool_calls)
+												} else {
+													(text, tool_calls)
+												}
 											} else {
 												(text, tool_calls)
 											}
 										} else {
 											(text, tool_calls)
 										}
-									} else {
-										(text, tool_calls)
-									}
+									} // closes `else { // supports_output_slot_cap`
 								} else {
 									(text, tool_calls)
 								};
@@ -1496,15 +1512,29 @@ impl GenericAgentRuntime {
 								let resp = if resp.finish_reason.as_deref() == Some("max_tokens")
 									|| resp.finish_reason.as_deref() == Some("length")
 								{
-									let initial_max = gen_request.expected_output_tokens;
-									if let Some(profile) =
-										roku_plugin_llm::model_cost::lookup_cost_profile(
-											&resp.model_id,
-										) {
-										let ceiling = profile.max_output_tokens;
-										if ceiling > initial_max {
-											if let Some(sender) = event_sender {
-												let _ = sender.send(
+									// Gate: skip escalation for providers that do not
+									// support client-side output-slot capping.
+									if !router.provider_supports_output_slot_cap(&resp.model_id) {
+										if let Some(sender) = event_sender {
+											let _ = sender.send(
+												crate::runtime_loop::LoopEvent::OutputSlotEscalationUnsupported {
+													step: current_step_index,
+													model_id: resp.model_id.clone(),
+													provider: resp.provider.clone(),
+												},
+											);
+										}
+										resp
+									} else {
+										let initial_max = gen_request.expected_output_tokens;
+										if let Some(profile) =
+											roku_plugin_llm::model_cost::lookup_cost_profile(
+												&resp.model_id,
+											) {
+											let ceiling = profile.max_output_tokens;
+											if ceiling > initial_max {
+												if let Some(sender) = event_sender {
+													let _ = sender.send(
 													crate::runtime_loop::LoopEvent::OutputSlotEscalated {
 														step: current_step_index,
 														initial_max_tokens: initial_max,
@@ -1512,40 +1542,43 @@ impl GenericAgentRuntime {
 														model_id: resp.model_id.clone(),
 													},
 												);
-											}
-											let mut escalated_request = gen_request.clone();
-											escalated_request.expected_output_tokens = ceiling;
-											if let Ok(retry_resp) =
-												router.generate(&escalated_request).await
-											{
-												// Token totals are billing-oriented: both
-												// the truncated call and the retry were
-												// charged by the provider, so we accumulate
-												// both. Consumers that need "response length"
-												// should use the retry's output_tokens only.
-												total_prompt_tokens = total_prompt_tokens
-													.saturating_add(retry_resp.prompt_tokens);
-												total_output_tokens = total_output_tokens
-													.saturating_add(retry_resp.output_tokens);
-												total_cache_creation_input_tokens =
-													total_cache_creation_input_tokens
-														.saturating_add(
-															retry_resp.cache_creation_input_tokens,
-														);
-												total_cache_read_input_tokens =
-													total_cache_read_input_tokens.saturating_add(
-														retry_resp.cache_read_input_tokens,
+												}
+												let mut escalated_request = gen_request.clone();
+												escalated_request.expected_output_tokens = ceiling;
+												if let Ok(retry_resp) =
+													router.generate(&escalated_request).await
+												{
+													// Token totals are billing-oriented: both
+													// the truncated call and the retry were
+													// charged by the provider, so we accumulate
+													// both. Consumers that need "response length"
+													// should use the retry's output_tokens only.
+													total_prompt_tokens = total_prompt_tokens
+														.saturating_add(retry_resp.prompt_tokens);
+													total_output_tokens = total_output_tokens
+														.saturating_add(retry_resp.output_tokens);
+													total_cache_creation_input_tokens =
+														total_cache_creation_input_tokens
+															.saturating_add(
+																retry_resp
+																	.cache_creation_input_tokens,
+															);
+													total_cache_read_input_tokens =
+														total_cache_read_input_tokens
+															.saturating_add(
+																retry_resp.cache_read_input_tokens,
+															);
+													// Update model ID for cost reporting.
+													last_model_id =
+														Some(retry_resp.model_id.clone());
+													// Re-calibrate the estimator with the retry's
+													// prompt_tokens for a tighter next-turn estimate.
+													loop_state.estimator_calibration.update(
+														pre_call_estimate.raw_total_tokens,
+														retry_resp.prompt_tokens,
 													);
-												// Update model ID for cost reporting.
-												last_model_id = Some(retry_resp.model_id.clone());
-												// Re-calibrate the estimator with the retry's
-												// prompt_tokens for a tighter next-turn estimate.
-												loop_state.estimator_calibration.update(
-													pre_call_estimate.raw_total_tokens,
-													retry_resp.prompt_tokens,
-												);
-												if let Some(sender) = event_sender {
-													let _ = sender.send(
+													if let Some(sender) = event_sender {
+														let _ = sender.send(
 														crate::runtime_loop::LoopEvent::EstimatorCalibrated {
 															step: current_step_index,
 															estimated_prompt_tokens: pre_call_estimate
@@ -1556,17 +1589,18 @@ impl GenericAgentRuntime {
 																.scale(),
 														},
 													);
+													}
+													retry_resp
+												} else {
+													resp
 												}
-												retry_resp
 											} else {
 												resp
 											}
 										} else {
 											resp
 										}
-									} else {
-										resp
-									}
+									} // closes `else { // supports_output_slot_cap`
 								} else {
 									resp
 								};
@@ -4396,6 +4430,251 @@ mod tests {
 				"signal {signal} should not be a truncation trigger"
 			);
 		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// Output-slot escalation capability gate tests (Issue #335)
+	// ---------------------------------------------------------------------------
+
+	/// Provider that returns a `max_tokens` finish_reason on the first call
+	/// and tracks invocation count. When `cap_supported` is false the router
+	/// must skip the escalation retry, so invocations must be exactly 1.
+	struct MaxTokensProvider {
+		invocations: Arc<std::sync::atomic::AtomicUsize>,
+		cap_supported: bool,
+	}
+
+	#[async_trait]
+	impl LlmProvider for MaxTokensProvider {
+		fn provider_name(&self) -> &'static str {
+			"max-tokens-provider"
+		}
+
+		async fn complete(
+			&self,
+			_model: &ModelProfile,
+			_request: &GenerationRequest,
+		) -> Result<ProviderResponse, ProviderCallError> {
+			self.invocations
+				.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+			// Always return a valid final_answer JSON so the runtime loop
+			// terminates cleanly rather than failing to parse the decision.
+			let output = serde_json::json!({
+				"action": "final_answer",
+				"tool_name": null,
+				"arguments": null,
+				"reason": "truncated by max_tokens",
+				"final_message": "truncated response"
+			})
+			.to_string();
+			Ok(ProviderResponse {
+				output,
+				finish_reason: Some("max_tokens".to_string()),
+				prompt_tokens: 20,
+				output_tokens: 16,
+				cache_creation_input_tokens: 0,
+				cache_read_input_tokens: 0,
+				latency_ms: 5,
+				tool_calls: None,
+				response_id: None,
+			})
+		}
+
+		fn supports_output_slot_cap(&self) -> bool {
+			self.cap_supported
+		}
+	}
+
+	fn router_with_max_tokens_provider(
+		cap_supported: bool,
+	) -> (LlmRouter, Arc<std::sync::atomic::AtomicUsize>) {
+		let invocations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+		let mut router = LlmRouter::new(RoutingPolicy {
+			max_request_cost_usd: 1.0,
+			max_latency_ms: 5_000,
+		});
+		router.register_provider(MaxTokensProvider {
+			invocations: Arc::clone(&invocations),
+			cap_supported,
+		});
+		// Register a model that does NOT have a cost profile (so the existing
+		// escalation path also bails out with "no profile") — this ensures the
+		// only difference between cap_supported=true and cap_supported=false is
+		// the event emitted.
+		router.register_model(ModelProfile {
+			model_id: "max-tokens-model".to_string(),
+			provider: "max-tokens-provider".to_string(),
+			max_context_tokens: 16_000,
+			cost_per_1k_tokens_usd: 0.0,
+			max_risk_tier: RiskTier::Low,
+			route_priority: 100,
+		});
+		(router, invocations)
+	}
+
+	#[test]
+	fn output_slot_escalation_unsupported_event_emitted_when_provider_caps_off() {
+		let (route_router, invocations) = router_with_max_tokens_provider(false);
+		let execution_router = router_with_text_output("exec-provider-no-cap", "exec");
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+			);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-no-cap".to_string()),
+			session_id: "session-no-cap".to_string(),
+			goal: "Test escalation gate".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::Chat,
+			0.9,
+			false,
+			crate::router::RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			"chat",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+
+		let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+		tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-no-cap".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				Some(&event_tx),
+				None,
+			));
+
+		drop(event_tx);
+		let events: Vec<_> = std::iter::from_fn(|| event_rx.try_recv().ok()).collect();
+
+		// The escalation-unsupported event must be emitted exactly once.
+		let unsupported_count = events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e,
+					crate::runtime_loop::LoopEvent::OutputSlotEscalationUnsupported { .. }
+				)
+			})
+			.count();
+		assert_eq!(
+			unsupported_count, 1,
+			"OutputSlotEscalationUnsupported must be emitted exactly once"
+		);
+
+		// No OutputSlotEscalated events should be present.
+		let escalated_count = events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e,
+					crate::runtime_loop::LoopEvent::OutputSlotEscalated { .. }
+				)
+			})
+			.count();
+		assert_eq!(
+			escalated_count, 0,
+			"OutputSlotEscalated must NOT be emitted when escalation is unsupported"
+		);
+
+		// The provider must have been called exactly once (no retry).
+		assert_eq!(
+			invocations.load(std::sync::atomic::Ordering::SeqCst),
+			1,
+			"provider must be invoked exactly once when escalation is skipped"
+		);
+	}
+
+	#[test]
+	fn output_slot_escalation_emitted_when_provider_caps_supported() {
+		// When supports_output_slot_cap = true, the existing escalation path
+		// fires (though with no cost profile the escalation guard bails early).
+		// We only verify that OutputSlotEscalationUnsupported is NOT emitted.
+		let (route_router, _invocations) = router_with_max_tokens_provider(true);
+		let execution_router = router_with_text_output("exec-provider-cap", "exec");
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+			);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-cap".to_string()),
+			session_id: "session-cap".to_string(),
+			goal: "Test escalation with cap supported".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::Chat,
+			0.9,
+			false,
+			crate::router::RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			"chat",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+
+		let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+		tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-cap".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				Some(&event_tx),
+				None,
+			));
+
+		drop(event_tx);
+		let events: Vec<_> = std::iter::from_fn(|| event_rx.try_recv().ok()).collect();
+
+		// OutputSlotEscalationUnsupported must NOT be emitted when cap is supported.
+		let unsupported_count = events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e,
+					crate::runtime_loop::LoopEvent::OutputSlotEscalationUnsupported { .. }
+				)
+			})
+			.count();
+		assert_eq!(
+			unsupported_count, 0,
+			"OutputSlotEscalationUnsupported must NOT be emitted when cap is supported"
+		);
 	}
 
 	fn test_skill_archive_bytes() -> Vec<u8> {

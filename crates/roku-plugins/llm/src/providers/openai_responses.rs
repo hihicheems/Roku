@@ -46,8 +46,9 @@ use tokio::sync::mpsc;
 use crate::providers::openai_ws::{OpenAiWsSession, SharedWsSession};
 use crate::router::{LlmProvider, LlmRouter};
 use crate::types::{
-	GenerationRequest, Message, ModelProfile, ProviderCallError, ProviderResponse, RiskTier,
-	RoutingPolicy, StreamChunk, ToolCallBlock, ToolDefinition, estimate_prompt_tokens,
+	CompactRequest, CompactResponse, CompactUsageSummary, GenerationRequest, Message, ModelProfile,
+	ProviderCallError, ProviderResponse, RiskTier, RoutingPolicy, StreamChunk, ToolCallBlock,
+	ToolDefinition, estimate_prompt_tokens,
 };
 
 const OPENAI_RESPONSES_PROVIDER: &str = "openai_responses";
@@ -214,6 +215,10 @@ pub struct OpenAiResponsesProvider {
 	/// Per-session delta state. Tracks `previous_response_id` across turns
 	/// when `config.websocket_mode` is enabled.
 	ws_session: SharedWsSession,
+	/// Timeout applied to the compact endpoint request. Defaults to
+	/// [`COMPACT_REQUEST_TIMEOUT`] (90s). Overridable in tests via
+	/// [`OpenAiResponsesProvider::with_compact_timeout`].
+	compact_timeout: std::time::Duration,
 }
 
 impl OpenAiResponsesProvider {
@@ -233,7 +238,32 @@ impl OpenAiResponsesProvider {
 			config,
 			prompt_cache_key,
 			ws_session,
+			compact_timeout: COMPACT_REQUEST_TIMEOUT,
 		})
+	}
+
+	/// Construct a provider with a custom compact-endpoint timeout.
+	///
+	/// Intended for unit tests only: allows tests to inject a very short
+	/// timeout so the compact timeout path fires quickly without waiting
+	/// for the production 90s constant.
+	#[cfg(test)]
+	pub(crate) fn with_compact_timeout(
+		client: Client,
+		config: OpenAiResponsesConfig,
+		compact_timeout: std::time::Duration,
+	) -> Self {
+		let prompt_cache_key = derive_session_prompt_cache_key(&config.session_id);
+		let ws_session = std::sync::Arc::new(tokio::sync::Mutex::new(OpenAiWsSession::new(
+			config.websocket_mode,
+		)));
+		Self {
+			client,
+			config,
+			prompt_cache_key,
+			ws_session,
+			compact_timeout,
+		}
 	}
 
 	fn build_headers(&self) -> Result<HeaderMap, ProviderCallError> {
@@ -280,8 +310,10 @@ impl OpenAiResponsesProvider {
 		// originator
 		headers.insert(
 			HeaderName::from_static("originator"),
-			HeaderValue::from_str(&self.config.originator).map_err(|e| ProviderCallError::Fatal {
-				message: format!("invalid originator header: {e}"),
+			HeaderValue::from_str(&self.config.originator).map_err(|e| {
+				ProviderCallError::Fatal {
+					message: format!("invalid originator header: {e}"),
+				}
 			})?,
 		);
 
@@ -849,6 +881,26 @@ async fn handle_sse_event(
 }
 
 // ---------------------------------------------------------------------------
+// Compact endpoint helpers
+// ---------------------------------------------------------------------------
+
+/// Derive the compact endpoint URL from the base responses URL.
+///
+/// The base URL is e.g. `https://chatgpt.com/backend-api/codex/responses`.
+/// The compact endpoint is at the same base path with `/compact` appended,
+/// i.e. `https://chatgpt.com/backend-api/codex/responses/compact`.
+fn compact_url(base_url: &str) -> String {
+	// Strip trailing slash then append /compact.
+	let trimmed = base_url.trim_end_matches('/');
+	format!("{trimmed}/compact")
+}
+
+/// Timeout for compact endpoint calls. Shorter than the normal 300s adapter
+/// default so that a hung compact call falls back to mechanical summarization
+/// quickly.
+pub(crate) const COMPACT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+// ---------------------------------------------------------------------------
 // LlmProvider implementation
 // ---------------------------------------------------------------------------
 
@@ -1063,11 +1115,272 @@ impl LlmProvider for OpenAiResponsesProvider {
 			response_id,
 		})
 	}
+
+	fn supports_compact_history(&self) -> bool {
+		true
+	}
+
+	fn supports_output_slot_cap(&self) -> bool {
+		false
+	}
+
+	async fn compact_history(
+		&self,
+		request: &CompactRequest,
+	) -> Option<Result<CompactResponse, ProviderCallError>> {
+		let url = compact_url(&self.config.base_url);
+		let headers = match self.build_headers() {
+			Ok(h) => h,
+			Err(e) => return Some(Err(e)),
+		};
+
+		// Convert internal Message format to Responses API input items.
+		let input_items: Vec<Value> = messages_to_responses_input(&request.input);
+
+		// Build the compact request body. Tool choice is always "auto" for compaction.
+		let tools_value: Vec<Value> = request.tools.iter().map(build_tool_definition).collect();
+
+		let mut body = json!({
+			"model": request.model,
+			"instructions": request.instructions,
+			"input": input_items,
+			"tool_choice": "auto",
+			"parallel_tool_calls": request.parallel_tool_calls,
+		});
+		if !tools_value.is_empty() {
+			body["tools"] = json!(tools_value);
+		}
+		if let Some(reasoning) = &request.reasoning {
+			body["reasoning"] = reasoning.clone();
+		}
+
+		let http_result = tokio::time::timeout(
+			self.compact_timeout,
+			self.client
+				.post(&url)
+				.headers(headers)
+				.timeout(self.compact_timeout)
+				.json(&body)
+				.send(),
+		)
+		.await;
+
+		let http_response = match http_result {
+			Ok(Ok(resp)) => resp,
+			Ok(Err(e)) => return Some(Err(classify_request_error(e))),
+			Err(_) => {
+				return Some(Err(ProviderCallError::Timeout {
+					message: "compact request timed out after 90s".to_string(),
+				}));
+			}
+		};
+
+		let status = http_response.status();
+		if !status.is_success() {
+			let body_text = http_response.text().await.unwrap_or_default();
+			log_responses(
+				LogLevel::Warn,
+				"compact endpoint returned non-success status",
+				[
+					("url", url),
+					("status", status.to_string()),
+					("body", truncate_for_log(&body_text, 400)),
+				],
+			);
+			return Some(Err(classify_status_error(status.as_u16(), body_text)));
+		}
+
+		let body_text = match http_response.text().await {
+			Ok(t) => t,
+			Err(e) => {
+				return Some(Err(ProviderCallError::Fatal {
+					message: format!("compact response body read error: {e}"),
+				}));
+			}
+		};
+
+		let parsed: Value = match serde_json::from_str(&body_text) {
+			Ok(v) => v,
+			Err(e) => {
+				return Some(Err(ProviderCallError::Fatal {
+					message: format!("compact response JSON parse error: {e}"),
+				}));
+			}
+		};
+
+		let raw_output = match parsed.get("output").and_then(|v| v.as_array()) {
+			Some(arr) => arr.clone(),
+			None => {
+				return Some(Err(ProviderCallError::Fatal {
+					message: "compact response missing 'output' field".to_string(),
+				}));
+			}
+		};
+
+		// Convert Responses API output items back to internal Message format.
+		let output = responses_output_to_messages(&raw_output);
+
+		let usage = parsed
+			.get("usage")
+			.map(|u| CompactUsageSummary {
+				prompt_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+				output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+				cached_input_tokens: u
+					.get("input_tokens_details")
+					.and_then(|d| d.get("cached_tokens"))
+					.and_then(|v| v.as_u64())
+					.unwrap_or(0),
+			})
+			.unwrap_or_default();
+
+		Some(Ok(CompactResponse { output, usage }))
+	}
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Convert internal [`Message`] slice to Responses API `input[]` wire format.
+///
+/// This mirrors the conversion in `build_responses_request` but operates on
+/// a raw slice of messages rather than a full `GenerationRequest`.
+fn messages_to_responses_input(messages: &[Message]) -> Vec<Value> {
+	let mut input: Vec<Value> = Vec::new();
+	for msg in messages {
+		match msg {
+			Message::User { content } => {
+				input.push(json!({
+					"type": "message",
+					"role": "user",
+					"content": [{"type": "input_text", "text": content}],
+				}));
+			}
+			Message::Assistant { text, tool_calls } => {
+				if !text.is_empty() {
+					input.push(json!({
+						"type": "message",
+						"role": "assistant",
+						"content": [{"type": "output_text", "text": text}],
+					}));
+				}
+				for tc in tool_calls {
+					input.push(json!({
+						"type": "function_call",
+						"name": tc.name,
+						"arguments": tc.arguments.to_string(),
+						"call_id": tc.id,
+					}));
+				}
+			}
+			Message::ToolResult {
+				tool_use_id,
+				content,
+				..
+			} => {
+				input.push(json!({
+					"type": "function_call_output",
+					"call_id": tool_use_id,
+					"output": content,
+				}));
+			}
+		}
+	}
+	input
+}
+
+/// Convert Responses API `output[]` wire items back to internal [`Message`] format.
+///
+/// Items not recognised as a known type are silently skipped. Tool calls that
+/// share a `call_id` are grouped into a single `Message::Assistant` entry.
+fn responses_output_to_messages(items: &[Value]) -> Vec<Message> {
+	let mut messages: Vec<Message> = Vec::new();
+
+	for item in items {
+		let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
+		match item_type {
+			"message" => {
+				let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
+				let mut text = String::new();
+				if let Some(content) = item.get("content").and_then(Value::as_array) {
+					for part in content {
+						let part_type = part.get("type").and_then(Value::as_str).unwrap_or("");
+						if matches!(part_type, "output_text" | "input_text" | "text")
+							&& let Some(t) = part.get("text").and_then(Value::as_str)
+						{
+							text.push_str(t);
+						}
+					}
+				}
+				if role == "assistant" {
+					messages.push(Message::Assistant {
+						text,
+						tool_calls: vec![],
+					});
+				} else {
+					messages.push(Message::User { content: text });
+				}
+			}
+			"function_call" => {
+				let call_id = item
+					.get("call_id")
+					.and_then(Value::as_str)
+					.unwrap_or("")
+					.to_string();
+				let name = item
+					.get("name")
+					.and_then(Value::as_str)
+					.unwrap_or("")
+					.to_string();
+				let arguments_str = item
+					.get("arguments")
+					.and_then(Value::as_str)
+					.unwrap_or("{}");
+				let arguments = serde_json::from_str::<Value>(arguments_str).unwrap_or(Value::Null);
+				// Append to the last assistant message if there is one, otherwise
+				// create a new empty assistant message to hold this tool call.
+				let tc = crate::types::ToolCallBlock {
+					id: call_id,
+					name,
+					arguments,
+				};
+				match messages.last_mut() {
+					Some(Message::Assistant { tool_calls, .. }) => {
+						tool_calls.push(tc);
+					}
+					_ => {
+						messages.push(Message::Assistant {
+							text: String::new(),
+							tool_calls: vec![tc],
+						});
+					}
+				}
+			}
+			"function_call_output" => {
+				let call_id = item
+					.get("call_id")
+					.and_then(Value::as_str)
+					.unwrap_or("")
+					.to_string();
+				let content = item
+					.get("output")
+					.and_then(Value::as_str)
+					.unwrap_or("")
+					.to_string();
+				messages.push(Message::ToolResult {
+					tool_use_id: call_id,
+					content,
+					is_error: false,
+				});
+			}
+			_ => {
+				// Unknown item type — skip.
+			}
+		}
+	}
+
+	messages
+}
 
 fn classify_request_error(error: reqwest::Error) -> ProviderCallError {
 	if error.is_timeout() {
@@ -1648,6 +1961,146 @@ mod tests {
 		}
 	}
 
+	// ---------------------------------------------------------------------------
+	// compact_url helper
+	// ---------------------------------------------------------------------------
+
+	#[test]
+	fn compact_url_appends_compact_segment() {
+		assert_eq!(
+			compact_url("https://chatgpt.com/backend-api/codex/responses"),
+			"https://chatgpt.com/backend-api/codex/responses/compact"
+		);
+	}
+
+	#[test]
+	fn compact_url_strips_trailing_slash_before_appending() {
+		assert_eq!(
+			compact_url("https://chatgpt.com/backend-api/codex/responses/"),
+			"https://chatgpt.com/backend-api/codex/responses/compact"
+		);
+	}
+
+	// ---------------------------------------------------------------------------
+	// Trait default capability predicates
+	// ---------------------------------------------------------------------------
+
+	#[test]
+	fn openai_responses_provider_supports_compact_history() {
+		let config = OpenAiResponsesConfig {
+			api_key: "test-key".to_string(),
+			base_url: "https://example.invalid/v1/responses".to_string(),
+			reasoning_effort: None,
+			websocket_mode: false,
+			chatgpt_account_id: None,
+			chatgpt_account_is_fedramp: false,
+			originator: "codex_cli_rs".to_string(),
+			installation_id: "install-test-uuid".to_string(),
+			session_id: "session-test-uuid".to_string(),
+		};
+		let provider =
+			OpenAiResponsesProvider::new(config).expect("provider construction succeeds");
+		assert!(
+			provider.supports_compact_history(),
+			"OpenAiResponsesProvider must report compact_history support"
+		);
+	}
+
+	#[test]
+	fn openai_responses_provider_does_not_support_output_slot_cap() {
+		let config = OpenAiResponsesConfig {
+			api_key: "test-key".to_string(),
+			base_url: "https://example.invalid/v1/responses".to_string(),
+			reasoning_effort: None,
+			websocket_mode: false,
+			chatgpt_account_id: None,
+			chatgpt_account_is_fedramp: false,
+			originator: "codex_cli_rs".to_string(),
+			installation_id: "install-test-uuid".to_string(),
+			session_id: "session-test-uuid".to_string(),
+		};
+		let provider =
+			OpenAiResponsesProvider::new(config).expect("provider construction succeeds");
+		assert!(
+			!provider.supports_output_slot_cap(),
+			"OpenAiResponsesProvider must NOT support output-slot escalation"
+		);
+	}
+
+	// ---------------------------------------------------------------------------
+	// messages_to_responses_input and responses_output_to_messages round-trips
+	// ---------------------------------------------------------------------------
+
+	#[test]
+	fn messages_to_input_converts_user_message() {
+		let messages = vec![Message::User {
+			content: "hello".to_string(),
+		}];
+		let input = messages_to_responses_input(&messages);
+		assert_eq!(input.len(), 1);
+		assert_eq!(input[0]["type"], "message");
+		assert_eq!(input[0]["role"], "user");
+		assert_eq!(input[0]["content"][0]["text"], "hello");
+	}
+
+	#[test]
+	fn messages_to_input_converts_assistant_with_text() {
+		let messages = vec![Message::Assistant {
+			text: "I can help".to_string(),
+			tool_calls: vec![],
+		}];
+		let input = messages_to_responses_input(&messages);
+		assert_eq!(input.len(), 1);
+		assert_eq!(input[0]["type"], "message");
+		assert_eq!(input[0]["role"], "assistant");
+		assert_eq!(input[0]["content"][0]["type"], "output_text");
+	}
+
+	#[test]
+	fn messages_to_input_converts_tool_result() {
+		let messages = vec![Message::ToolResult {
+			tool_use_id: "call_abc".to_string(),
+			content: "result".to_string(),
+			is_error: false,
+		}];
+		let input = messages_to_responses_input(&messages);
+		assert_eq!(input.len(), 1);
+		assert_eq!(input[0]["type"], "function_call_output");
+		assert_eq!(input[0]["call_id"], "call_abc");
+	}
+
+	#[test]
+	fn responses_output_to_messages_converts_assistant_message() {
+		let items = vec![json!({
+			"type": "message",
+			"role": "assistant",
+			"content": [{"type": "output_text", "text": "summary here"}]
+		})];
+		let messages = responses_output_to_messages(&items);
+		assert_eq!(messages.len(), 1);
+		assert!(matches!(&messages[0], Message::Assistant { text, .. } if text == "summary here"));
+	}
+
+	#[test]
+	fn responses_output_to_messages_converts_function_call() {
+		let items = vec![json!({
+			"type": "function_call",
+			"call_id": "call_xyz",
+			"name": "read_file",
+			"arguments": "{\"path\": \"/foo\"}"
+		})];
+		let messages = responses_output_to_messages(&items);
+		assert_eq!(messages.len(), 1);
+		match &messages[0] {
+			Message::Assistant { tool_calls, .. } => {
+				assert_eq!(tool_calls.len(), 1);
+				assert_eq!(tool_calls[0].id, "call_xyz");
+				assert_eq!(tool_calls[0].name, "read_file");
+			}
+			other => panic!("expected Assistant, got {other:?}"),
+		}
+	}
+
 	#[test]
 	fn build_headers_api_key_mode_emits_base_headers() {
 		let config = make_test_config_api_key();
@@ -1788,5 +2241,306 @@ mod tests {
 		// An invalid domain that will never resolve.
 		let result = probe_responses_reachability("http://this-host-does-not-exist.invalid/test");
 		assert!(result.is_err(), "DNS-failure probe must return Err");
+	}
+
+	#[test]
+	fn responses_output_to_messages_skips_unknown_items() {
+		let items = vec![
+			json!({ "type": "thinking", "content": "..." }),
+			json!({ "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}] }),
+		];
+		let messages = responses_output_to_messages(&items);
+		// thinking item is skipped
+		assert_eq!(messages.len(), 1);
+	}
+
+	// ---------------------------------------------------------------------------
+	// compact_history HTTP integration tests (mock TCP server)
+	// ---------------------------------------------------------------------------
+
+	/// Bind a local TCP listener and return its address.
+	/// The returned JoinHandle serves one HTTP exchange then exits.
+	async fn spawn_mock_compact_server(
+		status: u16,
+		body: &'static str,
+	) -> (String, tokio::task::JoinHandle<()>) {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+			.await
+			.expect("mock server: bind must succeed");
+		let addr = listener.local_addr().expect("must have address");
+		let handle = tokio::spawn(async move {
+			if let Ok((mut stream, _)) = listener.accept().await {
+				use tokio::io::{AsyncReadExt, AsyncWriteExt};
+				let mut buf = vec![0u8; 4096];
+				// Read the request (we don't validate it in most tests).
+				let _ = stream.read(&mut buf).await;
+				let response = format!(
+					"HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+					body.len(),
+					body
+				);
+				let _ = stream.write_all(response.as_bytes()).await;
+			}
+		});
+		(format!("http://{addr}/responses"), handle)
+	}
+
+	fn compact_provider_for(base_url: String) -> OpenAiResponsesProvider {
+		let config = OpenAiResponsesConfig {
+			api_key: "test-key".to_string(),
+			base_url,
+			reasoning_effort: None,
+			websocket_mode: false,
+			chatgpt_account_id: None,
+			chatgpt_account_is_fedramp: false,
+			originator: "codex_cli_rs".to_string(),
+			installation_id: "install-test-uuid".to_string(),
+			session_id: "session-test-uuid".to_string(),
+		};
+		OpenAiResponsesProvider::new(config).expect("provider construction succeeds")
+	}
+
+	fn minimal_compact_request(base_url: &str) -> CompactRequest {
+		let _ = base_url;
+		CompactRequest {
+			model: "gpt-4.1".to_string(),
+			instructions: "summarize".to_string(),
+			input: vec![Message::User {
+				content: "hello".to_string(),
+			}],
+			tools: vec![],
+			parallel_tool_calls: false,
+			reasoning: None,
+		}
+	}
+
+	#[tokio::test]
+	async fn compact_history_success_returns_parsed_response() {
+		let success_body = r#"{
+			"output": [
+				{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "compact summary"}]}
+			],
+			"usage": {"input_tokens": 100, "output_tokens": 50, "input_tokens_details": {"cached_tokens": 20}}
+		}"#;
+		let (base_url, _srv) = spawn_mock_compact_server(200, success_body).await;
+		let provider = compact_provider_for(base_url.clone());
+		let req = minimal_compact_request(&base_url);
+
+		let result = provider.compact_history(&req).await;
+		assert!(
+			result.is_some(),
+			"must return Some for a supporting provider"
+		);
+		let response = result.unwrap().expect("must be Ok on 200");
+
+		assert_eq!(response.output.len(), 1, "one output message expected");
+		assert!(
+			matches!(&response.output[0], Message::Assistant { text, .. } if text == "compact summary")
+		);
+		assert_eq!(response.usage.prompt_tokens, 100);
+		assert_eq!(response.usage.output_tokens, 50);
+		assert_eq!(response.usage.cached_input_tokens, 20);
+	}
+
+	#[tokio::test]
+	async fn compact_history_404_returns_err_without_panic() {
+		let (base_url, _srv) = spawn_mock_compact_server(404, r#"{"error":"not found"}"#).await;
+		let provider = compact_provider_for(base_url.clone());
+		let req = minimal_compact_request(&base_url);
+
+		let result = provider.compact_history(&req).await;
+		assert!(result.is_some());
+		let err = result.unwrap().expect_err("404 must be an error");
+		assert!(
+			matches!(err, ProviderCallError::Fatal { .. }),
+			"404 should map to Fatal: {err}"
+		);
+	}
+
+	#[tokio::test]
+	async fn compact_history_500_returns_err() {
+		let (base_url, _srv) = spawn_mock_compact_server(500, r#"{"error":"server error"}"#).await;
+		let provider = compact_provider_for(base_url.clone());
+		let req = minimal_compact_request(&base_url);
+
+		let result = provider.compact_history(&req).await;
+		assert!(result.is_some());
+		let err = result.unwrap().expect_err("500 must be an error");
+		assert!(
+			matches!(err, ProviderCallError::ServerError { status: 500, .. }),
+			"500 should map to ServerError: {err}"
+		);
+	}
+
+	#[tokio::test]
+	async fn compact_history_malformed_body_missing_output_returns_err() {
+		let (base_url, _srv) = spawn_mock_compact_server(200, r#"{"usage":{}}"#).await;
+		let provider = compact_provider_for(base_url.clone());
+		let req = minimal_compact_request(&base_url);
+
+		let result = provider.compact_history(&req).await;
+		assert!(result.is_some());
+		let err = result
+			.unwrap()
+			.expect_err("missing output field must be an error");
+		match err {
+			ProviderCallError::Fatal { message } => {
+				assert!(
+					message.contains("output"),
+					"error message should mention output field, got: {message}"
+				);
+			}
+			other => panic!("expected Fatal, got {other:?}"),
+		}
+	}
+
+	#[tokio::test]
+	async fn compact_history_timeout_returns_err() {
+		// Bind a listener that never responds within the test timeout.
+		// We use a very short timeout to keep CI fast, configured via the
+		// COMPACT_REQUEST_TIMEOUT constant (90s). To avoid a 90s wait in CI,
+		// we connect to an address that drops the connection immediately.
+		// The provider's timeout is 90s; this test just verifies the error
+		// path when the server hangs by connecting to a port that accepts
+		// but never writes a response.
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+			.await
+			.expect("bind");
+		let addr = listener.local_addr().expect("addr");
+		// Accept but never respond.
+		tokio::spawn(async move {
+			if let Ok((_stream, _)) = listener.accept().await {
+				// Hold the connection open briefly then drop it.
+				tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+				// Stream dropped here — server closes the connection.
+			}
+		});
+
+		// Use a very short client timeout for the test by constructing a custom client.
+		let client = reqwest::Client::builder()
+			.connect_timeout(std::time::Duration::from_millis(200))
+			.build()
+			.expect("client");
+		let config = OpenAiResponsesConfig {
+			api_key: "test-key".to_string(),
+			base_url: format!("http://{addr}/responses"),
+			reasoning_effort: None,
+			websocket_mode: false,
+			chatgpt_account_id: None,
+			chatgpt_account_is_fedramp: false,
+			originator: "codex_cli_rs".to_string(),
+			installation_id: "install-test-uuid".to_string(),
+			session_id: "session-test-uuid".to_string(),
+		};
+		let provider = OpenAiResponsesProvider {
+			client,
+			config,
+			prompt_cache_key: "test".to_string(),
+			ws_session: std::sync::Arc::new(tokio::sync::Mutex::new(
+				crate::providers::openai_ws::OpenAiWsSession::new(false),
+			)),
+			compact_timeout: COMPACT_REQUEST_TIMEOUT,
+		};
+		let req = CompactRequest {
+			model: "gpt-4.1".to_string(),
+			instructions: "summarize".to_string(),
+			input: vec![],
+			tools: vec![],
+			parallel_tool_calls: false,
+			reasoning: None,
+		};
+
+		let result = provider.compact_history(&req).await;
+		assert!(result.is_some(), "must return Some");
+		let err = result
+			.unwrap()
+			.expect_err("connection close must be an error");
+		// Either ConnectionFailed or Fatal is acceptable here.
+		assert!(
+			matches!(
+				err,
+				ProviderCallError::ConnectionFailed { .. }
+					| ProviderCallError::Fatal { .. }
+					| ProviderCallError::Timeout { .. }
+			),
+			"expected a failure variant, got: {err:?}"
+		);
+	}
+
+	#[tokio::test]
+	async fn compact_history_timeout_returns_timeout_variant() {
+		// This test verifies that the COMPACT_REQUEST_TIMEOUT constant is
+		// actually wired into the compact_history() path. A mock server that
+		// accepts the TCP connection but never writes a response is used.
+		// The provider is constructed with a very short timeout via the
+		// test-only with_compact_timeout() constructor so the test completes
+		// quickly rather than waiting for the full 90s production constant.
+		//
+		// The production constant (90s) is left unchanged — this test only
+		// exercises the code path, not the specific duration.
+		assert_eq!(
+			COMPACT_REQUEST_TIMEOUT,
+			std::time::Duration::from_secs(90),
+			"production COMPACT_REQUEST_TIMEOUT must remain 90s"
+		);
+
+		// Bind a server that accepts the connection but never writes a response.
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+			.await
+			.expect("bind");
+		let addr = listener.local_addr().expect("addr");
+		tokio::spawn(async move {
+			// Accept connection and hold it open without responding.
+			if let Ok((_stream, _)) = listener.accept().await {
+				// Stream held open until this task completes; the client
+				// timeout must fire before this is dropped.
+				tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+			}
+		});
+
+		let client = reqwest::Client::builder().build().expect("client");
+		let config = OpenAiResponsesConfig {
+			api_key: "test-key".to_string(),
+			base_url: format!("http://{addr}/responses"),
+			reasoning_effort: None,
+			websocket_mode: false,
+			chatgpt_account_id: None,
+			chatgpt_account_is_fedramp: false,
+			originator: "codex_cli_rs".to_string(),
+			installation_id: "install-test-uuid".to_string(),
+			session_id: "session-test-uuid".to_string(),
+		};
+		// Inject a 300ms timeout so the test completes quickly.
+		let provider = OpenAiResponsesProvider::with_compact_timeout(
+			client,
+			config,
+			std::time::Duration::from_millis(300),
+		);
+
+		let req = CompactRequest {
+			model: "gpt-4.1".to_string(),
+			instructions: "summarize".to_string(),
+			input: vec![],
+			tools: vec![],
+			parallel_tool_calls: false,
+			reasoning: None,
+		};
+
+		let started = std::time::Instant::now();
+		let result = provider.compact_history(&req).await;
+		let elapsed = started.elapsed();
+
+		// Must complete well under 1s (we used a 300ms timeout).
+		assert!(
+			elapsed < std::time::Duration::from_secs(1),
+			"compact_history must respect the timeout: elapsed={elapsed:?}"
+		);
+
+		assert!(result.is_some(), "must return Some");
+		let err = result.unwrap().expect_err("hung server must be an error");
+		assert!(
+			matches!(err, ProviderCallError::Timeout { .. }),
+			"expected Timeout variant when server never responds, got: {err:?}"
+		);
 	}
 }
