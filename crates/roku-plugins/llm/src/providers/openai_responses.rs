@@ -30,8 +30,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
@@ -223,6 +222,13 @@ pub struct OpenAiResponsesProvider {
 
 impl OpenAiResponsesProvider {
 	pub fn new(config: OpenAiResponsesConfig) -> Result<Self, ProviderCallError> {
+		if config.session_id.is_empty() {
+			return Err(ProviderCallError::Fatal {
+				message:
+					"OpenAiResponsesConfig.session_id must not be empty; caller must generate one"
+						.to_string(),
+			});
+		}
 		let client = Client::builder()
 			.connect_timeout(std::time::Duration::from_secs(30))
 			.build()
@@ -391,32 +397,11 @@ impl OpenAiResponsesProvider {
 // Prompt cache key derivation
 // ---------------------------------------------------------------------------
 
-/// Monotonic per-process counter that disambiguates two provider instances
-/// constructed within the same nanosecond tick (e.g. reconnect after init
-/// failure). Used only when no explicit session_id is provided.
-static PROMPT_CACHE_KEY_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Derive a session-stable opaque key for `prompt_cache_key`.
-///
-/// When `session_id` is non-empty, the key is the raw `session_id` so that
-/// the `prompt_cache_key` body field and the `session_id` identity header
-/// carry the byte-identical value, letting the backend index on a single
-/// dimension.
-///
-/// When `session_id` is empty (legacy / test path), falls back to a
-/// `pid+nanos+counter` derivation that is still stable per provider instance
-/// and collision-free across restarts.
+/// Returns `session_id` as the `prompt_cache_key` so the body field and the
+/// `session_id` header carry byte-identical values, letting the backend index
+/// on a single dimension.
 fn derive_session_prompt_cache_key(session_id: &str) -> String {
-	if !session_id.is_empty() {
-		return session_id.to_string();
-	}
-	let pid = std::process::id();
-	let nanos = SystemTime::now()
-		.duration_since(UNIX_EPOCH)
-		.map(|d| d.as_nanos())
-		.unwrap_or(0);
-	let counter = PROMPT_CACHE_KEY_COUNTER.fetch_add(1, Ordering::Relaxed);
-	format!("roku-{pid:x}-{nanos:x}-{counter:x}")
+	session_id.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1807,15 +1792,6 @@ mod tests {
 		};
 		let body = build_responses_request("gpt-4.1", &request, false, None, "session-abc", None);
 		assert_eq!(body["prompt_cache_key"], "session-abc");
-	}
-
-	#[test]
-	fn derived_prompt_cache_key_differs_across_back_to_back_constructions() {
-		// When no session_id is given, back-to-back derivations must produce
-		// different keys (pid+nanos+counter fallback path).
-		let k1 = derive_session_prompt_cache_key("");
-		let k2 = derive_session_prompt_cache_key("");
-		assert_ne!(k1, k2, "back-to-back derivations must differ");
 	}
 
 	#[test]
