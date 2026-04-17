@@ -1772,6 +1772,7 @@ mod tests {
 	// --- probe tests ---
 
 	#[test]
+	#[ignore = "network call; run with --ignored locally"]
 	fn probe_connect_refused_returns_err_with_description() {
 		// Port 1 is always refused on all OSes in test environments.
 		let result = probe_responses_reachability("http://127.0.0.1:1");
@@ -1782,6 +1783,7 @@ mod tests {
 	}
 
 	#[test]
+	#[ignore = "network call; run with --ignored locally"]
 	fn probe_unreachable_host_returns_err() {
 		// An invalid domain that will never resolve.
 		let result = probe_responses_reachability("http://this-host-does-not-exist.invalid/test");
