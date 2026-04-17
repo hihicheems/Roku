@@ -163,6 +163,10 @@ pub struct OpenAiResponsesProvider {
 	/// Per-session delta state. Tracks `previous_response_id` across turns
 	/// when `config.websocket_mode` is enabled.
 	ws_session: SharedWsSession,
+	/// Timeout applied to the compact endpoint request. Defaults to
+	/// [`COMPACT_REQUEST_TIMEOUT`] (90s). Overridable in tests via
+	/// [`OpenAiResponsesProvider::with_compact_timeout`].
+	compact_timeout: std::time::Duration,
 }
 
 impl OpenAiResponsesProvider {
@@ -182,7 +186,32 @@ impl OpenAiResponsesProvider {
 			config,
 			prompt_cache_key,
 			ws_session,
+			compact_timeout: COMPACT_REQUEST_TIMEOUT,
 		})
+	}
+
+	/// Construct a provider with a custom compact-endpoint timeout.
+	///
+	/// Intended for unit tests only: allows tests to inject a very short
+	/// timeout so the compact timeout path fires quickly without waiting
+	/// for the production 90s constant.
+	#[cfg(test)]
+	pub(crate) fn with_compact_timeout(
+		client: Client,
+		config: OpenAiResponsesConfig,
+		compact_timeout: std::time::Duration,
+	) -> Self {
+		let prompt_cache_key = derive_session_prompt_cache_key();
+		let ws_session = std::sync::Arc::new(tokio::sync::Mutex::new(OpenAiWsSession::new(
+			config.websocket_mode,
+		)));
+		Self {
+			client,
+			config,
+			prompt_cache_key,
+			ws_session,
+			compact_timeout,
+		}
 	}
 
 	fn build_headers(&self) -> Result<HeaderMap, ProviderCallError> {
@@ -712,7 +741,8 @@ fn compact_url(base_url: &str) -> String {
 /// Timeout for compact endpoint calls. Shorter than the normal 300s adapter
 /// default so that a hung compact call falls back to mechanical summarization
 /// quickly.
-const COMPACT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+pub(crate) const COMPACT_REQUEST_TIMEOUT: std::time::Duration =
+	std::time::Duration::from_secs(90);
 
 // ---------------------------------------------------------------------------
 // LlmProvider implementation
@@ -969,11 +999,11 @@ impl LlmProvider for OpenAiResponsesProvider {
 		}
 
 		let http_result = tokio::time::timeout(
-			COMPACT_REQUEST_TIMEOUT,
+			self.compact_timeout,
 			self.client
 				.post(&url)
 				.headers(headers)
-				.timeout(COMPACT_REQUEST_TIMEOUT)
+				.timeout(self.compact_timeout)
 				.json(&body)
 				.send(),
 		)
@@ -2047,6 +2077,7 @@ mod tests {
 			ws_session: std::sync::Arc::new(tokio::sync::Mutex::new(
 				crate::providers::openai_ws::OpenAiWsSession::new(false),
 			)),
+			compact_timeout: COMPACT_REQUEST_TIMEOUT,
 		};
 		let req = CompactRequest {
 			model: "gpt-4.1".to_string(),
@@ -2071,6 +2102,82 @@ mod tests {
 					| ProviderCallError::Timeout { .. }
 			),
 			"expected a failure variant, got: {err:?}"
+		);
+	}
+
+	#[tokio::test]
+	async fn compact_history_timeout_returns_timeout_variant() {
+		// This test verifies that the COMPACT_REQUEST_TIMEOUT constant is
+		// actually wired into the compact_history() path. A mock server that
+		// accepts the TCP connection but never writes a response is used.
+		// The provider is constructed with a very short timeout via the
+		// test-only with_compact_timeout() constructor so the test completes
+		// quickly rather than waiting for the full 90s production constant.
+		//
+		// The production constant (90s) is left unchanged — this test only
+		// exercises the code path, not the specific duration.
+		assert_eq!(
+			COMPACT_REQUEST_TIMEOUT,
+			std::time::Duration::from_secs(90),
+			"production COMPACT_REQUEST_TIMEOUT must remain 90s"
+		);
+
+		// Bind a server that accepts the connection but never writes a response.
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+			.await
+			.expect("bind");
+		let addr = listener.local_addr().expect("addr");
+		tokio::spawn(async move {
+			// Accept connection and hold it open without responding.
+			if let Ok((_stream, _)) = listener.accept().await {
+				// Stream held open until this task completes; the client
+				// timeout must fire before this is dropped.
+				tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+			}
+		});
+
+		let client = reqwest::Client::builder()
+			.build()
+			.expect("client");
+		let config = OpenAiResponsesConfig {
+			api_key: "test-key".to_string(),
+			base_url: format!("http://{addr}/responses"),
+			reasoning_effort: None,
+			websocket_mode: false,
+		};
+		// Inject a 300ms timeout so the test completes quickly.
+		let provider = OpenAiResponsesProvider::with_compact_timeout(
+			client,
+			config,
+			std::time::Duration::from_millis(300),
+		);
+
+		let req = CompactRequest {
+			model: "gpt-4.1".to_string(),
+			instructions: "summarize".to_string(),
+			input: vec![],
+			tools: vec![],
+			parallel_tool_calls: false,
+			reasoning: None,
+		};
+
+		let started = std::time::Instant::now();
+		let result = provider.compact_history(&req).await;
+		let elapsed = started.elapsed();
+
+		// Must complete well under 1s (we used a 300ms timeout).
+		assert!(
+			elapsed < std::time::Duration::from_secs(1),
+			"compact_history must respect the timeout: elapsed={elapsed:?}"
+		);
+
+		assert!(result.is_some(), "must return Some");
+		let err = result
+			.unwrap()
+			.expect_err("hung server must be an error");
+		assert!(
+			matches!(err, ProviderCallError::Timeout { .. }),
+			"expected Timeout variant when server never responds, got: {err:?}"
 		);
 	}
 }
