@@ -3167,19 +3167,23 @@ mod tests {
 	// Remote compact failure tests (Finding F1)
 	// ------------------------------------------------------------------
 
-	use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 	use std::sync::Arc;
+	use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 	/// A mock provider that supports compact_history and returns a fixed
 	/// result for it, while also counting `complete()` invocations so tests
 	/// can assert that router.generate() was NOT called.
 	struct MockCompactProvider {
-		compact_result: Option<Result<roku_plugin_llm::CompactResponse, roku_plugin_llm::ProviderCallError>>,
+		compact_result:
+			Option<Result<roku_plugin_llm::CompactResponse, roku_plugin_llm::ProviderCallError>>,
 		complete_calls: Arc<AtomicU64>,
 	}
 
 	impl MockCompactProvider {
-		fn returning_error(err: roku_plugin_llm::ProviderCallError, counter: Arc<AtomicU64>) -> Self {
+		fn returning_error(
+			err: roku_plugin_llm::ProviderCallError,
+			counter: Arc<AtomicU64>,
+		) -> Self {
 			Self {
 				compact_result: Some(Err(err)),
 				complete_calls: counter,
@@ -3235,7 +3239,8 @@ mod tests {
 		async fn compact_history(
 			&self,
 			_request: &roku_plugin_llm::CompactRequest,
-		) -> Option<Result<roku_plugin_llm::CompactResponse, roku_plugin_llm::ProviderCallError>> {
+		) -> Option<Result<roku_plugin_llm::CompactResponse, roku_plugin_llm::ProviderCallError>>
+		{
 			self.compact_result.clone()
 		}
 
@@ -3244,9 +3249,7 @@ mod tests {
 		}
 	}
 
-	fn make_compact_router(
-		provider: MockCompactProvider,
-	) -> roku_plugin_llm::LlmRouter {
+	fn make_compact_router(provider: MockCompactProvider) -> roku_plugin_llm::LlmRouter {
 		use roku_plugin_llm::{ModelProfile, RiskTier, RoutingPolicy};
 		let mut router = roku_plugin_llm::LlmRouter::new(RoutingPolicy::default());
 		router.register_provider(provider);
@@ -3290,7 +3293,10 @@ mod tests {
 		std::mem::forget(router);
 
 		// Must report failure.
-		assert!(!outcome.succeeded, "remote compact error must yield succeeded=false");
+		assert!(
+			!outcome.succeeded,
+			"remote compact error must yield succeeded=false"
+		);
 		assert_eq!(
 			outcome.prompt_tokens, 0,
 			"no prompt_tokens should be charged on remote compact error"
@@ -3364,10 +3370,8 @@ mod tests {
 		let summary_msg = Message::User {
 			content: "[Conversation summary]\nGoal: test\nAccomplished:\n- done\nKey Decisions:\n- none\nRelevant Files:\n- src/lib.rs\n".to_string(),
 		};
-		let provider = MockCompactProvider::returning_success(
-			vec![summary_msg.clone()],
-			counter.clone(),
-		);
+		let provider =
+			MockCompactProvider::returning_success(vec![summary_msg.clone()], counter.clone());
 		let router = make_compact_router(provider);
 
 		let mut messages = build_messages(5);
@@ -3382,7 +3386,10 @@ mod tests {
 
 		std::mem::forget(router);
 
-		assert!(outcome.succeeded, "remote compact success must yield succeeded=true");
+		assert!(
+			outcome.succeeded,
+			"remote compact success must yield succeeded=true"
+		);
 		assert_eq!(outcome.error, None);
 		assert_eq!(outcome.prompt_tokens, 100);
 		assert_eq!(outcome.output_tokens, 20);

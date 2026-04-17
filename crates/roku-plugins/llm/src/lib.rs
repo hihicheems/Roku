@@ -32,7 +32,7 @@ pub use providers::openai::{
 };
 pub use providers::openai_responses::{
 	OpenAiResponsesBootstrapError, OpenAiResponsesConfig, OpenAiResponsesProvider,
-	build_openai_responses_router_with_metrics,
+	build_openai_responses_router_with_metrics, probe_responses_reachability,
 };
 pub use providers::openrouter::{
 	OpenRouterBootstrapError, OpenRouterConfig, OpenRouterProvider, OpenRouterRuntimeConfig,
