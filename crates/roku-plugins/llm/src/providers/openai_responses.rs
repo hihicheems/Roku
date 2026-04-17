@@ -280,7 +280,9 @@ impl OpenAiResponsesProvider {
 		// originator
 		headers.insert(
 			HeaderName::from_static("originator"),
-			HeaderValue::from_static("codex_cli_rs"),
+			HeaderValue::from_str(&self.config.originator).map_err(|e| ProviderCallError::Fatal {
+				message: format!("invalid originator header: {e}"),
+			})?,
 		);
 
 		// session_id
@@ -1725,6 +1727,26 @@ mod tests {
 		let headers = provider.build_headers().expect("headers");
 		assert!(!headers.contains_key("chatgpt-account-id"));
 		assert!(!headers.contains_key("x-openai-fedramp"));
+	}
+
+	#[test]
+	fn build_headers_originator_reflects_config_value() {
+		// Provider must emit the configured originator, not a hardcoded literal.
+		let config = OpenAiResponsesConfig {
+			api_key: "test".to_string(),
+			base_url: "https://example.invalid".to_string(),
+			reasoning_effort: None,
+			websocket_mode: false,
+			chatgpt_account_id: None,
+			chatgpt_account_is_fedramp: false,
+			originator: "something-else".to_string(),
+			installation_id: "install-x".to_string(),
+			session_id: "session-x".to_string(),
+		};
+		let provider = OpenAiResponsesProvider::new(config).expect("construction");
+		let headers = provider.build_headers().expect("headers");
+		let originator_val = headers.get("originator").unwrap().to_str().unwrap();
+		assert_eq!(originator_val, "something-else");
 	}
 
 	#[test]
