@@ -364,16 +364,17 @@ static PROMPT_CACHE_KEY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Derive a session-stable opaque key for `prompt_cache_key`.
 ///
-/// When `session_id` is non-empty, the key is `"roku-{session_id}"` so that
+/// When `session_id` is non-empty, the key is the raw `session_id` so that
 /// the `prompt_cache_key` body field and the `session_id` identity header
-/// carry the same value, letting the backend index on a single dimension.
+/// carry the byte-identical value, letting the backend index on a single
+/// dimension.
 ///
 /// When `session_id` is empty (legacy / test path), falls back to a
 /// `pid+nanos+counter` derivation that is still stable per provider instance
 /// and collision-free across restarts.
 fn derive_session_prompt_cache_key(session_id: &str) -> String {
 	if !session_id.is_empty() {
-		return format!("roku-{session_id}");
+		return session_id.to_string();
 	}
 	let pid = std::process::id();
 	let nanos = SystemTime::now()
@@ -1503,25 +1504,24 @@ mod tests {
 	}
 
 	#[test]
-	fn derived_prompt_cache_key_equals_roku_plus_session_id() {
-		// When a session_id is provided, the cache key must be "roku-{session_id}".
+	fn derived_prompt_cache_key_equals_session_id() {
+		// When a session_id is provided, the cache key must equal the raw session_id
+		// so that the prompt_cache_key body field and the session_id header are
+		// byte-identical, letting the backend index on a single dimension.
 		let session_id = "test-session-abc-123";
 		let key = derive_session_prompt_cache_key(session_id);
-		assert_eq!(
-			key,
-			format!("roku-{session_id}"),
-			"cache key should be roku-{{session_id}}"
-		);
+		assert_eq!(key, session_id, "cache key must equal the raw session_id");
 	}
 
 	#[test]
 	fn derived_prompt_cache_key_is_non_empty_and_stable_per_instance() {
-		// Key derivation must return a non-empty, session-scoped identifier.
+		// Key derivation must return a non-empty, session-scoped identifier equal
+		// to the raw session_id when one is provided.
 		let key = derive_session_prompt_cache_key("stable-session");
 		assert!(!key.is_empty(), "derived key must be non-empty");
-		assert!(
-			key.starts_with("roku-"),
-			"derived key should carry the roku prefix, got: {key}"
+		assert_eq!(
+			key, "stable-session",
+			"derived key must equal the raw session_id, got: {key}"
 		);
 
 		// A provider instance holds one key for its lifetime — two requests
