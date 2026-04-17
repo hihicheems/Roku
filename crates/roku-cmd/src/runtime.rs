@@ -49,7 +49,7 @@ use roku_plugin_llm::{
 	OpenAiBootstrapError, OpenAiResponsesConfig, OpenAiRuntimeConfig, OpenRouterBootstrapError,
 	OpenRouterRuntimeConfig, anthropic_api_key_from_env, build_anthropic_router_with_metrics,
 	build_openai_responses_router_with_metrics, build_openai_router_with_metrics,
-	build_openrouter_router_with_metrics, openai_api_key_from_env,
+	build_openrouter_router_with_metrics, openai_api_key_from_env, probe_responses_reachability,
 };
 use roku_plugin_mcp::{McpConfig, McpConnection, McpTool, mcp_tools_to_catalog_descriptors};
 use roku_plugin_skills::{SkillRegistry, SkillsRuntimeConfig};
@@ -941,6 +941,7 @@ fn build_live_runtime(
 		&bootstrap.runtime_configs.anthropic,
 		&bootstrap.runtime_configs.openai,
 		&metrics,
+		layout,
 	) {
 		Ok(routers) => routers,
 		Err(LiveLlmBootstrapFailure { fallback_reason }) => {
@@ -1008,6 +1009,7 @@ fn build_live_llm_routers(
 	anthropic: &AnthropicRuntimeConfig,
 	openai: &OpenAiRuntimeConfig,
 	metrics: &Arc<Metrics>,
+	layout: &LocalStorageLayout,
 ) -> Result<(LlmRouter, LlmRouter), LiveLlmBootstrapFailure> {
 	match kind {
 		LlmProviderKind::Openrouter => {
@@ -1062,13 +1064,49 @@ fn build_live_llm_routers(
 			// endpoint requires api.responses.write scope which the OAuth
 			// PKCE flow does not grant.
 			if !api_key.starts_with("sk-") {
+				// Extract OAuth identity claims for Codex identity headers.
+				let (chatgpt_account_id, chatgpt_account_is_fedramp) = {
+					let store = crate::auth::AuthStore::from_env();
+					let entry = store
+						.load()
+						.ok()
+						.flatten()
+						.and_then(|f| f.credential_for("openai").cloned());
+					match entry {
+						Some(crate::auth::CredentialEntry::OAuth {
+							id_token_claims, ..
+						}) => (
+							id_token_claims.account_id.clone(),
+							id_token_claims.account_is_fedramp,
+						),
+						_ => (None, false),
+					}
+				};
+
+				let installation_id = load_or_create_installation_id(&layout.state_dir);
+				let session_id = generate_uuid_v4();
+
+				let base_url = "https://chatgpt.com/backend-api/codex/responses".to_string();
+
+				// Probe reachability before committing to this provider.
+				if let Err(detail) = probe_responses_reachability(&base_url) {
+					eprintln!(
+						"\x1b[1;33m[warn] OpenAI Responses API not reachable: {detail}. Prompt cache metrics may be 0 and compaction may fail.\x1b[0m"
+					);
+				}
+
 				let responses_config = OpenAiResponsesConfig {
 					api_key,
-					base_url: "https://chatgpt.com/backend-api/codex/responses".to_string(),
+					base_url,
 					reasoning_effort: openai.reasoning_effort.clone(),
 					websocket_mode: std::env::var("ROKU_OPENAI_WEBSOCKET_MODE")
 						.map(|v| v.eq_ignore_ascii_case("true") || v == "1")
 						.unwrap_or(false),
+					chatgpt_account_id,
+					chatgpt_account_is_fedramp,
+					originator: "codex_cli_rs".to_string(),
+					installation_id,
+					session_id,
 				};
 				let route_router = build_openai_responses_router_with_metrics(
 					responses_config.clone(),
@@ -1194,6 +1232,117 @@ pub(crate) fn openrouter_api_key_from_env()
 		.ok_or(roku_plugin_llm::OpenRouterBootstrapError::MissingEnv(
 			"OPENROUTER_API_KEY",
 		))
+}
+
+/// Generate a random UUID v4 string (e.g. `"550e8400-e29b-41d4-a716-446655440000"`).
+fn generate_uuid_v4() -> String {
+	use rand::RngExt;
+	let mut rng = rand::rng();
+	let mut bytes = [0u8; 16];
+	rng.fill(&mut bytes);
+	// Set variant bits (RFC 4122 §4.4).
+	bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+	bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10xx
+	format!(
+		"{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+		bytes[0],
+		bytes[1],
+		bytes[2],
+		bytes[3],
+		bytes[4],
+		bytes[5],
+		bytes[6],
+		bytes[7],
+		bytes[8],
+		bytes[9],
+		bytes[10],
+		bytes[11],
+		bytes[12],
+		bytes[13],
+		bytes[14],
+		bytes[15],
+	)
+}
+
+/// Load the persistent installation ID from `~/.roku/state/installation-id`,
+/// creating it if absent. If the file exists but does not contain a valid UUID,
+/// overwrite it with a fresh UUID and emit a yellow warning to stderr.
+///
+/// Permissions are set to 0o600 (owner read/write only).
+fn load_or_create_installation_id(state_dir: &std::path::Path) -> String {
+	use std::fs;
+	use std::io::Write;
+
+	let path = state_dir.join("installation-id");
+
+	if let Ok(contents) = fs::read_to_string(&path) {
+		let trimmed = contents.trim().to_string();
+		if is_valid_uuid(&trimmed) {
+			return trimmed;
+		}
+		// Corrupt contents — overwrite with fresh UUID.
+		eprintln!(
+			"\x1b[1;33m[warn] ~/.roku/state/installation-id contains invalid UUID \"{trimmed}\"; overwriting with new ID.\x1b[0m"
+		);
+	}
+
+	// Create parent directory if needed.
+	if let Err(e) = fs::create_dir_all(state_dir) {
+		let _ = emit_global_log(LogRecord::new(
+			"roku-cmd",
+			LogLevel::Warn,
+			format!("failed to create state dir for installation-id: {e}"),
+		));
+	}
+
+	let new_id = generate_uuid_v4();
+	match fs::OpenOptions::new()
+		.write(true)
+		.create(true)
+		.truncate(true)
+		.open(&path)
+	{
+		Ok(mut file) => {
+			// Set 0o600 permissions on Unix.
+			#[cfg(unix)]
+			{
+				use std::os::unix::fs::PermissionsExt;
+				let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
+			}
+			let _ = file.write_all(new_id.as_bytes());
+		}
+		Err(e) => {
+			let _ = emit_global_log(LogRecord::new(
+				"roku-cmd",
+				LogLevel::Warn,
+				format!("failed to write installation-id: {e}"),
+			));
+		}
+	}
+
+	new_id
+}
+
+/// Returns true if `s` looks like a UUID v4 (`xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx`).
+fn is_valid_uuid(s: &str) -> bool {
+	// Validate length and hyphen positions only (not variant/version bits),
+	// keeping it simple — the main goal is to detect clearly corrupt values.
+	let bytes = s.as_bytes();
+	if bytes.len() != 36 {
+		return false;
+	}
+	if bytes[8] != b'-' || bytes[13] != b'-' || bytes[18] != b'-' || bytes[23] != b'-' {
+		return false;
+	}
+	for (i, &b) in bytes.iter().enumerate() {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			continue;
+		}
+		if !b.is_ascii_hexdigit() {
+			return false;
+		}
+	}
+	true
 }
 
 fn log_runtime_bootstrap_mode(runtime_mode: &RuntimeModeReport) {
@@ -1855,5 +2004,73 @@ Use this skill when the user explicitly asks for Claude API integration help.
 			writer.finish().expect("zip should finish");
 		}
 		cursor.into_inner()
+	}
+
+	// --- installation_id tests ---
+
+	#[test]
+	fn load_or_create_installation_id_generates_file_when_absent() {
+		let dir = tempfile::tempdir().expect("tempdir");
+		let id = load_or_create_installation_id(dir.path());
+		assert!(
+			is_valid_uuid(&id),
+			"generated id should be a valid UUID, got: {id}"
+		);
+		let on_disk = fs::read_to_string(dir.path().join("installation-id"))
+			.expect("file should have been created");
+		assert_eq!(on_disk.trim(), id);
+	}
+
+	#[test]
+	fn load_or_create_installation_id_reuses_existing_valid_uuid() {
+		let dir = tempfile::tempdir().expect("tempdir");
+		let path = dir.path().join("installation-id");
+		let expected = "550e8400-e29b-41d4-a716-446655440000";
+		fs::write(&path, expected).expect("write");
+		let id = load_or_create_installation_id(dir.path());
+		assert_eq!(id, expected);
+	}
+
+	#[test]
+	fn load_or_create_installation_id_overwrites_corrupt_value() {
+		let dir = tempfile::tempdir().expect("tempdir");
+		let path = dir.path().join("installation-id");
+		fs::write(&path, "garbage-not-a-uuid").expect("write");
+
+		// Capture stderr to verify the warning is emitted.
+		// We can't capture eprintln! without additional infra, so we just verify
+		// behaviour: the returned id is a valid UUID different from "garbage".
+		let id = load_or_create_installation_id(dir.path());
+		assert_ne!(id, "garbage-not-a-uuid");
+		assert!(
+			is_valid_uuid(&id),
+			"overwritten id should be a valid UUID, got: {id}"
+		);
+		let on_disk = fs::read_to_string(&path).expect("file should exist after overwrite");
+		assert_eq!(on_disk.trim(), id);
+	}
+
+	#[test]
+	fn generate_uuid_v4_produces_valid_uuid() {
+		let uuid = generate_uuid_v4();
+		assert!(
+			is_valid_uuid(&uuid),
+			"generated UUID should be valid, got: {uuid}"
+		);
+		// Verify version nibble is '4'.
+		let version_nibble = uuid.as_bytes()[14];
+		assert_eq!(version_nibble, b'4', "version nibble should be 4");
+	}
+
+	#[test]
+	fn is_valid_uuid_rejects_short_strings() {
+		assert!(!is_valid_uuid("not-a-uuid"));
+		assert!(!is_valid_uuid(""));
+		assert!(!is_valid_uuid("garbage-not-a-uuid"));
+	}
+
+	#[test]
+	fn is_valid_uuid_accepts_valid_uuid() {
+		assert!(is_valid_uuid("550e8400-e29b-41d4-a716-446655440000"));
 	}
 }
