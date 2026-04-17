@@ -120,7 +120,8 @@ pub fn build_authorize_url(
 		 &code_challenge_method=S256\
 		 &state={}\
 		 &id_token_add_organizations=true\
-		 &codex_cli_simplified_flow=true",
+		 &codex_cli_simplified_flow=true\
+		 &originator=codex_cli_rs",
 		enc(client_id),
 		enc(redirect_uri),
 		enc(SCOPE),
@@ -321,11 +322,16 @@ pub fn parse_id_token_claims(id_token: &str) -> IdTokenClaims {
 		.and_then(|o| o.get("chatgpt_account_id"))
 		.and_then(|v| v.as_str())
 		.map(str::to_string);
+	let account_is_fedramp = auth_obj
+		.and_then(|o| o.get("chatgpt_account_is_fedramp"))
+		.and_then(|v| v.as_bool())
+		.unwrap_or(false);
 
 	IdTokenClaims {
 		email,
 		user_id,
 		account_id,
+		account_is_fedramp,
 	}
 }
 
@@ -689,5 +695,57 @@ mod tests {
 	fn parse_id_token_claims_returns_default_for_garbage() {
 		let parsed = parse_id_token_claims("not.a.jwt");
 		assert!(parsed.email.is_none());
+	}
+
+	#[test]
+	fn authorize_url_contains_originator_param() {
+		let url = build_authorize_url(
+			"client-123",
+			"http://localhost:1455/auth/callback",
+			"challenge-abc",
+			"state-xyz",
+		);
+		assert!(
+			url.contains("originator=codex_cli_rs"),
+			"originator param missing from authorize URL"
+		);
+	}
+
+	#[test]
+	fn parse_id_token_claims_extracts_fedramp_true() {
+		let claims = serde_json::json!({
+			"email": "admin@fedramp.gov",
+			"https://api.openai.com/auth": {
+				"chatgpt_user_id": "uid-1",
+				"chatgpt_account_id": "acc-fed",
+				"chatgpt_account_is_fedramp": true
+			}
+		});
+		let payload = URL_SAFE_NO_PAD.encode(claims.to_string().as_bytes());
+		let fake_jwt = format!("header.{payload}.sig");
+
+		let parsed = parse_id_token_claims(&fake_jwt);
+		assert_eq!(parsed.account_id.as_deref(), Some("acc-fed"));
+		assert!(parsed.account_is_fedramp, "fedramp flag should be true");
+	}
+
+	#[test]
+	fn parse_id_token_claims_fedramp_absent_defaults_false() {
+		// When the claim is absent, account_is_fedramp must default to false.
+		let claims = serde_json::json!({
+			"email": "user@example.com",
+			"https://api.openai.com/auth": {
+				"chatgpt_user_id": "uid-2",
+				"chatgpt_account_id": "acc-2"
+			}
+		});
+		let payload = URL_SAFE_NO_PAD.encode(claims.to_string().as_bytes());
+		let fake_jwt = format!("header.{payload}.sig");
+
+		let parsed = parse_id_token_claims(&fake_jwt);
+		assert!(
+			!parsed.account_is_fedramp,
+			"fedramp flag should default to false"
+		);
 	}
 }
