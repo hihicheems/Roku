@@ -30,6 +30,7 @@ debug
 AGENTS.md
 CLAUDE.md
 draft/
+/knowledge-base/
 logs/
 plans/
 prompts/
