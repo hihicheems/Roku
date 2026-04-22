@@ -219,15 +219,22 @@ pub enum LoopEvent {
 	/// is the count of messages that had content removed.
 	/// Schema is stable — additive fields only.
 	ReasoningContentStripped { step: u32, messages_stripped: u32 },
-	/// The serialized tool schema for this turn was either reused from the
-	/// session's frozen cache (`rebuilt = false`) or rebuilt from fresh tool
-	/// definitions (`rebuilt = true`).
+	/// The serialized tool schema for this outbound LLM call was either reused
+	/// from the session's frozen cache (`rebuilt = false`) or rebuilt from
+	/// fresh tool definitions (`rebuilt = true`).
 	///
-	/// Emitted once per LLM call right after `freeze_or_reuse_tool_schema` runs.
+	/// Emitted immediately before every outbound `router.generate` /
+	/// `router.generate_streaming` invocation — i.e. once per LLM call, not
+	/// once per turn. A turn that makes multiple calls (output-slot
+	/// escalation retry, reactive context-window retry) therefore produces
+	/// multiple events; retries within the same turn carry `rebuilt = false`
+	/// because `freeze_or_reuse_tool_schema` runs once per turn and the
+	/// frozen snapshot is reused by subsequent calls.
+	///
 	/// `hash` is a deterministic fingerprint over the serialized tool
-	/// definitions; consecutive turns with the same `rebuilt = false` and
-	/// identical `hash` are the direct, cross-provider signal of prefix
-	/// stability (independent of whether the provider reports
+	/// definitions; consecutive turns whose first-call events share the same
+	/// `hash` are the direct, cross-provider signal of prefix stability
+	/// (independent of whether the provider reports
 	/// `cache_read_input_tokens`).
 	///
 	/// Schema is stable — additive fields only.

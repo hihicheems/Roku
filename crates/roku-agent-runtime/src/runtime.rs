@@ -1142,28 +1142,14 @@ impl GenericAgentRuntime {
 				);
 			}
 
-			// Emit a direct, cross-provider signal that the serialized tool
-			// schema is stable turn-over-turn. Consumers (trace assertions,
-			// regression tests) can now verify prefix stability without
-			// depending on a provider's optional `cache_read_input_tokens`
-			// telemetry.
-			//
-			// Emit after the step-budget guard above: a budget-exhausted exit
-			// makes no LLM call, so emitting earlier would break the
-			// "one ToolSchemaFrozen per LLM call" invariant trace consumers
-			// rely on. Hash is computed over the post-deferred definitions —
-			// the exact set the provider adapter will serialize — so the
-			// hash tracks what the LLM actually receives when deferred-mode
-			// swaps part of the schema for the `tool_search` stub.
+			// Pre-compute the tool-schema fingerprint once per turn — the hash
+			// is invariant across reactive-retry iterations and escalation
+			// retries because `freeze_or_reuse_tool_schema` runs once per
+			// outer turn. Hash covers the post-deferred definitions so the
+			// signal matches what the provider adapter will actually
+			// serialize on the wire.
 			let tool_schema_hash =
 				crate::runtime_loop::cache_break::hash_tool_definitions(&tool_definitions);
-			if let Some(sender) = event_sender {
-				let _ = sender.send(crate::runtime_loop::LoopEvent::ToolSchemaFrozen {
-					step: loop_state.step_index.saturating_add(1),
-					hash: tool_schema_hash,
-					rebuilt: tool_schema_rebuilt,
-				});
-			}
 
 			// Build the modular system prompt with environment + project instructions.
 			// Environment is re-probed each turn; project instruction is stable (loaded once above).
@@ -1201,6 +1187,16 @@ impl GenericAgentRuntime {
 			});
 
 			let current_step_index = loop_state.step_index + 1;
+
+			// Track whether any `ToolSchemaFrozen` event has already fired
+			// within this turn. The first emit carries the turn's real
+			// rebuild predicate; every subsequent call in the same turn
+			// (escalation retry, reactive-retry iteration) reuses the same
+			// frozen bytes, so those emits carry `rebuilt=false`. One emit
+			// is produced before each outbound `router.generate*` call so
+			// the trace honors the "one ToolSchemaFrozen per LLM call"
+			// invariant.
+			let mut tool_schema_frozen_emitted = false;
 
 			// Inner reactive-retry loop: the LLM call may fail with
 			// `ContextWindowExceeded` because our local byte-based estimator
@@ -1367,6 +1363,14 @@ impl GenericAgentRuntime {
 							}
 							(text, tool_calls)
 						});
+						if let Some(sender) = event_sender {
+							let _ = sender.send(crate::runtime_loop::LoopEvent::ToolSchemaFrozen {
+								step: current_step_index,
+								hash: tool_schema_hash,
+								rebuilt: !tool_schema_frozen_emitted && tool_schema_rebuilt,
+							});
+						}
+						tool_schema_frozen_emitted = true;
 						let llm_result = router.generate_streaming(&gen_request, tx).await;
 						let (mut text, tool_calls) = accumulator.await.unwrap_or_default();
 
@@ -1475,6 +1479,13 @@ impl GenericAgentRuntime {
 											);
 												let mut escalated_request = gen_request.clone();
 												escalated_request.expected_output_tokens = ceiling;
+												let _ = sender.send(
+												crate::runtime_loop::LoopEvent::ToolSchemaFrozen {
+													step: current_step_index,
+													hash: tool_schema_hash,
+													rebuilt: false,
+												},
+											);
 												if let Ok(retry_resp) =
 													router.generate(&escalated_request).await
 												{
@@ -1560,6 +1571,14 @@ impl GenericAgentRuntime {
 						}
 					} else {
 						// Non-streaming path.
+						if let Some(sender) = event_sender {
+							let _ = sender.send(crate::runtime_loop::LoopEvent::ToolSchemaFrozen {
+								step: current_step_index,
+								hash: tool_schema_hash,
+								rebuilt: !tool_schema_frozen_emitted && tool_schema_rebuilt,
+							});
+						}
+						tool_schema_frozen_emitted = true;
 						match router.generate(&gen_request).await {
 							Ok(resp) => {
 								total_prompt_tokens =
@@ -1647,6 +1666,15 @@ impl GenericAgentRuntime {
 												}
 												let mut escalated_request = gen_request.clone();
 												escalated_request.expected_output_tokens = ceiling;
+												if let Some(sender) = event_sender {
+													let _ = sender.send(
+														crate::runtime_loop::LoopEvent::ToolSchemaFrozen {
+															step: current_step_index,
+															hash: tool_schema_hash,
+															rebuilt: false,
+														},
+													);
+												}
 												if let Ok(retry_resp) =
 													router.generate(&escalated_request).await
 												{
@@ -4437,6 +4465,36 @@ mod tests {
 				.iter()
 				.any(|e| matches!(e, crate::runtime_loop::LoopEvent::CompactComplete { .. })),
 			"a CompactComplete event should follow the reactive trigger"
+		);
+
+		// Each outbound LLM call must be preceded by its own `ToolSchemaFrozen`
+		// event — the provider was invoked twice (1 failure + 1 success after
+		// reactive compaction), so two events are expected. The first carries
+		// the turn's rebuild predicate; the retry carries `rebuilt = false`
+		// because the frozen snapshot is reused across reactive retries.
+		let schema_frozen_events: Vec<_> = events
+			.iter()
+			.filter_map(|e| match e {
+				crate::runtime_loop::LoopEvent::ToolSchemaFrozen {
+					step,
+					hash,
+					rebuilt,
+				} => Some((*step, *hash, *rebuilt)),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(
+			schema_frozen_events.len(),
+			2,
+			"one ToolSchemaFrozen per outbound LLM call; got: {schema_frozen_events:?}"
+		);
+		assert_eq!(
+			schema_frozen_events[0].1, schema_frozen_events[1].1,
+			"hash must be stable across reactive-retry iterations within the same turn"
+		);
+		assert!(
+			!schema_frozen_events[1].2,
+			"retry must carry rebuilt=false — the frozen snapshot is reused"
 		);
 	}
 
