@@ -1057,7 +1057,17 @@ impl GenericAgentRuntime {
 			// Freeze on first build; on subsequent clean turns return the
 			// cached `Vec<ToolDefinition>` so the provider adapter sees
 			// byte-identical tool bytes and cache markers stay valid.
-			let tool_schema_rebuilt = loop_state.tool_schema_dirty;
+			//
+			// `freeze_or_reuse_tool_schema` rebuilds iff the frozen snapshot
+			// is absent OR the dirty flag is set. Checkpoint-resume restores
+			// a `LoopState` whose `frozen_tool_schema` / `tool_schema_dirty`
+			// fields are `#[serde(skip)]`, so both default to `None` / `false`
+			// after round-trip. Reading `tool_schema_dirty` alone would
+			// mis-report `rebuilt=false` on the first post-resume call even
+			// though the freeze will actually rebuild. Use the full predicate
+			// to match the freeze's real outcome.
+			let tool_schema_rebuilt =
+				loop_state.tool_schema_dirty || loop_state.frozen_tool_schema.is_none();
 			let tool_definitions = loop_state.freeze_or_reuse_tool_schema(fresh_tool_definitions);
 			// Apply threshold-based deferred schema loading: when the total
 			// estimated schema token cost exceeds the configured fraction of

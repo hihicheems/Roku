@@ -805,6 +805,37 @@ mod tests {
 	}
 
 	#[test]
+	fn rebuild_predicate_accounts_for_checkpoint_resume_defaults() {
+		// `frozen_tool_schema` and `tool_schema_dirty` are `#[serde(skip)]`,
+		// so a post-resume `LoopState` arrives with `frozen = None` and
+		// `dirty = false`. The runtime emits a `ToolSchemaFrozen { rebuilt }`
+		// event whose boolean is derived BEFORE calling
+		// `freeze_or_reuse_tool_schema`; it must correctly predict that the
+		// freeze will rebuild. Reading `tool_schema_dirty` alone would say
+		// "no rebuild" in this state, but the freeze actually rebuilds
+		// because `frozen_tool_schema` is absent.
+		let mut state = LoopState::new("loop-1", &loop_context());
+		// Simulate a post-resume snapshot: both fields at their
+		// `#[serde(skip)]` defaults.
+		state.tool_schema_dirty = false;
+		state.frozen_tool_schema = None;
+
+		let predicted_rebuild = state.tool_schema_dirty || state.frozen_tool_schema.is_none();
+		assert!(
+			predicted_rebuild,
+			"predicate must predict rebuild when the snapshot is absent, \
+			 even if dirty=false (post-resume shape)"
+		);
+
+		let defs = vec![tool_def("Read")];
+		state.freeze_or_reuse_tool_schema(defs.clone());
+		assert!(
+			state.frozen_tool_schema.is_some(),
+			"freeze must have actually rebuilt the snapshot"
+		);
+	}
+
+	#[test]
 	fn freeze_survives_across_multiple_clean_turns_byte_identical() {
 		let mut state = LoopState::new("loop-1", &loop_context());
 		let canonical = vec![tool_def("Read"), tool_def("Grep"), tool_def("Bash")];
