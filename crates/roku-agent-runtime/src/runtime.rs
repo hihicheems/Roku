@@ -784,13 +784,24 @@ impl GenericAgentRuntime {
 		// compaction threshold can be skipped until the provider rejects the
 		// request as over-window. Rebuild from the current `loop_state` when
 		// the schema is dirty so the threshold check sees the right footprint.
+		//
+		// The rebuilt bytes must match what the provider will actually send
+		// on the next turn — so run `apply_deferred_mode` before serializing.
+		// Skipping it would compute bytes over the full visible set while
+		// deferred mode swaps most entries for the `tool_search` stub, which
+		// over-estimates pressure and can trigger unnecessary compaction.
 		let rebuilt_schema_bytes: Option<Vec<u8>> = if loop_state.tool_schema_dirty {
 			let fresh = crate::runtime_loop::build_tool_definitions(
 				&loop_state.visible_tools,
 				Some(&self.resource_catalog),
 				&loop_state.disallowed_tools,
 			);
-			match serde_json::to_vec(&fresh) {
+			let effective = crate::runtime_loop::apply_deferred_mode(
+				fresh,
+				loop_state,
+				self.agent_runtime_config.r#loop.context_window_tokens,
+			);
+			match serde_json::to_vec(&effective) {
 				Ok(bytes) if !bytes.is_empty() => Some(bytes),
 				_ => None,
 			}
