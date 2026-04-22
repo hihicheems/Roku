@@ -768,6 +768,74 @@ mod tests {
 	}
 
 	#[test]
+	fn tool_schema_dirty_flag_predicts_rebuild_before_freeze_call() {
+		// Pin the observable invariant that the runtime emits a
+		// `ToolSchemaFrozen` event against: reading `tool_schema_dirty` *before*
+		// calling `freeze_or_reuse_tool_schema` gives the correct `rebuilt`
+		// signal. If this relationship is ever broken (e.g. if freeze is
+		// refactored to clear `tool_schema_dirty` at entry), the event's
+		// `rebuilt` field will silently go wrong and the test catches it.
+		let mut state = LoopState::new("loop-1", &loop_context());
+		let defs = vec![tool_def("Read")];
+
+		// Turn 1: fresh state -> dirty is true -> freeze rebuilds.
+		let pre_call_dirty = state.tool_schema_dirty;
+		assert!(
+			pre_call_dirty,
+			"new LoopState must expose dirty=true so runtime emits rebuilt=true"
+		);
+		state.freeze_or_reuse_tool_schema(defs.clone());
+
+		// Turn 2: clean state -> dirty is false -> freeze reuses.
+		let pre_call_dirty = state.tool_schema_dirty;
+		assert!(
+			!pre_call_dirty,
+			"after a successful freeze the flag must expose dirty=false so runtime emits rebuilt=false"
+		);
+		state.freeze_or_reuse_tool_schema(defs.clone());
+
+		// Turn 3: mark dirty -> dirty is true -> freeze rebuilds.
+		state.mark_tool_schema_dirty();
+		let pre_call_dirty = state.tool_schema_dirty;
+		assert!(
+			pre_call_dirty,
+			"mark_tool_schema_dirty must re-expose dirty=true before the next freeze"
+		);
+		state.freeze_or_reuse_tool_schema(defs);
+	}
+
+	#[test]
+	fn rebuild_predicate_accounts_for_checkpoint_resume_defaults() {
+		// `frozen_tool_schema` and `tool_schema_dirty` are `#[serde(skip)]`,
+		// so a post-resume `LoopState` arrives with `frozen = None` and
+		// `dirty = false`. The runtime emits a `ToolSchemaFrozen { rebuilt }`
+		// event whose boolean is derived BEFORE calling
+		// `freeze_or_reuse_tool_schema`; it must correctly predict that the
+		// freeze will rebuild. Reading `tool_schema_dirty` alone would say
+		// "no rebuild" in this state, but the freeze actually rebuilds
+		// because `frozen_tool_schema` is absent.
+		let mut state = LoopState::new("loop-1", &loop_context());
+		// Simulate a post-resume snapshot: both fields at their
+		// `#[serde(skip)]` defaults.
+		state.tool_schema_dirty = false;
+		state.frozen_tool_schema = None;
+
+		let predicted_rebuild = state.tool_schema_dirty || state.frozen_tool_schema.is_none();
+		assert!(
+			predicted_rebuild,
+			"predicate must predict rebuild when the snapshot is absent, \
+			 even if dirty=false (post-resume shape)"
+		);
+
+		let defs = vec![tool_def("Read")];
+		state.freeze_or_reuse_tool_schema(defs.clone());
+		assert!(
+			state.frozen_tool_schema.is_some(),
+			"freeze must have actually rebuilt the snapshot"
+		);
+	}
+
+	#[test]
 	fn freeze_survives_across_multiple_clean_turns_byte_identical() {
 		let mut state = LoopState::new("loop-1", &loop_context());
 		let canonical = vec![tool_def("Read"), tool_def("Grep"), tool_def("Bash")];

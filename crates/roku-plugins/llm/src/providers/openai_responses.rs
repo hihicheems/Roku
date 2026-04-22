@@ -1122,14 +1122,15 @@ impl LlmProvider for OpenAiResponsesProvider {
 		// Convert internal Message format to Responses API input items.
 		let input_items: Vec<Value> = messages_to_responses_input(&request.input);
 
-		// Build the compact request body. Tool choice is always "auto" for compaction.
+		// Build the compact request body. The ChatGPT Codex `/responses/compact`
+		// endpoint does not accept `tool_choice`; sending it yields a 400
+		// "Unknown parameter: 'tool_choice'" and blocks the summarizer.
 		let tools_value: Vec<Value> = request.tools.iter().map(build_tool_definition).collect();
 
 		let mut body = json!({
 			"model": request.model,
 			"instructions": request.instructions,
 			"input": input_items,
-			"tool_choice": "auto",
 			"parallel_tool_calls": request.parallel_tool_calls,
 		});
 		if !tools_value.is_empty() {
@@ -2261,6 +2262,98 @@ mod tests {
 		(format!("http://{addr}/responses"), handle)
 	}
 
+	/// Variant that captures the request body and returns it via a oneshot,
+	/// so tests can assert on the exact JSON shape we sent to the endpoint.
+	///
+	/// Reads until at least the headers + full `Content-Length` bytes of body
+	/// have been accumulated. A single `read()` can return headers without the
+	/// body on loaded machines because the HTTP client may send them in two
+	/// writes; the loop protects against that.
+	async fn spawn_mock_capturing_server(
+		status: u16,
+		body: &'static str,
+	) -> (
+		String,
+		tokio::sync::oneshot::Receiver<String>,
+		tokio::task::JoinHandle<()>,
+	) {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+			.await
+			.expect("mock server: bind must succeed");
+		let addr = listener.local_addr().expect("must have address");
+		let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+		let handle = tokio::spawn(async move {
+			if let Ok((mut stream, _)) = listener.accept().await {
+				use tokio::io::{AsyncReadExt, AsyncWriteExt};
+				let mut accumulated = Vec::with_capacity(16384);
+				let mut scratch = [0u8; 4096];
+				let mut content_length: Option<usize> = None;
+				let mut headers_end: Option<usize> = None;
+				// Read chunks until headers are fully seen and the body has
+				// received `Content-Length` bytes. Bail after 32 KiB total to
+				// guard against runaway loops.
+				loop {
+					if accumulated.len() >= 32768 {
+						break;
+					}
+					match stream.read(&mut scratch).await {
+						Ok(0) => break,
+						Ok(n) => {
+							accumulated.extend_from_slice(&scratch[..n]);
+							if headers_end.is_none()
+								&& let Some(idx) = find_sequence(&accumulated, b"\r\n\r\n")
+							{
+								headers_end = Some(idx + 4);
+								let header_bytes = &accumulated[..idx];
+								if let Some(cl) = parse_content_length(header_bytes) {
+									content_length = Some(cl);
+								}
+							}
+							if let (Some(end), Some(cl)) = (headers_end, content_length)
+								&& accumulated.len() >= end + cl
+							{
+								break;
+							}
+							if content_length.is_none() && headers_end.is_some() {
+								// No `Content-Length` header — read was complete at
+								// the header boundary (no body). Stop.
+								break;
+							}
+						}
+						Err(_) => break,
+					}
+				}
+				let request = String::from_utf8_lossy(&accumulated).to_string();
+				let response = format!(
+					"HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+					body.len(),
+					body
+				);
+				let _ = stream.write_all(response.as_bytes()).await;
+				let _ = tx.send(request);
+			}
+		});
+		(format!("http://{addr}/responses"), rx, handle)
+	}
+
+	fn find_sequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+		haystack
+			.windows(needle.len())
+			.position(|window| window == needle)
+	}
+
+	fn parse_content_length(headers: &[u8]) -> Option<usize> {
+		let text = std::str::from_utf8(headers).ok()?;
+		for line in text.split("\r\n") {
+			if let Some((name, value)) = line.split_once(':')
+				&& name.eq_ignore_ascii_case("content-length")
+			{
+				return value.trim().parse::<usize>().ok();
+			}
+		}
+		None
+	}
+
 	fn compact_provider_for(base_url: String) -> OpenAiResponsesProvider {
 		let config = OpenAiResponsesConfig {
 			api_key: "test-key".to_string(),
@@ -2287,6 +2380,51 @@ mod tests {
 			tools: vec![],
 			parallel_tool_calls: false,
 			reasoning: None,
+		}
+	}
+
+	#[tokio::test]
+	async fn compact_history_body_omits_tool_choice_field() {
+		// Regression guard for issue #347: the ChatGPT Codex /responses/compact
+		// endpoint rejects `tool_choice` with HTTP 400 "Unknown parameter", so
+		// the serialized body must not contain that key.
+		let success_body = r#"{
+			"output": [
+				{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}
+			],
+			"usage": {"input_tokens": 1, "output_tokens": 1, "input_tokens_details": {"cached_tokens": 0}}
+		}"#;
+		let (base_url, rx, _srv) = spawn_mock_capturing_server(200, success_body).await;
+		let provider = compact_provider_for(base_url.clone());
+		let req = minimal_compact_request(&base_url);
+
+		let _ = provider.compact_history(&req).await;
+
+		let raw = rx.await.expect("capture channel closed before delivery");
+		// Split request headers from body on the CRLF-CRLF boundary. The
+		// capturing mock server reads until `Content-Length` bytes are
+		// accumulated past this boundary, so the body slice is exactly the
+		// JSON payload — no `find('{')` search needed.
+		let body_start = raw
+			.find("\r\n\r\n")
+			.expect("mock request must have a body delimiter")
+			+ 4;
+		let body_text = raw[body_start..].trim();
+		let body_json: Value =
+			serde_json::from_str(body_text).expect("compact body must be valid JSON");
+		let obj = body_json
+			.as_object()
+			.expect("compact body must be a JSON object");
+		assert!(
+			!obj.contains_key("tool_choice"),
+			"compact request body must not contain `tool_choice`; full body: {body_json}"
+		);
+		// Fields we do still expect so a typo-rename refactor can't sneak by.
+		for required in ["model", "instructions", "input", "parallel_tool_calls"] {
+			assert!(
+				obj.contains_key(required),
+				"compact body missing required field `{required}`"
+			);
 		}
 	}
 

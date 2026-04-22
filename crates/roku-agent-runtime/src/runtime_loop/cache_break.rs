@@ -223,7 +223,7 @@ fn hash_blocks(blocks: &[SystemPromptBlock]) -> u64 {
 	hasher.finish()
 }
 
-fn hash_tool_definitions(defs: &[ToolDefinition]) -> u64 {
+pub(crate) fn hash_tool_definitions(defs: &[ToolDefinition]) -> u64 {
 	let mut hasher = DefaultHasher::new();
 	for def in defs {
 		def.name.hash(&mut hasher);

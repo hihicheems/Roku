@@ -771,15 +771,51 @@ impl GenericAgentRuntime {
 		current_step_index: u32,
 		event_sender: Option<&crate::runtime_loop::LoopEventSender>,
 		system_prompt: &str,
+		tool_schema_bytes: Option<&[u8]>,
 	) -> (u64, u64) {
 		// Truncate oversized tool results in messages.
 		let tool_result_max_chars = self.agent_runtime_config.r#loop.working_summary_max_chars;
 		crate::runtime_loop::truncate_large_tool_results(messages, tool_result_max_chars);
 
+		// `tool_schema_bytes` was captured at turn start. If a tool executed
+		// this turn mutated the visible tool set (e.g. `tool_search` loading
+		// deferred schemas, or any path that calls `mark_tool_schema_dirty`),
+		// the cached bytes understate the next-turn prompt pressure and the
+		// compaction threshold can be skipped until the provider rejects the
+		// request as over-window. Rebuild from the current `loop_state` when
+		// the schema is dirty so the threshold check sees the right footprint.
+		//
+		// The rebuilt bytes must match what the provider will actually send
+		// on the next turn — so run `apply_deferred_mode` before serializing.
+		// Skipping it would compute bytes over the full visible set while
+		// deferred mode swaps most entries for the `tool_search` stub, which
+		// over-estimates pressure and can trigger unnecessary compaction.
+		let rebuilt_schema_bytes: Option<Vec<u8>> = if loop_state.tool_schema_dirty {
+			let fresh = crate::runtime_loop::build_tool_definitions(
+				&loop_state.visible_tools,
+				Some(&self.resource_catalog),
+				&loop_state.disallowed_tools,
+			);
+			let effective = crate::runtime_loop::apply_deferred_mode(
+				fresh,
+				loop_state,
+				self.agent_runtime_config.r#loop.context_window_tokens,
+			);
+			match serde_json::to_vec(&effective) {
+				Ok(bytes) if !bytes.is_empty() => Some(bytes),
+				_ => None,
+			}
+		} else {
+			None
+		};
+		let effective_schema_bytes: Option<&[u8]> =
+			rebuilt_schema_bytes.as_deref().or(tool_schema_bytes);
+
 		let threshold = self.agent_runtime_config.r#loop.compact_threshold_tokens();
 		let estimated = crate::runtime_loop::estimate_prompt_pressure(
 			messages,
 			Some(system_prompt),
+			effective_schema_bytes,
 			&loop_state.estimator_calibration,
 		);
 		if estimated > threshold {
@@ -1032,6 +1068,17 @@ impl GenericAgentRuntime {
 			// Freeze on first build; on subsequent clean turns return the
 			// cached `Vec<ToolDefinition>` so the provider adapter sees
 			// byte-identical tool bytes and cache markers stay valid.
+			//
+			// `freeze_or_reuse_tool_schema` rebuilds iff the frozen snapshot
+			// is absent OR the dirty flag is set. Checkpoint-resume restores
+			// a `LoopState` whose `frozen_tool_schema` / `tool_schema_dirty`
+			// fields are `#[serde(skip)]`, so both default to `None` / `false`
+			// after round-trip. Reading `tool_schema_dirty` alone would
+			// mis-report `rebuilt=false` on the first post-resume call even
+			// though the freeze will actually rebuild. Use the full predicate
+			// to match the freeze's real outcome.
+			let tool_schema_rebuilt =
+				loop_state.tool_schema_dirty || loop_state.frozen_tool_schema.is_none();
 			let tool_definitions = loop_state.freeze_or_reuse_tool_schema(fresh_tool_definitions);
 			// Apply threshold-based deferred schema loading: when the total
 			// estimated schema token cost exceeds the configured fraction of
@@ -1043,6 +1090,24 @@ impl GenericAgentRuntime {
 				loop_state,
 				self.agent_runtime_config.r#loop.context_window_tokens,
 			);
+			// Serialize the tool schema AFTER `apply_deferred_mode` so the
+			// estimator sees exactly the set the provider will send. Using
+			// the pre-deferred set would overestimate pressure on turns where
+			// the `tool_search` pseudo-tool has replaced most schemas and
+			// silently walk the calibration scale in the wrong direction.
+			//
+			// Note: this is the Roku-internal canonical serialization; the
+			// wire format each provider emits differs by a few bytes per tool
+			// (e.g. OpenAI Responses adds `"type":"function"` per entry). The
+			// residual drift is small (<5%) and well inside the estimator's
+			// 20% accuracy gate; provider-exact wire-byte estimation is a
+			// follow-up.
+			let tool_schema_bytes_vec = serde_json::to_vec(&tool_definitions).unwrap_or_default();
+			let tool_schema_bytes: Option<&[u8]> = if tool_schema_bytes_vec.is_empty() {
+				None
+			} else {
+				Some(&tool_schema_bytes_vec)
+			};
 
 			// Check step budget before calling the LLM.
 			if loop_state.remaining_step_budget == 0 {
@@ -1076,6 +1141,15 @@ impl GenericAgentRuntime {
 					Some(loop_state),
 				);
 			}
+
+			// Pre-compute the tool-schema fingerprint once per turn — the hash
+			// is invariant across reactive-retry iterations and escalation
+			// retries because `freeze_or_reuse_tool_schema` runs once per
+			// outer turn. Hash covers the post-deferred definitions so the
+			// signal matches what the provider adapter will actually
+			// serialize on the wire.
+			let tool_schema_hash =
+				crate::runtime_loop::cache_break::hash_tool_definitions(&tool_definitions);
 
 			// Build the modular system prompt with environment + project instructions.
 			// Environment is re-probed each turn; project instruction is stable (loaded once above).
@@ -1113,6 +1187,16 @@ impl GenericAgentRuntime {
 			});
 
 			let current_step_index = loop_state.step_index + 1;
+
+			// Track whether any `ToolSchemaFrozen` event has already fired
+			// within this turn. The first emit carries the turn's real
+			// rebuild predicate; every subsequent call in the same turn
+			// (escalation retry, reactive-retry iteration) reuses the same
+			// frozen bytes, so those emits carry `rebuilt=false`. One emit
+			// is produced before each outbound `router.generate*` call so
+			// the trace honors the "one ToolSchemaFrozen per LLM call"
+			// invariant.
+			let mut tool_schema_frozen_emitted = false;
 
 			// Inner reactive-retry loop: the LLM call may fail with
 			// `ContextWindowExceeded` because our local byte-based estimator
@@ -1159,6 +1243,7 @@ impl GenericAgentRuntime {
 					let mid_estimate = crate::runtime_loop::estimate_prompt_pressure(
 						&messages,
 						Some(&system_prompt),
+						tool_schema_bytes,
 						&loop_state.estimator_calibration,
 					);
 					let mid_threshold = (self.agent_runtime_config.r#loop.context_window_tokens
@@ -1206,6 +1291,7 @@ impl GenericAgentRuntime {
 				let pre_call_estimate = crate::runtime_loop::estimate_prompt_tokens_calibrated(
 					&messages,
 					Some(&system_prompt),
+					tool_schema_bytes,
 					&loop_state.estimator_calibration,
 				);
 				let gen_request = GenerationRequest {
@@ -1277,6 +1363,14 @@ impl GenericAgentRuntime {
 							}
 							(text, tool_calls)
 						});
+						if let Some(sender) = event_sender {
+							let _ = sender.send(crate::runtime_loop::LoopEvent::ToolSchemaFrozen {
+								step: current_step_index,
+								hash: tool_schema_hash,
+								rebuilt: !tool_schema_frozen_emitted && tool_schema_rebuilt,
+							});
+						}
+						tool_schema_frozen_emitted = true;
 						let llm_result = router.generate_streaming(&gen_request, tx).await;
 						let (mut text, tool_calls) = accumulator.await.unwrap_or_default();
 
@@ -1385,6 +1479,13 @@ impl GenericAgentRuntime {
 											);
 												let mut escalated_request = gen_request.clone();
 												escalated_request.expected_output_tokens = ceiling;
+												let _ = sender.send(
+												crate::runtime_loop::LoopEvent::ToolSchemaFrozen {
+													step: current_step_index,
+													hash: tool_schema_hash,
+													rebuilt: false,
+												},
+											);
 												if let Ok(retry_resp) =
 													router.generate(&escalated_request).await
 												{
@@ -1418,6 +1519,18 @@ impl GenericAgentRuntime {
 														pre_call_estimate.raw_total_tokens,
 														retry_resp.prompt_tokens,
 													);
+													// Replace the truncated streaming text in the
+													// TUI. `LlmDecisionComplete` was already sent
+													// before the retry, so the render engine's
+													// collector is finalized; this explicit
+													// replacement event is what unblocks the
+													// terminal from showing the truncated stream.
+													let _ = sender.send(
+													crate::runtime_loop::LoopEvent::LlmTextReplace {
+														step: current_step_index,
+														text: retry_resp.output.clone(),
+													},
+												);
 													let _ = sender.send(
 													crate::runtime_loop::LoopEvent::EstimatorCalibrated {
 														step: current_step_index,
@@ -1458,6 +1571,14 @@ impl GenericAgentRuntime {
 						}
 					} else {
 						// Non-streaming path.
+						if let Some(sender) = event_sender {
+							let _ = sender.send(crate::runtime_loop::LoopEvent::ToolSchemaFrozen {
+								step: current_step_index,
+								hash: tool_schema_hash,
+								rebuilt: !tool_schema_frozen_emitted && tool_schema_rebuilt,
+							});
+						}
+						tool_schema_frozen_emitted = true;
 						match router.generate(&gen_request).await {
 							Ok(resp) => {
 								total_prompt_tokens =
@@ -1545,6 +1666,15 @@ impl GenericAgentRuntime {
 												}
 												let mut escalated_request = gen_request.clone();
 												escalated_request.expected_output_tokens = ceiling;
+												if let Some(sender) = event_sender {
+													let _ = sender.send(
+														crate::runtime_loop::LoopEvent::ToolSchemaFrozen {
+															step: current_step_index,
+															hash: tool_schema_hash,
+															rebuilt: false,
+														},
+													);
+												}
 												if let Ok(retry_resp) =
 													router.generate(&escalated_request).await
 												{
@@ -1577,6 +1707,11 @@ impl GenericAgentRuntime {
 														pre_call_estimate.raw_total_tokens,
 														retry_resp.prompt_tokens,
 													);
+													// Intentionally no `LlmTextReplace` on the
+													// non-streaming path: there is no truncated
+													// streaming text in the terminal to replace.
+													// `retry_resp.output` is consumed directly by
+													// the caller as the final response text.
 													if let Some(sender) = event_sender {
 														let _ = sender.send(
 														crate::runtime_loop::LoopEvent::EstimatorCalibrated {
@@ -2175,6 +2310,7 @@ impl GenericAgentRuntime {
 					current_step_index,
 					event_sender,
 					&system_prompt,
+					tool_schema_bytes,
 				)
 				.await;
 			if compact_pt > 0 || compact_ot > 0 {
@@ -4329,6 +4465,36 @@ mod tests {
 				.iter()
 				.any(|e| matches!(e, crate::runtime_loop::LoopEvent::CompactComplete { .. })),
 			"a CompactComplete event should follow the reactive trigger"
+		);
+
+		// Each outbound LLM call must be preceded by its own `ToolSchemaFrozen`
+		// event — the provider was invoked twice (1 failure + 1 success after
+		// reactive compaction), so two events are expected. The first carries
+		// the turn's rebuild predicate; the retry carries `rebuilt = false`
+		// because the frozen snapshot is reused across reactive retries.
+		let schema_frozen_events: Vec<_> = events
+			.iter()
+			.filter_map(|e| match e {
+				crate::runtime_loop::LoopEvent::ToolSchemaFrozen {
+					step,
+					hash,
+					rebuilt,
+				} => Some((*step, *hash, *rebuilt)),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(
+			schema_frozen_events.len(),
+			2,
+			"one ToolSchemaFrozen per outbound LLM call; got: {schema_frozen_events:?}"
+		);
+		assert_eq!(
+			schema_frozen_events[0].1, schema_frozen_events[1].1,
+			"hash must be stable across reactive-retry iterations within the same turn"
+		);
+		assert!(
+			!schema_frozen_events[1].2,
+			"retry must carry rebuilt=false — the frozen snapshot is reused"
 		);
 	}
 

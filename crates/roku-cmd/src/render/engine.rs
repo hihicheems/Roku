@@ -221,6 +221,42 @@ impl RenderEngine {
 					self.controller.enqueue(committed);
 				}
 			}
+			LoopEvent::LlmTextReplace { step, text } => {
+				// Output-slot escalation retry succeeded: the initial streaming
+				// response was truncated and the runtime re-ran with the per-model
+				// ceiling. `LlmDecisionComplete` already finalized the collector
+				// before the retry began, so instead of rewriting the terminal
+				// (which would require ANSI cursor manipulation and fight tmux),
+				// we print a notice and render the full retry text below the
+				// truncated stream.
+				//
+				// Guards:
+				// - Empty retry text → skip; the notice + nothing is confusing.
+				// - No prior streaming output → skip the notice line; the
+				//   "replaces truncated streaming output" phrasing only makes
+				//   sense when there was a stream to replace.
+				if text.is_empty() {
+					// Nothing to render. Event is still consumed so the
+					// channel does not back up.
+				} else {
+					if s.had_text_output {
+						eprint!(
+							"{}\r\n",
+							crate::render::style::styled_compact_notice(&format!(
+								"[output_slot] step {step} retry text below replaces the truncated streaming output"
+							))
+						);
+					}
+					let normalized = text.replace('\n', "\r\n");
+					eprint!("{normalized}");
+					if !normalized.ends_with("\r\n") {
+						eprint!("\r\n");
+					}
+					s.had_text_output = true;
+					text_streamed_flag.store(true, Ordering::Relaxed);
+					let _ = io::stderr().flush();
+				}
+			}
 			LoopEvent::LlmDecisionComplete { .. } => {
 				s.streaming_active = false;
 				// Finalize: flush collector remainder
@@ -338,6 +374,9 @@ impl RenderEngine {
 			LoopEvent::ReasoningContentStripped { .. } => {
 				// Thinking-block stripping is a diagnostic detail for trace consumers;
 				// no live UX line emitted.
+			}
+			LoopEvent::ToolSchemaFrozen { .. } => {
+				// Prefix-stability signal for trace consumers; no live UX line.
 			}
 			LoopEvent::OutputSlotEscalated {
 				step,

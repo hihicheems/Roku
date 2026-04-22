@@ -266,6 +266,10 @@ pub(crate) fn render_trace_detail(events: &[TimestampedEvent]) -> String {
 				step, elapsed_ms, ..
 			} => format!("[step {step}] compact_complete: {elapsed_ms}ms"),
 			LoopEvent::LlmTextDelta { step, .. } => format!("[step {step}] llm_text_delta"),
+			LoopEvent::LlmTextReplace { step, text } => format!(
+				"[step {step}] llm_text_replace: chars={}",
+				text.chars().count()
+			),
 			LoopEvent::LlmDecisionComplete { step } => {
 				format!("[step {step}] llm_decision_complete")
 			}
@@ -348,6 +352,11 @@ pub(crate) fn render_trace_detail(events: &[TimestampedEvent]) -> String {
 				"[step {step}] cache_break_detected: tokens_lost={tokens_lost} changed=[{}]",
 				component_changed.join(", ")
 			),
+			LoopEvent::ToolSchemaFrozen {
+				step,
+				hash,
+				rebuilt,
+			} => format!("[step {step}] tool_schema_frozen: hash={hash:x} rebuilt={rebuilt}"),
 			LoopEvent::ReasoningContentStripped {
 				step,
 				messages_stripped,
