@@ -777,11 +777,34 @@ impl GenericAgentRuntime {
 		let tool_result_max_chars = self.agent_runtime_config.r#loop.working_summary_max_chars;
 		crate::runtime_loop::truncate_large_tool_results(messages, tool_result_max_chars);
 
+		// `tool_schema_bytes` was captured at turn start. If a tool executed
+		// this turn mutated the visible tool set (e.g. `tool_search` loading
+		// deferred schemas, or any path that calls `mark_tool_schema_dirty`),
+		// the cached bytes understate the next-turn prompt pressure and the
+		// compaction threshold can be skipped until the provider rejects the
+		// request as over-window. Rebuild from the current `loop_state` when
+		// the schema is dirty so the threshold check sees the right footprint.
+		let rebuilt_schema_bytes: Option<Vec<u8>> = if loop_state.tool_schema_dirty {
+			let fresh = crate::runtime_loop::build_tool_definitions(
+				&loop_state.visible_tools,
+				Some(&self.resource_catalog),
+				&loop_state.disallowed_tools,
+			);
+			match serde_json::to_vec(&fresh) {
+				Ok(bytes) if !bytes.is_empty() => Some(bytes),
+				_ => None,
+			}
+		} else {
+			None
+		};
+		let effective_schema_bytes: Option<&[u8]> =
+			rebuilt_schema_bytes.as_deref().or(tool_schema_bytes);
+
 		let threshold = self.agent_runtime_config.r#loop.compact_threshold_tokens();
 		let estimated = crate::runtime_loop::estimate_prompt_pressure(
 			messages,
 			Some(system_prompt),
-			tool_schema_bytes,
+			effective_schema_bytes,
 			&loop_state.estimator_calibration,
 		);
 		if estimated > threshold {
