@@ -1036,21 +1036,6 @@ impl GenericAgentRuntime {
 			// byte-identical tool bytes and cache markers stay valid.
 			let tool_schema_rebuilt = loop_state.tool_schema_dirty;
 			let tool_definitions = loop_state.freeze_or_reuse_tool_schema(fresh_tool_definitions);
-			// Emit a direct, cross-provider signal that the serialized tool
-			// schema is stable turn-over-turn. Consumers (trace assertions,
-			// regression tests) can now verify prefix stability without
-			// depending on a provider's optional `cache_read_input_tokens`
-			// telemetry.
-			let tool_schema_hash =
-				crate::runtime_loop::cache_break::hash_tool_definitions(&tool_definitions);
-			let next_step_index = loop_state.step_index.saturating_add(1);
-			if let Some(sender) = event_sender {
-				let _ = sender.send(crate::runtime_loop::LoopEvent::ToolSchemaFrozen {
-					step: next_step_index,
-					hash: tool_schema_hash,
-					rebuilt: tool_schema_rebuilt,
-				});
-			}
 			// Apply threshold-based deferred schema loading: when the total
 			// estimated schema token cost exceeds the configured fraction of
 			// the context window, non-core tool schemas are withheld from the
@@ -1111,6 +1096,29 @@ impl GenericAgentRuntime {
 					ResultStatus::Error,
 					Some(loop_state),
 				);
+			}
+
+			// Emit a direct, cross-provider signal that the serialized tool
+			// schema is stable turn-over-turn. Consumers (trace assertions,
+			// regression tests) can now verify prefix stability without
+			// depending on a provider's optional `cache_read_input_tokens`
+			// telemetry.
+			//
+			// Emit after the step-budget guard above: a budget-exhausted exit
+			// makes no LLM call, so emitting earlier would break the
+			// "one ToolSchemaFrozen per LLM call" invariant trace consumers
+			// rely on. Hash is computed over the post-deferred definitions —
+			// the exact set the provider adapter will serialize — so the
+			// hash tracks what the LLM actually receives when deferred-mode
+			// swaps part of the schema for the `tool_search` stub.
+			let tool_schema_hash =
+				crate::runtime_loop::cache_break::hash_tool_definitions(&tool_definitions);
+			if let Some(sender) = event_sender {
+				let _ = sender.send(crate::runtime_loop::LoopEvent::ToolSchemaFrozen {
+					step: loop_state.step_index.saturating_add(1),
+					hash: tool_schema_hash,
+					rebuilt: tool_schema_rebuilt,
+				});
 			}
 
 			// Build the modular system prompt with environment + project instructions.
