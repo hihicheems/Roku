@@ -795,6 +795,18 @@ where
 							roku_agent_runtime::LoopEvent::LlmDecisionComplete { .. } => {
 								eprintln!();
 							}
+							roku_agent_runtime::LoopEvent::LlmTextReplace { step, text } => {
+								// LiveOnce renders by forwarding events to stderr for test
+								// harness consumption; retry text is already propagated via
+								// the final `response.message`, so emit a single diagnostic
+								// line rather than reprinting the body.
+								if !text.is_empty() {
+									eprintln!(
+										"\n[output_slot] step {step} retry text replaces streamed output ({} chars)",
+										text.chars().count()
+									);
+								}
+							}
 							roku_agent_runtime::LoopEvent::StepComplete { step } => {
 								eprintln!("[step] {step} complete");
 							}
@@ -891,6 +903,9 @@ where
 							}
 							roku_agent_runtime::LoopEvent::ReasoningContentStripped { .. } => {
 								// Diagnostic only — reasoning content stripped during compaction.
+							}
+							roku_agent_runtime::LoopEvent::ToolSchemaFrozen { .. } => {
+								// Prefix-stability signal for trace consumers; no live UX line.
 							}
 							roku_agent_runtime::LoopEvent::WebSocketDelta {
 								step,

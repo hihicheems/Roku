@@ -124,6 +124,25 @@ pub enum LoopEvent {
 	},
 	/// The LLM finished producing its decision for this step.
 	LlmDecisionComplete { step: u32 },
+	/// The decision text streamed via prior `LlmTextDelta` events was
+	/// replaced wholesale. Consumers (TUI render engines) must clear any
+	/// previously committed text for this step and display `text` instead.
+	///
+	/// Emitted after a successful output-slot escalation retry: the initial
+	/// streaming response hit `finish_reason == "max_tokens"` / `"length"`,
+	/// the runtime retried (non-streaming) with the per-model ceiling, and
+	/// the retry's full text replaces the truncated streaming text that the
+	/// user saw. Because `LlmDecisionComplete` already finalized the render
+	/// engine's collector before the retry began, the collector needs this
+	/// explicit replacement signal.
+	///
+	/// Schema is stable — additive fields only.
+	LlmTextReplace {
+		step: u32,
+		/// Full replacement text (not a delta). Replaces any previously
+		/// committed streaming text for this step.
+		text: String,
+	},
 	/// One full loop iteration (decide + optional tool execution) is complete.
 	StepComplete { step: u32 },
 	/// Token usage summary emitted at the end of each tool loop execution.
@@ -200,6 +219,27 @@ pub enum LoopEvent {
 	/// is the count of messages that had content removed.
 	/// Schema is stable — additive fields only.
 	ReasoningContentStripped { step: u32, messages_stripped: u32 },
+	/// The serialized tool schema for this turn was either reused from the
+	/// session's frozen cache (`rebuilt = false`) or rebuilt from fresh tool
+	/// definitions (`rebuilt = true`).
+	///
+	/// Emitted once per LLM call right after `freeze_or_reuse_tool_schema` runs.
+	/// `hash` is a deterministic fingerprint over the serialized tool
+	/// definitions; consecutive turns with the same `rebuilt = false` and
+	/// identical `hash` are the direct, cross-provider signal of prefix
+	/// stability (independent of whether the provider reports
+	/// `cache_read_input_tokens`).
+	///
+	/// Schema is stable — additive fields only.
+	ToolSchemaFrozen {
+		step: u32,
+		/// Deterministic fingerprint over the serialized tool-definition bytes.
+		/// Stable within one process; not guaranteed across builds.
+		hash: u64,
+		/// `true` when the frozen snapshot was rebuilt this turn; `false` when
+		/// the prior turn's snapshot was reused.
+		rebuilt: bool,
+	},
 	/// A cache break was detected: `cache_read_input_tokens` dropped
 	/// significantly relative to the session baseline.
 	///
@@ -403,4 +443,71 @@ fn truncate(s: &str, max: usize) -> String {
 		.last()
 		.unwrap_or(0);
 	format!("{}…", &s[..end])
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn llm_text_replace_round_trips_through_json() {
+		// Lock the serialized schema so the field names (`step`, `text`) cannot
+		// be silently renamed by a refactor — trace consumers persist these
+		// keys and would break on any drift.
+		let ev = LoopEvent::LlmTextReplace {
+			step: 7,
+			text: "full retry text with\nnewlines and unicode ✓".to_string(),
+		};
+		let json = serde_json::to_string(&ev).expect("serialize must succeed");
+		assert!(
+			json.contains("\"event\":\"llm_text_replace\""),
+			"event discriminator must be llm_text_replace; got: {json}"
+		);
+		assert!(
+			json.contains("\"step\":7"),
+			"step field must serialize as `step`; got: {json}"
+		);
+		assert!(
+			json.contains("\"text\""),
+			"text field must serialize as `text`; got: {json}"
+		);
+		let decoded: LoopEvent =
+			serde_json::from_str(&json).expect("round-trip deserialize must succeed");
+		match decoded {
+			LoopEvent::LlmTextReplace { step, text } => {
+				assert_eq!(step, 7);
+				assert_eq!(text, "full retry text with\nnewlines and unicode ✓");
+			}
+			other => panic!("expected LlmTextReplace, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn tool_schema_frozen_round_trips_through_json() {
+		let ev = LoopEvent::ToolSchemaFrozen {
+			step: 3,
+			hash: 0xdead_beef_cafe_babe,
+			rebuilt: false,
+		};
+		let json = serde_json::to_string(&ev).expect("serialize must succeed");
+		assert!(
+			json.contains("\"event\":\"tool_schema_frozen\""),
+			"event discriminator must be tool_schema_frozen; got: {json}"
+		);
+		assert!(json.contains("\"rebuilt\":false"));
+		let decoded: LoopEvent =
+			serde_json::from_str(&json).expect("round-trip deserialize must succeed");
+		match decoded {
+			LoopEvent::ToolSchemaFrozen {
+				step,
+				hash,
+				rebuilt,
+			} => {
+				assert_eq!(step, 3);
+				assert_eq!(hash, 0xdead_beef_cafe_babe);
+				assert!(!rebuilt);
+			}
+			other => panic!("expected ToolSchemaFrozen, got {other:?}"),
+		}
+	}
 }

@@ -330,6 +330,11 @@ pub struct PromptTokenEstimate {
 	pub system_tokens: u64,
 	pub message_tokens: u64,
 	pub framing_tokens: u64,
+	/// Byte-derived token estimate for the serialized tool-schema block. `0`
+	/// when the caller did not supply a schema; folded into `raw_total_tokens`
+	/// when provided so cold-start turns do not under-estimate before the
+	/// calibration scale has samples to fit.
+	pub tool_schema_tokens: u64,
 	pub total_tokens: u64,
 	pub raw_total_tokens: u64,
 }
@@ -441,9 +446,17 @@ impl EstimatorCalibration {
 /// `system_prompt` is treated identically to a message body — code-heavy
 /// system prompts (which describe tool schemas as JSON) are auto-detected as
 /// structured and use the denser byte/2 rule.
+///
+/// `tool_schema_bytes` is the serialized tool-definition block for this
+/// request, typically produced by `serde_json::to_vec(&tool_definitions)`.
+/// Supplying it is what removes the cold-start under-estimate — the tool
+/// schema frequently adds 1–2K tokens that the message-only estimate misses
+/// until calibration accumulates samples. Pass `None` when callers legitimately
+/// have no tool schema (router/classifier requests, etc.).
 pub fn estimate_prompt_tokens_calibrated(
 	messages: &[Message],
 	system_prompt: Option<&str>,
+	tool_schema_bytes: Option<&[u8]>,
 	calibration: &EstimatorCalibration,
 ) -> PromptTokenEstimate {
 	let system_tokens = system_prompt.map(byte_estimate_for_text).unwrap_or(0);
@@ -455,15 +468,24 @@ pub fn estimate_prompt_tokens_calibrated(
 	// Per-message framing overhead charged by chat APIs (~4 tokens each).
 	let framing_tokens = (messages.len() as u64).saturating_mul(4);
 
+	// Tool schema JSON is always structured by construction — use the
+	// byte/2 rule consistently with `byte_estimate_for_text` on JSON-looking
+	// payloads.
+	let tool_schema_tokens: u64 = tool_schema_bytes
+		.map(|bytes| (bytes.len() as u64).div_ceil(2))
+		.unwrap_or(0);
+
 	let raw = system_tokens
 		.saturating_add(message_tokens)
-		.saturating_add(framing_tokens);
+		.saturating_add(framing_tokens)
+		.saturating_add(tool_schema_tokens);
 	let total = calibration.apply(raw);
 
 	PromptTokenEstimate {
 		system_tokens,
 		message_tokens,
 		framing_tokens,
+		tool_schema_tokens,
 		total_tokens: total,
 		raw_total_tokens: raw,
 	}
@@ -477,9 +499,11 @@ pub fn estimate_prompt_tokens_calibrated(
 pub fn estimate_prompt_pressure(
 	messages: &[Message],
 	system_prompt: Option<&str>,
+	tool_schema_bytes: Option<&[u8]>,
 	calibration: &EstimatorCalibration,
 ) -> u64 {
-	estimate_prompt_tokens_calibrated(messages, system_prompt, calibration).total_tokens
+	estimate_prompt_tokens_calibrated(messages, system_prompt, tool_schema_bytes, calibration)
+		.total_tokens
 }
 
 /// Per-message byte→token estimate.
@@ -2686,7 +2710,7 @@ mod tests {
 				tool_calls: vec![],
 			},
 		];
-		let est = estimate_prompt_tokens_calibrated(&messages, Some("system context"), &cal);
+		let est = estimate_prompt_tokens_calibrated(&messages, Some("system context"), None, &cal);
 		assert!(est.system_tokens > 0, "system tokens populated");
 		assert!(est.message_tokens > 0, "message tokens populated");
 		assert_eq!(est.framing_tokens, 8, "two messages × 4 tokens framing");
@@ -2710,7 +2734,7 @@ mod tests {
 				+ &"y".repeat(800)
 				+ "\"}",
 		}];
-		let pre_call = estimate_prompt_tokens_calibrated(&messages, None, &cal);
+		let pre_call = estimate_prompt_tokens_calibrated(&messages, None, None, &cal);
 
 		// Pretend the provider reported 60% of our pre-call estimate.
 		let real = ((pre_call.total_tokens as f64) * 0.6).round() as u64;
@@ -2730,7 +2754,7 @@ mod tests {
 			cal.scale()
 		);
 
-		let post_call = estimate_prompt_tokens_calibrated(&messages, None, &cal);
+		let post_call = estimate_prompt_tokens_calibrated(&messages, None, None, &cal);
 		let post_err = relative_error(post_call.total_tokens, real);
 		assert!(
 			post_err < pre_err,
@@ -2755,7 +2779,7 @@ mod tests {
 		}];
 
 		for _ in 0..6 {
-			let est = estimate_prompt_tokens_calibrated(&messages, None, &cal);
+			let est = estimate_prompt_tokens_calibrated(&messages, None, None, &cal);
 			let real = ((est.raw_total_tokens as f64) * 0.6).round() as u64;
 			cal.update(est.raw_total_tokens, real);
 		}
@@ -2765,6 +2789,90 @@ mod tests {
 			"scale must stabilize on the real/raw ratio across repeated \
 			 updates; got {} after 6 samples",
 			cal.scale()
+		);
+	}
+
+	#[test]
+	fn tool_schema_bytes_widen_raw_estimate_and_monotonic() {
+		// Regression guard for the cold-start under-estimate: the default
+		// estimate (no tool schema) under-counts the first turn because the
+		// serialized tool schema block (typically 1–2K tokens) is not part of
+		// the message bytes. Supplying the schema must widen the raw estimate,
+		// and the widening must be monotonic in the schema size.
+		let cal = EstimatorCalibration::default();
+		let messages = vec![Message::User {
+			content: "hello".to_string(),
+		}];
+
+		let without = estimate_prompt_tokens_calibrated(&messages, None, None, &cal);
+		assert_eq!(
+			without.tool_schema_tokens, 0,
+			"None input must leave the tool_schema field at zero"
+		);
+
+		let schema_small = br#"[{"name":"Read","description":"read file","parameters":{}}]"#;
+		let with_small =
+			estimate_prompt_tokens_calibrated(&messages, None, Some(schema_small), &cal);
+		assert!(
+			with_small.tool_schema_tokens > 0,
+			"non-empty tool schema must contribute tokens"
+		);
+		assert!(
+			with_small.raw_total_tokens > without.raw_total_tokens,
+			"supplying a tool schema must widen raw_total_tokens \
+			 (without={}, with_small={})",
+			without.raw_total_tokens,
+			with_small.raw_total_tokens
+		);
+
+		let schema_large = br#"[{"name":"Read","description":"read file","parameters":{}},{"name":"Edit","description":"edit file","parameters":{}},{"name":"Bash","description":"run shell","parameters":{}},{"name":"Grep","description":"search","parameters":{}}]"#;
+		let with_large =
+			estimate_prompt_tokens_calibrated(&messages, None, Some(schema_large), &cal);
+		assert!(
+			with_large.tool_schema_tokens > with_small.tool_schema_tokens,
+			"larger tool schema must contribute more tokens \
+			 (small={}, large={})",
+			with_small.tool_schema_tokens,
+			with_large.tool_schema_tokens
+		);
+		assert!(
+			with_large.raw_total_tokens > with_small.raw_total_tokens,
+			"monotonicity: adding more tool defs must never shrink the estimate"
+		);
+	}
+
+	#[test]
+	fn tool_schema_bytes_feed_into_calibration_through_raw_total() {
+		// Verifies the interaction between the new parameter and the
+		// existing calibration: the tool-schema contribution is included in
+		// `raw_total_tokens`, and the calibrated `total_tokens` tracks it
+		// through the scale multiplication. Pins the invariant that a caller
+		// feeding `raw_total_tokens` back into `update` passes a number that
+		// already accounts for the schema.
+		let mut cal = EstimatorCalibration::default();
+		let messages = vec![Message::User {
+			content: "hi".to_string(),
+		}];
+		let schema =
+			br#"[{"name":"Read","description":"read file","parameters":{"type":"object"}}]"#;
+
+		let pre = estimate_prompt_tokens_calibrated(&messages, None, Some(schema), &cal);
+		let raw_with_schema = pre.raw_total_tokens;
+		assert!(raw_with_schema >= pre.tool_schema_tokens);
+		// Pretend the provider reported a real count 40% higher than our
+		// pre-call estimate — a typical cold-start under-estimate direction.
+		let real = ((raw_with_schema as f64) * 1.4).round() as u64;
+		cal.update(raw_with_schema, real);
+		assert!(cal.sample_count() > 0);
+
+		let post = estimate_prompt_tokens_calibrated(&messages, None, Some(schema), &cal);
+		assert!(
+			post.total_tokens > pre.total_tokens,
+			"calibration with real > raw must raise the calibrated total"
+		);
+		assert_eq!(
+			post.raw_total_tokens, pre.raw_total_tokens,
+			"raw_total_tokens is calibration-independent (for the same inputs)"
 		);
 	}
 
