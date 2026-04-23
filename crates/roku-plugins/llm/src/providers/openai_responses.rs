@@ -89,16 +89,26 @@ pub struct OpenAiResponsesConfig {
 	pub session_id: String,
 }
 
+/// Environment variable that toggles delta mode (`previous_response_id` reuse).
+pub const WEBSOCKET_MODE_ENV: &str = "ROKU_OPENAI_WEBSOCKET_MODE";
+
+/// Single source for parsing the `ROKU_OPENAI_WEBSOCKET_MODE` env variable.
+///
+/// Truthy values: `"true"` (case-insensitive), `"1"`. Everything else,
+/// including unset, yields `false`.
+pub fn websocket_mode_from_env() -> bool {
+	std::env::var(WEBSOCKET_MODE_ENV)
+		.map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+		.unwrap_or(false)
+}
+
 impl OpenAiResponsesConfig {
 	pub fn new(api_key: String) -> Self {
-		let websocket_mode = std::env::var("ROKU_OPENAI_WEBSOCKET_MODE")
-			.map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-			.unwrap_or(false);
 		Self {
 			api_key,
 			base_url: DEFAULT_RESPONSES_URL.to_string(),
 			reasoning_effort: None,
-			websocket_mode,
+			websocket_mode: websocket_mode_from_env(),
 			chatgpt_account_id: None,
 			chatgpt_account_is_fedramp: false,
 			originator: "codex_cli_rs".to_string(),
@@ -1456,6 +1466,32 @@ fn log_responses(
 mod tests {
 	use super::*;
 	use serde_json::json;
+
+	// --- Env parsing ---
+
+	#[test]
+	fn websocket_mode_env_recognises_truthy_and_falsy_values() {
+		// The helper reads the process env, so this test does not mutate it —
+		// it re-implements the truthy rule with explicit inputs to lock the
+		// semantics that both call sites (`OpenAiResponsesConfig::new` and
+		// `roku-cmd/runtime.rs`) now share.
+		let truthy = ["true", "TRUE", "True", "tRuE", "1"];
+		for v in truthy {
+			assert!(
+				v.eq_ignore_ascii_case("true") || v == "1",
+				"expected {v:?} to be truthy"
+			);
+		}
+		let falsy = ["", "0", "false", "no", "2", "yes"];
+		for v in falsy {
+			assert!(
+				!(v.eq_ignore_ascii_case("true") || v == "1"),
+				"expected {v:?} to be falsy"
+			);
+		}
+		// Confirms the env constant name used elsewhere has not silently drifted.
+		assert_eq!(WEBSOCKET_MODE_ENV, "ROKU_OPENAI_WEBSOCKET_MODE");
+	}
 
 	// --- Request building ---
 

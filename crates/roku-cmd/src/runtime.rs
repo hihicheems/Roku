@@ -50,6 +50,7 @@ use roku_plugin_llm::{
 	OpenRouterRuntimeConfig, anthropic_api_key_from_env, build_anthropic_router_with_metrics,
 	build_openai_responses_router_with_metrics, build_openai_router_with_metrics,
 	build_openrouter_router_with_metrics, openai_api_key_from_env, probe_responses_reachability,
+	websocket_mode_from_env,
 };
 use roku_plugin_mcp::{McpConfig, McpConnection, McpTool, mcp_tools_to_catalog_descriptors};
 use roku_plugin_skills::{SkillRegistry, SkillsRuntimeConfig};
@@ -1099,9 +1100,7 @@ fn build_live_llm_routers(
 					api_key,
 					base_url,
 					reasoning_effort: openai.reasoning_effort.clone(),
-					websocket_mode: std::env::var("ROKU_OPENAI_WEBSOCKET_MODE")
-						.map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-						.unwrap_or(false),
+					websocket_mode: websocket_mode_from_env(),
 					chatgpt_account_id,
 					chatgpt_account_is_fedramp,
 					originator: "codex_cli_rs".to_string(),

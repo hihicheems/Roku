@@ -32,7 +32,8 @@ pub use providers::openai::{
 };
 pub use providers::openai_responses::{
 	OpenAiResponsesBootstrapError, OpenAiResponsesConfig, OpenAiResponsesProvider,
-	build_openai_responses_router_with_metrics, probe_responses_reachability,
+	WEBSOCKET_MODE_ENV, build_openai_responses_router_with_metrics, probe_responses_reachability,
+	websocket_mode_from_env,
 };
 pub use providers::openrouter::{
 	OpenRouterBootstrapError, OpenRouterConfig, OpenRouterProvider, OpenRouterRuntimeConfig,
