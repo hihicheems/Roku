@@ -817,7 +817,14 @@ pub fn mid_compact_messages(
 	}
 
 	let summary_text = match session_summary {
-		Some(s) => format!("[Session memory summary]\n{s}"),
+		// Run the Layer 2 summary body through the same sanitizer used for
+		// Layer 1 / Layer 3 digests. Even though the memory read path
+		// already filters by `COMPACT_SUMMARY_SENTINEL`, sanitizing here is
+		// defense-in-depth: if a future writer (or a misbehaving backend)
+		// produces a record whose content reproduces section-header tokens,
+		// those tokens cannot project into a downstream structured-summary
+		// validator or confuse a provider that consumes the message buffer.
+		Some(s) => format!("[Session memory summary]\n{}", sanitize_embedded_content(s)),
 		None => format!(
 			"[Mid-tier context collapse — {} messages compacted]\n{}",
 			discarded.len(),

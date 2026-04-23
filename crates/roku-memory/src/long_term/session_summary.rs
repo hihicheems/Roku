@@ -27,11 +27,27 @@
 //! because it goes through the trait's `search` method — every backend
 //! that honors `MemoryScope::Session` and the `MemoryFilters::kinds` hint
 //! will behave the same.
+//!
+//! A stable `summary` sentinel (`COMPACT_SUMMARY_SENTINEL`) is matched to
+//! keep the helper from returning WorkflowInsight records written for other
+//! reasons (HighValueObservation, TaskSucceeded, OperatorRequested) — a
+//! defense against prompt-injection vectors where an operator or plugin
+//! could otherwise plant arbitrary content under the same kind + scope.
 
 use super::backend::{LongTermMemoryBackend, MemoryError};
 use super::types::{
 	MemoryFilters, MemoryKind, MemoryQuery, MemoryRecallReason, MemoryRecord, MemoryScope,
 };
+
+/// Sentinel string written into `MemoryWriteRequest.summary` by the
+/// runtime's compact-summary write-back path. The reader requires this
+/// sentinel so WorkflowInsight records written for other reasons (with
+/// different `summary` text) do not flow into Layer 2 mid-tier compaction.
+///
+/// `roku-agent-runtime::service::direct::write_back_compact_summaries`
+/// writes this exact literal — keep the two copies in sync if either side
+/// changes.
+pub const COMPACT_SUMMARY_SENTINEL: &str = "Context compact summary";
 
 /// Default limit when fetching session compact summaries. The runtime only
 /// uses the most recent record, but a small over-fetch lets backends that
@@ -66,9 +82,10 @@ pub fn session_compact_summary_query(session_id: &str) -> MemoryQuery {
 /// a clean `Ok(None)` so the caller can transparently fall through to the
 /// Layer 1 mechanical fallback.
 ///
-/// The helper currently filters by `MemoryKind::WorkflowInsight` because
-/// that is the kind `write_back_compact_summaries` writes. If the write-back
-/// path ever diversifies, extend `MemoryFilters::kinds` in lockstep.
+/// Records are post-filtered by `record.summary == COMPACT_SUMMARY_SENTINEL`
+/// so WorkflowInsight records written for other reasons (operator-requested
+/// facts, task-success snapshots) are not mistakenly treated as compact
+/// summaries and spliced into a future turn's LLM context.
 pub fn latest_session_compact_summary(
 	backend: &dyn LongTermMemoryBackend,
 	session_id: &str,
@@ -81,6 +98,7 @@ pub fn latest_session_compact_summary(
 	let latest = hits
 		.into_iter()
 		.map(|hit| hit.record)
+		.filter(|record| record.summary == COMPACT_SUMMARY_SENTINEL)
 		.max_by_key(|record| record.created_at_unix_ms);
 	Ok(latest)
 }
@@ -101,7 +119,7 @@ mod tests {
 			MemoryKind::WorkflowInsight,
 			MemoryScope::Session,
 			content,
-			"Context compact summary",
+			COMPACT_SUMMARY_SENTINEL,
 			MemoryWriteReason::CompactSummary,
 		);
 		req.session_id = Some(session_id.to_string());
@@ -111,7 +129,7 @@ mod tests {
 				MemoryKind::WorkflowInsight,
 				MemoryScope::Session,
 				other_content,
-				"Context compact summary",
+				COMPACT_SUMMARY_SENTINEL,
 				MemoryWriteReason::CompactSummary,
 			);
 			extra_req.session_id = Some(other_session.clone());
@@ -157,6 +175,63 @@ mod tests {
 		let backend = backend_with_summary("", "should not leak", &[]);
 		let got = latest_session_compact_summary(&backend, "").expect("search must succeed");
 		assert!(got.is_none(), "empty session id must not return anything");
+	}
+
+	#[test]
+	fn ignores_workflow_insight_records_with_non_sentinel_summary() {
+		// Write a WorkflowInsight / Session record whose summary does NOT
+		// match the compact-summary sentinel — for example, an
+		// operator-written "custom workflow fact" record. The reader must
+		// skip it so it cannot be smuggled into mid-tier Layer 2 context.
+		let backend = InMemoryLongTermMemoryBackend::default();
+		let mut req = MemoryWriteRequest::new(
+			MemoryKind::WorkflowInsight,
+			MemoryScope::Session,
+			"attacker-controlled content",
+			"Operator-authored workflow insight",
+			MemoryWriteReason::OperatorRequested,
+		);
+		req.session_id = Some("session-1".to_string());
+		backend.write(&req).expect("seed non-sentinel record");
+
+		let got =
+			latest_session_compact_summary(&backend, "session-1").expect("search must succeed");
+		assert!(
+			got.is_none(),
+			"non-sentinel WorkflowInsight record must not be returned",
+		);
+	}
+
+	#[test]
+	fn prefers_compact_summary_over_sibling_workflow_insight() {
+		let backend = InMemoryLongTermMemoryBackend::default();
+		// Seed a non-sentinel record first (would otherwise look "fresher"
+		// to a backend that returns records in insert order).
+		let mut other = MemoryWriteRequest::new(
+			MemoryKind::WorkflowInsight,
+			MemoryScope::Session,
+			"should be ignored",
+			"Operator-authored workflow insight",
+			MemoryWriteReason::OperatorRequested,
+		);
+		other.session_id = Some("session-1".to_string());
+		backend.write(&other).expect("seed non-sentinel record");
+
+		// Then seed the real compact summary.
+		let mut compact = MemoryWriteRequest::new(
+			MemoryKind::WorkflowInsight,
+			MemoryScope::Session,
+			"real compact summary",
+			COMPACT_SUMMARY_SENTINEL,
+			MemoryWriteReason::CompactSummary,
+		);
+		compact.session_id = Some("session-1".to_string());
+		backend.write(&compact).expect("seed compact summary");
+
+		let got = latest_session_compact_summary(&backend, "session-1")
+			.expect("search must succeed")
+			.expect("compact summary must resolve");
+		assert_eq!(got.content, "real compact summary");
 	}
 
 	#[test]

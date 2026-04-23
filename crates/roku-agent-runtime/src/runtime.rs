@@ -3339,7 +3339,7 @@ mod tests {
 			roku_memory::MemoryKind::WorkflowInsight,
 			roku_memory::MemoryScope::Session,
 			"leaked",
-			"Context compact summary",
+			roku_memory::COMPACT_SUMMARY_SENTINEL,
 			roku_memory::MemoryWriteReason::CompactSummary,
 		);
 		req.session_id = Some("some-session".to_string());
@@ -3358,7 +3358,7 @@ mod tests {
 			roku_memory::MemoryKind::WorkflowInsight,
 			roku_memory::MemoryScope::Session,
 			"session X summary body",
-			"Context compact summary",
+			roku_memory::COMPACT_SUMMARY_SENTINEL,
 			roku_memory::MemoryWriteReason::CompactSummary,
 		);
 		req.session_id = Some("session-X".to_string());

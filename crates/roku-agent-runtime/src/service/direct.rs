@@ -89,7 +89,7 @@ impl RuntimeService {
 			roku_memory::MemoryKind::WorkflowInsight,
 			roku_memory::MemoryScope::Session,
 			&loop_state.working_summary,
-			"Context compact summary",
+			roku_memory::COMPACT_SUMMARY_SENTINEL,
 			roku_memory::MemoryWriteReason::CompactSummary,
 		);
 		let mut write_request = write_request;
