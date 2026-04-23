@@ -2533,6 +2533,13 @@ impl GenericAgentRuntime {
 					);
 					if freed > 0 {
 						loop_state.cache_break_detector.notify_compaction();
+						// Mirror the pre-flight microcompact at the top of
+						// the attempt loop: replacing tool-result bodies
+						// with short placeholders shrinks the committed
+						// prefix below what `last_observed_input_tokens`
+						// priced, so the baseline no longer matches the
+						// message buffer about to be sent.
+						loop_state.invalidate_committed_baseline();
 						if let Some(sender) = event_sender {
 							let _ = sender.send(crate::runtime_loop::LoopEvent::MicrocompactRan {
 								step: current_step_index,
