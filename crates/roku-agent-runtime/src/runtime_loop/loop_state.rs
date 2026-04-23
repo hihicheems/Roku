@@ -198,17 +198,27 @@ pub struct LoopState {
 	/// Not serialized — a freshly restored loop starts with an empty store.
 	#[serde(skip)]
 	pub(crate) tool_result_store: ToolResultStore,
-	/// Per-run flag set when Layer 2 mid-tier compaction has already
-	/// consumed the session-keyed compact summary. Subsequent mid-water
-	/// triggers in the same run fall back to Layer 1 (mechanical collapse)
-	/// so the same frozen summary is not re-spliced into the conversation
-	/// every turn the buffer grows past the threshold — repeated splicing
-	/// would increasingly over-represent the older digest relative to the
-	/// turn's fresh material. Persisted across checkpoint round-trips so
-	/// the one-Layer-2-per-run invariant holds even when a run is paused
-	/// and resumed.
+	/// Per-run flag set on the first Layer 2 lookup attempt this run,
+	/// regardless of whether the backend returned a summary. Subsequent
+	/// mid-water triggers in the same run therefore skip the memory query
+	/// and fall back to Layer 1 (mechanical collapse).
+	///
+	/// Two invariants motivate this:
+	///
+	/// - **At-most-one Layer 2 per run.** A stored compact summary is
+	///   end-of-run material; re-splicing the same frozen digest on every
+	///   subsequent mid-water trigger over-represents the older content
+	///   relative to each turn's fresh material without adding new signal.
+	/// - **Cache the miss.** `write_back_compact_summaries` only persists a
+	///   summary at end-of-run, so a lookup that misses now will still miss
+	///   on the next trigger within the same run — repeated queries only
+	///   add backend latency. Setting the flag on *attempt* (not only on a
+	///   Layer 2 outcome) caches the miss for the remainder of the run.
+	///
+	/// Persisted across checkpoint round-trips via `#[serde(default)]` so
+	/// the invariant holds even when a run is paused and resumed.
 	#[serde(default)]
-	pub(crate) layer2_consumed_this_run: bool,
+	pub(crate) layer2_lookup_attempted_this_run: bool,
 }
 
 /// Maximum allowed consecutive Layer 3 structured-summary failures before
@@ -262,7 +272,7 @@ impl LoopState {
 			cache_break_detector: CacheBreakDetector::default(),
 			deferred_tools: None,
 			tool_result_store: ToolResultStore::default(),
-			layer2_consumed_this_run: false,
+			layer2_lookup_attempted_this_run: false,
 		}
 	}
 
@@ -679,22 +689,23 @@ mod tests {
 	}
 
 	#[test]
-	fn layer2_consumed_this_run_roundtrips_through_checkpoint_serde() {
+	fn layer2_lookup_attempted_this_run_roundtrips_through_checkpoint_serde() {
 		// Lock the `#[serde(default)]` contract on
-		// `layer2_consumed_this_run`: the flag must survive a JSON
-		// round-trip so a run that consumed its compact summary before a
-		// checkpoint does not re-consume it after restore (which would
-		// break the one-Layer-2-per-run invariant).
+		// `layer2_lookup_attempted_this_run`: the flag must survive a JSON
+		// round-trip so a run that already attempted the Layer 2 lookup
+		// before a checkpoint does not re-attempt it after restore (which
+		// would break both the one-Layer-2-per-run invariant and the
+		// cache-the-miss invariant).
 		let mut state = LoopState::new("loop-layer2-flag", &loop_context());
 		assert!(
-			!state.layer2_consumed_this_run,
+			!state.layer2_lookup_attempted_this_run,
 			"fresh LoopState must start with the flag cleared",
 		);
-		state.layer2_consumed_this_run = true;
+		state.layer2_lookup_attempted_this_run = true;
 		let json = serde_json::to_string(&state).expect("serialize");
 		let restored: LoopState = serde_json::from_str(&json).expect("deserialize");
 		assert!(
-			restored.layer2_consumed_this_run,
+			restored.layer2_lookup_attempted_this_run,
 			"flag must survive a JSON round-trip (persisted across checkpoints)",
 		);
 	}
