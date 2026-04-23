@@ -778,6 +778,7 @@ impl GenericAgentRuntime {
 		event_sender: Option<&crate::runtime_loop::LoopEventSender>,
 		system_prompt: &str,
 		tool_schema_bytes: Option<&[u8]>,
+		estimator_selection_request: Option<&GenerationRequest>,
 	) -> (u64, u64) {
 		// Truncate oversized tool results in messages.
 		let tool_result_max_chars = self.agent_runtime_config.r#loop.working_summary_max_chars;
@@ -807,10 +808,18 @@ impl GenericAgentRuntime {
 				loop_state,
 				self.agent_runtime_config.r#loop.context_window_tokens,
 			);
+			// Use the route-aware preview method when the caller threaded a
+			// selection request through (end-of-turn rebuild case); otherwise
+			// fall back to the priority-based variant. Matches the pre-flight
+			// path's provider pick so both estimator snapshots in the same
+			// turn agree on the wire format.
 			let wire_bytes = self
 				.execution_router
 				.as_ref()
-				.map(|r| r.preview_wire_tool_schema_bytes(None, &effective))
+				.map(|r| match estimator_selection_request {
+					Some(sel) => r.preview_wire_tool_schema_bytes_for_request(sel, &effective),
+					None => r.preview_wire_tool_schema_bytes(None, &effective),
+				})
 				.unwrap_or_else(|| serde_json::to_vec(&effective).unwrap_or_default());
 			if wire_bytes.is_empty() {
 				None
@@ -1108,16 +1117,52 @@ impl GenericAgentRuntime {
 			// the `tool_search` pseudo-tool has replaced most schemas and
 			// silently walk the calibration scale in the wrong direction.
 			//
-			// Routed through `LlmRouter::preview_wire_tool_schema_bytes` so
-			// the estimator sees the provider-specific wire format (OpenAI
-			// Chat Completions and Responses wrap each entry in
+			// Routed through `LlmRouter::preview_wire_tool_schema_bytes_for_request`
+			// so the estimator sees the provider-specific wire format chosen by
+			// the router's real `select_model` policy — not a priority-based
+			// approximation. On multi-provider routers this matters whenever
+			// `model_override`, risk-tier filtering, or cost ordering would
+			// pick a different provider than the highest-priority one
+			// (OpenAI Chat Completions and Responses wrap each entry in
 			// `{"type":"function",...}`, Anthropic uses `input_schema` instead
-			// of `parameters`, etc.). This removes the small provider-specific
-			// byte bias that used to walk into the calibration scale.
+			// of `parameters`, etc.).
+			//
+			// This selection request mirrors the fields `select_model` reads
+			// (`model_override`, `preferred_provider`, `risk_tier`, budgets,
+			// and the message / system sizes used for context-window checks).
+			// `system_prompt` is not yet built at this point; omitting it
+			// undercounts the system-side tokens by at most a few hundred, well
+			// inside every model's context budget — `select_model`'s provider
+			// pick is not affected in practice.
+			let estimator_selection_request = GenerationRequest {
+				system_prompt: None,
+				prompt: String::new(),
+				messages: Some(messages.clone()),
+				expected_output_tokens: self.agent_runtime_config.next_step.expected_output_tokens,
+				risk_tier: RiskTier::Low,
+				preferred_provider: None,
+				budget_tokens_remaining: self
+					.agent_runtime_config
+					.next_step
+					.budget_tokens_remaining,
+				budget_cost_remaining_usd: self
+					.agent_runtime_config
+					.next_step
+					.budget_cost_remaining_usd,
+				tools: None,
+				model_override: request.model_override.clone(),
+				thinking_effort: None,
+				system_prompt_sections: None,
+			};
 			let tool_schema_bytes_vec = self
 				.execution_router
 				.as_ref()
-				.map(|r| r.preview_wire_tool_schema_bytes(None, &tool_definitions))
+				.map(|r| {
+					r.preview_wire_tool_schema_bytes_for_request(
+						&estimator_selection_request,
+						&tool_definitions,
+					)
+				})
 				.unwrap_or_else(|| serde_json::to_vec(&tool_definitions).unwrap_or_default());
 			let tool_schema_bytes: Option<&[u8]> = if tool_schema_bytes_vec.is_empty() {
 				None
@@ -2337,6 +2382,7 @@ impl GenericAgentRuntime {
 					event_sender,
 					&system_prompt,
 					tool_schema_bytes,
+					Some(&estimator_selection_request),
 				)
 				.await;
 			if compact_pt > 0 || compact_ot > 0 {

@@ -739,6 +739,13 @@ impl LlmRouter {
 	/// provider is registered at all, returns the Roku-internal canonical form
 	/// (this preserves existing behavior for the estimator call sites that
 	/// predate the per-provider override).
+	///
+	/// Prefer [`Self::preview_wire_tool_schema_bytes_for_request`] when the
+	/// caller can construct (or has) a `GenerationRequest`: it routes via the
+	/// same `select_model` logic the real `generate` call uses, so the
+	/// estimator sees the provider that will actually serve this request
+	/// — not a priority-based approximation that can disagree when
+	/// eligibility filters kick in.
 	pub fn preview_wire_tool_schema_bytes(
 		&self,
 		model_id: Option<&str>,
@@ -757,6 +764,33 @@ impl LlmRouter {
 			.map(|m| m.provider.as_str());
 		match provider_name.and_then(|name| self.providers.get(name)) {
 			Some(p) => p.provider.preview_wire_tool_schema_bytes(definitions),
+			None => serde_json::to_vec(definitions).unwrap_or_default(),
+		}
+	}
+
+	/// Same as [`Self::preview_wire_tool_schema_bytes`] but resolves the
+	/// target provider by running the full `select_model` policy against
+	/// `request`. This is the preferred call for the runtime's pre-flight
+	/// estimator because it matches what `generate` / `generate_streaming`
+	/// would actually route the request to — `model_override` eligibility,
+	/// risk-tier filtering, and cost / latency ordering all come into play.
+	///
+	/// If the request is ineligible for every registered model, or the
+	/// matched provider is not registered, returns the Roku-internal
+	/// canonical form so the estimator still produces a sensible value
+	/// instead of panicking or zero-ing out.
+	pub fn preview_wire_tool_schema_bytes_for_request(
+		&self,
+		request: &GenerationRequest,
+		definitions: &[ToolDefinition],
+	) -> Vec<u8> {
+		match self.select_model(request).ok() {
+			Some(model) => match self.providers.get(&model.provider) {
+				Some(registered) => registered
+					.provider
+					.preview_wire_tool_schema_bytes(definitions),
+				None => serde_json::to_vec(definitions).unwrap_or_default(),
+			},
 			None => serde_json::to_vec(definitions).unwrap_or_default(),
 		}
 	}
@@ -905,8 +939,8 @@ mod tests {
 	use roku_common_types::Metrics;
 
 	use crate::types::{
-		GenerationRequest, ModelProfile, ProviderCallError, ProviderResiliencePolicy,
-		ProviderResponse, RiskTier, RoutingPolicy,
+		GenerationRequest, Message, ModelProfile, ProviderCallError, ProviderResiliencePolicy,
+		ProviderResponse, RiskTier, RoutingPolicy, ToolDefinition,
 	};
 
 	use super::*;
@@ -1080,6 +1114,140 @@ mod tests {
 			.expect("generation should succeed");
 		assert_eq!(response.provider, "provider-a");
 		assert_eq!(response.model_id, "a-lite");
+	}
+
+	#[test]
+	fn preview_wire_bytes_for_request_routes_to_select_model_not_max_priority() {
+		// Two providers registered. `priority-tag-provider` has the higher
+		// `route_priority` — the priority-based `preview_wire_tool_schema_bytes(None, ...)`
+		// picks it. `eligible-tag-provider` has a lower priority but cheaper
+		// cost, so a request with a tight cost budget excludes the
+		// high-priority model at `select_model` time and must route to the
+		// eligible one.
+		//
+		// The two providers emit distinguishable wire bytes via their
+		// `preview_wire_tool_schema_bytes` override; the test asserts that
+		// `preview_wire_tool_schema_bytes_for_request` tracks the real
+		// `select_model` pick rather than the priority max.
+
+		struct TaggedProvider {
+			name: &'static str,
+			tag: &'static [u8],
+		}
+
+		#[async_trait]
+		impl LlmProvider for TaggedProvider {
+			fn provider_name(&self) -> &'static str {
+				self.name
+			}
+
+			async fn complete(
+				&self,
+				_model: &ModelProfile,
+				_request: &GenerationRequest,
+			) -> Result<ProviderResponse, ProviderCallError> {
+				unreachable!("TaggedProvider is only used for schema-preview tests")
+			}
+
+			fn preview_wire_tool_schema_bytes(&self, _definitions: &[ToolDefinition]) -> Vec<u8> {
+				self.tag.to_vec()
+			}
+		}
+
+		let mut router = LlmRouter::new(RoutingPolicy {
+			max_request_cost_usd: 10.0,
+			max_latency_ms: 10_000,
+		});
+		router.register_provider(TaggedProvider {
+			name: "priority-tag-provider",
+			tag: b"PRIORITY",
+		});
+		router.register_provider(TaggedProvider {
+			name: "eligible-tag-provider",
+			tag: b"ELIGIBLE",
+		});
+		// High priority, high cost.
+		router.register_model(ModelProfile {
+			model_id: "priority-model".to_string(),
+			provider: "priority-tag-provider".to_string(),
+			max_context_tokens: 8_000,
+			cost_per_1k_tokens_usd: 5.0,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		});
+		// Low priority, low cost.
+		router.register_model(ModelProfile {
+			model_id: "eligible-model".to_string(),
+			provider: "eligible-tag-provider".to_string(),
+			max_context_tokens: 8_000,
+			cost_per_1k_tokens_usd: 0.01,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 1,
+		});
+
+		let defs = vec![ToolDefinition {
+			name: "tool-a".to_string(),
+			description: "desc".to_string(),
+			parameters: serde_json::json!({"type": "object"}),
+		}];
+
+		// Baseline: priority-based API picks the highest `route_priority` →
+		// PRIORITY bytes.
+		let priority_bytes = router.preview_wire_tool_schema_bytes(None, &defs);
+		assert_eq!(
+			priority_bytes, b"PRIORITY",
+			"priority-based lookup picks the max-priority provider"
+		);
+
+		// Now build a request whose cost budget excludes the high-priority
+		// model but leaves the eligible one. Approx prompt+output ≈ 300
+		// tokens; at $5/1k that's ~$1.5 for `priority-model` and ~$0.003
+		// for `eligible-model`. A budget of $0.01 rejects the former and
+		// admits the latter, forcing `select_model` to pick against
+		// max-priority.
+		let tight_request = GenerationRequest {
+			system_prompt: None,
+			prompt: String::new(),
+			messages: Some(vec![Message::User {
+				content: "tiny".to_string(),
+			}]),
+			expected_output_tokens: 300,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: 4_000,
+			budget_cost_remaining_usd: 0.01,
+			tools: None,
+			model_override: None,
+			thinking_effort: None,
+			system_prompt_sections: None,
+		};
+		let routed_bytes = router.preview_wire_tool_schema_bytes_for_request(&tight_request, &defs);
+		assert_eq!(
+			routed_bytes, b"ELIGIBLE",
+			"select_model routes around the priority-max when budget excludes it; \
+			 preview_wire_tool_schema_bytes_for_request must follow that pick"
+		);
+		assert_ne!(
+			priority_bytes, routed_bytes,
+			"route-aware and priority-based previews must disagree under \
+			 this scenario — otherwise the test is not exercising the bug",
+		);
+
+		// And: `model_override` explicitly selects priority-model.
+		// `select_model` still applies `supports(request)`, so the override
+		// only wins when the model actually fits the budget — use a loose
+		// request here to verify the override-hits-priority path.
+		let override_request = GenerationRequest {
+			model_override: Some("priority-model".to_string()),
+			budget_cost_remaining_usd: 5.0,
+			..tight_request.clone()
+		};
+		let override_bytes =
+			router.preview_wire_tool_schema_bytes_for_request(&override_request, &defs);
+		assert_eq!(
+			override_bytes, b"PRIORITY",
+			"explicit model_override must route to that model's provider"
+		);
 	}
 
 	#[test]
