@@ -1023,6 +1023,20 @@ impl GenericAgentRuntime {
 						}
 					}
 				}
+				// Seed working_summary + CompactBoundary from the messages-level
+				// structured summary when the history-level compact skipped
+				// (history.len() <= retain_tail_steps). Without this,
+				// `write_back_compact_summaries` would never persist a compact
+				// summary for sessions whose message buffer is the bottleneck
+				// but whose step count stays small — and Layer 2 reuse on
+				// resume would find no memory record to splice.
+				if let Some(summary_text) = outcome.summary_text.as_ref() {
+					crate::runtime_loop::seed_compact_summary_if_missing(
+						loop_state,
+						outcome.discarded_count,
+						summary_text,
+					);
+				}
 				compact_tokens = (outcome.prompt_tokens, outcome.output_tokens);
 			}
 			_ => {

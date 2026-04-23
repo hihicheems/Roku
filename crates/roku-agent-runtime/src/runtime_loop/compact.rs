@@ -262,6 +262,40 @@ fn truncate(text: &str, max_chars: usize) -> String {
 	}
 }
 
+/// Seed `state.working_summary` and push a synthetic `CompactBoundary` record
+/// when history-level compaction skipped (history too short) but a
+/// messages-level compaction just produced a summary.
+///
+/// Without this, sessions whose message buffer grows past the compact
+/// threshold while the step count stays below `retain_tail_steps` never
+/// accumulate anything in `working_summary`, so
+/// [`crate::service::RuntimeService::write_back_compact_summaries`] skips
+/// persisting a compact summary and Layer 2 session-summary reuse on the
+/// next run finds nothing to splice.
+///
+/// No-op when `state.working_summary` is already populated (the history-level
+/// path ran) — the existing `apply_compact_state` write stays authoritative.
+pub(crate) fn seed_compact_summary_if_missing(
+	state: &mut LoopState,
+	messages_discarded_count: usize,
+	summary_text: &str,
+) {
+	if !state.working_summary.is_empty() {
+		return;
+	}
+	let summary_preview = truncate(summary_text, 200);
+	let boundary = super::StepRecord::compact_boundary(
+		state.step_index,
+		messages_discarded_count,
+		&summary_preview,
+		state.remaining_step_budget,
+		state.remaining_recovery_budget,
+		&state.working_directory,
+	);
+	state.history.insert(0, boundary);
+	state.working_summary = summary_text.to_string();
+}
+
 // ---------------------------------------------------------------------------
 // Message-level compaction (operates on Vec<Message>)
 // ---------------------------------------------------------------------------
@@ -935,6 +969,12 @@ pub struct StructuredCompactOutcome {
 	/// stripped before the mechanical digest was built. `0` when no thinking
 	/// blocks were present in the discarded messages.
 	pub thinking_stripped: u32,
+	/// Summary text inserted back into `messages` (LLM-produced or mechanical
+	/// fallback). `None` only when nothing was compacted. Callers can seed
+	/// `loop_state.working_summary` from this when history-level compaction
+	/// did not run, so [`crate::service::RuntimeService::write_back_compact_summaries`]
+	/// still persists a summary for Layer 2 session-summary reuse.
+	pub summary_text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -960,6 +1000,7 @@ impl StructuredCompactOutcome {
 			discarded_count: 0,
 			error: None,
 			thinking_stripped: 0,
+			summary_text: None,
 		}
 	}
 }
@@ -1043,6 +1084,7 @@ pub async fn compact_messages_with_structured_summary(
 						);
 					});
 					let fallback = summarize_discarded_messages(&original_discarded);
+					let summary_text = fallback.clone();
 					messages.insert(
 						1,
 						Message::User {
@@ -1057,8 +1099,10 @@ pub async fn compact_messages_with_structured_summary(
 						discarded_count: original_discarded_len,
 						error: Some(StructuredCompactError::ProviderFailure),
 						thinking_stripped,
+						summary_text: Some(summary_text),
 					};
 				} else {
+					let summary_text = extract_summary_text(&replaced);
 					// Insert back into messages at position 1 (after system message).
 					for (i, msg) in replaced.drain(..).enumerate() {
 						messages.insert(1 + i, msg);
@@ -1071,6 +1115,7 @@ pub async fn compact_messages_with_structured_summary(
 						discarded_count: original_discarded_len,
 						error: None,
 						thinking_stripped,
+						summary_text,
 					};
 				}
 			}
@@ -1087,6 +1132,7 @@ pub async fn compact_messages_with_structured_summary(
 					);
 				});
 				let fallback = summarize_discarded_messages(&original_discarded);
+				let summary_text = fallback.clone();
 				messages.insert(
 					1,
 					Message::User {
@@ -1101,6 +1147,7 @@ pub async fn compact_messages_with_structured_summary(
 					discarded_count: original_discarded_len,
 					error: Some(StructuredCompactError::ProviderFailure),
 					thinking_stripped,
+					summary_text: Some(summary_text),
 				};
 			}
 			None => {
@@ -1187,6 +1234,7 @@ pub async fn compact_messages_with_structured_summary(
 		}
 	};
 
+	let summary_text = Some(summary_body.clone());
 	messages.insert(
 		1,
 		Message::User {
@@ -1202,7 +1250,39 @@ pub async fn compact_messages_with_structured_summary(
 		discarded_count: original_discarded_len,
 		error,
 		thinking_stripped,
+		summary_text,
 	}
+}
+
+/// Extract a plain-text summary body from the `Vec<Message>` returned by a
+/// remote `/compact` endpoint. Concatenates the textual content of each message
+/// (User `content`, Assistant `text`, ToolResult `content`) with newline
+/// separators and strips a leading `[Conversation summary]\n` marker if the
+/// provider already added one, so downstream persistence sees the same clean
+/// body the local LLM summarizer path produces. Returns `None` when the
+/// messages contain no text (defensive — in practice the remote backend
+/// always returns at least one User message).
+fn extract_summary_text(messages: &[Message]) -> Option<String> {
+	let mut pieces: Vec<&str> = Vec::with_capacity(messages.len());
+	for msg in messages {
+		let text = match msg {
+			Message::User { content } => content.as_str(),
+			Message::Assistant { text, .. } => text.as_str(),
+			Message::ToolResult { content, .. } => content.as_str(),
+		};
+		if !text.is_empty() {
+			pieces.push(text);
+		}
+	}
+	if pieces.is_empty() {
+		return None;
+	}
+	let mut joined = pieces.join("\n");
+	const MARKER: &str = "[Conversation summary]\n";
+	if let Some(rest) = joined.strip_prefix(MARKER) {
+		joined = rest.to_string();
+	}
+	Some(joined)
 }
 
 fn build_structured_summary_prompt(mechanical_digest: &str) -> String {
@@ -1626,6 +1706,89 @@ mod tests {
 		);
 		let raw = boundary.raw_tool_output.as_ref().unwrap();
 		assert_eq!(raw["discarded_count"], 4);
+	}
+
+	#[test]
+	fn seed_compact_summary_if_missing_populates_empty_working_summary_and_inserts_boundary() {
+		let mut state = minimal_loop_state();
+		for i in 1..=3 {
+			state.record_step(sample_step(i, 10 - i));
+		}
+		assert!(state.working_summary.is_empty());
+		assert!(
+			!state
+				.history
+				.iter()
+				.any(|step| step.action == crate::runtime_loop::StepAction::CompactBoundary)
+		);
+
+		seed_compact_summary_if_missing(
+			&mut state,
+			5,
+			"Goal: rebuild context\nAccomplished: - compacted 5 messages",
+		);
+
+		assert_eq!(
+			state.working_summary, "Goal: rebuild context\nAccomplished: - compacted 5 messages",
+			"working_summary must hold the provided text verbatim"
+		);
+		let boundary = &state.history[0];
+		assert_eq!(
+			boundary.action,
+			crate::runtime_loop::StepAction::CompactBoundary,
+			"a synthetic CompactBoundary must be inserted at index 0"
+		);
+		let raw = boundary.raw_tool_output.as_ref().unwrap();
+		assert_eq!(raw["discarded_count"], 5);
+	}
+
+	#[test]
+	fn extract_summary_text_strips_conversation_summary_marker_and_joins_messages() {
+		use roku_plugin_llm::Message;
+		let messages = vec![Message::User {
+			content: "[Conversation summary]\nGoal: X\nAccomplished: -".to_string(),
+		}];
+		let out = extract_summary_text(&messages).expect("summary text present");
+		assert_eq!(out, "Goal: X\nAccomplished: -");
+
+		let multi = vec![
+			Message::User {
+				content: "first".to_string(),
+			},
+			Message::Assistant {
+				text: "second".to_string(),
+				tool_calls: vec![],
+			},
+		];
+		let out = extract_summary_text(&multi).expect("summary text present");
+		assert_eq!(out, "first\nsecond");
+
+		let empty: Vec<Message> = vec![Message::User {
+			content: "".to_string(),
+		}];
+		assert!(
+			extract_summary_text(&empty).is_none(),
+			"empty content must yield None"
+		);
+	}
+
+	#[test]
+	fn seed_compact_summary_if_missing_is_noop_when_working_summary_already_populated() {
+		let mut state = minimal_loop_state();
+		state.working_summary = "pre-existing summary".to_string();
+		let history_len_before = state.history.len();
+
+		seed_compact_summary_if_missing(&mut state, 7, "new summary body");
+
+		assert_eq!(
+			state.working_summary, "pre-existing summary",
+			"must not overwrite an existing working_summary"
+		);
+		assert_eq!(
+			state.history.len(),
+			history_len_before,
+			"must not push an extra CompactBoundary when the history-level compact already ran"
+		);
 	}
 
 	// --- Integration: compact reduces estimated tokens ---

@@ -41,6 +41,7 @@ pub use approval::{
 };
 pub(crate) use ask_user::effective_ask_user_payload;
 pub use ask_user::{AskUserPayload, AskUserResumeContract, AskUserResumeDirective};
+pub(crate) use compact::seed_compact_summary_if_missing;
 pub use compact::{
 	CompactConfig, MICROCOMPACT_RETAIN_RECENT, MID_WATER_TRIGGER_RATIO, MidCompactOutcome,
 	PER_TURN_TOOL_BUDGET_TOKENS, compact_history, compact_history_with_llm, compact_messages,
