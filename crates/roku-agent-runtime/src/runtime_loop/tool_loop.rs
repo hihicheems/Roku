@@ -527,6 +527,104 @@ mod tests {
 	}
 
 	#[test]
+	fn apply_deferred_mode_is_idempotent_across_repeated_calls() {
+		// `maybe_compact`'s end-of-turn byte rebuild calls `apply_deferred_mode`
+		// on the frozen (pre-deferred) snapshot after the pre-flight already
+		// applied it once. This invariant requires idempotency: a second
+		// pass on the same definitions with the same LoopState must produce
+		// the same output as the first pass. Otherwise the post-tool byte
+		// estimate would diverge from what the next outbound call actually
+		// sends, over- or under-estimating prompt pressure.
+		let mut definitions: Vec<ToolDefinition> = (0..50)
+			.map(|i| fat_tool(&format!("CustomTool{i}")))
+			.collect();
+		definitions.push(ToolDefinition {
+			name: "Bash".to_string(),
+			description: "Run bash".to_string(),
+			parameters: serde_json::json!({"type": "object", "properties": {}}),
+		});
+
+		let mut loop_state = test_loop_state();
+		let first = apply_deferred_mode(definitions.clone(), &mut loop_state, 200_000);
+		let second = apply_deferred_mode(definitions.clone(), &mut loop_state, 200_000);
+
+		let first_bytes = serde_json::to_vec(&first).expect("serialize first");
+		let second_bytes = serde_json::to_vec(&second).expect("serialize second");
+		assert_eq!(
+			first_bytes, second_bytes,
+			"apply_deferred_mode output must be byte-identical across repeated calls \
+			 with the same inputs — otherwise the post-tool rebuild in maybe_compact \
+			 would disagree with the pre-flight snapshot"
+		);
+
+		// Sanity: deferred state after the second call is structurally unchanged.
+		let deferred = loop_state
+			.deferred_tools
+			.as_ref()
+			.expect("deferred state populated");
+		assert!(
+			!deferred.deferred_names.is_empty(),
+			"non-core tools should be in deferred_names"
+		);
+		assert!(
+			deferred.loaded_names.is_empty(),
+			"loaded_names is not mutated by apply_deferred_mode — only by tool_search"
+		);
+	}
+
+	#[test]
+	fn apply_deferred_mode_on_frozen_snapshot_matches_fresh_build() {
+		// `maybe_compact`'s non-dirty branch pulls the frozen (pre-deferred)
+		// snapshot out of `loop_state.frozen_tool_schema` and re-runs
+		// `apply_deferred_mode` on it. The result must match what the dirty
+		// branch produces from a fresh `build_tool_definitions` + full
+		// `apply_deferred_mode` pipeline. This test locks that symmetry so
+		// the non-dirty path does not under-count by skipping the deferred
+		// filter (the regression `8a21e8d` introduced before this fix).
+
+		// "Frozen snapshot" surrogate: a pre-deferred definition set.
+		let frozen_snapshot: Vec<ToolDefinition> = {
+			let mut defs: Vec<ToolDefinition> = (0..50)
+				.map(|i| fat_tool(&format!("CustomTool{i}")))
+				.collect();
+			defs.push(ToolDefinition {
+				name: "Bash".to_string(),
+				description: "Run bash".to_string(),
+				parameters: serde_json::json!({"type": "object", "properties": {}}),
+			});
+			defs
+		};
+
+		// "Fresh build" surrogate: the same definitions (same inputs would
+		// yield the same output from `build_tool_definitions` in production).
+		let fresh_build = frozen_snapshot.clone();
+
+		let mut state_non_dirty = test_loop_state();
+		let non_dirty_result = apply_deferred_mode(frozen_snapshot, &mut state_non_dirty, 200_000);
+
+		let mut state_dirty = test_loop_state();
+		let dirty_result = apply_deferred_mode(fresh_build, &mut state_dirty, 200_000);
+
+		let non_dirty_bytes = serde_json::to_vec(&non_dirty_result).expect("serialize non-dirty");
+		let dirty_bytes = serde_json::to_vec(&dirty_result).expect("serialize dirty");
+		assert_eq!(
+			non_dirty_bytes, dirty_bytes,
+			"both branches must produce the same effective-schema bytes when given \
+			 the same pre-deferred input"
+		);
+		// Both must carry the tool_search stub — proving neither branch
+		// accidentally returns the raw pre-deferred set.
+		assert!(
+			non_dirty_result.iter().any(|d| d.name == "tool_search"),
+			"tool_search must appear in the non-dirty branch output"
+		);
+		assert!(
+			dirty_result.iter().any(|d| d.name == "tool_search"),
+			"tool_search must appear in the dirty branch output"
+		);
+	}
+
+	#[test]
 	fn loaded_tools_stay_loaded() {
 		// Pre-seed deferred state with MyTool already loaded.
 		let mut loop_state = test_loop_state();

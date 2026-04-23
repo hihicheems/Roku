@@ -810,6 +810,15 @@ impl GenericAgentRuntime {
 		// so the bytes reflect the deferred-mode swap (withholding non-core
 		// schemas and injecting the `tool_search` stub) rather than the
 		// full visible set.
+		// Pick the tool definitions that match what the next outbound call
+		// will actually send. `frozen_tool_schema` holds the **pre-deferred**
+		// snapshot (the full visible catalog); the pre-flight `tool_schema_bytes`
+		// was computed after `apply_deferred_mode` ran, so reusing the frozen
+		// snapshot as-is would regress deferred-mode sessions — the estimator
+		// would count bytes against the full schema while the wire actually
+		// carries the deferred-filtered subset (non-core schemas replaced by
+		// the `tool_search` stub). Run `apply_deferred_mode` unconditionally
+		// so both branches end with the effective set the provider will see.
 		let effective_definitions: Option<Vec<ToolDefinition>> = if loop_state.tool_schema_dirty {
 			let fresh = crate::runtime_loop::build_tool_definitions(
 				&loop_state.visible_tools,
@@ -826,6 +835,13 @@ impl GenericAgentRuntime {
 				.frozen_tool_schema
 				.as_ref()
 				.map(|snapshot| snapshot.definitions.clone())
+				.map(|base| {
+					crate::runtime_loop::apply_deferred_mode(
+						base,
+						loop_state,
+						self.agent_runtime_config.r#loop.context_window_tokens,
+					)
+				})
 		};
 
 		let rebuilt_schema_bytes: Option<Vec<u8>> = effective_definitions.and_then(|defs| {
