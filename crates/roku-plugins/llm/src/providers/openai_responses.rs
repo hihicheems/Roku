@@ -92,14 +92,25 @@ pub struct OpenAiResponsesConfig {
 /// Environment variable that toggles delta mode (`previous_response_id` reuse).
 pub const WEBSOCKET_MODE_ENV: &str = "ROKU_OPENAI_WEBSOCKET_MODE";
 
+/// Apply the canonical truthy rule to an explicit value. Split out from
+/// [`websocket_mode_from_env`] so tests can exercise the parsing without
+/// mutating the process environment.
+///
+/// Truthy values: `"true"` (case-insensitive) and `"1"`. Everything else,
+/// including `None`, yields `false`.
+pub fn websocket_mode_from_value(value: Option<&str>) -> bool {
+	match value {
+		Some(v) => v.eq_ignore_ascii_case("true") || v == "1",
+		None => false,
+	}
+}
+
 /// Single source for parsing the `ROKU_OPENAI_WEBSOCKET_MODE` env variable.
 ///
-/// Truthy values: `"true"` (case-insensitive), `"1"`. Everything else,
-/// including unset, yields `false`.
+/// Delegates to [`websocket_mode_from_value`] so the truthy rule and the
+/// env-name constant live in exactly one place.
 pub fn websocket_mode_from_env() -> bool {
-	std::env::var(WEBSOCKET_MODE_ENV)
-		.map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-		.unwrap_or(false)
+	websocket_mode_from_value(std::env::var(WEBSOCKET_MODE_ENV).ok().as_deref())
 }
 
 impl OpenAiResponsesConfig {
@@ -1544,25 +1555,26 @@ mod tests {
 	}
 
 	#[test]
-	fn websocket_mode_env_recognises_truthy_and_falsy_values() {
-		// The helper reads the process env, so this test does not mutate it —
-		// it re-implements the truthy rule with explicit inputs to lock the
-		// semantics that both call sites (`OpenAiResponsesConfig::new` and
-		// `roku-cmd/runtime.rs`) now share.
-		let truthy = ["true", "TRUE", "True", "tRuE", "1"];
-		for v in truthy {
+	fn websocket_mode_from_value_recognises_truthy_and_falsy_inputs() {
+		// Exercises the production parsing function directly — a regression
+		// in the function body (e.g. an accidental strict-case comparison or
+		// a wrong default) is caught here, not silently accepted.
+		for v in ["true", "TRUE", "True", "tRuE", "1"] {
 			assert!(
-				v.eq_ignore_ascii_case("true") || v == "1",
+				websocket_mode_from_value(Some(v)),
 				"expected {v:?} to be truthy"
 			);
 		}
-		let falsy = ["", "0", "false", "no", "2", "yes"];
-		for v in falsy {
+		for v in ["", "0", "false", "no", "2", "yes"] {
 			assert!(
-				!(v.eq_ignore_ascii_case("true") || v == "1"),
+				!websocket_mode_from_value(Some(v)),
 				"expected {v:?} to be falsy"
 			);
 		}
+		assert!(
+			!websocket_mode_from_value(None),
+			"None (env var unset) must be falsy"
+		);
 		// Confirms the env constant name used elsewhere has not silently drifted.
 		assert_eq!(WEBSOCKET_MODE_ENV, "ROKU_OPENAI_WEBSOCKET_MODE");
 	}

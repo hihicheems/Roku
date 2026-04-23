@@ -3379,6 +3379,289 @@ mod tests {
 	}
 
 	#[test]
+	fn execute_tool_loop_splices_session_memory_summary_via_layer2() {
+		// End-to-end regression test for the Layer 2 wiring added in the
+		// OpenAI gap sweep (issue #300): memory backend installed → mid-water
+		// pressure exceeded → session-keyed compact summary fetched and
+		// spliced into the conversation buffer → MidCompactLayer2Ran emitted
+		// instead of MidCompactLayer1Ran.
+
+		// Seed the in-memory backend with a compact summary for the test
+		// session using the canonical (kind, scope, summary-sentinel,
+		// write_reason) tuple.
+		let backend = Arc::new(roku_memory::InMemoryLongTermMemoryBackend::default());
+		let mut seed = roku_memory::MemoryWriteRequest::new(
+			roku_memory::MemoryKind::WorkflowInsight,
+			roku_memory::MemoryScope::Session,
+			"PRIOR-SESSION-MEMORY-SUMMARY-BODY: root-cause was a stale cache key.",
+			roku_memory::COMPACT_SUMMARY_SENTINEL,
+			roku_memory::MemoryWriteReason::CompactSummary,
+		);
+		seed.session_id = Some("session-layer2-int-test".to_string());
+		<roku_memory::InMemoryLongTermMemoryBackend as roku_memory::LongTermMemoryBackend>::write(
+			&backend, &seed,
+		)
+		.expect("seed compact summary");
+
+		// Route router: succeed on the first call with a final_answer decision
+		// so the loop exits cleanly after one turn.
+		let (route_router, _) = router_with_json_responses(vec![serde_json::json!({
+			"action": "final_answer",
+			"tool_name": null,
+			"arguments": null,
+			"reason": "test",
+			"final_message": "done"
+		})]);
+		let execution_router = router_with_text_output("layer2-int-exec", "unused");
+
+		// Tiny context window so a short `conversation_history` trips the
+		// mid-water threshold (0.60 × 200 = 120 tokens). Push Layer 3's
+		// post-flight threshold up to 0.99 so it doesn't pre-empt Layer 2.
+		let mut agent_config = crate::runtime_config::AgentRuntimeConfig::default();
+		agent_config.r#loop.context_window_tokens = 200;
+		agent_config.r#loop.compact_threshold_ratio = 0.99;
+
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime = GenericAgentRuntime::
+			with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+				agent_config,
+			)
+			.with_memory_backend(Arc::clone(&backend) as Arc<dyn roku_memory::LongTermMemoryBackend>);
+
+		// Build a conversation_history with enough English prose that the
+		// byte-based estimator (`bytes/4` for default text) produces an
+		// estimate above 120 tokens but below 200. Need at least 3 messages
+		// so `mid_compact_messages` does not Noop on a too-short buffer.
+		let pad = "lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt. ".repeat(3);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-layer2-int".to_string()),
+			session_id: "session-layer2-int-test".to_string(),
+			goal: "Layer 2 integration test".to_string(),
+			planning_mode_hint: None,
+			conversation_history: vec![
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::Assistant,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::Assistant,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+			],
+			model_override: None,
+			thinking_effort: None,
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::Chat,
+			0.95,
+			false,
+			crate::router::RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			"chat request",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+
+		let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+		let _execution = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-layer2-int".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				Some(&event_tx),
+				None,
+			));
+
+		drop(event_tx);
+		let mut events = Vec::new();
+		while let Ok(event) = event_rx.try_recv() {
+			events.push(event);
+		}
+
+		let layer2_events: Vec<_> = events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e,
+					crate::runtime_loop::LoopEvent::MidCompactLayer2Ran { .. }
+				)
+			})
+			.collect();
+		let layer1_events: Vec<_> = events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e,
+					crate::runtime_loop::LoopEvent::MidCompactLayer1Ran { .. }
+				)
+			})
+			.collect();
+
+		assert_eq!(
+			layer2_events.len(),
+			1,
+			"seeded memory → Layer 2 must fire exactly once; \
+			 Layer 2 count={}, Layer 1 count={}, events={events:?}",
+			layer2_events.len(),
+			layer1_events.len(),
+		);
+		assert_eq!(
+			layer1_events.len(),
+			0,
+			"Layer 1 mechanical fallback must not fire when Layer 2 consumed the summary",
+		);
+	}
+
+	#[test]
+	fn execute_tool_loop_falls_back_to_layer1_when_memory_has_no_summary() {
+		// Negative of the above: same setup but the backend is not installed.
+		// Mid-water must still fire, but Layer 1 (mechanical) takes over
+		// because `fetch_layer2_session_summary` returns None.
+
+		let (route_router, _) = router_with_json_responses(vec![serde_json::json!({
+			"action": "final_answer",
+			"tool_name": null,
+			"arguments": null,
+			"reason": "test",
+			"final_message": "done"
+		})]);
+		let execution_router = router_with_text_output("layer1-fallback-exec", "unused");
+
+		let mut agent_config = crate::runtime_config::AgentRuntimeConfig::default();
+		agent_config.r#loop.context_window_tokens = 200;
+		agent_config.r#loop.compact_threshold_ratio = 0.99;
+
+		let root = tempfile::tempdir().expect("temp root should exist");
+		// NOTE: no `.with_memory_backend(...)` call — the runtime stays
+		// without a backend, so Layer 2 cannot fire.
+		let runtime = GenericAgentRuntime::
+			with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+				agent_config,
+			);
+
+		let pad = "lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt. ".repeat(3);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-layer1-fallback".to_string()),
+			session_id: "session-layer1-fallback".to_string(),
+			goal: "Layer 1 fallback test".to_string(),
+			planning_mode_hint: None,
+			conversation_history: vec![
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::Assistant,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::Assistant,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+			],
+			model_override: None,
+			thinking_effort: None,
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::Chat,
+			0.95,
+			false,
+			crate::router::RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			"chat request",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+
+		let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+		let _execution = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-layer1-fallback".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				Some(&event_tx),
+				None,
+			));
+
+		drop(event_tx);
+		let mut events = Vec::new();
+		while let Ok(event) = event_rx.try_recv() {
+			events.push(event);
+		}
+
+		let layer2_count = events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e,
+					crate::runtime_loop::LoopEvent::MidCompactLayer2Ran { .. }
+				)
+			})
+			.count();
+		let layer1_count = events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e,
+					crate::runtime_loop::LoopEvent::MidCompactLayer1Ran { .. }
+				)
+			})
+			.count();
+
+		assert_eq!(layer2_count, 0, "no memory backend → Layer 2 must not fire");
+		assert_eq!(
+			layer1_count, 1,
+			"mid-water pressure without memory → Layer 1 mechanical fallback fires once",
+		);
+	}
+
+	#[test]
 	fn missing_required_input_ask_user_resume_contract_uses_router_decision() {
 		let (router, prompts) = router_with_json_responses(vec![serde_json::json!({
 			"resume_existing_loop": true,
