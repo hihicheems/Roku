@@ -778,7 +778,7 @@ impl GenericAgentRuntime {
 		event_sender: Option<&crate::runtime_loop::LoopEventSender>,
 		system_prompt: &str,
 		tool_schema_bytes: Option<&[u8]>,
-		estimator_selection_request: Option<&GenerationRequest>,
+		model_override: Option<&str>,
 	) -> (u64, u64) {
 		// Truncate oversized tool results in messages.
 		let tool_result_max_chars = self.agent_runtime_config.r#loop.working_summary_max_chars;
@@ -808,17 +808,38 @@ impl GenericAgentRuntime {
 				loop_state,
 				self.agent_runtime_config.r#loop.context_window_tokens,
 			);
-			// Use the route-aware preview method when the caller threaded a
-			// selection request through (end-of-turn rebuild case); otherwise
-			// fall back to the priority-based variant. Matches the pre-flight
-			// path's provider pick so both estimator snapshots in the same
-			// turn agree on the wire format.
+			// Build the selection request from the **current** messages (not
+			// a turn-start snapshot): tool execution between pre-flight and
+			// this end-of-turn rebuild can append / replace conversation
+			// entries, and those size changes can flip `select_model`'s
+			// eligibility. Rebuilding here keeps the provider picked for
+			// estimator bytes in sync with the provider the next `generate`
+			// call will actually route to.
+			let selection_request = GenerationRequest {
+				system_prompt: Some(system_prompt.to_string()),
+				prompt: String::new(),
+				messages: Some(messages.clone()),
+				expected_output_tokens: self.agent_runtime_config.next_step.expected_output_tokens,
+				risk_tier: RiskTier::Low,
+				preferred_provider: None,
+				budget_tokens_remaining: self
+					.agent_runtime_config
+					.next_step
+					.budget_tokens_remaining,
+				budget_cost_remaining_usd: self
+					.agent_runtime_config
+					.next_step
+					.budget_cost_remaining_usd,
+				tools: None,
+				model_override: model_override.map(str::to_string),
+				thinking_effort: None,
+				system_prompt_sections: None,
+			};
 			let wire_bytes = self
 				.execution_router
 				.as_ref()
-				.map(|r| match estimator_selection_request {
-					Some(sel) => r.preview_wire_tool_schema_bytes_for_request(sel, &effective),
-					None => r.preview_wire_tool_schema_bytes(None, &effective),
+				.map(|r| {
+					r.preview_wire_tool_schema_bytes_for_request(&selection_request, &effective)
 				})
 				.unwrap_or_else(|| serde_json::to_vec(&effective).unwrap_or_default());
 			if wire_bytes.is_empty() {
@@ -2420,7 +2441,7 @@ impl GenericAgentRuntime {
 					event_sender,
 					&system_prompt,
 					tool_schema_bytes,
-					Some(&estimator_selection_request),
+					request.model_override.as_deref(),
 				)
 				.await;
 			if compact_pt > 0 || compact_ot > 0 {
