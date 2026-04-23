@@ -1351,10 +1351,7 @@ mod tests {
 		// Adding a large system prompt (~200 whitespace-separated words) pushes
 		// tight-model past its 50-token context window. `select_model` must
 		// now route to `roomy-model` — and the preview bytes track that pick.
-		let large_system_prompt: String = std::iter::repeat("instruction")
-			.take(200)
-			.collect::<Vec<_>>()
-			.join(" ");
+		let large_system_prompt: String = vec!["instruction"; 200].join(" ");
 		let request_with_system_prompt = GenerationRequest {
 			system_prompt: Some(large_system_prompt),
 			..request_without_system_prompt.clone()
