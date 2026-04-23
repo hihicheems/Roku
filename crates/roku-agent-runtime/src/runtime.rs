@@ -50,7 +50,7 @@ use roku_plugin_host::{
 };
 use roku_plugin_llm::{
 	GenerationRequest, LlmAdapterError, LlmRouter, Message, RiskTier, StreamChunk, ThinkingEffort,
-	ToolCallBlock,
+	ToolCallBlock, ToolDefinition,
 };
 use roku_plugin_skills::SkillRegistry;
 use roku_plugin_tools::{
@@ -784,37 +784,54 @@ impl GenericAgentRuntime {
 		let tool_result_max_chars = self.agent_runtime_config.r#loop.working_summary_max_chars;
 		crate::runtime_loop::truncate_large_tool_results(messages, tool_result_max_chars);
 
-		// `tool_schema_bytes` was captured at turn start. If a tool executed
-		// this turn mutated the visible tool set (e.g. `tool_search` loading
-		// deferred schemas, or any path that calls `mark_tool_schema_dirty`),
-		// the cached bytes understate the next-turn prompt pressure and the
-		// compaction threshold can be skipped until the provider rejects the
-		// request as over-window. Rebuild from the current `loop_state` when
-		// the schema is dirty so the threshold check sees the right footprint.
+		// `tool_schema_bytes` was captured at turn start — both the schema
+		// shape and the provider pick are from that moment. Two drift
+		// sources make the pre-flight bytes potentially wrong here:
 		//
-		// The rebuilt bytes must match what the provider will actually send
-		// on the next turn — so run `apply_deferred_mode` before serializing.
-		// Skipping it would compute bytes over the full visible set while
-		// deferred mode swaps most entries for the `tool_search` stub, which
-		// over-estimates pressure and can trigger unnecessary compaction.
-		let rebuilt_schema_bytes: Option<Vec<u8>> = if loop_state.tool_schema_dirty {
+		// 1. **Schema dirty.** If a tool executed this turn mutated the
+		//    visible tool set (e.g. `tool_search` loading deferred schemas,
+		//    or any path that calls `mark_tool_schema_dirty`), the cached
+		//    bytes describe an outdated schema.
+		// 2. **Messages changed.** Even when the schema is unchanged, tool
+		//    execution appends messages. `select_model`'s eligibility
+		//    depends on input-token size, so the message-size change can
+		//    flip the picked provider — the pre-flight bytes would then
+		//    be in a different provider's wire format than the next
+		//    `generate` call will send.
+		//
+		// Recompute unconditionally. The tool definitions come from either
+		// a fresh rebuild (when dirty) or the frozen per-turn snapshot
+		// (otherwise — the same set the pre-flight used; cheap to clone).
+		// The selection request is built from **current** `messages` +
+		// `system_prompt` so the router's `select_model` matches what the
+		// next outbound call would pick.
+		//
+		// For dirty rebuilds, `apply_deferred_mode` runs before serialization
+		// so the bytes reflect the deferred-mode swap (withholding non-core
+		// schemas and injecting the `tool_search` stub) rather than the
+		// full visible set.
+		let effective_definitions: Option<Vec<ToolDefinition>> = if loop_state.tool_schema_dirty {
 			let fresh = crate::runtime_loop::build_tool_definitions(
 				&loop_state.visible_tools,
 				Some(&self.resource_catalog),
 				&loop_state.disallowed_tools,
 			);
-			let effective = crate::runtime_loop::apply_deferred_mode(
+			Some(crate::runtime_loop::apply_deferred_mode(
 				fresh,
 				loop_state,
 				self.agent_runtime_config.r#loop.context_window_tokens,
-			);
-			// Build the selection request from the **current** messages (not
-			// a turn-start snapshot): tool execution between pre-flight and
-			// this end-of-turn rebuild can append / replace conversation
-			// entries, and those size changes can flip `select_model`'s
-			// eligibility. Rebuilding here keeps the provider picked for
-			// estimator bytes in sync with the provider the next `generate`
-			// call will actually route to.
+			))
+		} else {
+			loop_state
+				.frozen_tool_schema
+				.as_ref()
+				.map(|snapshot| snapshot.definitions.clone())
+		};
+
+		let rebuilt_schema_bytes: Option<Vec<u8>> = effective_definitions.and_then(|defs| {
+			if defs.is_empty() {
+				return None;
+			}
 			let selection_request = GenerationRequest {
 				system_prompt: Some(system_prompt.to_string()),
 				prompt: String::new(),
@@ -838,18 +855,14 @@ impl GenericAgentRuntime {
 			let wire_bytes = self
 				.execution_router
 				.as_ref()
-				.map(|r| {
-					r.preview_wire_tool_schema_bytes_for_request(&selection_request, &effective)
-				})
-				.unwrap_or_else(|| serde_json::to_vec(&effective).unwrap_or_default());
+				.map(|r| r.preview_wire_tool_schema_bytes_for_request(&selection_request, &defs))
+				.unwrap_or_else(|| serde_json::to_vec(&defs).unwrap_or_default());
 			if wire_bytes.is_empty() {
 				None
 			} else {
 				Some(wire_bytes)
 			}
-		} else {
-			None
-		};
+		});
 		let effective_schema_bytes: Option<&[u8]> =
 			rebuilt_schema_bytes.as_deref().or(tool_schema_bytes);
 

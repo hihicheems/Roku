@@ -1371,6 +1371,120 @@ mod tests {
 	}
 
 	#[test]
+	fn preview_wire_bytes_for_request_honors_messages_size_in_eligibility() {
+		// Sibling of `...honors_system_prompt_in_eligibility`: the messages
+		// axis also feeds `estimate_request_input_tokens`, so growing the
+		// message set can flip `select_model`'s eligibility and change the
+		// provider the preview bytes come from. The runtime's end-of-turn
+		// estimator relies on this: after tool execution has appended
+		// messages, the recomputed wire bytes must track the provider the
+		// next outbound call would actually route to.
+
+		struct TaggedProvider {
+			name: &'static str,
+			tag: &'static [u8],
+		}
+
+		#[async_trait]
+		impl LlmProvider for TaggedProvider {
+			fn provider_name(&self) -> &'static str {
+				self.name
+			}
+
+			async fn complete(
+				&self,
+				_model: &ModelProfile,
+				_request: &GenerationRequest,
+			) -> Result<ProviderResponse, ProviderCallError> {
+				unreachable!("TaggedProvider is only used for schema-preview tests")
+			}
+
+			fn preview_wire_tool_schema_bytes(&self, _definitions: &[ToolDefinition]) -> Vec<u8> {
+				self.tag.to_vec()
+			}
+		}
+
+		let mut router = LlmRouter::new(RoutingPolicy {
+			max_request_cost_usd: 10.0,
+			max_latency_ms: 10_000,
+		});
+		router.register_provider(TaggedProvider {
+			name: "tight-msg-provider",
+			tag: b"TIGHT",
+		});
+		router.register_provider(TaggedProvider {
+			name: "roomy-msg-provider",
+			tag: b"ROOMY",
+		});
+		// High priority but tight context window (30 tokens).
+		router.register_model(ModelProfile {
+			model_id: "tight-msg-model".to_string(),
+			provider: "tight-msg-provider".to_string(),
+			max_context_tokens: 30,
+			cost_per_1k_tokens_usd: 0.01,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		});
+		// Lower priority, roomy context window.
+		router.register_model(ModelProfile {
+			model_id: "roomy-msg-model".to_string(),
+			provider: "roomy-msg-provider".to_string(),
+			max_context_tokens: 8_000,
+			cost_per_1k_tokens_usd: 0.01,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 1,
+		});
+
+		let defs = vec![ToolDefinition {
+			name: "tool-a".to_string(),
+			description: "desc".to_string(),
+			parameters: serde_json::json!({"type": "object"}),
+		}];
+
+		// Small message set — fits inside the tight model's 30-token window.
+		let small_request = GenerationRequest {
+			system_prompt: None,
+			prompt: String::new(),
+			messages: Some(vec![Message::User {
+				content: "hi".to_string(),
+			}]),
+			expected_output_tokens: 5,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: 10_000,
+			budget_cost_remaining_usd: 5.0,
+			tools: None,
+			model_override: None,
+			thinking_effort: None,
+			system_prompt_sections: None,
+		};
+		let small_bytes = router.preview_wire_tool_schema_bytes_for_request(&small_request, &defs);
+		assert_eq!(
+			small_bytes, b"TIGHT",
+			"small messages fit the tight-context model's window → TIGHT wins on priority"
+		);
+
+		// Grow the messages past the tight model's context window.
+		let large_payload: Vec<String> = (0..50).map(|_| "word".to_string()).collect();
+		let large_request = GenerationRequest {
+			messages: Some(vec![Message::User {
+				content: large_payload.join(" "),
+			}]),
+			..small_request.clone()
+		};
+		let large_bytes = router.preview_wire_tool_schema_bytes_for_request(&large_request, &defs);
+		assert_eq!(
+			large_bytes, b"ROOMY",
+			"large messages exceed tight-context window → select_model routes to the roomy provider"
+		);
+		assert_ne!(
+			small_bytes, large_bytes,
+			"small/large messages must produce different provider picks — \
+			 otherwise the test is not exercising the bug the fix addresses"
+		);
+	}
+
+	#[test]
 	fn preferred_provider_is_honored_when_eligible() {
 		let router = router_with_models();
 		let mut request = sample_request(RiskTier::Low);
