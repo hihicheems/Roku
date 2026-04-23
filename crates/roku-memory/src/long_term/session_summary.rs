@@ -99,6 +99,17 @@ pub fn session_compact_summary_query(session_id: &str) -> MemoryQuery {
 /// so WorkflowInsight records written for other reasons (operator-requested
 /// facts, task-success snapshots) are not mistakenly treated as compact
 /// summaries and spliced into a future turn's LLM context.
+///
+/// Recency selection uses `(created_at_unix_ms, updated_at_unix_ms)` as a
+/// tuple key and additionally **requires at least one candidate to carry a
+/// non-zero signal** on either timestamp. When every candidate reports
+/// `0` on both fields the backend is not populating recency for search
+/// results (OpenViking's `matched_context_into_hit` hard-codes both to
+/// `0`), and `max_by_key` would degenerate to an arbitrary score-ordered
+/// pick — potentially splicing a stale summary even when a newer one
+/// exists. In that case the helper returns `Ok(None)` so the caller
+/// degrades cleanly to Layer 1 mechanical compaction rather than risking
+/// a stale splice.
 pub fn latest_session_compact_summary(
 	backend: &dyn LongTermMemoryBackend,
 	session_id: &str,
@@ -108,11 +119,23 @@ pub fn latest_session_compact_summary(
 	}
 	let query = session_compact_summary_query(session_id);
 	let hits = backend.search(&query)?;
-	let latest = hits
+	let candidates: Vec<MemoryRecord> = hits
 		.into_iter()
 		.map(|hit| hit.record)
 		.filter(|record| record.summary == COMPACT_SUMMARY_SENTINEL)
-		.max_by_key(|record| record.created_at_unix_ms);
+		.collect();
+	if candidates.is_empty() {
+		return Ok(None);
+	}
+	let has_recency_signal = candidates
+		.iter()
+		.any(|r| r.created_at_unix_ms != 0 || r.updated_at_unix_ms != 0);
+	if !has_recency_signal {
+		return Ok(None);
+	}
+	let latest = candidates
+		.into_iter()
+		.max_by_key(|r| (r.created_at_unix_ms, r.updated_at_unix_ms));
 	Ok(latest)
 }
 
@@ -277,6 +300,193 @@ mod tests {
 		assert_eq!(
 			got.content, expected_content,
 			"latest-by-created_at must win even when many siblings exist",
+		);
+	}
+
+	#[test]
+	fn returns_none_when_every_candidate_carries_zero_timestamps() {
+		// Backends whose `search` does not populate `created_at_unix_ms` /
+		// `updated_at_unix_ms` (known case: OpenViking's
+		// `matched_context_into_hit` hard-codes both to 0) cannot provide a
+		// reliable recency signal. Rather than let `max_by_key` degenerate
+		// to an arbitrary score-ordered pick — which can splice a stale
+		// compact summary even when a newer one exists — the helper must
+		// refuse to guess and return `None`.
+		use crate::long_term::backend::{
+			LongTermMemoryBackend, MemoryBackendHealth, MemoryBackendStatus, MemoryDeleteSelector,
+			MemoryError, MemoryWriteAck,
+		};
+		use crate::long_term::types::{MemoryHit, MemoryMetadata, MemoryProvenance};
+
+		struct ZeroTimestampBackend {
+			records: Vec<MemoryRecord>,
+		}
+
+		impl LongTermMemoryBackend for ZeroTimestampBackend {
+			fn backend_name(&self) -> &'static str {
+				"zero-timestamp-test-backend"
+			}
+
+			fn search(&self, _query: &MemoryQuery) -> Result<Vec<MemoryHit>, MemoryError> {
+				Ok(self
+					.records
+					.iter()
+					.map(|record| MemoryHit {
+						record: record.clone(),
+						score: 1.0,
+						provenance: MemoryProvenance::default(),
+					})
+					.collect())
+			}
+
+			fn write(
+				&self,
+				_request: &super::super::types::MemoryWriteRequest,
+			) -> Result<MemoryWriteAck, MemoryError> {
+				Ok(MemoryWriteAck {
+					accepted: false,
+					record_id: None,
+				})
+			}
+
+			fn delete(&self, _selector: &MemoryDeleteSelector) -> Result<(), MemoryError> {
+				Ok(())
+			}
+
+			fn health(&self) -> Result<MemoryBackendHealth, MemoryError> {
+				Ok(MemoryBackendHealth {
+					backend: self.backend_name().to_string(),
+					status: MemoryBackendStatus::Healthy,
+					detail: None,
+				})
+			}
+		}
+
+		fn zero_ts_record(session_id: &str, content: &str, record_id: &str) -> MemoryRecord {
+			MemoryRecord {
+				record_id: record_id.to_string(),
+				kind: MemoryKind::WorkflowInsight,
+				scope: MemoryScope::Session,
+				content: content.to_string(),
+				summary: COMPACT_SUMMARY_SENTINEL.to_string(),
+				source_refs: Vec::new(),
+				metadata: MemoryMetadata::default(),
+				session_id: Some(session_id.to_string()),
+				user_id: None,
+				project_id: None,
+				workspace_id: None,
+				created_at_unix_ms: 0,
+				updated_at_unix_ms: 0,
+			}
+		}
+
+		let backend = ZeroTimestampBackend {
+			records: vec![
+				zero_ts_record("session-1", "old content", "rec-1"),
+				zero_ts_record("session-1", "newer content", "rec-2"),
+			],
+		};
+
+		let got =
+			latest_session_compact_summary(&backend, "session-1").expect("search must succeed");
+		assert!(
+			got.is_none(),
+			"all-zero timestamps = no reliable recency → must return None \
+			 (caller falls through to Layer 1 mechanical compaction)",
+		);
+	}
+
+	#[test]
+	fn prefers_record_with_later_updated_at_when_created_at_ties() {
+		// When several records share the same `created_at_unix_ms` (e.g.,
+		// rapid writes in the same millisecond), `updated_at_unix_ms`
+		// serves as a tiebreaker. Constructing records manually because
+		// the in-memory backend uses `unix_ms_now()` at write time and
+		// cannot reliably collide on timestamps.
+		use crate::long_term::backend::{
+			LongTermMemoryBackend, MemoryBackendHealth, MemoryBackendStatus, MemoryDeleteSelector,
+			MemoryError, MemoryWriteAck,
+		};
+		use crate::long_term::types::{MemoryHit, MemoryMetadata, MemoryProvenance};
+
+		struct StaticRecordBackend {
+			records: Vec<MemoryRecord>,
+		}
+
+		impl LongTermMemoryBackend for StaticRecordBackend {
+			fn backend_name(&self) -> &'static str {
+				"static-record-test-backend"
+			}
+			fn search(&self, _query: &MemoryQuery) -> Result<Vec<MemoryHit>, MemoryError> {
+				Ok(self
+					.records
+					.iter()
+					.map(|record| MemoryHit {
+						record: record.clone(),
+						score: 1.0,
+						provenance: MemoryProvenance::default(),
+					})
+					.collect())
+			}
+			fn write(
+				&self,
+				_request: &super::super::types::MemoryWriteRequest,
+			) -> Result<MemoryWriteAck, MemoryError> {
+				Ok(MemoryWriteAck {
+					accepted: false,
+					record_id: None,
+				})
+			}
+			fn delete(&self, _selector: &MemoryDeleteSelector) -> Result<(), MemoryError> {
+				Ok(())
+			}
+			fn health(&self) -> Result<MemoryBackendHealth, MemoryError> {
+				Ok(MemoryBackendHealth {
+					backend: self.backend_name().to_string(),
+					status: MemoryBackendStatus::Healthy,
+					detail: None,
+				})
+			}
+		}
+
+		fn fixed_record(
+			session_id: &str,
+			content: &str,
+			record_id: &str,
+			created: u64,
+			updated: u64,
+		) -> MemoryRecord {
+			MemoryRecord {
+				record_id: record_id.to_string(),
+				kind: MemoryKind::WorkflowInsight,
+				scope: MemoryScope::Session,
+				content: content.to_string(),
+				summary: COMPACT_SUMMARY_SENTINEL.to_string(),
+				source_refs: Vec::new(),
+				metadata: MemoryMetadata::default(),
+				session_id: Some(session_id.to_string()),
+				user_id: None,
+				project_id: None,
+				workspace_id: None,
+				created_at_unix_ms: created,
+				updated_at_unix_ms: updated,
+			}
+		}
+
+		let backend = StaticRecordBackend {
+			records: vec![
+				fixed_record("session-1", "first", "r1", 1_000, 1_000),
+				fixed_record("session-1", "second", "r2", 1_000, 2_000),
+				fixed_record("session-1", "third", "r3", 1_000, 1_500),
+			],
+		};
+
+		let got = latest_session_compact_summary(&backend, "session-1")
+			.expect("search must succeed")
+			.expect("recency signal present — must resolve");
+		assert_eq!(
+			got.content, "second",
+			"tie on created_at must break on updated_at DESC",
 		);
 	}
 
