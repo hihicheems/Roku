@@ -198,6 +198,17 @@ pub struct LoopState {
 	/// Not serialized — a freshly restored loop starts with an empty store.
 	#[serde(skip)]
 	pub(crate) tool_result_store: ToolResultStore,
+	/// Per-run flag set when Layer 2 mid-tier compaction has already
+	/// consumed the session-keyed compact summary. Subsequent mid-water
+	/// triggers in the same run fall back to Layer 1 (mechanical collapse)
+	/// so the same frozen summary is not re-spliced into the conversation
+	/// every turn the buffer grows past the threshold — repeated splicing
+	/// would increasingly over-represent the older digest relative to the
+	/// turn's fresh material. Persisted across checkpoint round-trips so
+	/// the one-Layer-2-per-run invariant holds even when a run is paused
+	/// and resumed.
+	#[serde(default)]
+	pub(crate) layer2_consumed_this_run: bool,
 }
 
 /// Maximum allowed consecutive Layer 3 structured-summary failures before
@@ -251,6 +262,7 @@ impl LoopState {
 			cache_break_detector: CacheBreakDetector::default(),
 			deferred_tools: None,
 			tool_result_store: ToolResultStore::default(),
+			layer2_consumed_this_run: false,
 		}
 	}
 
@@ -664,6 +676,27 @@ mod tests {
 		assert_eq!(deserialized.visible_tools.len(), 3);
 		assert_eq!(deserialized.bound_resources.len(), 2);
 		assert!(deserialized.last_observation.is_some());
+	}
+
+	#[test]
+	fn layer2_consumed_this_run_roundtrips_through_checkpoint_serde() {
+		// Lock the `#[serde(default)]` contract on
+		// `layer2_consumed_this_run`: the flag must survive a JSON
+		// round-trip so a run that consumed its compact summary before a
+		// checkpoint does not re-consume it after restore (which would
+		// break the one-Layer-2-per-run invariant).
+		let mut state = LoopState::new("loop-layer2-flag", &loop_context());
+		assert!(
+			!state.layer2_consumed_this_run,
+			"fresh LoopState must start with the flag cleared",
+		);
+		state.layer2_consumed_this_run = true;
+		let json = serde_json::to_string(&state).expect("serialize");
+		let restored: LoopState = serde_json::from_str(&json).expect("deserialize");
+		assert!(
+			restored.layer2_consumed_this_run,
+			"flag must survive a JSON round-trip (persisted across checkpoints)",
+		);
 	}
 
 	#[test]

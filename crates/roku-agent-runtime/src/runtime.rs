@@ -1311,18 +1311,34 @@ impl GenericAgentRuntime {
 						as f64 * crate::runtime_loop::MID_WATER_TRIGGER_RATIO)
 						as u64;
 					if mid_estimate > mid_threshold {
-						// Layer 2 (preferred): reuse the latest session-keyed
-						// compact summary if roku-memory has one. When memory
-						// is not wired up, the backend is empty for this
-						// session, or the read fails, `session_summary_text`
+						// Layer 2 (preferred, at-most-once per run): reuse the
+						// latest session-keyed compact summary if roku-memory
+						// has one AND this run has not already consumed it.
+						// Subsequent mid-water triggers in the same run fall
+						// back to Layer 1 (mechanical collapse): re-splicing a
+						// frozen prior-session summary on every trigger would
+						// increasingly over-represent the older digest next to
+						// the turn's fresh material without adding new signal.
+						//
+						// When memory is not wired up, the backend has no
+						// matching record, or the read fails, `session_summary_text`
 						// stays `None` and `mid_compact_messages` transparently
 						// falls through to the Layer 1 mechanical path.
-						let session_summary_text =
-							self.fetch_layer2_session_summary(&loop_state.session_id);
+						let session_summary_text = if loop_state.layer2_consumed_this_run {
+							None
+						} else {
+							self.fetch_layer2_session_summary(&loop_state.session_id)
+						};
 						let outcome = crate::runtime_loop::mid_compact_messages(
 							&mut messages,
 							session_summary_text.as_deref(),
 						);
+						if matches!(
+							outcome,
+							crate::runtime_loop::MidCompactOutcome::Layer2 { .. }
+						) {
+							loop_state.layer2_consumed_this_run = true;
+						}
 						if !matches!(outcome, crate::runtime_loop::MidCompactOutcome::Noop) {
 							loop_state.cache_break_detector.notify_compaction();
 						}
@@ -3580,6 +3596,157 @@ mod tests {
 			layer1_events.len(),
 			0,
 			"Layer 1 mechanical fallback must not fire when Layer 2 consumed the summary",
+		);
+
+		// Side-check on the run-scoped flag: Layer 2 firing must have set it.
+		assert!(
+			loop_state.layer2_consumed_this_run,
+			"layer2_consumed_this_run must be set after Layer 2 fires",
+		);
+	}
+
+	#[test]
+	fn execute_tool_loop_falls_back_to_layer1_when_layer2_already_consumed_this_run() {
+		// Same setup as `..._splices_session_memory_summary_via_layer2` but
+		// pre-sets `loop_state.layer2_consumed_this_run = true` before the
+		// call. The memory backend still has a valid summary, but the
+		// one-Layer-2-per-run invariant means the mid-water trigger must
+		// fall back to Layer 1 (mechanical) instead of re-splicing the
+		// frozen summary.
+
+		let backend = Arc::new(roku_memory::InMemoryLongTermMemoryBackend::default());
+		let mut seed = roku_memory::MemoryWriteRequest::new(
+			roku_memory::MemoryKind::WorkflowInsight,
+			roku_memory::MemoryScope::Session,
+			"PRIOR-SESSION-SUMMARY",
+			roku_memory::COMPACT_SUMMARY_SENTINEL,
+			roku_memory::MemoryWriteReason::CompactSummary,
+		);
+		seed.session_id = Some("session-layer2-already-consumed".to_string());
+		<roku_memory::InMemoryLongTermMemoryBackend as roku_memory::LongTermMemoryBackend>::write(
+			&backend, &seed,
+		)
+		.expect("seed compact summary");
+
+		let (route_router, _) = router_with_json_responses(vec![serde_json::json!({
+			"action": "final_answer",
+			"tool_name": null,
+			"arguments": null,
+			"reason": "done",
+			"final_message": "done"
+		})]);
+		let execution_router = router_with_text_output("layer2-consumed-exec", "unused");
+
+		let mut agent_config = crate::runtime_config::AgentRuntimeConfig::default();
+		agent_config.r#loop.context_window_tokens = 200;
+		agent_config.r#loop.compact_threshold_ratio = 0.99;
+
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime = GenericAgentRuntime::
+			with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+				agent_config,
+			)
+			.with_memory_backend(Arc::clone(&backend) as Arc<dyn roku_memory::LongTermMemoryBackend>);
+
+		let pad = "lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt. ".repeat(3);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-layer2-already".to_string()),
+			session_id: "session-layer2-already-consumed".to_string(),
+			goal: "Layer 2 already-consumed test".to_string(),
+			planning_mode_hint: None,
+			conversation_history: vec![
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::Assistant,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::Assistant,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+			],
+			model_override: None,
+			thinking_effort: None,
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::Chat,
+			0.95,
+			false,
+			crate::router::RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			"chat request",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+		// Simulate a previous mid-water trigger in this run that already
+		// consumed the compact summary via Layer 2.
+		loop_state.layer2_consumed_this_run = true;
+
+		let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+		let _execution = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-layer2-already".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				Some(&event_tx),
+				None,
+			));
+
+		drop(event_tx);
+		let mut events = Vec::new();
+		while let Ok(event) = event_rx.try_recv() {
+			events.push(event);
+		}
+
+		let layer2_count = events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e,
+					crate::runtime_loop::LoopEvent::MidCompactLayer2Ran { .. }
+				)
+			})
+			.count();
+		let layer1_count = events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e,
+					crate::runtime_loop::LoopEvent::MidCompactLayer1Ran { .. }
+				)
+			})
+			.count();
+		assert_eq!(
+			layer2_count, 0,
+			"flag already true → Layer 2 must NOT fire a second time in the same run",
+		);
+		assert_eq!(
+			layer1_count, 1,
+			"mid-water pressure with Layer 2 already consumed → Layer 1 fallback fires once",
 		);
 	}
 

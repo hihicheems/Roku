@@ -1346,6 +1346,7 @@ mod tests {
 			cache_break_detector: crate::runtime_loop::cache_break::CacheBreakDetector::default(),
 			deferred_tools: None,
 			tool_result_store: crate::runtime_loop::tool_result_store::ToolResultStore::default(),
+			layer2_consumed_this_run: false,
 		}
 	}
 
