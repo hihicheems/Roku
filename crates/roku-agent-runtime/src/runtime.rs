@@ -109,6 +109,11 @@ pub struct GenericAgentRuntime {
 	sub_agent_config: SubAgentConfig,
 	/// Session-scoped task store for structured progress tracking.
 	task_store: std::sync::Mutex<TaskStore>,
+	/// Optional long-term memory backend used by Layer 2 mid-tier compaction
+	/// to reuse a prior session's compact summary instead of paying for an
+	/// LLM summarizer call. When `None`, mid-tier compaction transparently
+	/// falls back to Layer 1 mechanical collapse.
+	memory_backend: Option<Arc<dyn roku_memory::LongTermMemoryBackend>>,
 	/// Keepalive for the MCP bootstrap tokio runtime. The rmcp serve loop tasks
 	/// are spawned on this runtime during MCP server connection. Dropping it
 	/// would kill those tasks and break all MCP tool calls. Never accessed
@@ -174,6 +179,7 @@ impl GenericAgentRuntime {
 			loop_mode: LoopMode::Normal,
 			sub_agent_config: SubAgentConfig::default(),
 			task_store: std::sync::Mutex::new(TaskStore::new()),
+			memory_backend: None,
 			_mcp_runtime: None,
 		};
 		runtime.register_worker(
@@ -1260,8 +1266,18 @@ impl GenericAgentRuntime {
 						as f64 * crate::runtime_loop::MID_WATER_TRIGGER_RATIO)
 						as u64;
 					if mid_estimate > mid_threshold {
-						let outcome =
-							crate::runtime_loop::mid_compact_messages(&mut messages, None);
+						// Layer 2 (preferred): reuse the latest session-keyed
+						// compact summary if roku-memory has one. When memory
+						// is not wired up, the backend is empty for this
+						// session, or the read fails, `session_summary_text`
+						// stays `None` and `mid_compact_messages` transparently
+						// falls through to the Layer 1 mechanical path.
+						let session_summary_text =
+							self.fetch_layer2_session_summary(&loop_state.session_id);
+						let outcome = crate::runtime_loop::mid_compact_messages(
+							&mut messages,
+							session_summary_text.as_deref(),
+						);
 						if !matches!(outcome, crate::runtime_loop::MidCompactOutcome::Noop) {
 							loop_state.cache_break_detector.notify_compaction();
 						}
@@ -2422,6 +2438,34 @@ impl GenericAgentRuntime {
 		self
 	}
 
+	/// Install a long-term memory backend the runtime loop uses for Layer 2
+	/// mid-tier compaction (session-keyed summary reuse). Optional: when not
+	/// set, mid-tier compaction falls through to the mechanical Layer 1 path.
+	pub fn with_memory_backend(
+		mut self,
+		memory_backend: Arc<dyn roku_memory::LongTermMemoryBackend>,
+	) -> Self {
+		self.memory_backend = Some(memory_backend);
+		self
+	}
+
+	/// Fetch the most recent session-scoped compact summary from the installed
+	/// memory backend, if any. Returns `None` when no backend is wired up,
+	/// when `session_id` is empty, when the backend has no matching record, or
+	/// when the backend errors — the caller treats any `None` as "fall through
+	/// to Layer 1".
+	fn fetch_layer2_session_summary(&self, session_id: &str) -> Option<String> {
+		self.memory_backend
+			.as_deref()
+			.filter(|_| !session_id.is_empty())
+			.and_then(|backend| {
+				roku_memory::latest_session_compact_summary(backend, session_id)
+					.ok()
+					.flatten()
+					.map(|record| record.content)
+			})
+	}
+
 	fn visible_tools_for_decision(
 		&self,
 		route_decision: &crate::router::RouteDecision,
@@ -3118,6 +3162,7 @@ mod tests {
 		AgentContext, AggregationMode, EvidenceItem, JoinPolicy, NodeId, PolicyBindings,
 		ResultStatus, TaskId, TaskNode, TaskNodeKind,
 	};
+	use roku_memory::LongTermMemoryBackend;
 	use roku_plugin_llm::{
 		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderCallError,
 		ProviderResponse, RiskTier, RoutingPolicy,
@@ -3275,6 +3320,61 @@ mod tests {
 				reason: "user reply selected one of the grounded candidates for the paused loop"
 					.to_string(),
 			}
+		);
+	}
+
+	#[test]
+	fn fetch_layer2_session_summary_returns_none_without_memory_backend() {
+		let runtime = GenericAgentRuntime::default();
+		assert!(
+			runtime.fetch_layer2_session_summary("session-1").is_none(),
+			"no backend installed → None",
+		);
+	}
+
+	#[test]
+	fn fetch_layer2_session_summary_returns_none_for_empty_session_id() {
+		let backend = Arc::new(roku_memory::InMemoryLongTermMemoryBackend::default());
+		let mut req = roku_memory::MemoryWriteRequest::new(
+			roku_memory::MemoryKind::WorkflowInsight,
+			roku_memory::MemoryScope::Session,
+			"leaked",
+			"Context compact summary",
+			roku_memory::MemoryWriteReason::CompactSummary,
+		);
+		req.session_id = Some("some-session".to_string());
+		backend.write(&req).expect("seed summary");
+		let runtime = GenericAgentRuntime::default().with_memory_backend(backend);
+		assert!(
+			runtime.fetch_layer2_session_summary("").is_none(),
+			"empty session_id must short-circuit (no cross-session leakage)",
+		);
+	}
+
+	#[test]
+	fn fetch_layer2_session_summary_returns_stored_content_for_matching_session() {
+		let backend = Arc::new(roku_memory::InMemoryLongTermMemoryBackend::default());
+		let mut req = roku_memory::MemoryWriteRequest::new(
+			roku_memory::MemoryKind::WorkflowInsight,
+			roku_memory::MemoryScope::Session,
+			"session X summary body",
+			"Context compact summary",
+			roku_memory::MemoryWriteReason::CompactSummary,
+		);
+		req.session_id = Some("session-X".to_string());
+		backend.write(&req).expect("seed summary");
+
+		let runtime = GenericAgentRuntime::default().with_memory_backend(backend);
+		let got = runtime
+			.fetch_layer2_session_summary("session-X")
+			.expect("should resolve summary");
+		assert_eq!(got, "session X summary body");
+
+		// Foreign session must not leak.
+		assert!(
+			runtime
+				.fetch_layer2_session_summary("session-other")
+				.is_none(),
 		);
 	}
 

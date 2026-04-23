@@ -21,6 +21,7 @@
 
 mod backend;
 mod policy;
+mod session_summary;
 mod types;
 
 pub use backend::{
@@ -31,6 +32,7 @@ pub use policy::{
 	ConservativeMemoryLifecyclePolicy, MemoryLifecyclePolicy, MemoryRecallInput,
 	MemoryWritePolicyInput,
 };
+pub use session_summary::{latest_session_compact_summary, session_compact_summary_query};
 pub use types::{
 	MemoryFilters, MemoryHit, MemoryKind, MemoryMetadata, MemoryProvenance, MemoryQuery,
 	MemoryRecallReason, MemoryRecord, MemoryScope, MemorySourceRef, MemoryWriteReason,
