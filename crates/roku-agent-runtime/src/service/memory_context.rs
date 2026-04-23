@@ -118,7 +118,13 @@ impl RuntimeService {
 		mut self,
 		memory_backend: Arc<dyn LongTermMemoryBackend>,
 	) -> Self {
-		self.memory_backend = memory_backend;
+		self.memory_backend = Arc::clone(&memory_backend);
+		// Propagate the backend into the underlying runtime so mid-tier
+		// (Layer 2) compaction can reuse session-keyed summaries. Without
+		// this propagation the backend would only be reachable from the
+		// service-level recall / write-back paths and Layer 2 would stay
+		// stuck on the mechanical fallback even when summaries exist.
+		self.runtime = std::mem::take(&mut self.runtime).with_memory_backend(memory_backend);
 		self
 	}
 

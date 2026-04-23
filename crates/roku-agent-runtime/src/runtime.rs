@@ -50,7 +50,7 @@ use roku_plugin_host::{
 };
 use roku_plugin_llm::{
 	GenerationRequest, LlmAdapterError, LlmRouter, Message, RiskTier, StreamChunk, ThinkingEffort,
-	ToolCallBlock,
+	ToolCallBlock, ToolDefinition,
 };
 use roku_plugin_skills::SkillRegistry;
 use roku_plugin_tools::{
@@ -109,6 +109,11 @@ pub struct GenericAgentRuntime {
 	sub_agent_config: SubAgentConfig,
 	/// Session-scoped task store for structured progress tracking.
 	task_store: std::sync::Mutex<TaskStore>,
+	/// Optional long-term memory backend used by Layer 2 mid-tier compaction
+	/// to reuse a prior session's compact summary instead of paying for an
+	/// LLM summarizer call. When `None`, mid-tier compaction transparently
+	/// falls back to Layer 1 mechanical collapse.
+	memory_backend: Option<Arc<dyn roku_memory::LongTermMemoryBackend>>,
 	/// Keepalive for the MCP bootstrap tokio runtime. The rmcp serve loop tasks
 	/// are spawned on this runtime during MCP server connection. Dropping it
 	/// would kill those tasks and break all MCP tool calls. Never accessed
@@ -174,6 +179,7 @@ impl GenericAgentRuntime {
 			loop_mode: LoopMode::Normal,
 			sub_agent_config: SubAgentConfig::default(),
 			task_store: std::sync::Mutex::new(TaskStore::new()),
+			memory_backend: None,
 			_mcp_runtime: None,
 		};
 		runtime.register_worker(
@@ -772,42 +778,107 @@ impl GenericAgentRuntime {
 		event_sender: Option<&crate::runtime_loop::LoopEventSender>,
 		system_prompt: &str,
 		tool_schema_bytes: Option<&[u8]>,
+		model_override: Option<&str>,
 	) -> (u64, u64) {
 		// Truncate oversized tool results in messages.
 		let tool_result_max_chars = self.agent_runtime_config.r#loop.working_summary_max_chars;
 		crate::runtime_loop::truncate_large_tool_results(messages, tool_result_max_chars);
 
-		// `tool_schema_bytes` was captured at turn start. If a tool executed
-		// this turn mutated the visible tool set (e.g. `tool_search` loading
-		// deferred schemas, or any path that calls `mark_tool_schema_dirty`),
-		// the cached bytes understate the next-turn prompt pressure and the
-		// compaction threshold can be skipped until the provider rejects the
-		// request as over-window. Rebuild from the current `loop_state` when
-		// the schema is dirty so the threshold check sees the right footprint.
+		// `tool_schema_bytes` was captured at turn start — both the schema
+		// shape and the provider pick are from that moment. Two drift
+		// sources make the pre-flight bytes potentially wrong here:
 		//
-		// The rebuilt bytes must match what the provider will actually send
-		// on the next turn — so run `apply_deferred_mode` before serializing.
-		// Skipping it would compute bytes over the full visible set while
-		// deferred mode swaps most entries for the `tool_search` stub, which
-		// over-estimates pressure and can trigger unnecessary compaction.
-		let rebuilt_schema_bytes: Option<Vec<u8>> = if loop_state.tool_schema_dirty {
+		// 1. **Schema dirty.** If a tool executed this turn mutated the
+		//    visible tool set (e.g. `tool_search` loading deferred schemas,
+		//    or any path that calls `mark_tool_schema_dirty`), the cached
+		//    bytes describe an outdated schema.
+		// 2. **Messages changed.** Even when the schema is unchanged, tool
+		//    execution appends messages. `select_model`'s eligibility
+		//    depends on input-token size, so the message-size change can
+		//    flip the picked provider — the pre-flight bytes would then
+		//    be in a different provider's wire format than the next
+		//    `generate` call will send.
+		//
+		// Recompute unconditionally. The tool definitions come from either
+		// a fresh rebuild (when dirty) or the frozen per-turn snapshot
+		// (otherwise — the same set the pre-flight used; cheap to clone).
+		// The selection request is built from **current** `messages` +
+		// `system_prompt` so the router's `select_model` matches what the
+		// next outbound call would pick.
+		//
+		// For dirty rebuilds, `apply_deferred_mode` runs before serialization
+		// so the bytes reflect the deferred-mode swap (withholding non-core
+		// schemas and injecting the `tool_search` stub) rather than the
+		// full visible set.
+		// Pick the tool definitions that match what the next outbound call
+		// will actually send. `frozen_tool_schema` holds the **pre-deferred**
+		// snapshot (the full visible catalog); the pre-flight `tool_schema_bytes`
+		// was computed after `apply_deferred_mode` ran, so reusing the frozen
+		// snapshot as-is would regress deferred-mode sessions — the estimator
+		// would count bytes against the full schema while the wire actually
+		// carries the deferred-filtered subset (non-core schemas replaced by
+		// the `tool_search` stub). Run `apply_deferred_mode` unconditionally
+		// so both branches end with the effective set the provider will see.
+		let effective_definitions: Option<Vec<ToolDefinition>> = if loop_state.tool_schema_dirty {
 			let fresh = crate::runtime_loop::build_tool_definitions(
 				&loop_state.visible_tools,
 				Some(&self.resource_catalog),
 				&loop_state.disallowed_tools,
 			);
-			let effective = crate::runtime_loop::apply_deferred_mode(
+			Some(crate::runtime_loop::apply_deferred_mode(
 				fresh,
 				loop_state,
 				self.agent_runtime_config.r#loop.context_window_tokens,
-			);
-			match serde_json::to_vec(&effective) {
-				Ok(bytes) if !bytes.is_empty() => Some(bytes),
-				_ => None,
-			}
+			))
 		} else {
-			None
+			loop_state
+				.frozen_tool_schema
+				.as_ref()
+				.map(|snapshot| snapshot.definitions.clone())
+				.map(|base| {
+					crate::runtime_loop::apply_deferred_mode(
+						base,
+						loop_state,
+						self.agent_runtime_config.r#loop.context_window_tokens,
+					)
+				})
 		};
+
+		let rebuilt_schema_bytes: Option<Vec<u8>> = effective_definitions.and_then(|defs| {
+			if defs.is_empty() {
+				return None;
+			}
+			let selection_request = GenerationRequest {
+				system_prompt: Some(system_prompt.to_string()),
+				prompt: String::new(),
+				messages: Some(messages.clone()),
+				expected_output_tokens: self.agent_runtime_config.next_step.expected_output_tokens,
+				risk_tier: RiskTier::Low,
+				preferred_provider: None,
+				budget_tokens_remaining: self
+					.agent_runtime_config
+					.next_step
+					.budget_tokens_remaining,
+				budget_cost_remaining_usd: self
+					.agent_runtime_config
+					.next_step
+					.budget_cost_remaining_usd,
+				tools: None,
+				model_override: model_override.map(str::to_string),
+				thinking_effort: None,
+				system_prompt_sections: None,
+			};
+			let wire_bytes = self
+				.execution_router
+				.as_ref()
+				.map(|r| r.preview_wire_tool_schema_bytes_for_request(&selection_request, &defs))
+				.unwrap_or_else(|| serde_json::to_vec(&defs).unwrap_or_default());
+			if wire_bytes.is_empty() {
+				None
+			} else {
+				Some(wire_bytes)
+			}
+		});
 		let effective_schema_bytes: Option<&[u8]> =
 			rebuilt_schema_bytes.as_deref().or(tool_schema_bytes);
 
@@ -1090,19 +1161,84 @@ impl GenericAgentRuntime {
 				loop_state,
 				self.agent_runtime_config.r#loop.context_window_tokens,
 			);
+
+			// Build the modular system prompt with environment + project
+			// instructions. Hoisted before the estimator pre-flight so the
+			// selection request handed to `select_model` includes the same
+			// system-prompt token weight the real generation request will
+			// carry — eligibility (context-window / budget checks) agrees
+			// between the two paths and the chosen provider's wire format
+			// matches what the turn actually sends.
+			//
+			// Environment is re-probed each turn; project instruction is
+			// stable (loaded once above). The structured `sections` form
+			// carries the static/dynamic split that prompt-cache adapters
+			// will consume; `system_prompt` keeps the single String shape
+			// for adapters that haven't migrated yet.
+			let env_snapshot = crate::runtime_loop::environment::probe_environment();
+			let system_prompt_sections =
+				crate::runtime_loop::system_prompt::build_system_prompt_sections(
+					env_snapshot,
+					&loop_state.working_directory,
+					project_instruction.as_deref(),
+					Some(runtime_memory_sections),
+					self.loop_mode == LoopMode::Plan,
+				);
+			let system_prompt = system_prompt_sections.flatten();
+
 			// Serialize the tool schema AFTER `apply_deferred_mode` so the
 			// estimator sees exactly the set the provider will send. Using
 			// the pre-deferred set would overestimate pressure on turns where
 			// the `tool_search` pseudo-tool has replaced most schemas and
 			// silently walk the calibration scale in the wrong direction.
 			//
-			// Note: this is the Roku-internal canonical serialization; the
-			// wire format each provider emits differs by a few bytes per tool
-			// (e.g. OpenAI Responses adds `"type":"function"` per entry). The
-			// residual drift is small (<5%) and well inside the estimator's
-			// 20% accuracy gate; provider-exact wire-byte estimation is a
-			// follow-up.
-			let tool_schema_bytes_vec = serde_json::to_vec(&tool_definitions).unwrap_or_default();
+			// Routed through `LlmRouter::preview_wire_tool_schema_bytes_for_request`
+			// so the estimator sees the provider-specific wire format chosen by
+			// the router's real `select_model` policy — not a priority-based
+			// approximation. On multi-provider routers this matters whenever
+			// `model_override`, risk-tier filtering, or cost ordering would
+			// pick a different provider than the highest-priority one
+			// (OpenAI Chat Completions and Responses wrap each entry in
+			// `{"type":"function",...}`, Anthropic uses `input_schema` instead
+			// of `parameters`, etc.).
+			//
+			// This selection request mirrors the fields `select_model` reads
+			// (`model_override`, `preferred_provider`, `risk_tier`, budgets,
+			// and the message / system sizes used for context-window checks).
+			// Passing the full system prompt matters for tight context /
+			// budget configurations where omitting it would undercount
+			// `estimate_request_input_tokens` and admit a model the real
+			// call would reject.
+			let estimator_selection_request = GenerationRequest {
+				system_prompt: Some(system_prompt.clone()),
+				prompt: String::new(),
+				messages: Some(messages.clone()),
+				expected_output_tokens: self.agent_runtime_config.next_step.expected_output_tokens,
+				risk_tier: RiskTier::Low,
+				preferred_provider: None,
+				budget_tokens_remaining: self
+					.agent_runtime_config
+					.next_step
+					.budget_tokens_remaining,
+				budget_cost_remaining_usd: self
+					.agent_runtime_config
+					.next_step
+					.budget_cost_remaining_usd,
+				tools: None,
+				model_override: request.model_override.clone(),
+				thinking_effort: None,
+				system_prompt_sections: None,
+			};
+			let tool_schema_bytes_vec = self
+				.execution_router
+				.as_ref()
+				.map(|r| {
+					r.preview_wire_tool_schema_bytes_for_request(
+						&estimator_selection_request,
+						&tool_definitions,
+					)
+				})
+				.unwrap_or_else(|| serde_json::to_vec(&tool_definitions).unwrap_or_default());
 			let tool_schema_bytes: Option<&[u8]> = if tool_schema_bytes_vec.is_empty() {
 				None
 			} else {
@@ -1150,22 +1286,6 @@ impl GenericAgentRuntime {
 			// serialize on the wire.
 			let tool_schema_hash =
 				crate::runtime_loop::cache_break::hash_tool_definitions(&tool_definitions);
-
-			// Build the modular system prompt with environment + project instructions.
-			// Environment is re-probed each turn; project instruction is stable (loaded once above).
-			// The structured `sections` form carries the static/dynamic split that
-			// prompt-cache adapters will consume; `system_prompt` keeps the single
-			// String shape for adapters that haven't migrated yet.
-			let env_snapshot = crate::runtime_loop::environment::probe_environment();
-			let system_prompt_sections =
-				crate::runtime_loop::system_prompt::build_system_prompt_sections(
-					env_snapshot,
-					&loop_state.working_directory,
-					project_instruction.as_deref(),
-					Some(runtime_memory_sections),
-					self.loop_mode == LoopMode::Plan,
-				);
-			let system_prompt = system_prompt_sections.flatten();
 
 			// Cache break detector: snapshot the prompt prefix components
 			// (static system blocks + tool schema + model) so the post-call
@@ -1250,8 +1370,47 @@ impl GenericAgentRuntime {
 						as f64 * crate::runtime_loop::MID_WATER_TRIGGER_RATIO)
 						as u64;
 					if mid_estimate > mid_threshold {
-						let outcome =
-							crate::runtime_loop::mid_compact_messages(&mut messages, None);
+						// Layer 2 (preferred, at-most-one-lookup per run):
+						// reuse the latest session-keyed compact summary if
+						// roku-memory has one AND this run has not already
+						// looked for it. Subsequent mid-water triggers skip
+						// the backend query and fall back to Layer 1
+						// (mechanical collapse) whether the first lookup hit
+						// or missed.
+						//
+						// Two invariants together:
+						//
+						// 1. At-most-one Layer 2 per run. Re-splicing the
+						//    same frozen prior-session summary on every
+						//    trigger over-represents the older digest
+						//    relative to the turn's fresh material.
+						//
+						// 2. Cache the miss. `write_back_compact_summaries`
+						//    only persists a summary at end-of-run, so a
+						//    lookup that misses now will still miss on the
+						//    next trigger within the same run — repeated
+						//    queries only add backend latency.
+						//
+						// The flag therefore flips on *attempt* (immediately
+						// after `fetch_layer2_session_summary` returns),
+						// regardless of outcome.
+						//
+						// When memory is not wired up, the backend has no
+						// matching record, or the read fails,
+						// `session_summary_text` stays `None` and
+						// `mid_compact_messages` transparently falls through
+						// to the Layer 1 mechanical path.
+						let session_summary_text = if loop_state.layer2_lookup_attempted_this_run {
+							None
+						} else {
+							let fetched = self.fetch_layer2_session_summary(&loop_state.session_id);
+							loop_state.layer2_lookup_attempted_this_run = true;
+							fetched
+						};
+						let outcome = crate::runtime_loop::mid_compact_messages(
+							&mut messages,
+							session_summary_text.as_deref(),
+						);
 						if !matches!(outcome, crate::runtime_loop::MidCompactOutcome::Noop) {
 							loop_state.cache_break_detector.notify_compaction();
 						}
@@ -2311,6 +2470,7 @@ impl GenericAgentRuntime {
 					event_sender,
 					&system_prompt,
 					tool_schema_bytes,
+					request.model_override.as_deref(),
 				)
 				.await;
 			if compact_pt > 0 || compact_ot > 0 {
@@ -2410,6 +2570,34 @@ impl GenericAgentRuntime {
 	fn with_route_router(mut self, route_router: Arc<LlmRouter>) -> Self {
 		self.route_router = Some(route_router);
 		self
+	}
+
+	/// Install a long-term memory backend the runtime loop uses for Layer 2
+	/// mid-tier compaction (session-keyed summary reuse). Optional: when not
+	/// set, mid-tier compaction falls through to the mechanical Layer 1 path.
+	pub fn with_memory_backend(
+		mut self,
+		memory_backend: Arc<dyn roku_memory::LongTermMemoryBackend>,
+	) -> Self {
+		self.memory_backend = Some(memory_backend);
+		self
+	}
+
+	/// Fetch the most recent session-scoped compact summary from the installed
+	/// memory backend, if any. Returns `None` when no backend is wired up,
+	/// when `session_id` is empty, when the backend has no matching record, or
+	/// when the backend errors — the caller treats any `None` as "fall through
+	/// to Layer 1".
+	fn fetch_layer2_session_summary(&self, session_id: &str) -> Option<String> {
+		self.memory_backend
+			.as_deref()
+			.filter(|_| !session_id.is_empty())
+			.and_then(|backend| {
+				roku_memory::latest_session_compact_summary(backend, session_id)
+					.ok()
+					.flatten()
+					.map(|record| record.content)
+			})
 	}
 
 	fn visible_tools_for_decision(
@@ -3108,6 +3296,7 @@ mod tests {
 		AgentContext, AggregationMode, EvidenceItem, JoinPolicy, NodeId, PolicyBindings,
 		ResultStatus, TaskId, TaskNode, TaskNodeKind,
 	};
+	use roku_memory::LongTermMemoryBackend;
 	use roku_plugin_llm::{
 		GenerationRequest, LlmProvider, LlmRouter, ModelProfile, ProviderCallError,
 		ProviderResponse, RiskTier, RoutingPolicy,
@@ -3265,6 +3454,677 @@ mod tests {
 				reason: "user reply selected one of the grounded candidates for the paused loop"
 					.to_string(),
 			}
+		);
+	}
+
+	#[test]
+	fn fetch_layer2_session_summary_returns_none_without_memory_backend() {
+		let runtime = GenericAgentRuntime::default();
+		assert!(
+			runtime.fetch_layer2_session_summary("session-1").is_none(),
+			"no backend installed → None",
+		);
+	}
+
+	#[test]
+	fn fetch_layer2_session_summary_returns_none_for_empty_session_id() {
+		let backend = Arc::new(roku_memory::InMemoryLongTermMemoryBackend::default());
+		let mut req = roku_memory::MemoryWriteRequest::new(
+			roku_memory::MemoryKind::WorkflowInsight,
+			roku_memory::MemoryScope::Session,
+			"leaked",
+			roku_memory::COMPACT_SUMMARY_SENTINEL,
+			roku_memory::MemoryWriteReason::CompactSummary,
+		);
+		req.session_id = Some("some-session".to_string());
+		backend.write(&req).expect("seed summary");
+		let runtime = GenericAgentRuntime::default().with_memory_backend(backend);
+		assert!(
+			runtime.fetch_layer2_session_summary("").is_none(),
+			"empty session_id must short-circuit (no cross-session leakage)",
+		);
+	}
+
+	#[test]
+	fn fetch_layer2_session_summary_returns_stored_content_for_matching_session() {
+		let backend = Arc::new(roku_memory::InMemoryLongTermMemoryBackend::default());
+		let mut req = roku_memory::MemoryWriteRequest::new(
+			roku_memory::MemoryKind::WorkflowInsight,
+			roku_memory::MemoryScope::Session,
+			"session X summary body",
+			roku_memory::COMPACT_SUMMARY_SENTINEL,
+			roku_memory::MemoryWriteReason::CompactSummary,
+		);
+		req.session_id = Some("session-X".to_string());
+		backend.write(&req).expect("seed summary");
+
+		let runtime = GenericAgentRuntime::default().with_memory_backend(backend);
+		let got = runtime
+			.fetch_layer2_session_summary("session-X")
+			.expect("should resolve summary");
+		assert_eq!(got, "session X summary body");
+
+		// Foreign session must not leak.
+		assert!(
+			runtime
+				.fetch_layer2_session_summary("session-other")
+				.is_none(),
+		);
+	}
+
+	#[test]
+	fn execute_tool_loop_splices_session_memory_summary_via_layer2() {
+		// End-to-end regression test for the Layer 2 wiring added in the
+		// OpenAI gap sweep (issue #300): memory backend installed → mid-water
+		// pressure exceeded → session-keyed compact summary fetched and
+		// spliced into the conversation buffer → MidCompactLayer2Ran emitted
+		// instead of MidCompactLayer1Ran.
+
+		// Seed the in-memory backend with a compact summary for the test
+		// session using the canonical (kind, scope, summary-sentinel,
+		// write_reason) tuple.
+		let backend = Arc::new(roku_memory::InMemoryLongTermMemoryBackend::default());
+		let mut seed = roku_memory::MemoryWriteRequest::new(
+			roku_memory::MemoryKind::WorkflowInsight,
+			roku_memory::MemoryScope::Session,
+			"PRIOR-SESSION-MEMORY-SUMMARY-BODY: root-cause was a stale cache key.",
+			roku_memory::COMPACT_SUMMARY_SENTINEL,
+			roku_memory::MemoryWriteReason::CompactSummary,
+		);
+		seed.session_id = Some("session-layer2-int-test".to_string());
+		<roku_memory::InMemoryLongTermMemoryBackend as roku_memory::LongTermMemoryBackend>::write(
+			&backend, &seed,
+		)
+		.expect("seed compact summary");
+
+		// Route router: succeed on the first call with a final_answer decision
+		// so the loop exits cleanly after one turn.
+		let (route_router, _) = router_with_json_responses(vec![serde_json::json!({
+			"action": "final_answer",
+			"tool_name": null,
+			"arguments": null,
+			"reason": "test",
+			"final_message": "done"
+		})]);
+		let execution_router = router_with_text_output("layer2-int-exec", "unused");
+
+		// Tiny context window so a short `conversation_history` trips the
+		// mid-water threshold (0.60 × 200 = 120 tokens). Push Layer 3's
+		// post-flight threshold up to 0.99 so it doesn't pre-empt Layer 2.
+		let mut agent_config = crate::runtime_config::AgentRuntimeConfig::default();
+		agent_config.r#loop.context_window_tokens = 200;
+		agent_config.r#loop.compact_threshold_ratio = 0.99;
+
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime = GenericAgentRuntime::
+			with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+				agent_config,
+			)
+			.with_memory_backend(Arc::clone(&backend) as Arc<dyn roku_memory::LongTermMemoryBackend>);
+
+		// Build a conversation_history with enough English prose that the
+		// byte-based estimator (`bytes/4` for default text) produces an
+		// estimate above 120 tokens but below 200. Need at least 3 messages
+		// so `mid_compact_messages` does not Noop on a too-short buffer.
+		let pad = "lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt. ".repeat(3);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-layer2-int".to_string()),
+			session_id: "session-layer2-int-test".to_string(),
+			goal: "Layer 2 integration test".to_string(),
+			planning_mode_hint: None,
+			conversation_history: vec![
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::Assistant,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::Assistant,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+			],
+			model_override: None,
+			thinking_effort: None,
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::Chat,
+			0.95,
+			false,
+			crate::router::RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			"chat request",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+
+		let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+		let _execution = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-layer2-int".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				Some(&event_tx),
+				None,
+			));
+
+		drop(event_tx);
+		let mut events = Vec::new();
+		while let Ok(event) = event_rx.try_recv() {
+			events.push(event);
+		}
+
+		let layer2_events: Vec<_> = events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e,
+					crate::runtime_loop::LoopEvent::MidCompactLayer2Ran { .. }
+				)
+			})
+			.collect();
+		let layer1_events: Vec<_> = events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e,
+					crate::runtime_loop::LoopEvent::MidCompactLayer1Ran { .. }
+				)
+			})
+			.collect();
+
+		assert_eq!(
+			layer2_events.len(),
+			1,
+			"seeded memory → Layer 2 must fire exactly once; \
+			 Layer 2 count={}, Layer 1 count={}, events={events:?}",
+			layer2_events.len(),
+			layer1_events.len(),
+		);
+		assert_eq!(
+			layer1_events.len(),
+			0,
+			"Layer 1 mechanical fallback must not fire when Layer 2 consumed the summary",
+		);
+
+		// Side-check on the run-scoped flag: the lookup attempt must have
+		// set it (regardless of outcome; here the outcome is Layer 2).
+		assert!(
+			loop_state.layer2_lookup_attempted_this_run,
+			"layer2_lookup_attempted_this_run must be set after Layer 2 fires",
+		);
+	}
+
+	#[test]
+	fn execute_tool_loop_falls_back_to_layer1_when_layer2_lookup_already_attempted() {
+		// Same setup as `..._splices_session_memory_summary_via_layer2` but
+		// pre-sets `loop_state.layer2_lookup_attempted_this_run = true` before
+		// the call. The memory backend still has a valid summary, but the
+		// at-most-one-lookup-per-run invariant means the mid-water trigger
+		// must fall back to Layer 1 (mechanical) instead of re-splicing the
+		// frozen summary.
+
+		let backend = Arc::new(roku_memory::InMemoryLongTermMemoryBackend::default());
+		let mut seed = roku_memory::MemoryWriteRequest::new(
+			roku_memory::MemoryKind::WorkflowInsight,
+			roku_memory::MemoryScope::Session,
+			"PRIOR-SESSION-SUMMARY",
+			roku_memory::COMPACT_SUMMARY_SENTINEL,
+			roku_memory::MemoryWriteReason::CompactSummary,
+		);
+		seed.session_id = Some("session-layer2-already-consumed".to_string());
+		<roku_memory::InMemoryLongTermMemoryBackend as roku_memory::LongTermMemoryBackend>::write(
+			&backend, &seed,
+		)
+		.expect("seed compact summary");
+
+		let (route_router, _) = router_with_json_responses(vec![serde_json::json!({
+			"action": "final_answer",
+			"tool_name": null,
+			"arguments": null,
+			"reason": "done",
+			"final_message": "done"
+		})]);
+		let execution_router = router_with_text_output("layer2-consumed-exec", "unused");
+
+		let mut agent_config = crate::runtime_config::AgentRuntimeConfig::default();
+		agent_config.r#loop.context_window_tokens = 200;
+		agent_config.r#loop.compact_threshold_ratio = 0.99;
+
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime = GenericAgentRuntime::
+			with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+				agent_config,
+			)
+			.with_memory_backend(Arc::clone(&backend) as Arc<dyn roku_memory::LongTermMemoryBackend>);
+
+		let pad = "lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt. ".repeat(3);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-layer2-already".to_string()),
+			session_id: "session-layer2-already-consumed".to_string(),
+			goal: "Layer 2 already-consumed test".to_string(),
+			planning_mode_hint: None,
+			conversation_history: vec![
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::Assistant,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::Assistant,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+			],
+			model_override: None,
+			thinking_effort: None,
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::Chat,
+			0.95,
+			false,
+			crate::router::RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			"chat request",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+		// Simulate a previous mid-water trigger in this run that already
+		// performed the Layer 2 lookup (outcome is irrelevant — once
+		// attempted, the run must not re-query).
+		loop_state.layer2_lookup_attempted_this_run = true;
+
+		let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+		let _execution = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-layer2-already".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				Some(&event_tx),
+				None,
+			));
+
+		drop(event_tx);
+		let mut events = Vec::new();
+		while let Ok(event) = event_rx.try_recv() {
+			events.push(event);
+		}
+
+		let layer2_count = events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e,
+					crate::runtime_loop::LoopEvent::MidCompactLayer2Ran { .. }
+				)
+			})
+			.count();
+		let layer1_count = events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e,
+					crate::runtime_loop::LoopEvent::MidCompactLayer1Ran { .. }
+				)
+			})
+			.count();
+		assert_eq!(
+			layer2_count, 0,
+			"flag already true → Layer 2 must NOT fire a second time in the same run",
+		);
+		assert_eq!(
+			layer1_count, 1,
+			"mid-water pressure with Layer 2 already consumed → Layer 1 fallback fires once",
+		);
+		// With the attempted flag pre-set, the backend must not be queried
+		// at all — even though the backend has a valid summary that would
+		// otherwise produce a Layer 2 outcome. This is the "cache the
+		// lookup" half of the invariant.
+		let our_queries = backend
+			.recorded_queries()
+			.into_iter()
+			.filter(|q| q.session_id.as_deref() == Some("session-layer2-already-consumed"))
+			.count();
+		assert_eq!(
+			our_queries, 0,
+			"attempted flag pre-set → backend must NOT be queried this run",
+		);
+	}
+
+	#[test]
+	fn execute_tool_loop_caches_layer2_lookup_miss_and_sets_attempted_flag() {
+		// Backend is installed and non-empty, but has NO compact summary
+		// for our session (the record seeded below belongs to a different
+		// session). The Layer 2 lookup therefore misses, Layer 1 takes over,
+		// and the attempted flag must still flip to `true` so future
+		// mid-water triggers in the same run skip the backend entirely —
+		// caching the miss (compact summaries are only written at end-of-run
+		// so a re-query would miss again).
+
+		let backend = Arc::new(roku_memory::InMemoryLongTermMemoryBackend::default());
+		// Seed a record for a FOREIGN session so the backend is non-empty
+		// but our session still misses.
+		let mut foreign = roku_memory::MemoryWriteRequest::new(
+			roku_memory::MemoryKind::WorkflowInsight,
+			roku_memory::MemoryScope::Session,
+			"foreign-session summary — should not leak",
+			roku_memory::COMPACT_SUMMARY_SENTINEL,
+			roku_memory::MemoryWriteReason::CompactSummary,
+		);
+		foreign.session_id = Some("session-foreign".to_string());
+		<roku_memory::InMemoryLongTermMemoryBackend as roku_memory::LongTermMemoryBackend>::write(
+			&backend, &foreign,
+		)
+		.expect("seed foreign summary");
+
+		let (route_router, _) = router_with_json_responses(vec![serde_json::json!({
+			"action": "final_answer",
+			"tool_name": null,
+			"arguments": null,
+			"reason": "done",
+			"final_message": "done"
+		})]);
+		let execution_router = router_with_text_output("layer2-miss-exec", "unused");
+
+		let mut agent_config = crate::runtime_config::AgentRuntimeConfig::default();
+		agent_config.r#loop.context_window_tokens = 200;
+		agent_config.r#loop.compact_threshold_ratio = 0.99;
+
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime = GenericAgentRuntime::
+			with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+				agent_config,
+			)
+			.with_memory_backend(Arc::clone(&backend) as Arc<dyn roku_memory::LongTermMemoryBackend>);
+
+		let pad = "lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt. ".repeat(3);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-layer2-miss".to_string()),
+			session_id: "session-layer2-miss".to_string(),
+			goal: "Layer 2 miss-caching test".to_string(),
+			planning_mode_hint: None,
+			conversation_history: vec![
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::Assistant,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::Assistant,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+			],
+			model_override: None,
+			thinking_effort: None,
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::Chat,
+			0.95,
+			false,
+			crate::router::RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			"chat request",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+
+		let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+		let _execution = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-layer2-miss".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				Some(&event_tx),
+				None,
+			));
+
+		drop(event_tx);
+		let mut events = Vec::new();
+		while let Ok(event) = event_rx.try_recv() {
+			events.push(event);
+		}
+
+		let layer2_count = events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e,
+					crate::runtime_loop::LoopEvent::MidCompactLayer2Ran { .. }
+				)
+			})
+			.count();
+		let layer1_count = events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e,
+					crate::runtime_loop::LoopEvent::MidCompactLayer1Ran { .. }
+				)
+			})
+			.count();
+		assert_eq!(
+			layer2_count, 0,
+			"no matching summary → Layer 2 must NOT fire",
+		);
+		assert_eq!(
+			layer1_count, 1,
+			"mid-water pressure → Layer 1 mechanical fallback fires once",
+		);
+
+		// Core invariant: flag is set even though the outcome was Layer 1
+		// (the run attempted the lookup, nothing more to retry).
+		assert!(
+			loop_state.layer2_lookup_attempted_this_run,
+			"attempted flag must flip on any lookup — hit or miss — so future \
+			 triggers in the same run skip the backend entirely",
+		);
+
+		// Backend was queried exactly once for our session. (Other sessions
+		// — e.g. the foreign seed write — don't issue queries, so this
+		// filter isolates the miss query the runtime issued.)
+		let our_queries = backend
+			.recorded_queries()
+			.into_iter()
+			.filter(|q| q.session_id.as_deref() == Some("session-layer2-miss"))
+			.count();
+		assert_eq!(
+			our_queries, 1,
+			"backend must be queried exactly once per run, regardless of \
+			 Layer 2 outcome",
+		);
+	}
+
+	#[test]
+	fn execute_tool_loop_falls_back_to_layer1_when_memory_has_no_summary() {
+		// Negative of the above: same setup but the backend is not installed.
+		// Mid-water must still fire, but Layer 1 (mechanical) takes over
+		// because `fetch_layer2_session_summary` returns None.
+
+		let (route_router, _) = router_with_json_responses(vec![serde_json::json!({
+			"action": "final_answer",
+			"tool_name": null,
+			"arguments": null,
+			"reason": "test",
+			"final_message": "done"
+		})]);
+		let execution_router = router_with_text_output("layer1-fallback-exec", "unused");
+
+		let mut agent_config = crate::runtime_config::AgentRuntimeConfig::default();
+		agent_config.r#loop.context_window_tokens = 200;
+		agent_config.r#loop.compact_threshold_ratio = 0.99;
+
+		let root = tempfile::tempdir().expect("temp root should exist");
+		// NOTE: no `.with_memory_backend(...)` call — the runtime stays
+		// without a backend, so Layer 2 cannot fire.
+		let runtime = GenericAgentRuntime::
+			with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot_and_runtime_config(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+				agent_config,
+			);
+
+		let pad = "lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt. ".repeat(3);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-layer1-fallback".to_string()),
+			session_id: "session-layer1-fallback".to_string(),
+			goal: "Layer 1 fallback test".to_string(),
+			planning_mode_hint: None,
+			conversation_history: vec![
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::Assistant,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::User,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+				ConversationTurn {
+					role: ConversationRole::Assistant,
+					content: pad.clone(),
+					created_at_unix_ms: 0,
+				},
+			],
+			model_override: None,
+			thinking_effort: None,
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::Chat,
+			0.95,
+			false,
+			crate::router::RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			"chat request",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+
+		let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+		let _execution = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-layer1-fallback".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				Some(&event_tx),
+				None,
+			));
+
+		drop(event_tx);
+		let mut events = Vec::new();
+		while let Ok(event) = event_rx.try_recv() {
+			events.push(event);
+		}
+
+		let layer2_count = events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e,
+					crate::runtime_loop::LoopEvent::MidCompactLayer2Ran { .. }
+				)
+			})
+			.count();
+		let layer1_count = events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e,
+					crate::runtime_loop::LoopEvent::MidCompactLayer1Ran { .. }
+				)
+			})
+			.count();
+
+		assert_eq!(layer2_count, 0, "no memory backend → Layer 2 must not fire");
+		assert_eq!(
+			layer1_count, 1,
+			"mid-water pressure without memory → Layer 1 mechanical fallback fires once",
 		);
 	}
 

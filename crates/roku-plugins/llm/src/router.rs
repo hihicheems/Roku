@@ -27,7 +27,7 @@ use crate::types::{
 	CompactRequest, CompactResponse, GenerationRequest, LlmAdapterError, LlmResponse, ModelProfile,
 	ProviderCallError, ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy,
 	StreamChunk, StructuredGenerationError, StructuredJsonResponse, StructuredOutputError,
-	estimate_cost_usd,
+	ToolDefinition, estimate_cost_usd,
 };
 
 #[async_trait]
@@ -97,6 +97,20 @@ pub trait LlmProvider: Send + Sync {
 	/// output budget (e.g. the OpenAI Responses API link) return `false`.
 	fn supports_output_slot_cap(&self) -> bool {
 		true
+	}
+
+	/// Produce the exact byte sequence this provider would send on the wire
+	/// for the `tools` field if given `definitions`.
+	///
+	/// The default implementation returns the Roku-internal canonical form
+	/// (`serde_json::to_vec(definitions)`). Live providers override to match
+	/// the provider's actual wire format (for example, OpenAI Chat Completions
+	/// wraps each entry in `{"type":"function","function":{...}}`, while
+	/// Anthropic uses `input_schema` instead of `parameters`). This is used
+	/// by the runtime's cold-start prompt-token estimator to avoid folding a
+	/// provider-specific byte bias into the calibration scale.
+	fn preview_wire_tool_schema_bytes(&self, definitions: &[ToolDefinition]) -> Vec<u8> {
+		serde_json::to_vec(definitions).unwrap_or_default()
 	}
 }
 
@@ -716,6 +730,70 @@ impl LlmRouter {
 			None => true,
 		}
 	}
+
+	/// Preview the exact bytes the active provider would send on the wire for
+	/// the `tools` field given `definitions`.
+	///
+	/// Picks the provider bound to `model_id`; falls back to the first-highest
+	/// priority registered model's provider when `model_id` is unknown. If no
+	/// provider is registered at all, returns the Roku-internal canonical form
+	/// (this preserves existing behavior for the estimator call sites that
+	/// predate the per-provider override).
+	///
+	/// Prefer [`Self::preview_wire_tool_schema_bytes_for_request`] when the
+	/// caller can construct (or has) a `GenerationRequest`: it routes via the
+	/// same `select_model` logic the real `generate` call uses, so the
+	/// estimator sees the provider that will actually serve this request
+	/// — not a priority-based approximation that can disagree when
+	/// eligibility filters kick in.
+	pub fn preview_wire_tool_schema_bytes(
+		&self,
+		model_id: Option<&str>,
+		definitions: &[ToolDefinition],
+	) -> Vec<u8> {
+		let provider_name = model_id
+			.and_then(|id| self.models.iter().find(|m| m.model_id == id))
+			.or_else(|| {
+				// No explicit model_id: use the highest-priority registered
+				// model as a proxy for "the provider that will most likely
+				// serve the next call". Matches select_model's tie-breaker
+				// when no `model_override` is in play and keeps the
+				// estimator deterministic across turns.
+				self.models.iter().max_by_key(|m| m.route_priority)
+			})
+			.map(|m| m.provider.as_str());
+		match provider_name.and_then(|name| self.providers.get(name)) {
+			Some(p) => p.provider.preview_wire_tool_schema_bytes(definitions),
+			None => serde_json::to_vec(definitions).unwrap_or_default(),
+		}
+	}
+
+	/// Same as [`Self::preview_wire_tool_schema_bytes`] but resolves the
+	/// target provider by running the full `select_model` policy against
+	/// `request`. This is the preferred call for the runtime's pre-flight
+	/// estimator because it matches what `generate` / `generate_streaming`
+	/// would actually route the request to — `model_override` eligibility,
+	/// risk-tier filtering, and cost / latency ordering all come into play.
+	///
+	/// If the request is ineligible for every registered model, or the
+	/// matched provider is not registered, returns the Roku-internal
+	/// canonical form so the estimator still produces a sensible value
+	/// instead of panicking or zero-ing out.
+	pub fn preview_wire_tool_schema_bytes_for_request(
+		&self,
+		request: &GenerationRequest,
+		definitions: &[ToolDefinition],
+	) -> Vec<u8> {
+		match self.select_model(request).ok() {
+			Some(model) => match self.providers.get(&model.provider) {
+				Some(registered) => registered
+					.provider
+					.preview_wire_tool_schema_bytes(definitions),
+				None => serde_json::to_vec(definitions).unwrap_or_default(),
+			},
+			None => serde_json::to_vec(definitions).unwrap_or_default(),
+		}
+	}
 }
 
 fn map_structured_generation_error(error: LlmAdapterError) -> StructuredGenerationError {
@@ -861,8 +939,8 @@ mod tests {
 	use roku_common_types::Metrics;
 
 	use crate::types::{
-		GenerationRequest, ModelProfile, ProviderCallError, ProviderResiliencePolicy,
-		ProviderResponse, RiskTier, RoutingPolicy,
+		GenerationRequest, Message, ModelProfile, ProviderCallError, ProviderResiliencePolicy,
+		ProviderResponse, RiskTier, RoutingPolicy, ToolDefinition,
 	};
 
 	use super::*;
@@ -1036,6 +1114,374 @@ mod tests {
 			.expect("generation should succeed");
 		assert_eq!(response.provider, "provider-a");
 		assert_eq!(response.model_id, "a-lite");
+	}
+
+	#[test]
+	fn preview_wire_bytes_for_request_routes_to_select_model_not_max_priority() {
+		// Two providers registered. `priority-tag-provider` has the higher
+		// `route_priority` — the priority-based `preview_wire_tool_schema_bytes(None, ...)`
+		// picks it. `eligible-tag-provider` has a lower priority but cheaper
+		// cost, so a request with a tight cost budget excludes the
+		// high-priority model at `select_model` time and must route to the
+		// eligible one.
+		//
+		// The two providers emit distinguishable wire bytes via their
+		// `preview_wire_tool_schema_bytes` override; the test asserts that
+		// `preview_wire_tool_schema_bytes_for_request` tracks the real
+		// `select_model` pick rather than the priority max.
+
+		struct TaggedProvider {
+			name: &'static str,
+			tag: &'static [u8],
+		}
+
+		#[async_trait]
+		impl LlmProvider for TaggedProvider {
+			fn provider_name(&self) -> &'static str {
+				self.name
+			}
+
+			async fn complete(
+				&self,
+				_model: &ModelProfile,
+				_request: &GenerationRequest,
+			) -> Result<ProviderResponse, ProviderCallError> {
+				unreachable!("TaggedProvider is only used for schema-preview tests")
+			}
+
+			fn preview_wire_tool_schema_bytes(&self, _definitions: &[ToolDefinition]) -> Vec<u8> {
+				self.tag.to_vec()
+			}
+		}
+
+		let mut router = LlmRouter::new(RoutingPolicy {
+			max_request_cost_usd: 10.0,
+			max_latency_ms: 10_000,
+		});
+		router.register_provider(TaggedProvider {
+			name: "priority-tag-provider",
+			tag: b"PRIORITY",
+		});
+		router.register_provider(TaggedProvider {
+			name: "eligible-tag-provider",
+			tag: b"ELIGIBLE",
+		});
+		// High priority, high cost.
+		router.register_model(ModelProfile {
+			model_id: "priority-model".to_string(),
+			provider: "priority-tag-provider".to_string(),
+			max_context_tokens: 8_000,
+			cost_per_1k_tokens_usd: 5.0,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		});
+		// Low priority, low cost.
+		router.register_model(ModelProfile {
+			model_id: "eligible-model".to_string(),
+			provider: "eligible-tag-provider".to_string(),
+			max_context_tokens: 8_000,
+			cost_per_1k_tokens_usd: 0.01,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 1,
+		});
+
+		let defs = vec![ToolDefinition {
+			name: "tool-a".to_string(),
+			description: "desc".to_string(),
+			parameters: serde_json::json!({"type": "object"}),
+		}];
+
+		// Baseline: priority-based API picks the highest `route_priority` →
+		// PRIORITY bytes.
+		let priority_bytes = router.preview_wire_tool_schema_bytes(None, &defs);
+		assert_eq!(
+			priority_bytes, b"PRIORITY",
+			"priority-based lookup picks the max-priority provider"
+		);
+
+		// Now build a request whose cost budget excludes the high-priority
+		// model but leaves the eligible one. Approx prompt+output ≈ 300
+		// tokens; at $5/1k that's ~$1.5 for `priority-model` and ~$0.003
+		// for `eligible-model`. A budget of $0.01 rejects the former and
+		// admits the latter, forcing `select_model` to pick against
+		// max-priority.
+		let tight_request = GenerationRequest {
+			system_prompt: None,
+			prompt: String::new(),
+			messages: Some(vec![Message::User {
+				content: "tiny".to_string(),
+			}]),
+			expected_output_tokens: 300,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: 4_000,
+			budget_cost_remaining_usd: 0.01,
+			tools: None,
+			model_override: None,
+			thinking_effort: None,
+			system_prompt_sections: None,
+		};
+		let routed_bytes = router.preview_wire_tool_schema_bytes_for_request(&tight_request, &defs);
+		assert_eq!(
+			routed_bytes, b"ELIGIBLE",
+			"select_model routes around the priority-max when budget excludes it; \
+			 preview_wire_tool_schema_bytes_for_request must follow that pick"
+		);
+		assert_ne!(
+			priority_bytes, routed_bytes,
+			"route-aware and priority-based previews must disagree under \
+			 this scenario — otherwise the test is not exercising the bug",
+		);
+
+		// And: `model_override` explicitly selects priority-model.
+		// `select_model` still applies `supports(request)`, so the override
+		// only wins when the model actually fits the budget — use a loose
+		// request here to verify the override-hits-priority path.
+		let override_request = GenerationRequest {
+			model_override: Some("priority-model".to_string()),
+			budget_cost_remaining_usd: 5.0,
+			..tight_request.clone()
+		};
+		let override_bytes =
+			router.preview_wire_tool_schema_bytes_for_request(&override_request, &defs);
+		assert_eq!(
+			override_bytes, b"PRIORITY",
+			"explicit model_override must route to that model's provider"
+		);
+	}
+
+	#[test]
+	fn preview_wire_bytes_for_request_honors_system_prompt_in_eligibility() {
+		// Regression: the runtime used to hand `select_model` a request with
+		// `system_prompt: None`, so estimator-time eligibility differed from
+		// the real generation request's eligibility whenever the system
+		// prompt tokens pushed the input over a model's budget. The fix
+		// passes the real system prompt into the selection request; this
+		// test locks that behavior by constructing a budget tight enough
+		// that the "high-priority" model is eligible WITHOUT a system prompt
+		// but ineligible WITH one.
+
+		struct TaggedProvider {
+			name: &'static str,
+			tag: &'static [u8],
+		}
+
+		#[async_trait]
+		impl LlmProvider for TaggedProvider {
+			fn provider_name(&self) -> &'static str {
+				self.name
+			}
+
+			async fn complete(
+				&self,
+				_model: &ModelProfile,
+				_request: &GenerationRequest,
+			) -> Result<ProviderResponse, ProviderCallError> {
+				unreachable!("TaggedProvider is only used for schema-preview tests")
+			}
+
+			fn preview_wire_tool_schema_bytes(&self, _definitions: &[ToolDefinition]) -> Vec<u8> {
+				self.tag.to_vec()
+			}
+		}
+
+		let mut router = LlmRouter::new(RoutingPolicy {
+			max_request_cost_usd: 10.0,
+			max_latency_ms: 10_000,
+		});
+		router.register_provider(TaggedProvider {
+			name: "tight-tag-provider",
+			tag: b"TIGHT",
+		});
+		router.register_provider(TaggedProvider {
+			name: "roomy-tag-provider",
+			tag: b"ROOMY",
+		});
+		// High priority but tight context window (50 tokens).
+		router.register_model(ModelProfile {
+			model_id: "tight-model".to_string(),
+			provider: "tight-tag-provider".to_string(),
+			max_context_tokens: 50,
+			cost_per_1k_tokens_usd: 0.01,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		});
+		// Lower priority, roomy context window.
+		router.register_model(ModelProfile {
+			model_id: "roomy-model".to_string(),
+			provider: "roomy-tag-provider".to_string(),
+			max_context_tokens: 8_000,
+			cost_per_1k_tokens_usd: 0.01,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 1,
+		});
+
+		let defs = vec![ToolDefinition {
+			name: "tool-a".to_string(),
+			description: "desc".to_string(),
+			parameters: serde_json::json!({"type": "object"}),
+		}];
+
+		// Messages alone: ~20 tokens — both models are eligible; tight-model
+		// wins on priority and its wire bytes are returned.
+		let small_message_payload: Vec<String> = (0..20).map(|_| "word".to_string()).collect();
+		let request_without_system_prompt = GenerationRequest {
+			system_prompt: None,
+			prompt: String::new(),
+			messages: Some(vec![Message::User {
+				content: small_message_payload.join(" "),
+			}]),
+			expected_output_tokens: 10,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: 10_000,
+			budget_cost_remaining_usd: 5.0,
+			tools: None,
+			model_override: None,
+			thinking_effort: None,
+			system_prompt_sections: None,
+		};
+		let without_bytes = router
+			.preview_wire_tool_schema_bytes_for_request(&request_without_system_prompt, &defs);
+		assert_eq!(
+			without_bytes, b"TIGHT",
+			"without a system prompt the tight-but-high-priority model is eligible"
+		);
+
+		// Adding a large system prompt (~200 whitespace-separated words) pushes
+		// tight-model past its 50-token context window. `select_model` must
+		// now route to `roomy-model` — and the preview bytes track that pick.
+		let large_system_prompt: String = vec!["instruction"; 200].join(" ");
+		let request_with_system_prompt = GenerationRequest {
+			system_prompt: Some(large_system_prompt),
+			..request_without_system_prompt.clone()
+		};
+		let with_bytes =
+			router.preview_wire_tool_schema_bytes_for_request(&request_with_system_prompt, &defs);
+		assert_eq!(
+			with_bytes, b"ROOMY",
+			"including the system prompt excludes the tight-context model, \
+			 so select_model must route to the roomy provider"
+		);
+		assert_ne!(
+			without_bytes, with_bytes,
+			"without/with system prompt must produce different provider picks \
+			 — otherwise the test is not exercising the bug"
+		);
+	}
+
+	#[test]
+	fn preview_wire_bytes_for_request_honors_messages_size_in_eligibility() {
+		// Sibling of `...honors_system_prompt_in_eligibility`: the messages
+		// axis also feeds `estimate_request_input_tokens`, so growing the
+		// message set can flip `select_model`'s eligibility and change the
+		// provider the preview bytes come from. The runtime's end-of-turn
+		// estimator relies on this: after tool execution has appended
+		// messages, the recomputed wire bytes must track the provider the
+		// next outbound call would actually route to.
+
+		struct TaggedProvider {
+			name: &'static str,
+			tag: &'static [u8],
+		}
+
+		#[async_trait]
+		impl LlmProvider for TaggedProvider {
+			fn provider_name(&self) -> &'static str {
+				self.name
+			}
+
+			async fn complete(
+				&self,
+				_model: &ModelProfile,
+				_request: &GenerationRequest,
+			) -> Result<ProviderResponse, ProviderCallError> {
+				unreachable!("TaggedProvider is only used for schema-preview tests")
+			}
+
+			fn preview_wire_tool_schema_bytes(&self, _definitions: &[ToolDefinition]) -> Vec<u8> {
+				self.tag.to_vec()
+			}
+		}
+
+		let mut router = LlmRouter::new(RoutingPolicy {
+			max_request_cost_usd: 10.0,
+			max_latency_ms: 10_000,
+		});
+		router.register_provider(TaggedProvider {
+			name: "tight-msg-provider",
+			tag: b"TIGHT",
+		});
+		router.register_provider(TaggedProvider {
+			name: "roomy-msg-provider",
+			tag: b"ROOMY",
+		});
+		// High priority but tight context window (30 tokens).
+		router.register_model(ModelProfile {
+			model_id: "tight-msg-model".to_string(),
+			provider: "tight-msg-provider".to_string(),
+			max_context_tokens: 30,
+			cost_per_1k_tokens_usd: 0.01,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		});
+		// Lower priority, roomy context window.
+		router.register_model(ModelProfile {
+			model_id: "roomy-msg-model".to_string(),
+			provider: "roomy-msg-provider".to_string(),
+			max_context_tokens: 8_000,
+			cost_per_1k_tokens_usd: 0.01,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 1,
+		});
+
+		let defs = vec![ToolDefinition {
+			name: "tool-a".to_string(),
+			description: "desc".to_string(),
+			parameters: serde_json::json!({"type": "object"}),
+		}];
+
+		// Small message set — fits inside the tight model's 30-token window.
+		let small_request = GenerationRequest {
+			system_prompt: None,
+			prompt: String::new(),
+			messages: Some(vec![Message::User {
+				content: "hi".to_string(),
+			}]),
+			expected_output_tokens: 5,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: 10_000,
+			budget_cost_remaining_usd: 5.0,
+			tools: None,
+			model_override: None,
+			thinking_effort: None,
+			system_prompt_sections: None,
+		};
+		let small_bytes = router.preview_wire_tool_schema_bytes_for_request(&small_request, &defs);
+		assert_eq!(
+			small_bytes, b"TIGHT",
+			"small messages fit the tight-context model's window → TIGHT wins on priority"
+		);
+
+		// Grow the messages past the tight model's context window.
+		let large_payload: Vec<String> = (0..50).map(|_| "word".to_string()).collect();
+		let large_request = GenerationRequest {
+			messages: Some(vec![Message::User {
+				content: large_payload.join(" "),
+			}]),
+			..small_request.clone()
+		};
+		let large_bytes = router.preview_wire_tool_schema_bytes_for_request(&large_request, &defs);
+		assert_eq!(
+			large_bytes, b"ROOMY",
+			"large messages exceed tight-context window → select_model routes to the roomy provider"
+		);
+		assert_ne!(
+			small_bytes, large_bytes,
+			"small/large messages must produce different provider picks — \
+			 otherwise the test is not exercising the bug the fix addresses"
+		);
 	}
 
 	#[test]

@@ -198,6 +198,27 @@ pub struct LoopState {
 	/// Not serialized — a freshly restored loop starts with an empty store.
 	#[serde(skip)]
 	pub(crate) tool_result_store: ToolResultStore,
+	/// Per-run flag set on the first Layer 2 lookup attempt this run,
+	/// regardless of whether the backend returned a summary. Subsequent
+	/// mid-water triggers in the same run therefore skip the memory query
+	/// and fall back to Layer 1 (mechanical collapse).
+	///
+	/// Two invariants motivate this:
+	///
+	/// - **At-most-one Layer 2 per run.** A stored compact summary is
+	///   end-of-run material; re-splicing the same frozen digest on every
+	///   subsequent mid-water trigger over-represents the older content
+	///   relative to each turn's fresh material without adding new signal.
+	/// - **Cache the miss.** `write_back_compact_summaries` only persists a
+	///   summary at end-of-run, so a lookup that misses now will still miss
+	///   on the next trigger within the same run — repeated queries only
+	///   add backend latency. Setting the flag on *attempt* (not only on a
+	///   Layer 2 outcome) caches the miss for the remainder of the run.
+	///
+	/// Persisted across checkpoint round-trips via `#[serde(default)]` so
+	/// the invariant holds even when a run is paused and resumed.
+	#[serde(default)]
+	pub(crate) layer2_lookup_attempted_this_run: bool,
 }
 
 /// Maximum allowed consecutive Layer 3 structured-summary failures before
@@ -251,6 +272,7 @@ impl LoopState {
 			cache_break_detector: CacheBreakDetector::default(),
 			deferred_tools: None,
 			tool_result_store: ToolResultStore::default(),
+			layer2_lookup_attempted_this_run: false,
 		}
 	}
 
@@ -664,6 +686,110 @@ mod tests {
 		assert_eq!(deserialized.visible_tools.len(), 3);
 		assert_eq!(deserialized.bound_resources.len(), 2);
 		assert!(deserialized.last_observation.is_some());
+	}
+
+	#[test]
+	fn layer2_lookup_attempted_this_run_roundtrips_through_checkpoint_serde() {
+		// Lock the `#[serde(default)]` contract on
+		// `layer2_lookup_attempted_this_run`: the flag must survive a JSON
+		// round-trip so a run that already attempted the Layer 2 lookup
+		// before a checkpoint does not re-attempt it after restore (which
+		// would break both the one-Layer-2-per-run invariant and the
+		// cache-the-miss invariant).
+		let mut state = LoopState::new("loop-layer2-flag", &loop_context());
+		assert!(
+			!state.layer2_lookup_attempted_this_run,
+			"fresh LoopState must start with the flag cleared",
+		);
+		state.layer2_lookup_attempted_this_run = true;
+		let json = serde_json::to_string(&state).expect("serialize");
+		let restored: LoopState = serde_json::from_str(&json).expect("deserialize");
+		assert!(
+			restored.layer2_lookup_attempted_this_run,
+			"flag must survive a JSON round-trip (persisted across checkpoints)",
+		);
+	}
+
+	#[test]
+	fn tool_result_store_drops_entries_across_checkpoint_roundtrip() {
+		// Exercise the documented `#[serde(skip)]` contract on
+		// `LoopState.tool_result_store`: entries registered pre-checkpoint
+		// must not survive deserialization, and the restored state must
+		// behave correctly for both `advance_turn` and fresh `register` calls.
+
+		let mut state = LoopState::new("loop-restore", &loop_context());
+
+		// Register a large tool result so ToolResultStore enters the preview
+		// persistence path (content > PREVIEW_SIZE bytes).
+		let large = "X".repeat(5_000);
+		let (_content, is_preview) =
+			state
+				.tool_result_store
+				.register("tool-pre", &large, "run-restore");
+		assert!(is_preview, "large content should engage preview path");
+		assert!(
+			state.tool_result_store.get_preview("tool-pre").is_none(),
+			"fresh state is not yet a preview for get_preview",
+		);
+		state.tool_result_store.advance_turn(); // Fresh -> Frozen
+		assert!(
+			state.tool_result_store.get_preview("tool-pre").is_some(),
+			"after advance_turn entry should be Frozen and visible",
+		);
+
+		// Checkpoint round-trip.
+		let json = serde_json::to_string(&state).expect("serialize");
+		let restored: LoopState = serde_json::from_str(&json).expect("deserialize");
+
+		// 1. The store is empty after deserialize.
+		assert_eq!(
+			restored.tool_result_store,
+			ToolResultStore::default(),
+			"restored store must match default (entries dropped)",
+		);
+		assert!(
+			restored.tool_result_store.get_preview("tool-pre").is_none(),
+			"pre-restore ids must not resolve in the restored store",
+		);
+
+		// 2. advance_turn on the restored store is a no-op and does not panic.
+		let mut restored = restored;
+		restored.tool_result_store.advance_turn();
+		assert_eq!(
+			restored.tool_result_store,
+			ToolResultStore::default(),
+			"advance_turn on empty restored store must remain empty",
+		);
+
+		// 3. Fresh register() calls interact correctly with the restored state.
+		//    Re-registering the same tool_use_id that pre-existed before the
+		//    checkpoint must be treated as a brand-new entry (no aliasing
+		//    with pre-restore state), and a new distinct id must coexist.
+		let (_c1, p1) = restored
+			.tool_result_store
+			.register("tool-pre", &large, "run-restore");
+		assert!(
+			p1,
+			"re-registering after restore should re-engage preview path"
+		);
+		let new_payload = "Y".repeat(5_000);
+		let (_c2, p2) =
+			restored
+				.tool_result_store
+				.register("tool-post", &new_payload, "run-restore");
+		assert!(p2, "new id should engage preview path");
+		restored.tool_result_store.advance_turn();
+		assert!(
+			restored.tool_result_store.get_preview("tool-pre").is_some(),
+			"post-restore re-registered id should be visible after advance_turn",
+		);
+		assert!(
+			restored
+				.tool_result_store
+				.get_preview("tool-post")
+				.is_some(),
+			"newly registered id should coexist",
+		);
 	}
 
 	#[test]

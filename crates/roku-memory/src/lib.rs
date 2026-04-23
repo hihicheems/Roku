@@ -48,12 +48,13 @@ pub use control_plane::{
 	InMemoryResultRepository, InMemoryTaskRepository, ResultRepository, RetryClaim, TaskRepository,
 };
 pub use long_term::{
-	ConservativeMemoryLifecyclePolicy, InMemoryLongTermMemoryBackend, LongTermMemoryBackend,
-	MemoryBackendHealth, MemoryBackendStatus, MemoryDeleteSelector, MemoryError, MemoryFilters,
-	MemoryHit, MemoryKind, MemoryLifecyclePolicy, MemoryMetadata, MemoryProvenance, MemoryQuery,
-	MemoryRecallInput, MemoryRecallReason, MemoryRecord, MemoryScope, MemorySourceRef,
-	MemoryWriteAck, MemoryWritePolicyInput, MemoryWriteReason, MemoryWriteRequest,
-	NoopLongTermMemoryBackend,
+	COMPACT_SUMMARY_SENTINEL, ConservativeMemoryLifecyclePolicy, InMemoryLongTermMemoryBackend,
+	LongTermMemoryBackend, MemoryBackendHealth, MemoryBackendStatus, MemoryDeleteSelector,
+	MemoryError, MemoryFilters, MemoryHit, MemoryKind, MemoryLifecyclePolicy, MemoryMetadata,
+	MemoryProvenance, MemoryQuery, MemoryRecallInput, MemoryRecallReason, MemoryRecord,
+	MemoryScope, MemorySourceRef, MemoryWriteAck, MemoryWritePolicyInput, MemoryWriteReason,
+	MemoryWriteRequest, NoopLongTermMemoryBackend, latest_session_compact_summary,
+	session_compact_summary_query,
 };
 pub use pending_loop::{
 	NoopPendingLoopSnapshotBackend, PendingLoopSnapshot, PendingLoopSnapshotBackend,

@@ -89,16 +89,37 @@ pub struct OpenAiResponsesConfig {
 	pub session_id: String,
 }
 
+/// Environment variable that toggles delta mode (`previous_response_id` reuse).
+pub const WEBSOCKET_MODE_ENV: &str = "ROKU_OPENAI_WEBSOCKET_MODE";
+
+/// Apply the canonical truthy rule to an explicit value. Split out from
+/// [`websocket_mode_from_env`] so tests can exercise the parsing without
+/// mutating the process environment.
+///
+/// Truthy values: `"true"` (case-insensitive) and `"1"`. Everything else,
+/// including `None`, yields `false`.
+pub fn websocket_mode_from_value(value: Option<&str>) -> bool {
+	match value {
+		Some(v) => v.eq_ignore_ascii_case("true") || v == "1",
+		None => false,
+	}
+}
+
+/// Single source for parsing the `ROKU_OPENAI_WEBSOCKET_MODE` env variable.
+///
+/// Delegates to [`websocket_mode_from_value`] so the truthy rule and the
+/// env-name constant live in exactly one place.
+pub fn websocket_mode_from_env() -> bool {
+	websocket_mode_from_value(std::env::var(WEBSOCKET_MODE_ENV).ok().as_deref())
+}
+
 impl OpenAiResponsesConfig {
 	pub fn new(api_key: String) -> Self {
-		let websocket_mode = std::env::var("ROKU_OPENAI_WEBSOCKET_MODE")
-			.map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-			.unwrap_or(false);
 		Self {
 			api_key,
 			base_url: DEFAULT_RESPONSES_URL.to_string(),
 			reasoning_effort: None,
-			websocket_mode,
+			websocket_mode: websocket_mode_from_env(),
 			chatgpt_account_id: None,
 			chatgpt_account_is_fedramp: false,
 			originator: "codex_cli_rs".to_string(),
@@ -1109,6 +1130,16 @@ impl LlmProvider for OpenAiResponsesProvider {
 		false
 	}
 
+	fn preview_wire_tool_schema_bytes(&self, definitions: &[ToolDefinition]) -> Vec<u8> {
+		// Mirror the exact serialization used by build_responses_request() /
+		// compact_history(): each tool is wrapped as
+		// `{"type":"function","name","description","parameters"}` via
+		// build_tool_definition(). Bundled as a JSON array so the estimator
+		// sees the byte count the provider would put on the wire.
+		let wire: Vec<Value> = definitions.iter().map(build_tool_definition).collect();
+		serde_json::to_vec(&wire).unwrap_or_default()
+	}
+
 	async fn compact_history(
 		&self,
 		request: &CompactRequest,
@@ -1456,6 +1487,97 @@ fn log_responses(
 mod tests {
 	use super::*;
 	use serde_json::json;
+
+	// --- Env parsing ---
+
+	#[test]
+	fn preview_wire_tool_schema_bytes_matches_build_responses_request_tools() {
+		let definitions = vec![
+			ToolDefinition {
+				name: "web_fetch".to_string(),
+				description: "Fetch a URL".to_string(),
+				parameters: json!({
+					"type": "object",
+					"properties": {"url": {"type": "string"}},
+				}),
+			},
+			ToolDefinition {
+				name: "shell_exec".to_string(),
+				description: "Run a shell command".to_string(),
+				parameters: json!({
+					"type": "object",
+					"properties": {"cmd": {"type": "string"}},
+					"required": ["cmd"],
+				}),
+			},
+		];
+		let request = GenerationRequest {
+			system_prompt: None,
+			prompt: "Hi".to_string(),
+			messages: None,
+			expected_output_tokens: 128,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: 100_000,
+			budget_cost_remaining_usd: 10.0,
+			tools: Some(definitions.clone()),
+			model_override: None,
+			thinking_effort: None,
+			system_prompt_sections: None,
+		};
+		let body = build_responses_request("gpt-5.4", &request, false, None, "cache-key", None);
+		let wire_tools = body
+			.get("tools")
+			.cloned()
+			.expect("build_responses_request should serialize tools");
+
+		let config = OpenAiResponsesConfig {
+			api_key: "sk-test-key".to_string(),
+			base_url: "https://example.invalid/v1/responses".to_string(),
+			reasoning_effort: None,
+			websocket_mode: false,
+			chatgpt_account_id: None,
+			chatgpt_account_is_fedramp: false,
+			originator: "codex_cli_rs".to_string(),
+			installation_id: "install-test-uuid".to_string(),
+			session_id: "session-test-uuid".to_string(),
+		};
+		let provider = OpenAiResponsesProvider::new(config).expect("construct provider");
+		let preview = provider.preview_wire_tool_schema_bytes(&definitions);
+		let preview_json: Value =
+			serde_json::from_slice(&preview).expect("preview bytes are valid JSON");
+
+		assert_eq!(
+			preview_json, wire_tools,
+			"preview_wire_tool_schema_bytes must match the tools array \
+			 build_responses_request places on the wire",
+		);
+	}
+
+	#[test]
+	fn websocket_mode_from_value_recognises_truthy_and_falsy_inputs() {
+		// Exercises the production parsing function directly — a regression
+		// in the function body (e.g. an accidental strict-case comparison or
+		// a wrong default) is caught here, not silently accepted.
+		for v in ["true", "TRUE", "True", "tRuE", "1"] {
+			assert!(
+				websocket_mode_from_value(Some(v)),
+				"expected {v:?} to be truthy"
+			);
+		}
+		for v in ["", "0", "false", "no", "2", "yes"] {
+			assert!(
+				!websocket_mode_from_value(Some(v)),
+				"expected {v:?} to be falsy"
+			);
+		}
+		assert!(
+			!websocket_mode_from_value(None),
+			"None (env var unset) must be falsy"
+		);
+		// Confirms the env constant name used elsewhere has not silently drifted.
+		assert_eq!(WEBSOCKET_MODE_ENV, "ROKU_OPENAI_WEBSOCKET_MODE");
+	}
 
 	// --- Request building ---
 
