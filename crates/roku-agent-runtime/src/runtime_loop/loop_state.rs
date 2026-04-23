@@ -667,6 +667,88 @@ mod tests {
 	}
 
 	#[test]
+	fn tool_result_store_drops_entries_across_checkpoint_roundtrip() {
+		// Exercise the documented `#[serde(skip)]` contract on
+		// `LoopState.tool_result_store`: entries registered pre-checkpoint
+		// must not survive deserialization, and the restored state must
+		// behave correctly for both `advance_turn` and fresh `register` calls.
+
+		let mut state = LoopState::new("loop-restore", &loop_context());
+
+		// Register a large tool result so ToolResultStore enters the preview
+		// persistence path (content > PREVIEW_SIZE bytes).
+		let large = "X".repeat(5_000);
+		let (_content, is_preview) =
+			state
+				.tool_result_store
+				.register("tool-pre", &large, "run-restore");
+		assert!(is_preview, "large content should engage preview path");
+		assert!(
+			state.tool_result_store.get_preview("tool-pre").is_none(),
+			"fresh state is not yet a preview for get_preview",
+		);
+		state.tool_result_store.advance_turn(); // Fresh -> Frozen
+		assert!(
+			state.tool_result_store.get_preview("tool-pre").is_some(),
+			"after advance_turn entry should be Frozen and visible",
+		);
+
+		// Checkpoint round-trip.
+		let json = serde_json::to_string(&state).expect("serialize");
+		let restored: LoopState = serde_json::from_str(&json).expect("deserialize");
+
+		// 1. The store is empty after deserialize.
+		assert_eq!(
+			restored.tool_result_store,
+			ToolResultStore::default(),
+			"restored store must match default (entries dropped)",
+		);
+		assert!(
+			restored.tool_result_store.get_preview("tool-pre").is_none(),
+			"pre-restore ids must not resolve in the restored store",
+		);
+
+		// 2. advance_turn on the restored store is a no-op and does not panic.
+		let mut restored = restored;
+		restored.tool_result_store.advance_turn();
+		assert_eq!(
+			restored.tool_result_store,
+			ToolResultStore::default(),
+			"advance_turn on empty restored store must remain empty",
+		);
+
+		// 3. Fresh register() calls interact correctly with the restored state.
+		//    Re-registering the same tool_use_id that pre-existed before the
+		//    checkpoint must be treated as a brand-new entry (no aliasing
+		//    with pre-restore state), and a new distinct id must coexist.
+		let (_c1, p1) = restored
+			.tool_result_store
+			.register("tool-pre", &large, "run-restore");
+		assert!(
+			p1,
+			"re-registering after restore should re-engage preview path"
+		);
+		let new_payload = "Y".repeat(5_000);
+		let (_c2, p2) =
+			restored
+				.tool_result_store
+				.register("tool-post", &new_payload, "run-restore");
+		assert!(p2, "new id should engage preview path");
+		restored.tool_result_store.advance_turn();
+		assert!(
+			restored.tool_result_store.get_preview("tool-pre").is_some(),
+			"post-restore re-registered id should be visible after advance_turn",
+		);
+		assert!(
+			restored
+				.tool_result_store
+				.get_preview("tool-post")
+				.is_some(),
+			"newly registered id should coexist",
+		);
+	}
+
+	#[test]
 	fn autocompact_breaker_starts_untripped() {
 		let state = LoopState::new("loop-1", &loop_context());
 
