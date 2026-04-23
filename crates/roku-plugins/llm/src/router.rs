@@ -1251,6 +1251,129 @@ mod tests {
 	}
 
 	#[test]
+	fn preview_wire_bytes_for_request_honors_system_prompt_in_eligibility() {
+		// Regression: the runtime used to hand `select_model` a request with
+		// `system_prompt: None`, so estimator-time eligibility differed from
+		// the real generation request's eligibility whenever the system
+		// prompt tokens pushed the input over a model's budget. The fix
+		// passes the real system prompt into the selection request; this
+		// test locks that behavior by constructing a budget tight enough
+		// that the "high-priority" model is eligible WITHOUT a system prompt
+		// but ineligible WITH one.
+
+		struct TaggedProvider {
+			name: &'static str,
+			tag: &'static [u8],
+		}
+
+		#[async_trait]
+		impl LlmProvider for TaggedProvider {
+			fn provider_name(&self) -> &'static str {
+				self.name
+			}
+
+			async fn complete(
+				&self,
+				_model: &ModelProfile,
+				_request: &GenerationRequest,
+			) -> Result<ProviderResponse, ProviderCallError> {
+				unreachable!("TaggedProvider is only used for schema-preview tests")
+			}
+
+			fn preview_wire_tool_schema_bytes(&self, _definitions: &[ToolDefinition]) -> Vec<u8> {
+				self.tag.to_vec()
+			}
+		}
+
+		let mut router = LlmRouter::new(RoutingPolicy {
+			max_request_cost_usd: 10.0,
+			max_latency_ms: 10_000,
+		});
+		router.register_provider(TaggedProvider {
+			name: "tight-tag-provider",
+			tag: b"TIGHT",
+		});
+		router.register_provider(TaggedProvider {
+			name: "roomy-tag-provider",
+			tag: b"ROOMY",
+		});
+		// High priority but tight context window (50 tokens).
+		router.register_model(ModelProfile {
+			model_id: "tight-model".to_string(),
+			provider: "tight-tag-provider".to_string(),
+			max_context_tokens: 50,
+			cost_per_1k_tokens_usd: 0.01,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		});
+		// Lower priority, roomy context window.
+		router.register_model(ModelProfile {
+			model_id: "roomy-model".to_string(),
+			provider: "roomy-tag-provider".to_string(),
+			max_context_tokens: 8_000,
+			cost_per_1k_tokens_usd: 0.01,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 1,
+		});
+
+		let defs = vec![ToolDefinition {
+			name: "tool-a".to_string(),
+			description: "desc".to_string(),
+			parameters: serde_json::json!({"type": "object"}),
+		}];
+
+		// Messages alone: ~20 tokens — both models are eligible; tight-model
+		// wins on priority and its wire bytes are returned.
+		let small_message_payload: Vec<String> = (0..20).map(|_| "word".to_string()).collect();
+		let request_without_system_prompt = GenerationRequest {
+			system_prompt: None,
+			prompt: String::new(),
+			messages: Some(vec![Message::User {
+				content: small_message_payload.join(" "),
+			}]),
+			expected_output_tokens: 10,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: 10_000,
+			budget_cost_remaining_usd: 5.0,
+			tools: None,
+			model_override: None,
+			thinking_effort: None,
+			system_prompt_sections: None,
+		};
+		let without_bytes = router
+			.preview_wire_tool_schema_bytes_for_request(&request_without_system_prompt, &defs);
+		assert_eq!(
+			without_bytes, b"TIGHT",
+			"without a system prompt the tight-but-high-priority model is eligible"
+		);
+
+		// Adding a large system prompt (~200 whitespace-separated words) pushes
+		// tight-model past its 50-token context window. `select_model` must
+		// now route to `roomy-model` — and the preview bytes track that pick.
+		let large_system_prompt: String = std::iter::repeat("instruction")
+			.take(200)
+			.collect::<Vec<_>>()
+			.join(" ");
+		let request_with_system_prompt = GenerationRequest {
+			system_prompt: Some(large_system_prompt),
+			..request_without_system_prompt.clone()
+		};
+		let with_bytes =
+			router.preview_wire_tool_schema_bytes_for_request(&request_with_system_prompt, &defs);
+		assert_eq!(
+			with_bytes, b"ROOMY",
+			"including the system prompt excludes the tight-context model, \
+			 so select_model must route to the roomy provider"
+		);
+		assert_ne!(
+			without_bytes, with_bytes,
+			"without/with system prompt must produce different provider picks \
+			 — otherwise the test is not exercising the bug"
+		);
+	}
+
+	#[test]
 	fn preferred_provider_is_honored_when_eligible() {
 		let router = router_with_models();
 		let mut request = sample_request(RiskTier::Low);

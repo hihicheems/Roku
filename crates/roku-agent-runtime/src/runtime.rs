@@ -1111,6 +1111,31 @@ impl GenericAgentRuntime {
 				loop_state,
 				self.agent_runtime_config.r#loop.context_window_tokens,
 			);
+
+			// Build the modular system prompt with environment + project
+			// instructions. Hoisted before the estimator pre-flight so the
+			// selection request handed to `select_model` includes the same
+			// system-prompt token weight the real generation request will
+			// carry — eligibility (context-window / budget checks) agrees
+			// between the two paths and the chosen provider's wire format
+			// matches what the turn actually sends.
+			//
+			// Environment is re-probed each turn; project instruction is
+			// stable (loaded once above). The structured `sections` form
+			// carries the static/dynamic split that prompt-cache adapters
+			// will consume; `system_prompt` keeps the single String shape
+			// for adapters that haven't migrated yet.
+			let env_snapshot = crate::runtime_loop::environment::probe_environment();
+			let system_prompt_sections =
+				crate::runtime_loop::system_prompt::build_system_prompt_sections(
+					env_snapshot,
+					&loop_state.working_directory,
+					project_instruction.as_deref(),
+					Some(runtime_memory_sections),
+					self.loop_mode == LoopMode::Plan,
+				);
+			let system_prompt = system_prompt_sections.flatten();
+
 			// Serialize the tool schema AFTER `apply_deferred_mode` so the
 			// estimator sees exactly the set the provider will send. Using
 			// the pre-deferred set would overestimate pressure on turns where
@@ -1130,12 +1155,12 @@ impl GenericAgentRuntime {
 			// This selection request mirrors the fields `select_model` reads
 			// (`model_override`, `preferred_provider`, `risk_tier`, budgets,
 			// and the message / system sizes used for context-window checks).
-			// `system_prompt` is not yet built at this point; omitting it
-			// undercounts the system-side tokens by at most a few hundred, well
-			// inside every model's context budget — `select_model`'s provider
-			// pick is not affected in practice.
+			// Passing the full system prompt matters for tight context /
+			// budget configurations where omitting it would undercount
+			// `estimate_request_input_tokens` and admit a model the real
+			// call would reject.
 			let estimator_selection_request = GenerationRequest {
-				system_prompt: None,
+				system_prompt: Some(system_prompt.clone()),
 				prompt: String::new(),
 				messages: Some(messages.clone()),
 				expected_output_tokens: self.agent_runtime_config.next_step.expected_output_tokens,
@@ -1211,22 +1236,6 @@ impl GenericAgentRuntime {
 			// serialize on the wire.
 			let tool_schema_hash =
 				crate::runtime_loop::cache_break::hash_tool_definitions(&tool_definitions);
-
-			// Build the modular system prompt with environment + project instructions.
-			// Environment is re-probed each turn; project instruction is stable (loaded once above).
-			// The structured `sections` form carries the static/dynamic split that
-			// prompt-cache adapters will consume; `system_prompt` keeps the single
-			// String shape for adapters that haven't migrated yet.
-			let env_snapshot = crate::runtime_loop::environment::probe_environment();
-			let system_prompt_sections =
-				crate::runtime_loop::system_prompt::build_system_prompt_sections(
-					env_snapshot,
-					&loop_state.working_directory,
-					project_instruction.as_deref(),
-					Some(runtime_memory_sections),
-					self.loop_mode == LoopMode::Plan,
-				);
-			let system_prompt = system_prompt_sections.flatten();
 
 			// Cache break detector: snapshot the prompt prefix components
 			// (static system blocks + tool schema + model) so the post-call
