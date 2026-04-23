@@ -15,7 +15,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Preview size limit: first 2KB of content shown in context.
+/// Preview size limit: first ~2 KiB of content shown in context.
+///
+/// `register()` uses this as a **byte** threshold against `content.len()`
+/// and `build_preview()` slices on the same byte budget, stepping back to the
+/// nearest UTF-8 char boundary. Both paths therefore agree on what "too large"
+/// means even for multibyte UTF-8 content.
 const PREVIEW_SIZE: usize = 2_048;
 
 /// Three-state machine for tool result content replacement.
@@ -164,15 +169,24 @@ fn sanitize_path_component(s: &str) -> String {
 }
 
 /// Build a preview string from full content + disk path reference.
+///
+/// The preview is cut at or below `PREVIEW_SIZE` **bytes**, snapping down
+/// to the nearest UTF-8 char boundary so a multibyte codepoint is never
+/// split. This keeps `register()`'s byte-length gate and the preview body
+/// consistent for arbitrary UTF-8 content.
 fn build_preview(content: &str, disk_path: &std::path::Path) -> String {
-	let preview_end = content
-		.char_indices()
-		.nth(PREVIEW_SIZE)
-		.map(|(i, _)| i)
-		.unwrap_or(content.len());
+	let preview_end = if content.len() <= PREVIEW_SIZE {
+		content.len()
+	} else {
+		let mut end = PREVIEW_SIZE;
+		while end > 0 && !content.is_char_boundary(end) {
+			end -= 1;
+		}
+		end
+	};
 	let preview_text = &content[..preview_end];
 	format!(
-		"{preview_text}\n\n[Full content ({} chars) saved to disk: {}]",
+		"{preview_text}\n\n[Full content ({} bytes) saved to disk: {}]",
 		content.len(),
 		disk_path.display(),
 	)
@@ -206,7 +220,7 @@ mod tests {
 		let (content, is_preview) = store.register("tool-1", &large, "test-run");
 		assert!(is_preview);
 		assert!(content.len() < large.len());
-		assert!(content.contains("[Full content (5000 chars) saved to disk:"));
+		assert!(content.contains("[Full content (5000 bytes) saved to disk:"));
 		assert!(content.contains("tool-results/test-run/tool-1.txt"));
 	}
 
@@ -288,7 +302,7 @@ mod tests {
 		let path = PathBuf::from("/home/user/.roku/tool-results/run-1/tool-1.txt");
 		let preview = build_preview(&"Z".repeat(3000), &path);
 		assert!(preview.contains("/home/user/.roku/tool-results/run-1/tool-1.txt"));
-		assert!(preview.contains("[Full content (3000 chars)"));
+		assert!(preview.contains("[Full content (3000 bytes)"));
 	}
 
 	#[test]
@@ -329,6 +343,53 @@ mod tests {
 
 		assert_eq!(store.get_preview("t2"), Some("frozen preview"));
 		assert_eq!(store.get_preview("t3"), Some("reapply preview"));
+	}
+
+	#[test]
+	fn multibyte_utf8_preview_honors_byte_budget_and_char_boundaries() {
+		// CJK "好" is 3 bytes in UTF-8. Build a payload whose byte length is
+		// slightly over PREVIEW_SIZE so register() engages the preview path
+		// and build_preview() must clip to a UTF-8 char boundary.
+		let ideograph = "好"; // 3 bytes
+		let bytes_per_char = ideograph.len();
+		assert_eq!(bytes_per_char, 3);
+		// Build enough repetitions to exceed the byte budget by a small margin.
+		let repeats = (PREVIEW_SIZE / bytes_per_char) + 20;
+		let payload: String = ideograph.repeat(repeats);
+		assert!(payload.len() > PREVIEW_SIZE);
+
+		let mut store = ToolResultStore::default();
+		let (content, is_preview) = store.register("tool-mb", &payload, "mb-run");
+		assert!(
+			is_preview,
+			"register() should treat a >PREVIEW_SIZE payload as preview-persisted"
+		);
+
+		// Locate the preview body up to the footer marker.
+		let footer = "\n\n[Full content (";
+		let footer_idx = content.find(footer).expect("footer present");
+		let preview_body = &content[..footer_idx];
+
+		// Byte budget: preview body never exceeds PREVIEW_SIZE bytes.
+		assert!(
+			preview_body.len() <= PREVIEW_SIZE,
+			"preview body {} bytes exceeds PREVIEW_SIZE",
+			preview_body.len()
+		);
+		// char-boundary: slicing by any byte index inside a multibyte
+		// codepoint would have panicked in build_preview; surviving to this
+		// point proves we cut on a boundary.
+		assert!(preview_body.is_char_boundary(preview_body.len()));
+		// Body contains only the 3-byte ideograph, so its byte length must be
+		// a multiple of 3 (the clip snapped down from PREVIEW_SIZE=2048 to
+		// the nearest boundary, which is 2046 here).
+		assert_eq!(preview_body.len() % bytes_per_char, 0);
+
+		// Footer reports the original byte length of the full payload.
+		assert!(
+			content.contains(&format!("[Full content ({} bytes)", payload.len())),
+			"footer should report byte length; got: {content}"
+		);
 	}
 
 	#[test]
