@@ -49,11 +49,24 @@ use super::types::{
 /// changes.
 pub const COMPACT_SUMMARY_SENTINEL: &str = "Context compact summary";
 
-/// Default limit when fetching session compact summaries. The runtime only
-/// uses the most recent record, but a small over-fetch lets backends that
-/// can't sort by recency still return the correct candidate as long as the
-/// truth is among the few most recent workflow insights.
-const DEFAULT_FETCH_LIMIT: usize = 8;
+/// Upper bound for the recall query. The helper picks the most recent
+/// record by `created_at_unix_ms` on the client side, so correctness under
+/// backends whose server-side ordering is not recency-first (e.g.,
+/// `InMemoryLongTermMemoryBackend` returns insertion order; OpenViking
+/// orders by semantic score) depends on the latest record being **inside**
+/// the fetched batch. A small cap (the old value was 8) could silently
+/// drop the latest summary on a session with many workflow-insight writes.
+///
+/// 4096 is effectively "all" for any real session — the runtime writes
+/// at most one compact summary per run, so a session would need thousands
+/// of resumptions to approach the cap. Client-side
+/// `max_by_key(created_at_unix_ms)` remains authoritative regardless of
+/// how the backend orders the result set.
+///
+/// The cap is kept finite (rather than `usize::MAX`) because OpenViking
+/// sends this value over HTTP as a JSON number; `usize::MAX` would blow
+/// past safe-integer limits on the wire and risk server-side rejection.
+const DEFAULT_FETCH_LIMIT: usize = 4_096;
 
 /// Build the canonical recall query used to list a session's workflow-insight
 /// memories. Exposed as a helper so test assertions and alternative readers
@@ -232,6 +245,39 @@ mod tests {
 			.expect("search must succeed")
 			.expect("compact summary must resolve");
 		assert_eq!(got.content, "real compact summary");
+	}
+
+	#[test]
+	fn returns_latest_record_even_when_many_sibling_summaries_exist() {
+		// Regression test for the fetch-limit change: with the previous
+		// cap of 8, a session that accumulated more than 8 compact
+		// summaries could silently drop the newest one if the backend
+		// returned records in insertion order (as InMemory does).
+		//
+		// Seed 20 compact summaries for the same session; the last write
+		// must still be the one returned by the helper.
+		let backend = InMemoryLongTermMemoryBackend::default();
+		let total = 20usize;
+		for i in 0..total {
+			let mut req = MemoryWriteRequest::new(
+				MemoryKind::WorkflowInsight,
+				MemoryScope::Session,
+				format!("summary-body-{i}"),
+				COMPACT_SUMMARY_SENTINEL,
+				MemoryWriteReason::CompactSummary,
+			);
+			req.session_id = Some("session-many".to_string());
+			backend.write(&req).expect("seed compact summary");
+		}
+
+		let got = latest_session_compact_summary(&backend, "session-many")
+			.expect("search must succeed")
+			.expect("most recent summary must be returned");
+		let expected_content = format!("summary-body-{}", total - 1);
+		assert_eq!(
+			got.content, expected_content,
+			"latest-by-created_at must win even when many siblings exist",
+		);
 	}
 
 	#[test]
