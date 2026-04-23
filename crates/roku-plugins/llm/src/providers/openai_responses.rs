@@ -1122,20 +1122,25 @@ impl LlmProvider for OpenAiResponsesProvider {
 		// Convert internal Message format to Responses API input items.
 		let input_items: Vec<Value> = messages_to_responses_input(&request.input);
 
-		// Build the compact request body. The ChatGPT Codex `/responses/compact`
-		// endpoint does not accept `tool_choice`; sending it yields a 400
-		// "Unknown parameter: 'tool_choice'" and blocks the summarizer.
+		// Build the compact request body to match the canonical
+		// `CompactionInput` wire shape expected by the ChatGPT Codex
+		// `/responses/compact` endpoint:
+		//   - `tools` is ALWAYS serialized (even when the caller passed an
+		//     empty `Vec<ToolDefinition>`); omitting the key triggers the
+		//     backend to return a 200 OK with an empty `output` array.
+		//   - `tool_choice` is NOT serialized — Codex rejects the field with
+		//     HTTP 400 "Unknown parameter" (see the regression test
+		//     `compact_history_body_omits_tool_choice_field`).
+		//   - `reasoning` is optional (caller can leave it unset).
 		let tools_value: Vec<Value> = request.tools.iter().map(build_tool_definition).collect();
 
 		let mut body = json!({
 			"model": request.model,
 			"instructions": request.instructions,
 			"input": input_items,
+			"tools": tools_value,
 			"parallel_tool_calls": request.parallel_tool_calls,
 		});
-		if !tools_value.is_empty() {
-			body["tools"] = json!(tools_value);
-		}
 		if let Some(reasoning) = &request.reasoning {
 			body["reasoning"] = reasoning.clone();
 		}
@@ -2420,12 +2425,71 @@ mod tests {
 			"compact request body must not contain `tool_choice`; full body: {body_json}"
 		);
 		// Fields we do still expect so a typo-rename refactor can't sneak by.
-		for required in ["model", "instructions", "input", "parallel_tool_calls"] {
+		// `tools` is listed here (not in an "optional" bucket) because the
+		// Codex `/responses/compact` endpoint returns a 200 OK with an empty
+		// `output` array when `tools` is absent — issue #354.
+		for required in [
+			"model",
+			"instructions",
+			"input",
+			"tools",
+			"parallel_tool_calls",
+		] {
 			assert!(
 				obj.contains_key(required),
 				"compact body missing required field `{required}`"
 			);
 		}
+		// `tools` specifically must be an array even when the caller supplied
+		// an empty `Vec<ToolDefinition>`; the backend does not fall back to
+		// an implicit empty set.
+		let tools = obj.get("tools").expect("tools key is required (see #354)");
+		assert!(
+			tools.is_array(),
+			"compact body `tools` must be a JSON array, got: {tools}"
+		);
+	}
+
+	#[tokio::test]
+	async fn compact_history_body_includes_empty_tools_array_when_no_tools() {
+		// Regression guard for issue #354: Codex `/responses/compact` returns
+		// 200 OK with an empty `output` array when the request body omits the
+		// `tools` field. The serializer must unconditionally emit a `tools`
+		// key as `[]` when the caller passes `Vec<ToolDefinition>::new()`.
+		let success_body = r#"{
+			"output": [
+				{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}
+			],
+			"usage": {"input_tokens": 1, "output_tokens": 1, "input_tokens_details": {"cached_tokens": 0}}
+		}"#;
+		let (base_url, rx, _srv) = spawn_mock_capturing_server(200, success_body).await;
+		let provider = compact_provider_for(base_url.clone());
+		let req = minimal_compact_request(&base_url);
+		assert!(
+			req.tools.is_empty(),
+			"test fixture must start with no tools"
+		);
+
+		let _ = provider.compact_history(&req).await;
+
+		let raw = rx.await.expect("capture channel closed before delivery");
+		let body_start = raw
+			.find("\r\n\r\n")
+			.expect("mock request must have a body delimiter")
+			+ 4;
+		let body_text = raw[body_start..].trim();
+		let body_json: Value =
+			serde_json::from_str(body_text).expect("compact body must be valid JSON");
+		let tools = body_json
+			.get("tools")
+			.expect("tools key required even when empty (see #354)");
+		let arr = tools
+			.as_array()
+			.expect("tools must serialize as a JSON array");
+		assert!(
+			arr.is_empty(),
+			"empty tool set must serialize as `[]`, got: {tools}"
+		);
 	}
 
 	#[tokio::test]

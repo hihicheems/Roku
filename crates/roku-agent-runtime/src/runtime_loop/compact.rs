@@ -468,11 +468,22 @@ pub fn estimate_prompt_tokens_calibrated(
 	// Per-message framing overhead charged by chat APIs (~4 tokens each).
 	let framing_tokens = (messages.len() as u64).saturating_mul(4);
 
-	// Tool schema JSON is always structured by construction — use the
-	// byte/2 rule consistently with `byte_estimate_for_text` on JSON-looking
-	// payloads.
+	// Tool schema needs a dedicated byte-to-token ratio, not the generic
+	// "JSON = bytes/2" rule. An OpenAI tool schema is mostly *prose*
+	// (the `description` field is natural English) wrapped in JSON
+	// scaffolding, and the scaffolding itself (`"type"`, `"function"`,
+	// `"name"`, `"description"`, `"parameters"`) tokenizes into single
+	// tokens in cl100k / o200k. Empirically a representative 20-tool
+	// Roku schema (~10K bytes) tokenizes to ~1300 tokens on the OpenAI
+	// Responses backend — a real ratio of ~7.7 bytes/token.
+	//
+	// Using `bytes/2` overshoots by roughly 3.8×, which pins the
+	// calibration scale at `CAL_SCALE_MIN = 0.5` so the bias cannot be
+	// absorbed. `bytes/5` lands inside the calibration band (raw/real ≈
+	// 0.65) while staying on the safe side (slight over-estimate →
+	// compaction triggers early, not late).
 	let tool_schema_tokens: u64 = tool_schema_bytes
-		.map(|bytes| (bytes.len() as u64).div_ceil(2))
+		.map(|bytes| (bytes.len() as u64).div_ceil(5))
 		.unwrap_or(0);
 
 	let raw = system_tokens
@@ -2873,6 +2884,38 @@ mod tests {
 		assert_eq!(
 			post.raw_total_tokens, pre.raw_total_tokens,
 			"raw_total_tokens is calibration-independent (for the same inputs)"
+		);
+	}
+
+	#[test]
+	fn tool_schema_estimator_keeps_ratio_inside_calibration_clamp() {
+		// Regression guard for the Round 5 over-estimate. A representative
+		// OpenAI tool schema (~20 tools, ~10K serialized bytes) tokenizes to
+		// roughly 1300 tokens on the provider side. If the byte-to-token rule
+		// is too aggressive (e.g. `bytes/2`), `raw / real ≈ 3.8` which exceeds
+		// `CAL_SCALE_MAX = 2.0` — the calibrator clamps and the bias is
+		// permanent. This test pins the ratio to stay inside the calibration
+		// band so future refactors of the rule don't silently re-introduce the
+		// regression.
+		let cal = EstimatorCalibration::default();
+		let schema = vec![b'a'; 10_000]; // representative 10K-byte schema
+		let messages = vec![Message::User {
+			content: "hi".to_string(),
+		}];
+		let pre = estimate_prompt_tokens_calibrated(&messages, None, Some(&schema), &cal);
+		// Representative "real" count for a ~10K-byte schema.
+		let representative_real = 1300_u64;
+		let ratio = (pre.raw_total_tokens as f64) / (representative_real as f64);
+		assert!(
+			ratio <= 2.0,
+			"estimator ratio raw/real must stay <= CAL_SCALE_MAX=2.0 so \
+			 calibration can converge; got ratio={ratio:.3} (raw={}, real={representative_real})",
+			pre.raw_total_tokens
+		);
+		assert!(
+			ratio >= 0.5,
+			"estimator ratio raw/real must stay >= CAL_SCALE_MIN=0.5 so \
+			 the safe-direction (over-estimate) property holds; got ratio={ratio:.3}",
 		);
 	}
 
