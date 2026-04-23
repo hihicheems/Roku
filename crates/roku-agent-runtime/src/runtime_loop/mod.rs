@@ -56,8 +56,8 @@ pub use compact::{
 // the re-exports get an explicit `unused_imports` allow.
 #[allow(unused_imports)]
 pub use compact::{
-	MAX_DROP_OLDEST_RETRIES, STRUCTURED_SUMMARY_SECTIONS, StructuredCompactError,
-	StructuredCompactOutcome, validate_structured_summary,
+	CommittedBaseline, MAX_DROP_OLDEST_RETRIES, STRUCTURED_SUMMARY_SECTIONS,
+	StructuredCompactError, StructuredCompactOutcome, validate_structured_summary,
 };
 pub use context_assembly::LoopContext;
 pub(crate) use context_assembly::build_loop_context;

@@ -916,6 +916,22 @@ impl LlmProvider for OpenAiResponsesProvider {
 		OPENAI_RESPONSES_PROVIDER
 	}
 
+	/// OpenAI Responses backend uses a Roku-schema that is ~60% natural
+	/// English in `description` fields wrapped in JSON scaffolding. The
+	/// real byte/token ratio on the live link measures ~7-8 bytes/token;
+	/// `bytes/5` lands just inside the calibration band (raw/real ≈ 0.65)
+	/// while staying on the safe side (slight over-estimate triggers
+	/// compaction early, not late). Message / system-prompt / tool-result
+	/// bytes stay on the uniform `bytes/4` rule that matches codex's
+	/// pre-flight approximation for this tokenizer family.
+	fn token_counter(&self) -> std::sync::Arc<dyn crate::token_counter::TokenCounter> {
+		std::sync::Arc::new(
+			crate::token_counter::ByteHeuristicCounter::with_bytes_per_token(4)
+				.with_tool_schema_bytes_per_token(5)
+				.with_name("openai-responses-heuristic"),
+		)
+	}
+
 	async fn complete(
 		&self,
 		model: &ModelProfile,

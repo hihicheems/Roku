@@ -19,6 +19,7 @@ pub mod model_cost;
 mod providers;
 mod retry;
 mod router;
+mod token_counter;
 mod types;
 
 pub use bootstrap::LlmProviderKind;
@@ -40,6 +41,7 @@ pub use providers::openrouter::{
 	OpenRouterRuntimeConfigPatch, build_openrouter_router, build_openrouter_router_with_metrics,
 };
 pub use router::{LlmProvider, LlmRouter};
+pub use token_counter::{ByteHeuristicCounter, TokenCounter, default_counter};
 pub use types::{
 	CompactRequest, CompactResponse, CompactUsageSummary, GenerationRequest, LlmAdapterError,
 	LlmResponse, Message, ModelCostProfile, ModelProfile, ProviderCallError,

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use roku_plugin_llm::{
-	CompactRequest, GenerationRequest, LlmAdapterError, LlmRouter, Message, RiskTier,
+	CompactRequest, GenerationRequest, LlmAdapterError, LlmRouter, Message, RiskTier, TokenCounter,
 };
 use serde::{Deserialize, Serialize};
 
@@ -369,8 +369,36 @@ pub struct PromptTokenEstimate {
 	/// when provided so cold-start turns do not under-estimate before the
 	/// calibration scale has samples to fit.
 	pub tool_schema_tokens: u64,
+	/// Provider-authoritative `usage.prompt_tokens` carried over from the
+	/// last successful call. Zero in cold-start and post-compaction mode.
+	/// When non-zero, the system / tools / committed message prefix are
+	/// represented here (exactly) and the other fields describe only the
+	/// uncommitted tail appended since that call. The invariant
+	/// `raw_total_tokens = system + message + framing + tool_schema +
+	///  committed_baseline_tokens` holds in both modes.
+	pub committed_baseline_tokens: u64,
 	pub total_tokens: u64,
 	pub raw_total_tokens: u64,
+}
+
+/// Authoritative committed-token state carried across turns.
+///
+/// Captured right after each successful provider response that reports a
+/// non-zero `usage.prompt_tokens`. The runtime then feeds this back into
+/// the next pre-flight estimate so everything up to `message_count` is
+/// treated as exact and only the tail uses byte-heuristic counting. This
+/// mirrors the codex CLI's approach: hardcoded `APPROX_BYTES_PER_TOKEN`
+/// for the tail, real API usage feedback for the committed prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommittedBaseline {
+	/// `usage.prompt_tokens` as reported by the provider for the last
+	/// successful call. Authoritative for system + tools + committed
+	/// messages (up to `message_count`).
+	pub input_tokens: u64,
+	/// Number of messages that were in the committed request. Any message
+	/// at `messages[message_count..]` on a later turn is an uncommitted
+	/// delta that still needs byte-heuristic estimation.
+	pub message_count: usize,
 }
 
 /// Bounded calibration state for the byte-based estimator.
@@ -474,50 +502,82 @@ impl EstimatorCalibration {
 
 /// Estimate prompt tokens for what will actually be sent to the LLM.
 ///
-/// O(n) over total byte length. Pure function: no IO, no panic. Per-segment
-/// classification rules are documented on [`byte_estimate_for_text`].
+/// O(n) over total byte length. Pure function: no IO, no panic.
 ///
-/// `system_prompt` is treated identically to a message body — code-heavy
-/// system prompts (which describe tool schemas as JSON) are auto-detected as
-/// structured and use the denser byte/2 rule.
+/// Byte→token mapping is delegated to the supplied [`TokenCounter`], which
+/// each provider owns. The default provider counter is a uniform `bytes/4`
+/// heuristic; Anthropic or any future tokenizer-backed provider can override
+/// with a higher-fidelity implementation without touching this function.
+///
+/// When `baseline` is `Some(b)` and `messages.len() >= b.message_count`, the
+/// function runs in **committed-baseline** mode: `b.input_tokens` is the
+/// authoritative value reported by the provider for the last call, so only
+/// the uncommitted tail `messages[b.message_count..]` plus its per-message
+/// framing needs byte-heuristic counting. `system_prompt` and
+/// `tool_schema_bytes` are ignored in this branch under the assumption that
+/// they were part of the committed call; callers must invalidate the
+/// baseline whenever those surfaces change.
+///
+/// When `baseline` is `None`, the function runs in **cold-start** mode and
+/// counts the entire request (system + all messages + framing + tool schema).
 ///
 /// `tool_schema_bytes` is the serialized tool-definition block for this
-/// request, typically produced by `serde_json::to_vec(&tool_definitions)`.
-/// Supplying it is what removes the cold-start under-estimate — the tool
-/// schema frequently adds 1–2K tokens that the message-only estimate misses
-/// until calibration accumulates samples. Pass `None` when callers legitimately
-/// have no tool schema (router/classifier requests, etc.).
+/// request, typically produced by the router's
+/// `preview_wire_tool_schema_bytes_for_request`. Supplying it is what
+/// removes the cold-start under-estimate — the tool schema frequently adds
+/// 1–2K tokens that the message-only estimate misses until calibration
+/// accumulates samples. Pass `None` when callers legitimately have no tool
+/// schema (router/classifier requests, etc.).
 pub fn estimate_prompt_tokens_calibrated(
 	messages: &[Message],
 	system_prompt: Option<&str>,
 	tool_schema_bytes: Option<&[u8]>,
 	calibration: &EstimatorCalibration,
+	counter: &dyn TokenCounter,
+	baseline: Option<CommittedBaseline>,
 ) -> PromptTokenEstimate {
-	let system_tokens = system_prompt.map(byte_estimate_for_text).unwrap_or(0);
+	// Committed-baseline mode: the provider already reported an exact
+	// `input_tokens` for everything at `messages[..baseline.message_count]`,
+	// along with the system prompt and tool schema. Only the tail appended
+	// since then needs byte-heuristic counting.
+	if let Some(b) = baseline
+		&& b.input_tokens > 0
+		&& messages.len() >= b.message_count
+	{
+		let tail = &messages[b.message_count..];
+		let delta_message_tokens: u64 = tail
+			.iter()
+			.map(|m| counter.count_message(m))
+			.fold(0_u64, u64::saturating_add);
+		let delta_framing_tokens = (tail.len() as u64).saturating_mul(4);
+		let raw_delta = delta_message_tokens.saturating_add(delta_framing_tokens);
+		let scaled_delta = calibration.apply(raw_delta);
+		let total = b.input_tokens.saturating_add(scaled_delta);
+		let raw_total = b.input_tokens.saturating_add(raw_delta);
+		return PromptTokenEstimate {
+			// Per-segment fields describe only the uncommitted delta in
+			// this mode so trace consumers can see how the new pressure
+			// distributes; the exact committed portion lives in
+			// `committed_baseline_tokens`.
+			system_tokens: 0,
+			message_tokens: delta_message_tokens,
+			framing_tokens: delta_framing_tokens,
+			tool_schema_tokens: 0,
+			committed_baseline_tokens: b.input_tokens,
+			total_tokens: total,
+			raw_total_tokens: raw_total,
+		};
+	}
+
+	// Cold-start mode: count the whole request.
+	let system_tokens = system_prompt.map(|s| counter.count_text(s)).unwrap_or(0);
 	let message_tokens: u64 = messages
 		.iter()
-		.map(byte_estimate_for_message)
+		.map(|m| counter.count_message(m))
 		.fold(0_u64, u64::saturating_add);
-
-	// Per-message framing overhead charged by chat APIs (~4 tokens each).
 	let framing_tokens = (messages.len() as u64).saturating_mul(4);
-
-	// Tool schema needs a dedicated byte-to-token ratio, not the generic
-	// "JSON = bytes/2" rule. An OpenAI tool schema is mostly *prose*
-	// (the `description` field is natural English) wrapped in JSON
-	// scaffolding, and the scaffolding itself (`"type"`, `"function"`,
-	// `"name"`, `"description"`, `"parameters"`) tokenizes into single
-	// tokens in cl100k / o200k. Empirically a representative 20-tool
-	// Roku schema (~10K bytes) tokenizes to ~1300 tokens on the OpenAI
-	// Responses backend — a real ratio of ~7.7 bytes/token.
-	//
-	// Using `bytes/2` overshoots by roughly 3.8×, which pins the
-	// calibration scale at `CAL_SCALE_MIN = 0.5` so the bias cannot be
-	// absorbed. `bytes/5` lands inside the calibration band (raw/real ≈
-	// 0.65) while staying on the safe side (slight over-estimate →
-	// compaction triggers early, not late).
 	let tool_schema_tokens: u64 = tool_schema_bytes
-		.map(|bytes| (bytes.len() as u64).div_ceil(5))
+		.map(|bytes| counter.count_tool_schema_bytes(bytes))
 		.unwrap_or(0);
 
 	let raw = system_tokens
@@ -531,6 +591,7 @@ pub fn estimate_prompt_tokens_calibrated(
 		message_tokens,
 		framing_tokens,
 		tool_schema_tokens,
+		committed_baseline_tokens: 0,
 		total_tokens: total,
 		raw_total_tokens: raw,
 	}
@@ -546,27 +607,18 @@ pub fn estimate_prompt_pressure(
 	system_prompt: Option<&str>,
 	tool_schema_bytes: Option<&[u8]>,
 	calibration: &EstimatorCalibration,
+	counter: &dyn TokenCounter,
+	baseline: Option<CommittedBaseline>,
 ) -> u64 {
-	estimate_prompt_tokens_calibrated(messages, system_prompt, tool_schema_bytes, calibration)
-		.total_tokens
-}
-
-/// Per-message byte→token estimate.
-fn byte_estimate_for_message(msg: &Message) -> u64 {
-	match msg {
-		Message::User { content } => byte_estimate_for_text(content),
-		Message::Assistant { text, tool_calls } => {
-			let mut t = byte_estimate_for_text(text);
-			for tc in tool_calls {
-				t = t.saturating_add(byte_estimate_for_text(&tc.name));
-				// Arguments are always JSON — use the structured rule.
-				let args_bytes = tc.arguments.to_string().len() as u64;
-				t = t.saturating_add(args_bytes.div_ceil(2));
-			}
-			t
-		}
-		Message::ToolResult { content, .. } => byte_estimate_for_text(content),
-	}
+	estimate_prompt_tokens_calibrated(
+		messages,
+		system_prompt,
+		tool_schema_bytes,
+		calibration,
+		counter,
+		baseline,
+	)
+	.total_tokens
 }
 
 /// Classify a free-form string and return its byte-based token estimate.
@@ -1385,7 +1437,14 @@ mod tests {
 	use crate::runtime_loop::state_update::InterpretedObservation;
 	use crate::runtime_loop::step_record::StepRecord;
 	use crate::runtime_loop::{NextStepAction, NextStepDecision, StepObservation};
+	use roku_plugin_llm::ByteHeuristicCounter;
 	use serde_json::json;
+
+	/// Test-only counter that mirrors the runtime default (uniform 4/byte),
+	/// shared by every estimator test in this module.
+	fn default_test_counter() -> ByteHeuristicCounter {
+		ByteHeuristicCounter::default()
+	}
 
 	fn minimal_loop_state() -> LoopState {
 		LoopState {
@@ -1419,6 +1478,8 @@ mod tests {
 			sub_agent_depth: 0,
 			disallowed_tools: Vec::new(),
 			estimator_calibration: EstimatorCalibration::default(),
+			last_observed_input_tokens: None,
+			committed_message_count: 0,
 			consecutive_autocompact_failures: 0,
 			frozen_tool_schema: None,
 			tool_schema_dirty: true,
@@ -2993,7 +3054,15 @@ mod tests {
 				tool_calls: vec![],
 			},
 		];
-		let est = estimate_prompt_tokens_calibrated(&messages, Some("system context"), None, &cal);
+		let counter = default_test_counter();
+		let est = estimate_prompt_tokens_calibrated(
+			&messages,
+			Some("system context"),
+			None,
+			&cal,
+			&counter,
+			None,
+		);
 		assert!(est.system_tokens > 0, "system tokens populated");
 		assert!(est.message_tokens > 0, "message tokens populated");
 		assert_eq!(est.framing_tokens, 8, "two messages × 4 tokens framing");
@@ -3017,7 +3086,9 @@ mod tests {
 				+ &"y".repeat(800)
 				+ "\"}",
 		}];
-		let pre_call = estimate_prompt_tokens_calibrated(&messages, None, None, &cal);
+		let counter = default_test_counter();
+		let pre_call =
+			estimate_prompt_tokens_calibrated(&messages, None, None, &cal, &counter, None);
 
 		// Pretend the provider reported 60% of our pre-call estimate.
 		let real = ((pre_call.total_tokens as f64) * 0.6).round() as u64;
@@ -3037,7 +3108,8 @@ mod tests {
 			cal.scale()
 		);
 
-		let post_call = estimate_prompt_tokens_calibrated(&messages, None, None, &cal);
+		let post_call =
+			estimate_prompt_tokens_calibrated(&messages, None, None, &cal, &counter, None);
 		let post_err = relative_error(post_call.total_tokens, real);
 		assert!(
 			post_err < pre_err,
@@ -3061,8 +3133,10 @@ mod tests {
 				+ "\"}",
 		}];
 
+		let counter = default_test_counter();
 		for _ in 0..6 {
-			let est = estimate_prompt_tokens_calibrated(&messages, None, None, &cal);
+			let est =
+				estimate_prompt_tokens_calibrated(&messages, None, None, &cal, &counter, None);
 			let real = ((est.raw_total_tokens as f64) * 0.6).round() as u64;
 			cal.update(est.raw_total_tokens, real);
 		}
@@ -3087,15 +3161,23 @@ mod tests {
 			content: "hello".to_string(),
 		}];
 
-		let without = estimate_prompt_tokens_calibrated(&messages, None, None, &cal);
+		let counter = default_test_counter();
+		let without =
+			estimate_prompt_tokens_calibrated(&messages, None, None, &cal, &counter, None);
 		assert_eq!(
 			without.tool_schema_tokens, 0,
 			"None input must leave the tool_schema field at zero"
 		);
 
 		let schema_small = br#"[{"name":"Read","description":"read file","parameters":{}}]"#;
-		let with_small =
-			estimate_prompt_tokens_calibrated(&messages, None, Some(schema_small), &cal);
+		let with_small = estimate_prompt_tokens_calibrated(
+			&messages,
+			None,
+			Some(schema_small),
+			&cal,
+			&counter,
+			None,
+		);
 		assert!(
 			with_small.tool_schema_tokens > 0,
 			"non-empty tool schema must contribute tokens"
@@ -3109,8 +3191,14 @@ mod tests {
 		);
 
 		let schema_large = br#"[{"name":"Read","description":"read file","parameters":{}},{"name":"Edit","description":"edit file","parameters":{}},{"name":"Bash","description":"run shell","parameters":{}},{"name":"Grep","description":"search","parameters":{}}]"#;
-		let with_large =
-			estimate_prompt_tokens_calibrated(&messages, None, Some(schema_large), &cal);
+		let with_large = estimate_prompt_tokens_calibrated(
+			&messages,
+			None,
+			Some(schema_large),
+			&cal,
+			&counter,
+			None,
+		);
 		assert!(
 			with_large.tool_schema_tokens > with_small.tool_schema_tokens,
 			"larger tool schema must contribute more tokens \
@@ -3139,7 +3227,9 @@ mod tests {
 		let schema =
 			br#"[{"name":"Read","description":"read file","parameters":{"type":"object"}}]"#;
 
-		let pre = estimate_prompt_tokens_calibrated(&messages, None, Some(schema), &cal);
+		let counter = default_test_counter();
+		let pre =
+			estimate_prompt_tokens_calibrated(&messages, None, Some(schema), &cal, &counter, None);
 		let raw_with_schema = pre.raw_total_tokens;
 		assert!(raw_with_schema >= pre.tool_schema_tokens);
 		// Pretend the provider reported a real count 40% higher than our
@@ -3148,7 +3238,8 @@ mod tests {
 		cal.update(raw_with_schema, real);
 		assert!(cal.sample_count() > 0);
 
-		let post = estimate_prompt_tokens_calibrated(&messages, None, Some(schema), &cal);
+		let post =
+			estimate_prompt_tokens_calibrated(&messages, None, Some(schema), &cal, &counter, None);
 		assert!(
 			post.total_tokens > pre.total_tokens,
 			"calibration with real > raw must raise the calibrated total"
@@ -3174,7 +3265,9 @@ mod tests {
 		let messages = vec![Message::User {
 			content: "hi".to_string(),
 		}];
-		let pre = estimate_prompt_tokens_calibrated(&messages, None, Some(&schema), &cal);
+		let counter = default_test_counter();
+		let pre =
+			estimate_prompt_tokens_calibrated(&messages, None, Some(&schema), &cal, &counter, None);
 		// Representative "real" count for a ~10K-byte schema.
 		let representative_real = 1300_u64;
 		let ratio = (pre.raw_total_tokens as f64) / (representative_real as f64);
@@ -3189,6 +3282,217 @@ mod tests {
 			"estimator ratio raw/real must stay >= CAL_SCALE_MIN=0.5 so \
 			 the safe-direction (over-estimate) property holds; got ratio={ratio:.3}",
 		);
+	}
+
+	// ------------------------------------------------------------------
+	// Committed / uncommitted token accounting (codex-parity)
+	// ------------------------------------------------------------------
+
+	#[test]
+	fn committed_baseline_returns_authoritative_total_plus_tail_delta() {
+		// Two messages in the committed request → baseline input_tokens = 1500.
+		// Next turn appends one more user message; the estimator must return
+		// 1500 + counter.count(tail) + framing (4 tokens for the new message).
+		let cal = EstimatorCalibration::default();
+		let counter = default_test_counter();
+		let baseline = CommittedBaseline {
+			input_tokens: 1500,
+			message_count: 2,
+		};
+		let messages = vec![
+			Message::User {
+				content: "old content 1".to_string(),
+			},
+			Message::Assistant {
+				text: "old reply".to_string(),
+				tool_calls: vec![],
+			},
+			Message::User {
+				content: "x".repeat(40), // 40 bytes / 4 = 10 tokens
+			},
+		];
+		let est = estimate_prompt_tokens_calibrated(
+			&messages,
+			Some("ignored system prompt"),
+			Some(b"[ignored schema]"),
+			&cal,
+			&counter,
+			Some(baseline),
+		);
+		assert_eq!(est.committed_baseline_tokens, 1500);
+		assert_eq!(
+			est.message_tokens, 10,
+			"tail of 40 bytes → 10 tokens under 4/byte heuristic"
+		);
+		assert_eq!(est.framing_tokens, 4, "one new message × 4 framing tokens");
+		assert_eq!(
+			est.system_tokens, 0,
+			"system prompt already included in committed baseline"
+		);
+		assert_eq!(
+			est.tool_schema_tokens, 0,
+			"tool schema already included in committed baseline"
+		);
+		assert_eq!(est.raw_total_tokens, 1500 + 10 + 4);
+		assert_eq!(
+			est.total_tokens, est.raw_total_tokens,
+			"scale=1.0 default → calibrated == raw"
+		);
+	}
+
+	#[test]
+	fn committed_baseline_with_zero_tail_returns_baseline_exactly() {
+		// messages.len() == baseline.message_count → empty delta → total
+		// equals the provider-reported input_tokens exactly.
+		let cal = EstimatorCalibration::default();
+		let counter = default_test_counter();
+		let baseline = CommittedBaseline {
+			input_tokens: 2048,
+			message_count: 3,
+		};
+		let messages = vec![
+			Message::User {
+				content: "a".to_string(),
+			},
+			Message::Assistant {
+				text: "b".to_string(),
+				tool_calls: vec![],
+			},
+			Message::User {
+				content: "c".to_string(),
+			},
+		];
+		let est = estimate_prompt_tokens_calibrated(
+			&messages,
+			None,
+			None,
+			&cal,
+			&counter,
+			Some(baseline),
+		);
+		assert_eq!(est.total_tokens, 2048);
+		assert_eq!(est.raw_total_tokens, 2048);
+		assert_eq!(est.message_tokens, 0);
+		assert_eq!(est.framing_tokens, 0);
+	}
+
+	#[test]
+	fn committed_baseline_falls_back_to_cold_start_when_messages_shrunk() {
+		// Compaction removed messages so `messages.len() < baseline.message_count`.
+		// The baseline is stale; the estimator must ignore it and count the
+		// full (post-compaction) request from scratch.
+		let cal = EstimatorCalibration::default();
+		let counter = default_test_counter();
+		let baseline = CommittedBaseline {
+			input_tokens: 5000,
+			message_count: 10,
+		};
+		let messages = vec![Message::User {
+			content: "survivor".to_string(),
+		}];
+		let est = estimate_prompt_tokens_calibrated(
+			&messages,
+			None,
+			None,
+			&cal,
+			&counter,
+			Some(baseline),
+		);
+		// Fallback branch: committed_baseline_tokens stays zero, and the
+		// total is the whole-history estimate (not the stale 5000).
+		assert_eq!(est.committed_baseline_tokens, 0);
+		assert!(est.total_tokens < 100, "whole-history estimate, not 5000");
+	}
+
+	#[test]
+	fn committed_baseline_falls_back_when_input_tokens_is_zero() {
+		// A baseline with `input_tokens = 0` is effectively no baseline at
+		// all — treat as cold-start. Guards against a caller accidentally
+		// constructing an empty baseline.
+		let cal = EstimatorCalibration::default();
+		let counter = default_test_counter();
+		let baseline = CommittedBaseline {
+			input_tokens: 0,
+			message_count: 1,
+		};
+		let messages = vec![Message::User {
+			content: "hello".to_string(),
+		}];
+		let est = estimate_prompt_tokens_calibrated(
+			&messages,
+			None,
+			None,
+			&cal,
+			&counter,
+			Some(baseline),
+		);
+		// Cold-start path populates message_tokens from the actual counter.
+		assert_eq!(est.committed_baseline_tokens, 0);
+		assert!(est.message_tokens > 0);
+	}
+
+	#[test]
+	fn committed_baseline_scale_applies_to_delta_only_not_to_baseline() {
+		// Install a calibration scale of 2.0 (upper clamp). In cold-start
+		// mode the scale multiplies the full raw estimate; in committed
+		// mode it must only multiply the uncommitted delta so the
+		// authoritative `input_tokens` is not double-counted.
+		let mut cal = EstimatorCalibration::default();
+		// Push scale to the upper clamp with one extreme sample.
+		cal.update(100, 1_000);
+		assert!((cal.scale() - 2.0).abs() < 1e-9);
+		let counter = default_test_counter();
+		let baseline = CommittedBaseline {
+			input_tokens: 1000,
+			message_count: 1,
+		};
+		let messages = vec![
+			Message::User {
+				content: "old".to_string(),
+			},
+			Message::User {
+				content: "y".repeat(40), // 10 tokens + 4 framing = 14 raw
+			},
+		];
+		let est = estimate_prompt_tokens_calibrated(
+			&messages,
+			None,
+			None,
+			&cal,
+			&counter,
+			Some(baseline),
+		);
+		let raw_delta = 10 + 4;
+		let scaled_delta = (raw_delta as f64 * 2.0).round() as u64;
+		assert_eq!(est.total_tokens, 1000 + scaled_delta);
+		assert_eq!(
+			est.raw_total_tokens,
+			1000 + raw_delta as u64,
+			"raw feedback skips the scale so calibration update stays well-defined"
+		);
+	}
+
+	#[test]
+	fn estimate_prompt_pressure_uses_committed_baseline_when_provided() {
+		// `estimate_prompt_pressure` is the thin wrapper used by the
+		// compaction-trigger fast path; it must honor the baseline too.
+		let cal = EstimatorCalibration::default();
+		let counter = default_test_counter();
+		let baseline = CommittedBaseline {
+			input_tokens: 500,
+			message_count: 1,
+		};
+		let messages = vec![
+			Message::User {
+				content: "x".to_string(),
+			},
+			Message::User {
+				content: "y".repeat(20), // 5 tokens + 4 framing
+			},
+		];
+		let pressure =
+			estimate_prompt_pressure(&messages, None, None, &cal, &counter, Some(baseline));
+		assert_eq!(pressure, 500 + 5 + 4);
 	}
 
 	#[test]

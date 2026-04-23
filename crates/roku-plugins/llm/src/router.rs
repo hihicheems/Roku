@@ -23,6 +23,7 @@ use roku_common_types::{LlmInvocationOutcome, Metrics};
 use serde_json::Value;
 
 use crate::retry::backoff_for_attempt;
+use crate::token_counter::{TokenCounter, default_counter};
 use crate::types::{
 	CompactRequest, CompactResponse, GenerationRequest, LlmAdapterError, LlmResponse, ModelProfile,
 	ProviderCallError, ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy,
@@ -111,6 +112,20 @@ pub trait LlmProvider: Send + Sync {
 	/// provider-specific byte bias into the calibration scale.
 	fn preview_wire_tool_schema_bytes(&self, definitions: &[ToolDefinition]) -> Vec<u8> {
 		serde_json::to_vec(definitions).unwrap_or_default()
+	}
+
+	/// Return the token counter this provider uses for pre-flight byte→token
+	/// estimation. The default implementation returns a uniform `bytes / 4`
+	/// heuristic (see [`crate::token_counter::ByteHeuristicCounter`]), which
+	/// tracks the widely-used approximation for OpenAI-family tokenizers on
+	/// mixed English and code.
+	///
+	/// Providers with access to a local tokenizer or a remote
+	/// `/count_tokens` endpoint should override this with a higher-fidelity
+	/// counter so the runtime estimator converges on real usage without
+	/// relying on the calibration EMA to absorb a systematic bias.
+	fn token_counter(&self) -> Arc<dyn TokenCounter> {
+		default_counter()
 	}
 }
 
@@ -792,6 +807,40 @@ impl LlmRouter {
 				None => serde_json::to_vec(definitions).unwrap_or_default(),
 			},
 			None => serde_json::to_vec(definitions).unwrap_or_default(),
+		}
+	}
+
+	/// Resolve the [`TokenCounter`] that would serve `request`.
+	///
+	/// Runs the full `select_model` policy so the estimator sees the same
+	/// provider that `generate` / `generate_streaming` would pick. Returns
+	/// the shared default counter when no eligible model exists, which
+	/// keeps the estimator producing a sensible number instead of failing.
+	pub fn token_counter_for_request(&self, request: &GenerationRequest) -> Arc<dyn TokenCounter> {
+		match self.select_model(request).ok() {
+			Some(model) => match self.providers.get(&model.provider) {
+				Some(registered) => registered.provider.token_counter(),
+				None => default_counter(),
+			},
+			None => default_counter(),
+		}
+	}
+
+	/// Resolve the [`TokenCounter`] for a given `model_id`.
+	///
+	/// When `model_id` is `None`, falls back to the highest-priority
+	/// registered model (same tie-breaker as
+	/// [`Self::preview_wire_tool_schema_bytes`]). Returns the shared
+	/// default counter when the model is unknown or its provider is not
+	/// registered.
+	pub fn token_counter_for_model(&self, model_id: Option<&str>) -> Arc<dyn TokenCounter> {
+		let provider_name = model_id
+			.and_then(|id| self.models.iter().find(|m| m.model_id == id))
+			.or_else(|| self.models.iter().max_by_key(|m| m.route_priority))
+			.map(|m| m.provider.as_str());
+		match provider_name.and_then(|name| self.providers.get(name)) {
+			Some(p) => p.provider.token_counter(),
+			None => default_counter(),
 		}
 	}
 }

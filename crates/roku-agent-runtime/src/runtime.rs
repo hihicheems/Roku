@@ -844,30 +844,32 @@ impl GenericAgentRuntime {
 				})
 		};
 
+		// Shared request shape used to route both the tool-schema wire-bytes
+		// preview and the token-counter selection through the same
+		// `select_model` policy. Constructed once so both resolutions see
+		// an identical request and agree on the provider.
+		let selection_request = GenerationRequest {
+			system_prompt: Some(system_prompt.to_string()),
+			prompt: String::new(),
+			messages: Some(messages.clone()),
+			expected_output_tokens: self.agent_runtime_config.next_step.expected_output_tokens,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: self.agent_runtime_config.next_step.budget_tokens_remaining,
+			budget_cost_remaining_usd: self
+				.agent_runtime_config
+				.next_step
+				.budget_cost_remaining_usd,
+			tools: None,
+			model_override: model_override.map(str::to_string),
+			thinking_effort: None,
+			system_prompt_sections: None,
+		};
+
 		let rebuilt_schema_bytes: Option<Vec<u8>> = effective_definitions.and_then(|defs| {
 			if defs.is_empty() {
 				return None;
 			}
-			let selection_request = GenerationRequest {
-				system_prompt: Some(system_prompt.to_string()),
-				prompt: String::new(),
-				messages: Some(messages.clone()),
-				expected_output_tokens: self.agent_runtime_config.next_step.expected_output_tokens,
-				risk_tier: RiskTier::Low,
-				preferred_provider: None,
-				budget_tokens_remaining: self
-					.agent_runtime_config
-					.next_step
-					.budget_tokens_remaining,
-				budget_cost_remaining_usd: self
-					.agent_runtime_config
-					.next_step
-					.budget_cost_remaining_usd,
-				tools: None,
-				model_override: model_override.map(str::to_string),
-				thinking_effort: None,
-				system_prompt_sections: None,
-			};
 			let wire_bytes = self
 				.execution_router
 				.as_ref()
@@ -883,11 +885,18 @@ impl GenericAgentRuntime {
 			rebuilt_schema_bytes.as_deref().or(tool_schema_bytes);
 
 		let threshold = self.agent_runtime_config.r#loop.compact_threshold_tokens();
+		let counter = self
+			.execution_router
+			.as_ref()
+			.map(|r| r.token_counter_for_request(&selection_request))
+			.unwrap_or_else(roku_plugin_llm::default_counter);
 		let estimated = crate::runtime_loop::estimate_prompt_pressure(
 			messages,
 			Some(system_prompt),
 			effective_schema_bytes,
 			&loop_state.estimator_calibration,
+			counter.as_ref(),
+			loop_state.committed_baseline(),
 		);
 		if estimated > threshold {
 			let _ = roku_common_types::emit_global_log(roku_common_types::LogRecord::new(
@@ -1054,6 +1063,12 @@ impl GenericAgentRuntime {
 				elapsed_ms: compact_start.elapsed().as_millis() as u64,
 			});
 		}
+		// Compaction rewrote the message buffer and the step history, so the
+		// previous committed-token baseline (which pointed into the old
+		// buffer) is no longer valid. Clear it so the next pre-flight falls
+		// back to the whole-history estimate until the provider reports a
+		// fresh `usage.prompt_tokens`.
+		loop_state.invalidate_committed_baseline();
 		compact_tokens
 	}
 
@@ -1352,8 +1367,13 @@ impl GenericAgentRuntime {
 					&loop_state.estimator_calibration,
 				);
 				// Notify the cache break detector that message content changed.
+				// Also invalidate the committed-token baseline: microcompact
+				// replaced tool-result bodies with short placeholders, so the
+				// previously recorded `usage.prompt_tokens` no longer matches
+				// what the next call will actually send.
 				if microcompact_freed > 0 {
 					loop_state.cache_break_detector.notify_compaction();
+					loop_state.invalidate_committed_baseline();
 				}
 				// Emit only when the pre-flight pass actually freed tokens. On
 				// retry iterations after reactive compaction the buffer is
@@ -1368,6 +1388,18 @@ impl GenericAgentRuntime {
 					});
 				}
 
+				// Resolve the provider-owned token counter once per attempt.
+				// Selection is driven by `model_override` so it stays stable
+				// across reactive-retry iterations; the routing policy's
+				// budget/risk filters are deliberately not re-run here to
+				// avoid the per-iteration clone of `messages` that a full
+				// `GenerationRequest` would require.
+				let counter = self
+					.execution_router
+					.as_ref()
+					.map(|r| r.token_counter_for_model(request.model_override.as_deref()))
+					.unwrap_or_else(roku_plugin_llm::default_counter);
+
 				// Mid-tier pre-flight (Layer 1 / Layer 2): runs between Layer 0
 				// microcompact and the Layer 3 high-water check. Only fires when
 				// pressure is above the mid-water threshold and reactive compaction
@@ -1379,6 +1411,8 @@ impl GenericAgentRuntime {
 						Some(&system_prompt),
 						tool_schema_bytes,
 						&loop_state.estimator_calibration,
+						counter.as_ref(),
+						loop_state.committed_baseline(),
 					);
 					let mid_threshold = (self.agent_runtime_config.r#loop.context_window_tokens
 						as f64 * crate::runtime_loop::MID_WATER_TRIGGER_RATIO)
@@ -1427,6 +1461,11 @@ impl GenericAgentRuntime {
 						);
 						if !matches!(outcome, crate::runtime_loop::MidCompactOutcome::Noop) {
 							loop_state.cache_break_detector.notify_compaction();
+							// Mid-tier compaction rewrote the tail of the
+							// message buffer; the previously committed
+							// `usage.prompt_tokens` baseline now points at
+							// stale content and must be discarded.
+							loop_state.invalidate_committed_baseline();
 						}
 						if let Some(sender) = event_sender {
 							match &outcome {
@@ -1466,7 +1505,12 @@ impl GenericAgentRuntime {
 					Some(&system_prompt),
 					tool_schema_bytes,
 					&loop_state.estimator_calibration,
+					counter.as_ref(),
+					loop_state.committed_baseline(),
 				);
+				// Snapshot the message count at pre-call time so the
+				// post-response write-back records the exact commit boundary.
+				let pre_call_message_count = messages.len();
 				let gen_request = GenerationRequest {
 					system_prompt: Some(system_prompt.clone()),
 					prompt: String::new(),
@@ -1583,6 +1627,14 @@ impl GenericAgentRuntime {
 								loop_state
 									.estimator_calibration
 									.update(pre_call_estimate.raw_total_tokens, resp.prompt_tokens);
+								// Record the committed-token baseline: this call's
+								// exact input_tokens plus the message count at the
+								// moment of the call. Next turn's pre-flight only
+								// needs to estimate the tail appended after this.
+								loop_state.record_observed_usage(
+									pre_call_message_count,
+									resp.prompt_tokens,
+								);
 								let _ = sender.send(
 									crate::runtime_loop::LoopEvent::EstimatorCalibrated {
 										step: current_step_index,
@@ -1692,6 +1744,13 @@ impl GenericAgentRuntime {
 														pre_call_estimate.raw_total_tokens,
 														retry_resp.prompt_tokens,
 													);
+													// Retry shares the same committed message
+													// boundary as the primary call; use the
+													// retry's `prompt_tokens` as the baseline.
+													loop_state.record_observed_usage(
+														pre_call_message_count,
+														retry_resp.prompt_tokens,
+													);
 													// Replace the truncated streaming text in the
 													// TUI. `LlmDecisionComplete` was already sent
 													// before the retry, so the render engine's
@@ -1767,6 +1826,10 @@ impl GenericAgentRuntime {
 								loop_state
 									.estimator_calibration
 									.update(pre_call_estimate.raw_total_tokens, resp.prompt_tokens);
+								loop_state.record_observed_usage(
+									pre_call_message_count,
+									resp.prompt_tokens,
+								);
 								if let Some(sender) = event_sender {
 									let _ = sender.send(
 										crate::runtime_loop::LoopEvent::EstimatorCalibrated {
@@ -1878,6 +1941,10 @@ impl GenericAgentRuntime {
 													// prompt_tokens for a tighter next-turn estimate.
 													loop_state.estimator_calibration.update(
 														pre_call_estimate.raw_total_tokens,
+														retry_resp.prompt_tokens,
+													);
+													loop_state.record_observed_usage(
+														pre_call_message_count,
 														retry_resp.prompt_tokens,
 													);
 													// Intentionally no `LlmTextReplace` on the

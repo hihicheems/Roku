@@ -725,6 +725,18 @@ impl LlmProvider for OpenAiProvider {
 		OPENAI_PROVIDER
 	}
 
+	/// See [`super::openai_responses::OpenAiResponsesProvider::token_counter`]
+	/// for the rationale: tool-schema bytes divide by 5 while message /
+	/// system / tool-result bytes divide by 4. The two OpenAI providers
+	/// share the same tokenizer family and the same schema shape.
+	fn token_counter(&self) -> std::sync::Arc<dyn crate::token_counter::TokenCounter> {
+		std::sync::Arc::new(
+			crate::token_counter::ByteHeuristicCounter::with_bytes_per_token(4)
+				.with_tool_schema_bytes_per_token(5)
+				.with_name("openai-chat-heuristic"),
+		)
+	}
+
 	fn preview_wire_tool_schema_bytes(&self, definitions: &[ToolDefinition]) -> Vec<u8> {
 		// Mirror the exact serialization used by build_request(): each tool
 		// wraps as `{"type":"function","function":{"name","description",

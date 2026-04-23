@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::router::RouteDecision;
 use crate::runtime_config::LoopRuntimeConfig;
 use crate::runtime_loop::cache_break::CacheBreakDetector;
-use crate::runtime_loop::compact::EstimatorCalibration;
+use crate::runtime_loop::compact::{CommittedBaseline, EstimatorCalibration};
 use crate::runtime_loop::grounding::{
 	extract_explicit_path_candidates, extract_explicit_python_code, extract_explicit_shell_command,
 	extract_explicit_table_path, extract_glob_pattern, extract_web_query,
@@ -150,6 +150,26 @@ pub struct LoopState {
 	/// for backwards compatibility with serialized snapshots.
 	#[serde(default)]
 	pub estimator_calibration: EstimatorCalibration,
+	/// Provider-reported `usage.prompt_tokens` captured right after the
+	/// most recent successful call. Authoritative for everything that was
+	/// in that request; `None` on cold-start or after any state that
+	/// invalidates the previous commit (compaction, tool schema change).
+	///
+	/// Not serialized — a restored-from-checkpoint loop has its message
+	/// buffer rebuilt from scratch and its `frozen_tool_schema` cleared,
+	/// so the pre-checkpoint baseline no longer corresponds to the
+	/// post-restore buffer layout. Starting fresh (None) makes the first
+	/// post-restore turn fall back to the whole-history estimate, and the
+	/// baseline re-populates once that turn's provider response lands.
+	#[serde(skip)]
+	pub(crate) last_observed_input_tokens: Option<u64>,
+	/// Number of messages in the call that produced
+	/// `last_observed_input_tokens`. Together the two fields form a
+	/// [`CommittedBaseline`]; see [`LoopState::committed_baseline`].
+	/// Not serialized, for the same reason as
+	/// [`Self::last_observed_input_tokens`].
+	#[serde(skip)]
+	pub(crate) committed_message_count: usize,
 	/// Run-scoped counter of consecutive Layer 3 structured-summary
 	/// compaction failures. Reset to `0` on any successful LLM-assisted
 	/// compaction. Once it reaches
@@ -265,6 +285,8 @@ impl LoopState {
 			sub_agent_depth: 0,
 			disallowed_tools: Vec::new(),
 			estimator_calibration: EstimatorCalibration::default(),
+			last_observed_input_tokens: None,
+			committed_message_count: 0,
 			consecutive_autocompact_failures: 0,
 			frozen_tool_schema: None,
 			tool_schema_dirty: true,
@@ -310,8 +332,53 @@ impl LoopState {
 	///
 	/// Any new dirty source must route through this method so the set of
 	/// schema-invalidating events stays auditable in one place.
+	///
+	/// Also invalidates the committed token baseline: the baseline assumes
+	/// that system + tools are identical to what the provider priced on
+	/// the last call, and a schema-dirty event breaks that assumption.
 	pub fn mark_tool_schema_dirty(&mut self) {
 		self.tool_schema_dirty = true;
+		self.invalidate_committed_baseline();
+	}
+
+	/// Return the current committed-token baseline, if any.
+	///
+	/// Populated after any successful provider call that reported a
+	/// non-zero `usage.prompt_tokens`; cleared on compaction or any event
+	/// that changes the non-tail surface (tool schema, system prompt).
+	pub fn committed_baseline(&self) -> Option<CommittedBaseline> {
+		self.last_observed_input_tokens
+			.map(|input_tokens| CommittedBaseline {
+				input_tokens,
+				message_count: self.committed_message_count,
+			})
+	}
+
+	/// Record the real `usage.prompt_tokens` and message count for the
+	/// most recent successful call.
+	///
+	/// `observed_input_tokens` is the provider's authoritative count;
+	/// `committed_count` is the number of messages that were in that
+	/// request. Zero `observed_input_tokens` is a no-op — the provider
+	/// either did not report usage or reported a cache-only hit, neither
+	/// of which can serve as a baseline for the tail heuristic.
+	pub fn record_observed_usage(&mut self, committed_count: usize, observed_input_tokens: u64) {
+		if observed_input_tokens == 0 {
+			return;
+		}
+		self.last_observed_input_tokens = Some(observed_input_tokens);
+		self.committed_message_count = committed_count;
+	}
+
+	/// Clear any cached committed-token baseline.
+	///
+	/// Called on compaction (which truncates / rewrites history so the
+	/// previous message_count is no longer meaningful) and on schema
+	/// changes (which invalidate the system/tools portion of the
+	/// provider's previous `prompt_tokens`).
+	pub fn invalidate_committed_baseline(&mut self) {
+		self.last_observed_input_tokens = None;
+		self.committed_message_count = 0;
 	}
 
 	/// Return a `Vec<ToolDefinition>` for the next LLM call, reusing the
@@ -665,15 +732,20 @@ mod tests {
 			serde_json::from_str(&json_str).expect("loop state should deserialize from JSON");
 
 		// `frozen_tool_schema`, `tool_schema_dirty`, `observed_plan_mode`,
-		// `cache_break_detector`, `deferred_tools`, and `tool_result_store`
-		// are `#[serde(skip)]` — they do not survive a snapshot roundtrip
-		// by design, so normalize before structural compare.
+		// `cache_break_detector`, `deferred_tools`, `tool_result_store`,
+		// `last_observed_input_tokens`, and `committed_message_count` are
+		// `#[serde(skip)]` — they do not survive a snapshot roundtrip by
+		// design (baseline message-positions cannot be trusted against a
+		// buffer rebuilt from scratch on restore), so normalize before
+		// structural compare.
 		state.frozen_tool_schema = None;
 		state.tool_schema_dirty = false;
 		state.observed_plan_mode = None;
 		state.cache_break_detector = CacheBreakDetector::default();
 		state.deferred_tools = None;
 		state.tool_result_store = ToolResultStore::default();
+		state.last_observed_input_tokens = None;
+		state.committed_message_count = 0;
 
 		assert_eq!(state, deserialized);
 		assert_eq!(deserialized.history.len(), 3);
@@ -708,6 +780,86 @@ mod tests {
 			restored.layer2_lookup_attempted_this_run,
 			"flag must survive a JSON round-trip (persisted across checkpoints)",
 		);
+	}
+
+	#[test]
+	fn committed_token_baseline_does_not_survive_checkpoint_roundtrip() {
+		// Lock the `#[serde(skip)]` contract on `last_observed_input_tokens`
+		// and `committed_message_count`: these fields refer to positions in
+		// the pre-checkpoint message buffer, which is rebuilt from scratch
+		// on restore. Carrying the old baseline would cause the next
+		// pre-flight estimate to trust stale message counts against the
+		// fresh buffer. The first post-restore call must fall back to the
+		// whole-history estimate.
+		let mut state = LoopState::new("loop-baseline-skip", &loop_context());
+		state.record_observed_usage(7, 2048);
+		assert_eq!(state.last_observed_input_tokens, Some(2048));
+		assert_eq!(state.committed_message_count, 7);
+		assert!(state.committed_baseline().is_some());
+
+		let json = serde_json::to_string(&state).expect("serialize");
+		let restored: LoopState = serde_json::from_str(&json).expect("deserialize");
+
+		assert!(
+			restored.last_observed_input_tokens.is_none(),
+			"baseline must reset to None on restore so the next call \
+			 falls back to whole-history estimate",
+		);
+		assert_eq!(restored.committed_message_count, 0);
+		assert!(restored.committed_baseline().is_none());
+	}
+
+	#[test]
+	fn mark_tool_schema_dirty_invalidates_committed_baseline() {
+		// The schema-dirty signal invalidates both the frozen tool schema
+		// and the committed baseline together — the baseline assumes the
+		// committed system + tools surface is stable, and a schema-dirty
+		// event explicitly breaks that assumption.
+		let mut state = LoopState::new("loop-dirty-reset", &loop_context());
+		state.record_observed_usage(5, 1500);
+		assert!(state.committed_baseline().is_some());
+		state.tool_schema_dirty = false;
+
+		state.mark_tool_schema_dirty();
+
+		assert!(state.tool_schema_dirty);
+		assert!(
+			state.committed_baseline().is_none(),
+			"schema-dirty must clear the baseline so the next estimate \
+			 re-counts the full request",
+		);
+	}
+
+	#[test]
+	fn invalidate_committed_baseline_is_idempotent() {
+		// Calling invalidate on an already-empty baseline must be a no-op
+		// (not a panic, not a value change). Multiple compaction hooks can
+		// fire per turn so the helper must tolerate repeated calls.
+		let mut state = LoopState::new("loop-invalidate-idempotent", &loop_context());
+		state.invalidate_committed_baseline();
+		state.invalidate_committed_baseline();
+		assert!(state.committed_baseline().is_none());
+
+		state.record_observed_usage(3, 900);
+		state.invalidate_committed_baseline();
+		state.invalidate_committed_baseline();
+		assert!(state.committed_baseline().is_none());
+	}
+
+	#[test]
+	fn record_observed_usage_ignores_zero_input_tokens() {
+		// Guard the "real provider usage zero" branch: a cache-only hit or
+		// a provider that failed to report usage must not be treated as a
+		// valid baseline. The existing baseline (if any) stays untouched,
+		// and an absent baseline stays absent.
+		let mut state = LoopState::new("loop-zero-usage", &loop_context());
+		state.record_observed_usage(4, 0);
+		assert!(state.committed_baseline().is_none());
+
+		state.record_observed_usage(4, 1200);
+		let original = state.committed_baseline();
+		state.record_observed_usage(8, 0);
+		assert_eq!(state.committed_baseline(), original);
 	}
 
 	#[test]
