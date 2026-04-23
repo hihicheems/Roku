@@ -30,7 +30,8 @@ use tokio::sync::mpsc;
 use crate::router::{LlmProvider, LlmRouter};
 use crate::types::{
 	GenerationRequest, Message, ModelProfile, ProviderCallError, ProviderResponse, RiskTier,
-	RoutingPolicy, StreamChunk, ThinkingEffort, ToolCallBlock, estimate_prompt_tokens,
+	RoutingPolicy, StreamChunk, ThinkingEffort, ToolCallBlock, ToolDefinition,
+	estimate_prompt_tokens,
 };
 
 const OPENROUTER_PROVIDER: &str = "openrouter";
@@ -584,6 +585,23 @@ impl OpenRouterProvider {
 impl LlmProvider for OpenRouterProvider {
 	fn provider_name(&self) -> &'static str {
 		OPENROUTER_PROVIDER
+	}
+
+	fn preview_wire_tool_schema_bytes(&self, definitions: &[ToolDefinition]) -> Vec<u8> {
+		// OpenRouter reuses the OpenAI Chat Completions tool wire format:
+		// `{"type":"function","function":{"name","description","parameters"}}`.
+		let wire: Vec<OpenAiToolDefinition> = definitions
+			.iter()
+			.map(|tool| OpenAiToolDefinition {
+				r#type: "function",
+				function: OpenAiFunctionDefinition {
+					name: tool.name.clone(),
+					description: tool.description.clone(),
+					parameters: tool.parameters.clone(),
+				},
+			})
+			.collect();
+		serde_json::to_vec(&wire).unwrap_or_default()
 	}
 
 	async fn complete(
@@ -1424,6 +1442,65 @@ mod tests {
 			thinking_effort: None,
 			system_prompt_sections: None,
 		}
+	}
+
+	#[test]
+	fn preview_wire_tool_schema_bytes_matches_build_request_body_tools_output() {
+		let config = OpenRouterConfig {
+			api_key: "test-key".to_string(),
+			primary_model: normalize_model_id(DEFAULT_OPENROUTER_PRIMARY_MODEL),
+			fallback_models: default_fallback_models(),
+			app_name: None,
+			site_url: None,
+			base_url: DEFAULT_OPENROUTER_URL.to_string(),
+			max_context_tokens: 128_000,
+			cost_per_1k_tokens_usd: 0.0,
+			max_request_cost_usd: 1.0,
+			max_latency_ms: 60_000,
+		};
+		let provider = OpenRouterProvider::new(config.clone()).expect("construct provider");
+
+		let definitions = vec![
+			crate::types::ToolDefinition {
+				name: "web_fetch".to_string(),
+				description: "Fetch a URL".to_string(),
+				parameters: serde_json::json!({
+					"type": "object",
+					"properties": {"url": {"type": "string"}},
+				}),
+			},
+			crate::types::ToolDefinition {
+				name: "shell_exec".to_string(),
+				description: "Run a shell command".to_string(),
+				parameters: serde_json::json!({
+					"type": "object",
+					"properties": {"cmd": {"type": "string"}},
+					"required": ["cmd"],
+				}),
+			},
+		];
+		let mut request = sample_request();
+		request.tools = Some(definitions.clone());
+		let body = serde_json::to_value(build_request_body(
+			&config.primary_model,
+			&config.fallback_models,
+			&request,
+		))
+		.expect("request body should serialize");
+		let wire_tools = body
+			.get("tools")
+			.cloned()
+			.expect("build_request_body should serialize tools");
+
+		let preview = provider.preview_wire_tool_schema_bytes(&definitions);
+		let preview_json: serde_json::Value =
+			serde_json::from_slice(&preview).expect("preview bytes are valid JSON");
+
+		assert_eq!(
+			preview_json, wire_tools,
+			"preview_wire_tool_schema_bytes must match the tools array \
+			 build_request_body places on the wire",
+		);
 	}
 
 	#[test]

@@ -801,9 +801,15 @@ impl GenericAgentRuntime {
 				loop_state,
 				self.agent_runtime_config.r#loop.context_window_tokens,
 			);
-			match serde_json::to_vec(&effective) {
-				Ok(bytes) if !bytes.is_empty() => Some(bytes),
-				_ => None,
+			let wire_bytes = self
+				.execution_router
+				.as_ref()
+				.map(|r| r.preview_wire_tool_schema_bytes(None, &effective))
+				.unwrap_or_else(|| serde_json::to_vec(&effective).unwrap_or_default());
+			if wire_bytes.is_empty() {
+				None
+			} else {
+				Some(wire_bytes)
 			}
 		} else {
 			None
@@ -1096,13 +1102,17 @@ impl GenericAgentRuntime {
 			// the `tool_search` pseudo-tool has replaced most schemas and
 			// silently walk the calibration scale in the wrong direction.
 			//
-			// Note: this is the Roku-internal canonical serialization; the
-			// wire format each provider emits differs by a few bytes per tool
-			// (e.g. OpenAI Responses adds `"type":"function"` per entry). The
-			// residual drift is small (<5%) and well inside the estimator's
-			// 20% accuracy gate; provider-exact wire-byte estimation is a
-			// follow-up.
-			let tool_schema_bytes_vec = serde_json::to_vec(&tool_definitions).unwrap_or_default();
+			// Routed through `LlmRouter::preview_wire_tool_schema_bytes` so
+			// the estimator sees the provider-specific wire format (OpenAI
+			// Chat Completions and Responses wrap each entry in
+			// `{"type":"function",...}`, Anthropic uses `input_schema` instead
+			// of `parameters`, etc.). This removes the small provider-specific
+			// byte bias that used to walk into the calibration scale.
+			let tool_schema_bytes_vec = self
+				.execution_router
+				.as_ref()
+				.map(|r| r.preview_wire_tool_schema_bytes(None, &tool_definitions))
+				.unwrap_or_else(|| serde_json::to_vec(&tool_definitions).unwrap_or_default());
 			let tool_schema_bytes: Option<&[u8]> = if tool_schema_bytes_vec.is_empty() {
 				None
 			} else {

@@ -38,7 +38,8 @@ use tokio::sync::mpsc;
 use crate::router::{LlmProvider, LlmRouter};
 use crate::types::{
 	GenerationRequest, Message, ModelProfile, ProviderCallError, ProviderResponse, RiskTier,
-	RoutingPolicy, StreamChunk, ThinkingEffort, ToolCallBlock, estimate_prompt_tokens,
+	RoutingPolicy, StreamChunk, ThinkingEffort, ToolCallBlock, ToolDefinition,
+	estimate_prompt_tokens,
 };
 
 const ANTHROPIC_PROVIDER: &str = "anthropic";
@@ -488,6 +489,26 @@ impl AnthropicProvider {
 impl LlmProvider for AnthropicProvider {
 	fn provider_name(&self) -> &'static str {
 		ANTHROPIC_PROVIDER
+	}
+
+	fn preview_wire_tool_schema_bytes(&self, definitions: &[ToolDefinition]) -> Vec<u8> {
+		// Mirror the exact serialization used by build_request_body():
+		// each tool is `{"name","description","input_schema":<parameters>}`
+		// (no `"type"` wrapper). The runtime caller is responsible for not
+		// invoking this with an empty slice — the empty-tools-omit behavior
+		// in build_request_body() only affects live requests, not the
+		// estimator.
+		let wire: Vec<Value> = definitions
+			.iter()
+			.map(|tool| {
+				serde_json::json!({
+					"name": tool.name,
+					"description": tool.description,
+					"input_schema": tool.parameters,
+				})
+			})
+			.collect();
+		serde_json::to_vec(&wire).unwrap_or_default()
 	}
 
 	async fn complete(
@@ -1206,6 +1227,64 @@ mod tests {
 		assert_eq!(normalize_stop_reason("tool_use"), "tool_calls");
 		assert_eq!(normalize_stop_reason("max_tokens"), "max_tokens");
 		assert_eq!(normalize_stop_reason("stop_sequence"), "stop_sequence");
+	}
+
+	#[test]
+	fn preview_wire_tool_schema_bytes_matches_build_request_body_tools_output() {
+		let config = AnthropicConfig {
+			api_key: "test-key".to_string(),
+			base_url: DEFAULT_ANTHROPIC_URL.to_string(),
+			max_tokens: DEFAULT_MAX_TOKENS,
+		};
+		let provider = AnthropicProvider::new(config).unwrap();
+		let definitions = vec![
+			crate::types::ToolDefinition {
+				name: "web_fetch".to_string(),
+				description: "Fetch a URL".to_string(),
+				parameters: serde_json::json!({
+					"type": "object",
+					"properties": {"url": {"type": "string"}},
+				}),
+			},
+			crate::types::ToolDefinition {
+				name: "shell_exec".to_string(),
+				description: "Run a shell command".to_string(),
+				parameters: serde_json::json!({
+					"type": "object",
+					"properties": {"cmd": {"type": "string"}},
+					"required": ["cmd"],
+				}),
+			},
+		];
+		let request = GenerationRequest {
+			system_prompt: None,
+			prompt: "Hi".to_string(),
+			messages: None,
+			expected_output_tokens: 128,
+			risk_tier: crate::types::RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: 100_000,
+			budget_cost_remaining_usd: 10.0,
+			tools: Some(definitions.clone()),
+			model_override: None,
+			thinking_effort: None,
+			system_prompt_sections: None,
+		};
+		let body = provider.build_request_body("claude-sonnet-4-5-20250514", &request, false);
+		let wire_tools = body
+			.get("tools")
+			.cloned()
+			.expect("build_request_body should serialize tools");
+
+		let preview = provider.preview_wire_tool_schema_bytes(&definitions);
+		let preview_json: Value =
+			serde_json::from_slice(&preview).expect("preview bytes are valid JSON");
+
+		assert_eq!(
+			preview_json, wire_tools,
+			"preview_wire_tool_schema_bytes must match the tools array \
+			 build_request_body places on the wire",
+		);
 	}
 
 	#[test]

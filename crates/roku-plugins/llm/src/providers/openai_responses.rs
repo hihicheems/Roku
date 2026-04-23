@@ -1119,6 +1119,16 @@ impl LlmProvider for OpenAiResponsesProvider {
 		false
 	}
 
+	fn preview_wire_tool_schema_bytes(&self, definitions: &[ToolDefinition]) -> Vec<u8> {
+		// Mirror the exact serialization used by build_responses_request() /
+		// compact_history(): each tool is wrapped as
+		// `{"type":"function","name","description","parameters"}` via
+		// build_tool_definition(). Bundled as a JSON array so the estimator
+		// sees the byte count the provider would put on the wire.
+		let wire: Vec<Value> = definitions.iter().map(build_tool_definition).collect();
+		serde_json::to_vec(&wire).unwrap_or_default()
+	}
+
 	async fn compact_history(
 		&self,
 		request: &CompactRequest,
@@ -1468,6 +1478,70 @@ mod tests {
 	use serde_json::json;
 
 	// --- Env parsing ---
+
+	#[test]
+	fn preview_wire_tool_schema_bytes_matches_build_responses_request_tools() {
+		let definitions = vec![
+			ToolDefinition {
+				name: "web_fetch".to_string(),
+				description: "Fetch a URL".to_string(),
+				parameters: json!({
+					"type": "object",
+					"properties": {"url": {"type": "string"}},
+				}),
+			},
+			ToolDefinition {
+				name: "shell_exec".to_string(),
+				description: "Run a shell command".to_string(),
+				parameters: json!({
+					"type": "object",
+					"properties": {"cmd": {"type": "string"}},
+					"required": ["cmd"],
+				}),
+			},
+		];
+		let request = GenerationRequest {
+			system_prompt: None,
+			prompt: "Hi".to_string(),
+			messages: None,
+			expected_output_tokens: 128,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: 100_000,
+			budget_cost_remaining_usd: 10.0,
+			tools: Some(definitions.clone()),
+			model_override: None,
+			thinking_effort: None,
+			system_prompt_sections: None,
+		};
+		let body = build_responses_request("gpt-5.4", &request, false, None, "cache-key", None);
+		let wire_tools = body
+			.get("tools")
+			.cloned()
+			.expect("build_responses_request should serialize tools");
+
+		let config = OpenAiResponsesConfig {
+			api_key: "sk-test-key".to_string(),
+			base_url: "https://example.invalid/v1/responses".to_string(),
+			reasoning_effort: None,
+			websocket_mode: false,
+			chatgpt_account_id: None,
+			chatgpt_account_is_fedramp: false,
+			originator: "codex_cli_rs".to_string(),
+			installation_id: "install-test-uuid".to_string(),
+			session_id: "session-test-uuid".to_string(),
+		};
+		let provider = OpenAiResponsesProvider::new(config).expect("construct provider");
+		let preview = provider.preview_wire_tool_schema_bytes(&definitions);
+		let preview_json: Value =
+			serde_json::from_slice(&preview).expect("preview bytes are valid JSON");
+
+		assert_eq!(
+			preview_json, wire_tools,
+			"preview_wire_tool_schema_bytes must match the tools array \
+			 build_responses_request places on the wire",
+		);
+	}
 
 	#[test]
 	fn websocket_mode_env_recognises_truthy_and_falsy_values() {

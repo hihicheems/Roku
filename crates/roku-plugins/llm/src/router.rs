@@ -27,7 +27,7 @@ use crate::types::{
 	CompactRequest, CompactResponse, GenerationRequest, LlmAdapterError, LlmResponse, ModelProfile,
 	ProviderCallError, ProviderResiliencePolicy, ProviderResponse, RiskTier, RoutingPolicy,
 	StreamChunk, StructuredGenerationError, StructuredJsonResponse, StructuredOutputError,
-	estimate_cost_usd,
+	ToolDefinition, estimate_cost_usd,
 };
 
 #[async_trait]
@@ -97,6 +97,20 @@ pub trait LlmProvider: Send + Sync {
 	/// output budget (e.g. the OpenAI Responses API link) return `false`.
 	fn supports_output_slot_cap(&self) -> bool {
 		true
+	}
+
+	/// Produce the exact byte sequence this provider would send on the wire
+	/// for the `tools` field if given `definitions`.
+	///
+	/// The default implementation returns the Roku-internal canonical form
+	/// (`serde_json::to_vec(definitions)`). Live providers override to match
+	/// the provider's actual wire format (for example, OpenAI Chat Completions
+	/// wraps each entry in `{"type":"function","function":{...}}`, while
+	/// Anthropic uses `input_schema` instead of `parameters`). This is used
+	/// by the runtime's cold-start prompt-token estimator to avoid folding a
+	/// provider-specific byte bias into the calibration scale.
+	fn preview_wire_tool_schema_bytes(&self, definitions: &[ToolDefinition]) -> Vec<u8> {
+		serde_json::to_vec(definitions).unwrap_or_default()
 	}
 }
 
@@ -714,6 +728,36 @@ impl LlmRouter {
 				.map(|p| p.provider.supports_output_slot_cap())
 				.unwrap_or(true),
 			None => true,
+		}
+	}
+
+	/// Preview the exact bytes the active provider would send on the wire for
+	/// the `tools` field given `definitions`.
+	///
+	/// Picks the provider bound to `model_id`; falls back to the first-highest
+	/// priority registered model's provider when `model_id` is unknown. If no
+	/// provider is registered at all, returns the Roku-internal canonical form
+	/// (this preserves existing behavior for the estimator call sites that
+	/// predate the per-provider override).
+	pub fn preview_wire_tool_schema_bytes(
+		&self,
+		model_id: Option<&str>,
+		definitions: &[ToolDefinition],
+	) -> Vec<u8> {
+		let provider_name = model_id
+			.and_then(|id| self.models.iter().find(|m| m.model_id == id))
+			.or_else(|| {
+				// No explicit model_id: use the highest-priority registered
+				// model as a proxy for "the provider that will most likely
+				// serve the next call". Matches select_model's tie-breaker
+				// when no `model_override` is in play and keeps the
+				// estimator deterministic across turns.
+				self.models.iter().max_by_key(|m| m.route_priority)
+			})
+			.map(|m| m.provider.as_str());
+		match provider_name.and_then(|name| self.providers.get(name)) {
+			Some(p) => p.provider.preview_wire_tool_schema_bytes(definitions),
+			None => serde_json::to_vec(definitions).unwrap_or_default(),
 		}
 	}
 }
