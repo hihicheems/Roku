@@ -1388,16 +1388,35 @@ impl GenericAgentRuntime {
 					});
 				}
 
-				// Resolve the provider-owned token counter once per attempt.
-				// Selection is driven by `model_override` so it stays stable
-				// across reactive-retry iterations; the routing policy's
-				// budget/risk filters are deliberately not re-run here to
-				// avoid the per-iteration clone of `messages` that a full
-				// `GenerationRequest` would require.
+				// Resolve the provider-owned token counter through the full
+				// `select_model` policy so the estimator consults the same
+				// provider that `generate_streaming` / `generate` will
+				// actually route to — `model_override` eligibility, risk
+				// tier, and budget filters all come into play. An earlier
+				// optimization routed via `model_id` only to avoid a
+				// `messages.clone()` per attempt, but that short-circuit
+				// can pick a different provider than the real call in
+				// multi-model setups (budget exhaustion, risk-tier
+				// demotion) and produce misleading pressure estimates.
+				// The clone pays for correctness on the hot path.
+				let counter_selection_request = GenerationRequest {
+					system_prompt: Some(system_prompt.clone()),
+					prompt: String::new(),
+					messages: Some(messages.clone()),
+					expected_output_tokens: config.expected_output_tokens,
+					risk_tier: RiskTier::Low,
+					preferred_provider: None,
+					budget_tokens_remaining: config.budget_tokens_remaining,
+					budget_cost_remaining_usd: config.budget_cost_remaining_usd,
+					tools: None,
+					model_override: request.model_override.clone(),
+					thinking_effort: None,
+					system_prompt_sections: Some(system_prompt_sections.clone()),
+				};
 				let counter = self
 					.execution_router
 					.as_ref()
-					.map(|r| r.token_counter_for_model(request.model_override.as_deref()))
+					.map(|r| r.token_counter_for_request(&counter_selection_request))
 					.unwrap_or_else(roku_plugin_llm::default_counter);
 
 				// Mid-tier pre-flight (Layer 1 / Layer 2): runs between Layer 0
