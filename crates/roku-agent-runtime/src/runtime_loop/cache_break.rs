@@ -178,6 +178,22 @@ impl CacheBreakDetector {
 	pub fn notify_compaction(&mut self) {
 		self.compaction_pending = true;
 	}
+
+	/// Test-only accessor for the last-checked fingerprint's model field.
+	///
+	/// After `check_response` runs, the current fingerprint is moved
+	/// to `previous_fingerprint` so the next turn has a baseline to
+	/// compare against. This accessor lets runtime-layer tests observe
+	/// what the caller recorded on the turn that just completed —
+	/// specifically, that the routed serving id was fingerprinted,
+	/// not `request.model_override` (which is `""` under default
+	/// routing and would silently hide provider swaps).
+	#[cfg(test)]
+	pub(crate) fn previous_fingerprint_model(&self) -> Option<&str> {
+		self.previous_fingerprint
+			.as_ref()
+			.map(|fp| fp.model.as_str())
+	}
 }
 
 /// Write a structured diagnostic file to `~/.roku/diagnostics/`.

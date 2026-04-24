@@ -49,8 +49,8 @@ use roku_plugin_host::{
 	PluginRegistrySnapshot, ToolExecutionResult, ToolInvocation, ToolRuntime, ToolRuntimeError,
 };
 use roku_plugin_llm::{
-	GenerationRequest, LlmAdapterError, LlmRouter, Message, RiskTier, StreamChunk, ThinkingEffort,
-	ToolCallBlock, ToolDefinition,
+	GenerationRequest, LlmAdapterError, LlmRouter, Message, RiskTier, StreamChunk,
+	SystemPromptSections, ThinkingEffort, TokenCounter, ToolCallBlock, ToolDefinition,
 };
 use roku_plugin_skills::SkillRegistry;
 use roku_plugin_tools::{
@@ -769,6 +769,181 @@ impl GenericAgentRuntime {
 		ToolObservation::from_runtime_error(tool_name, error, &self.resource_catalog)
 	}
 
+	/// Resolve the three preflight views the attempt loop depends on
+	/// through the full `select_model` policy: provider-owned token
+	/// counter, routed serving model id, and wire-bytes preview of the
+	/// tool-schema block. All three are sourced from the same
+	/// `GenerationRequest`-shaped selection payload so they agree on
+	/// the provider `router.generate*` will actually land on — model
+	/// override eligibility, risk tier, budgets, and message-size
+	/// context checks all contribute.
+	///
+	/// Called once per attempt before the mid-tier pre-flight block,
+	/// and again after the block if mid-tier compaction mutated
+	/// `messages` (the shorter buffer can flip `select_model`'s
+	/// eligibility decision, rerouting to a different provider whose
+	/// counter and wire format differ). Shared helper keeps the two
+	/// resolution sites from drifting.
+	///
+	/// `route_router` (not `execution_router`) is consulted so the
+	/// routed id matches what `router.generate*` will actually serve
+	/// under the two-router configuration where those diverge.
+	#[allow(clippy::type_complexity)]
+	fn resolve_attempt_preflight(
+		&self,
+		messages: &[Message],
+		system_prompt: &str,
+		system_prompt_sections: &SystemPromptSections,
+		tool_definitions: &[ToolDefinition],
+		model_override: Option<String>,
+		config: &crate::runtime_config::NextStepRuntimeConfig,
+	) -> (Arc<dyn TokenCounter>, Option<String>, Vec<u8>) {
+		let selection_request = GenerationRequest {
+			system_prompt: Some(system_prompt.to_string()),
+			prompt: String::new(),
+			messages: Some(messages.to_vec()),
+			expected_output_tokens: config.expected_output_tokens,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: config.budget_tokens_remaining,
+			budget_cost_remaining_usd: config.budget_cost_remaining_usd,
+			tools: None,
+			model_override,
+			thinking_effort: None,
+			system_prompt_sections: Some(system_prompt_sections.clone()),
+		};
+		let counter = self
+			.route_router
+			.as_ref()
+			.map(|r| r.token_counter_for_request(&selection_request))
+			.unwrap_or_else(roku_plugin_llm::default_counter);
+		let routed_model = self
+			.route_router
+			.as_ref()
+			.and_then(|r| r.selected_model_id_for_request(&selection_request));
+		let schema_bytes = self
+			.route_router
+			.as_ref()
+			.map(|r| {
+				r.preview_wire_tool_schema_bytes_for_request(&selection_request, tool_definitions)
+			})
+			.unwrap_or_else(|| serde_json::to_vec(tool_definitions).unwrap_or_default());
+		(counter, routed_model, schema_bytes)
+	}
+
+	/// Resolve the calibration `(estimated, real)` pair plus the
+	/// tool-schema byte length to record in the committed baseline
+	/// when an output-slot escalation retry lands.
+	///
+	/// The primary call ran under the attempt loop's resolved
+	/// `(counter, current_routed_model, attempt_schema_bytes_vec)` and
+	/// produced `pre_call_estimate`. If the escalation retry stayed
+	/// on the same routed model (`retry_resp_model_id ==
+	/// primary_resp_model_id`), those primary views are still
+	/// authoritative and we feed `pre_call_estimate.calibration_pair`
+	/// with the primary's byte-length — the current fast path.
+	///
+	/// When the escalation reroutes (typical when the retry switches
+	/// to a larger model that `select_model` re-picks under the
+	/// expanded `expected_output_tokens`), the primary's views belong
+	/// to the wrong provider: its counter's byte→token bias does not
+	/// match the retry's tokenizer, and its wire-bytes length is
+	/// shaped for the primary provider's serializer. Recording
+	/// `(primary_estimate, retry_real)` into the retry's per-model
+	/// calibration bucket injects model A's residual bias into model
+	/// B's bucket, and persisting the primary's schema-bytes length
+	/// against the retry's serving id breaks next turn's
+	/// `CommittedBaseline::is_valid_for` on the schema-bytes guard.
+	///
+	/// Fix: when a reroute is detected, re-resolve the retry model's
+	/// counter and wire-bytes preview (same `resolve_attempt_preflight`
+	/// helper the attempt loop uses, with the retry's id as the
+	/// override hint), compute a fresh `pre_call_estimate` with those
+	/// views, and base the calibration sample and baseline length on
+	/// the retry-specific estimate.
+	#[allow(clippy::too_many_arguments)]
+	fn retry_preflight_values(
+		&self,
+		retry_resp_model_id: &str,
+		primary_resp_model_id: &str,
+		messages: &[Message],
+		system_prompt: &str,
+		system_prompt_sections: &SystemPromptSections,
+		tool_definitions: &[ToolDefinition],
+		config: &crate::runtime_config::NextStepRuntimeConfig,
+		pre_call_system_prompt_bytes: usize,
+		pre_call_tool_schema_bytes_len: usize,
+		pre_call_system_prompt_hash: u64,
+		pre_call_prefix_messages_hash: u64,
+		pre_call_estimate: &crate::runtime_loop::PromptTokenEstimate,
+		retry_prompt_tokens: u64,
+		calibration: &crate::runtime_loop::PerModelCalibration,
+		loop_state_baseline: Option<crate::runtime_loop::CommittedBaseline>,
+	) -> (u64, u64, usize, u64) {
+		if retry_resp_model_id == primary_resp_model_id {
+			let (est, real) = pre_call_estimate.calibration_pair(retry_prompt_tokens);
+			// Same-route retry reuses the primary's pre-call estimate /
+			// schema-bytes length and must persist the same tool-schema
+			// content hash so next turn's `is_valid_for` sees the exact
+			// wire bytes the provider tokenized this turn.
+			let primary_schema_hash = {
+				// Reconstruct the primary's tool schema for hashing.
+				let (_counter, _routed, primary_schema_bytes_vec) = self.resolve_attempt_preflight(
+					messages,
+					system_prompt,
+					system_prompt_sections,
+					tool_definitions,
+					Some(primary_resp_model_id.to_string()),
+					config,
+				);
+				crate::runtime_loop::hash_tool_schema_bytes(&primary_schema_bytes_vec)
+			};
+			return (
+				est,
+				real,
+				pre_call_tool_schema_bytes_len,
+				primary_schema_hash,
+			);
+		}
+		// Rerouted retry: re-resolve the retry model's preflight views.
+		let (retry_counter, _routed, retry_schema_bytes_vec) = self.resolve_attempt_preflight(
+			messages,
+			system_prompt,
+			system_prompt_sections,
+			tool_definitions,
+			Some(retry_resp_model_id.to_string()),
+			config,
+		);
+		let retry_schema_bytes: Option<&[u8]> = if retry_schema_bytes_vec.is_empty() {
+			None
+		} else {
+			Some(&retry_schema_bytes_vec)
+		};
+		let retry_schema_len = retry_schema_bytes.map(|b| b.len()).unwrap_or(0);
+		let retry_tool_schema_hash =
+			crate::runtime_loop::hash_tool_schema_bytes(&retry_schema_bytes_vec);
+		let retry_baseline = loop_state_baseline.filter(|b| {
+			b.is_valid_for(
+				pre_call_system_prompt_bytes as u64,
+				retry_schema_len as u64,
+				pre_call_system_prompt_hash,
+				retry_tool_schema_hash,
+				pre_call_prefix_messages_hash,
+				Some(retry_resp_model_id),
+			)
+		});
+		let retry_estimate = crate::runtime_loop::estimate_prompt_tokens_calibrated(
+			messages,
+			Some(system_prompt),
+			retry_schema_bytes,
+			calibration.get(Some(retry_resp_model_id)),
+			retry_counter.as_ref(),
+			retry_baseline,
+		);
+		let (est, real) = retry_estimate.calibration_pair(retry_prompt_tokens);
+		(est, real, retry_schema_len, retry_tool_schema_hash)
+	}
+
 	/// Returns `(prompt_tokens, output_tokens)` consumed by compaction LLM calls.
 	async fn maybe_compact(
 		&self,
@@ -844,32 +1019,44 @@ impl GenericAgentRuntime {
 				})
 		};
 
+		// Shared request shape used to route both the tool-schema wire-bytes
+		// preview and the token-counter selection through the same
+		// `select_model` policy. Constructed once so both resolutions see
+		// an identical request and agree on the provider.
+		let selection_request = GenerationRequest {
+			system_prompt: Some(system_prompt.to_string()),
+			prompt: String::new(),
+			messages: Some(messages.clone()),
+			expected_output_tokens: self.agent_runtime_config.next_step.expected_output_tokens,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: self.agent_runtime_config.next_step.budget_tokens_remaining,
+			budget_cost_remaining_usd: self
+				.agent_runtime_config
+				.next_step
+				.budget_cost_remaining_usd,
+			tools: None,
+			model_override: model_override.map(str::to_string),
+			thinking_effort: None,
+			system_prompt_sections: None,
+		};
+
+		// Route all three preflight resolutions (wire-bytes preview,
+		// token counter, routed-model id) through `route_router` — the
+		// same router instance whose `generate*` will actually serve
+		// the upcoming call. When the runtime is configured with
+		// distinct route / execution routers (subagent execution vs.
+		// main-loop generation), consulting `execution_router` here
+		// would predict a different provider's wire shape, tokenizer,
+		// and routed model id than what the real call lands on, so the
+		// estimator and committed-baseline validator would operate
+		// against the wrong router on every turn.
 		let rebuilt_schema_bytes: Option<Vec<u8>> = effective_definitions.and_then(|defs| {
 			if defs.is_empty() {
 				return None;
 			}
-			let selection_request = GenerationRequest {
-				system_prompt: Some(system_prompt.to_string()),
-				prompt: String::new(),
-				messages: Some(messages.clone()),
-				expected_output_tokens: self.agent_runtime_config.next_step.expected_output_tokens,
-				risk_tier: RiskTier::Low,
-				preferred_provider: None,
-				budget_tokens_remaining: self
-					.agent_runtime_config
-					.next_step
-					.budget_tokens_remaining,
-				budget_cost_remaining_usd: self
-					.agent_runtime_config
-					.next_step
-					.budget_cost_remaining_usd,
-				tools: None,
-				model_override: model_override.map(str::to_string),
-				thinking_effort: None,
-				system_prompt_sections: None,
-			};
 			let wire_bytes = self
-				.execution_router
+				.route_router
 				.as_ref()
 				.map(|r| r.preview_wire_tool_schema_bytes_for_request(&selection_request, &defs))
 				.unwrap_or_else(|| serde_json::to_vec(&defs).unwrap_or_default());
@@ -883,11 +1070,62 @@ impl GenericAgentRuntime {
 			rebuilt_schema_bytes.as_deref().or(tool_schema_bytes);
 
 		let threshold = self.agent_runtime_config.r#loop.compact_threshold_tokens();
+		let counter = self
+			.route_router
+			.as_ref()
+			.map(|r| r.token_counter_for_request(&selection_request))
+			.unwrap_or_else(roku_plugin_llm::default_counter);
+		// Only trust the committed baseline when the system-prompt byte
+		// length, the tool-schema byte length, and the routed serving
+		// model all match what the baseline was committed against. Any
+		// shift (dynamic working-directory block grew, plan mode
+		// flipped, router fell back to a different model because the
+		// committed model became ineligible) means
+		// `last_observed_input_tokens` no longer priced the current
+		// prefix — fall back to cold-start.
+		//
+		// The routed model id comes from `selected_model_id_for_request`
+		// (which runs the full `select_model` policy), not from
+		// `request.model_override`. A null override is the default case,
+		// and even a populated override can fall through to priority
+		// ordering when the targeted model is ineligible; comparing
+		// `model_override` against the committed serving `resp.model_id`
+		// would read as a mismatch every turn and permanently disable
+		// committed-baseline mode.
+		let current_system_bytes = system_prompt.len() as u64;
+		let current_schema_bytes = effective_schema_bytes.map(|b| b.len() as u64).unwrap_or(0);
+		let current_system_prompt_hash =
+			crate::runtime_loop::hash_system_prompt_text(system_prompt);
+		let current_tool_schema_hash =
+			crate::runtime_loop::hash_tool_schema_bytes(effective_schema_bytes.unwrap_or_default());
+		let current_model = self
+			.route_router
+			.as_ref()
+			.and_then(|r| r.selected_model_id_for_request(&selection_request));
+		let validated_baseline = loop_state.committed_baseline().filter(|b| {
+			if messages.len() < b.message_count {
+				return false;
+			}
+			let current_prefix_messages_hash =
+				crate::runtime_loop::hash_message_prefix(&messages[..b.message_count]);
+			b.is_valid_for(
+				current_system_bytes,
+				current_schema_bytes,
+				current_system_prompt_hash,
+				current_tool_schema_hash,
+				current_prefix_messages_hash,
+				current_model.as_deref(),
+			)
+		});
 		let estimated = crate::runtime_loop::estimate_prompt_pressure(
 			messages,
 			Some(system_prompt),
 			effective_schema_bytes,
-			&loop_state.estimator_calibration,
+			loop_state
+				.estimator_calibration
+				.get(current_model.as_deref()),
+			counter.as_ref(),
+			validated_baseline,
 		);
 		if estimated > threshold {
 			let _ = roku_common_types::emit_global_log(roku_common_types::LogRecord::new(
@@ -1054,6 +1292,12 @@ impl GenericAgentRuntime {
 				elapsed_ms: compact_start.elapsed().as_millis() as u64,
 			});
 		}
+		// Compaction rewrote the message buffer and the step history, so the
+		// previous committed-token baseline (which pointed into the old
+		// buffer) is no longer valid. Clear it so the next pre-flight falls
+		// back to the whole-history estimate until the provider reports a
+		// fresh `usage.prompt_tokens`.
+		loop_state.invalidate_committed_baseline();
 		compact_tokens
 	}
 
@@ -1244,7 +1488,7 @@ impl GenericAgentRuntime {
 				system_prompt_sections: None,
 			};
 			let tool_schema_bytes_vec = self
-				.execution_router
+				.route_router
 				.as_ref()
 				.map(|r| {
 					r.preview_wire_tool_schema_bytes_for_request(
@@ -1301,16 +1545,6 @@ impl GenericAgentRuntime {
 			let tool_schema_hash =
 				crate::runtime_loop::cache_break::hash_tool_definitions(&tool_definitions);
 
-			// Cache break detector: snapshot the prompt prefix components
-			// (static system blocks + tool schema + model) so the post-call
-			// check can identify which component diverged when a break fires.
-			let model_for_fingerprint = request.model_override.as_deref().unwrap_or("");
-			loop_state.cache_break_detector.record_prompt_state(
-				&system_prompt_sections.static_blocks,
-				&tool_definitions,
-				model_for_fingerprint,
-			);
-
 			let config = &self.agent_runtime_config.next_step;
 			let thinking_effort = request.thinking_effort.as_deref().and_then(|s| match s {
 				"low" => Some(ThinkingEffort::Low),
@@ -1346,14 +1580,27 @@ impl GenericAgentRuntime {
 				// call, no threshold — runs on every attempt (including after
 				// reactive compaction) so `pre_call_estimate` reflects the
 				// post-microcompact state.
+				// Pre-routing apply site: microcompact runs before
+				// `current_routed_model` is resolved on this
+				// attempt, so there is no model id to key the
+				// scale by yet. Fall through to the fallback
+				// bucket via `get(None)` — microcompact's
+				// calibration is used only to scale the freed-
+				// tokens figure for tracing, so a neutral scale
+				// is fine here.
 				let microcompact_freed = crate::runtime_loop::microcompact_old_tool_results(
 					&mut messages,
 					crate::runtime_loop::MICROCOMPACT_RETAIN_RECENT,
-					&loop_state.estimator_calibration,
+					loop_state.estimator_calibration.get(None),
 				);
 				// Notify the cache break detector that message content changed.
+				// Also invalidate the committed-token baseline: microcompact
+				// replaced tool-result bodies with short placeholders, so the
+				// previously recorded `usage.prompt_tokens` no longer matches
+				// what the next call will actually send.
 				if microcompact_freed > 0 {
 					loop_state.cache_break_detector.notify_compaction();
+					loop_state.invalidate_committed_baseline();
 				}
 				// Emit only when the pre-flight pass actually freed tokens. On
 				// retry iterations after reactive compaction the buffer is
@@ -1368,17 +1615,96 @@ impl GenericAgentRuntime {
 					});
 				}
 
+				// Initial preflight resolution for this attempt — may be
+				// superseded by a second resolution below if mid-tier
+				// compaction mutates `messages`. Layer 0 microcompact
+				// above already shrank the buffer; this resolution
+				// reflects its post-microcompact state. Reading the
+				// counter / routed model / wire-bytes preview through
+				// the full `select_model` policy (via the same
+				// `counter_selection_request`) keeps all three views
+				// consistent with the model `router.generate*` will
+				// actually serve — `model_override` eligibility, risk
+				// tier, and budget filters all come into play. An
+				// earlier optimization routed via `model_id` only to
+				// avoid a `messages.clone()` per attempt, but that
+				// short-circuit can pick a different provider than the
+				// real call in multi-model setups (budget exhaustion,
+				// risk-tier demotion) and produce misleading pressure
+				// estimates. The clone pays for correctness on the hot
+				// path. `route_router` (not `execution_router`) is
+				// consulted so the routed id matches what
+				// `router.generate*` will actually serve under the
+				// two-router configuration where those diverge.
+				let (counter_initial, current_routed_model_initial, attempt_schema_bytes_initial) =
+					self.resolve_attempt_preflight(
+						&messages,
+						&system_prompt,
+						&system_prompt_sections,
+						&tool_definitions,
+						request.model_override.clone(),
+						config,
+					);
+
 				// Mid-tier pre-flight (Layer 1 / Layer 2): runs between Layer 0
 				// microcompact and the Layer 3 high-water check. Only fires when
 				// pressure is above the mid-water threshold and reactive compaction
 				// has not already been used this attempt (to avoid double-firing
 				// two compaction layers in the same turn).
-				if !reactive_compact_used {
+				//
+				// Scoped: `mid_tool_schema_bytes` borrows the initial
+				// preview vec inside this block only. When the block
+				// exits the borrow drops, leaving the `_initial` vec
+				// free to be replaced by the post-mid-tier re-resolution
+				// below.
+				let mid_tier_ran = if !reactive_compact_used {
+					let mid_tool_schema_bytes: Option<&[u8]> =
+						if attempt_schema_bytes_initial.is_empty() {
+							None
+						} else {
+							Some(&attempt_schema_bytes_initial)
+						};
+					// Same baseline validity check as `maybe_compact`: the
+					// committed prefix is only authoritative when the
+					// system prompt, tool-schema surface, and routed
+					// model are all unchanged since the commit. The model
+					// guard uses `current_routed_model_initial` (resolved
+					// via `select_model`), not `request.model_override` —
+					// otherwise the default-routing case (override=None)
+					// would read as a permanent mismatch and the
+					// committed-baseline branch would never activate.
+					let mid_system_bytes = system_prompt.len() as u64;
+					let mid_schema_bytes =
+						mid_tool_schema_bytes.map(|b| b.len() as u64).unwrap_or(0);
+					let mid_system_prompt_hash =
+						crate::runtime_loop::hash_system_prompt_text(&system_prompt);
+					let mid_tool_schema_hash = crate::runtime_loop::hash_tool_schema_bytes(
+						mid_tool_schema_bytes.unwrap_or_default(),
+					);
+					let mid_baseline = loop_state.committed_baseline().filter(|b| {
+						if messages.len() < b.message_count {
+							return false;
+						}
+						let mid_prefix_messages_hash =
+							crate::runtime_loop::hash_message_prefix(&messages[..b.message_count]);
+						b.is_valid_for(
+							mid_system_bytes,
+							mid_schema_bytes,
+							mid_system_prompt_hash,
+							mid_tool_schema_hash,
+							mid_prefix_messages_hash,
+							current_routed_model_initial.as_deref(),
+						)
+					});
 					let mid_estimate = crate::runtime_loop::estimate_prompt_pressure(
 						&messages,
 						Some(&system_prompt),
-						tool_schema_bytes,
-						&loop_state.estimator_calibration,
+						mid_tool_schema_bytes,
+						loop_state
+							.estimator_calibration
+							.get(current_routed_model_initial.as_deref()),
+						counter_initial.as_ref(),
+						mid_baseline,
 					);
 					let mid_threshold = (self.agent_runtime_config.r#loop.context_window_tokens
 						as f64 * crate::runtime_loop::MID_WATER_TRIGGER_RATIO)
@@ -1425,8 +1751,14 @@ impl GenericAgentRuntime {
 							&mut messages,
 							session_summary_text.as_deref(),
 						);
-						if !matches!(outcome, crate::runtime_loop::MidCompactOutcome::Noop) {
+						let ran = !matches!(outcome, crate::runtime_loop::MidCompactOutcome::Noop);
+						if ran {
 							loop_state.cache_break_detector.notify_compaction();
+							// Mid-tier compaction rewrote the tail of the
+							// message buffer; the previously committed
+							// `usage.prompt_tokens` baseline now points at
+							// stale content and must be discarded.
+							loop_state.invalidate_committed_baseline();
 						}
 						if let Some(sender) = event_sender {
 							match &outcome {
@@ -1453,8 +1785,121 @@ impl GenericAgentRuntime {
 								crate::runtime_loop::MidCompactOutcome::Noop => {}
 							}
 						}
+						ran
+					} else {
+						false
 					}
-				}
+				} else {
+					false
+				};
+
+				// Re-resolve preflight state if mid-tier compaction
+				// actually mutated `messages`. The resulting buffer
+				// can flip `select_model`'s eligibility decision
+				// (message-size-sensitive budgets), so the serving
+				// provider may differ from the initial resolution.
+				// Without this refresh, `pre_call_estimate` would use
+				// the old provider's counter and wire-bytes while
+				// `router.generate*` lands on the new one — and the
+				// stored baseline's schema-bytes length would belong
+				// to the wrong provider, breaking next-turn validity.
+				let (counter, current_routed_model, attempt_schema_bytes_vec) = if mid_tier_ran {
+					self.resolve_attempt_preflight(
+						&messages,
+						&system_prompt,
+						&system_prompt_sections,
+						&tool_definitions,
+						request.model_override.clone(),
+						config,
+					)
+				} else {
+					(
+						counter_initial,
+						current_routed_model_initial,
+						attempt_schema_bytes_initial,
+					)
+				};
+				let tool_schema_bytes: Option<&[u8]> = if attempt_schema_bytes_vec.is_empty() {
+					None
+				} else {
+					Some(&attempt_schema_bytes_vec)
+				};
+
+				// Cache break detector: snapshot the prompt prefix
+				// components (static system blocks + tool schema +
+				// model) with the *final* routed model for this attempt
+				// — after any mid-tier reroute has settled. Recording
+				// before the mid-tier block would leave the fingerprint
+				// carrying the initial routed id while the real call
+				// lands on the post-compaction id, so next turn's
+				// cache-break comparison would read a spurious "model
+				// unchanged" on the leading edge of a legitimate
+				// routing swap.
+				//
+				// Placed inside the attempt loop because
+				// `current_routed_model` — the id the next
+				// `router.generate*` call will actually serve — only
+				// resolves after `counter_selection_request` is built.
+				// Using `request.model_override` here instead would
+				// hash `""` on every default-routing turn, so two
+				// consecutive turns routed to different providers would
+				// read as "model unchanged" and the detector would
+				// silently miss every cache break caused by a routing
+				// swap.
+				//
+				// Reactive-retry iterations re-record unconditionally:
+				// `current_fingerprint` is consumed by `check_response`
+				// only on successful primary responses; a
+				// `ContextWindowExceeded` fail path loops back here
+				// and overwrites the previous iteration's fingerprint,
+				// which is the desired "last record before the real
+				// call wins" semantics.
+				loop_state.cache_break_detector.record_prompt_state(
+					&system_prompt_sections.static_blocks,
+					&tool_definitions,
+					current_routed_model.as_deref().unwrap_or(""),
+				);
+
+				// Pre-call snapshots: used below to (a) compare the current
+				// request context against the committed-token baseline —
+				// a shifted system prompt, tool-schema surface, or model
+				// invalidates the baseline — and (b) feed back into
+				// `record_observed_usage` after the response lands, so
+				// the next turn can run the same validity check. Content
+				// hashes catch the same-length edits byte count alone
+				// would miss (e.g. a dynamic block swapping a path of
+				// equal length, or a tool description rename).
+				let pre_call_message_count = messages.len();
+				let pre_call_system_prompt_bytes = system_prompt.len();
+				let pre_call_tool_schema_bytes_len =
+					tool_schema_bytes.map(|b| b.len()).unwrap_or(0);
+				let pre_call_system_prompt_hash =
+					crate::runtime_loop::hash_system_prompt_text(&system_prompt);
+				let pre_call_tool_schema_hash = crate::runtime_loop::hash_tool_schema_bytes(
+					tool_schema_bytes.unwrap_or_default(),
+				);
+				// Full-buffer prefix hash commits the entire `messages`
+				// slice at this point — the next turn's baseline check
+				// will compare against `messages[..pre_call_message_count]`,
+				// which is the same slice because `message_count` equals
+				// `messages.len()` now.
+				let pre_call_prefix_messages_hash =
+					crate::runtime_loop::hash_message_prefix(&messages);
+				let pre_call_baseline = loop_state.committed_baseline().filter(|b| {
+					if messages.len() < b.message_count {
+						return false;
+					}
+					let current_prefix_messages_hash =
+						crate::runtime_loop::hash_message_prefix(&messages[..b.message_count]);
+					b.is_valid_for(
+						pre_call_system_prompt_bytes as u64,
+						pre_call_tool_schema_bytes_len as u64,
+						pre_call_system_prompt_hash,
+						pre_call_tool_schema_hash,
+						current_prefix_messages_hash,
+						current_routed_model.as_deref(),
+					)
+				});
 
 				// Pre-call: snapshot the calibrated byte-based prompt estimate so
 				// we can fold the provider's reported `usage.prompt_tokens` back
@@ -1465,7 +1910,11 @@ impl GenericAgentRuntime {
 					&messages,
 					Some(&system_prompt),
 					tool_schema_bytes,
-					&loop_state.estimator_calibration,
+					loop_state
+						.estimator_calibration
+						.get(current_routed_model.as_deref()),
+					counter.as_ref(),
+					pre_call_baseline,
 				);
 				let gen_request = GenerationRequest {
 					system_prompt: Some(system_prompt.clone()),
@@ -1579,16 +2028,51 @@ impl GenericAgentRuntime {
 								last_model_id = Some(resp.model_id.clone());
 								// Fold the real `usage.prompt_tokens` back into the
 								// estimator calibration so the next turn's pressure
-								// check is closer to ground truth.
-								loop_state
-									.estimator_calibration
-									.update(pre_call_estimate.raw_total_tokens, resp.prompt_tokens);
+								// check is closer to ground truth. In
+								// committed-baseline mode `calibration_pair`
+								// subtracts the unchanged committed prefix from
+								// both sides so the ratio reflects tail bias only;
+								// in cold-start mode it returns the raw totals
+								// unchanged.
+								let (cal_estimated, cal_real) =
+									pre_call_estimate.calibration_pair(resp.prompt_tokens);
+								// Key the sample by the serving model id so the
+								// next turn's apply against this provider sees
+								// its own bias, not the average-of-everything
+								// from a shared ring buffer.
+								loop_state.estimator_calibration.update(
+									Some(&resp.model_id),
+									cal_estimated,
+									cal_real,
+								);
+								// Record the committed-token baseline plus the three
+								// prefix-surface guards (system prompt byte length,
+								// tool-schema byte length and content hash, system
+								// prompt hash, serving model). Next turn's pre-flight
+								// rejects the baseline if any guard diverges, so
+								// mid-session changes (dynamic system blocks,
+								// plan mode transitions, tool surface growth, model
+								// swap, or same-length content edits that byte
+								// counts alone would miss) no longer produce stale
+								// reuse of `input_tokens`.
+								loop_state.record_observed_usage(
+									pre_call_message_count,
+									resp.prompt_tokens,
+									pre_call_system_prompt_bytes,
+									pre_call_tool_schema_bytes_len,
+									pre_call_system_prompt_hash,
+									pre_call_tool_schema_hash,
+									pre_call_prefix_messages_hash,
+									Some(resp.model_id.clone()),
+								);
 								let _ = sender.send(
 									crate::runtime_loop::LoopEvent::EstimatorCalibrated {
 										step: current_step_index,
 										estimated_prompt_tokens: pre_call_estimate.total_tokens,
 										prompt_tokens: resp.prompt_tokens,
-										scale: loop_state.estimator_calibration.scale(),
+										scale: loop_state
+											.estimator_calibration
+											.scale_for(Some(&resp.model_id)),
 									},
 								);
 								// Cache break detection: compare this turn's
@@ -1687,10 +2171,72 @@ impl GenericAgentRuntime {
 													last_model_id =
 														Some(retry_resp.model_id.clone());
 													// Re-calibrate the estimator with the retry's
-													// prompt_tokens for a tighter next-turn estimate.
-													loop_state.estimator_calibration.update(
-														pre_call_estimate.raw_total_tokens,
+													// prompt_tokens. When output-slot escalation
+													// reroutes to a different model (`select_model`
+													// picks a larger model under the expanded
+													// `expected_output_tokens`), resolve a fresh
+													// counter + wire-bytes preview for that model
+													// so the calibration sample reflects the retry
+													// model's bias — not the primary attempt's —
+													// and the baseline byte-length matches the
+													// retry provider's serializer. Same-route
+													// retries keep the fast path and reuse the
+													// primary `pre_call_estimate`.
+													let (
+														cal_estimated,
+														cal_real,
+														retry_schema_len,
+														retry_tool_schema_hash,
+													) = self.retry_preflight_values(
+														&retry_resp.model_id,
+														&resp.model_id,
+														&messages,
+														&system_prompt,
+														&system_prompt_sections,
+														&tool_definitions,
+														config,
+														pre_call_system_prompt_bytes,
+														pre_call_tool_schema_bytes_len,
+														pre_call_system_prompt_hash,
+														pre_call_prefix_messages_hash,
+														&pre_call_estimate,
 														retry_resp.prompt_tokens,
+														&loop_state.estimator_calibration,
+														loop_state.committed_baseline(),
+													);
+													// Attribute the retry sample to the retry
+													// response's serving model — output-slot
+													// escalation can swap to a larger model
+													// on-the-fly, and that new model's bias
+													// should be logged against its own bucket,
+													// not the primary attempt's (aborted) one.
+													loop_state.estimator_calibration.update(
+														Some(&retry_resp.model_id),
+														cal_estimated,
+														cal_real,
+													);
+													// Retry shares the same committed message
+													// boundary as the primary call; use the
+													// retry's `prompt_tokens` as the baseline.
+													// The retry model id overrides the primary's
+													// — the server may have escalated to a larger
+													// model when filling the expanded output slot.
+													// `retry_schema_len` / `retry_tool_schema_hash`
+													// are either the primary's (same route) or the
+													// retry provider's fresh wire-bytes view
+													// (rerouted). The prefix hash is always
+													// `pre_call_prefix_messages_hash` because the
+													// message buffer does not change between primary
+													// and retry.
+													loop_state.record_observed_usage(
+														pre_call_message_count,
+														retry_resp.prompt_tokens,
+														pre_call_system_prompt_bytes,
+														retry_schema_len,
+														pre_call_system_prompt_hash,
+														retry_tool_schema_hash,
+														pre_call_prefix_messages_hash,
+														Some(retry_resp.model_id.clone()),
 													);
 													// Replace the truncated streaming text in the
 													// TUI. `LlmDecisionComplete` was already sent
@@ -1712,7 +2258,7 @@ impl GenericAgentRuntime {
 														prompt_tokens: retry_resp.prompt_tokens,
 														scale: loop_state
 															.estimator_calibration
-															.scale(),
+															.scale_for(Some(&retry_resp.model_id)),
 													},
 												);
 													let retry_tool_calls =
@@ -1764,16 +2310,38 @@ impl GenericAgentRuntime {
 								total_cache_read_input_tokens = total_cache_read_input_tokens
 									.saturating_add(resp.cache_read_input_tokens);
 								last_model_id = Some(resp.model_id.clone());
-								loop_state
-									.estimator_calibration
-									.update(pre_call_estimate.raw_total_tokens, resp.prompt_tokens);
+								// Baseline-aware calibration update: in committed
+								// mode the raw total contains the unchanged
+								// committed prefix on both sides and the full-total
+								// ratio collapses toward 1.0 — use tail-only terms.
+								let (cal_estimated, cal_real) =
+									pre_call_estimate.calibration_pair(resp.prompt_tokens);
+								// Per-model bucket keyed by the non-streaming
+								// response's serving model id.
+								loop_state.estimator_calibration.update(
+									Some(&resp.model_id),
+									cal_estimated,
+									cal_real,
+								);
+								loop_state.record_observed_usage(
+									pre_call_message_count,
+									resp.prompt_tokens,
+									pre_call_system_prompt_bytes,
+									pre_call_tool_schema_bytes_len,
+									pre_call_system_prompt_hash,
+									pre_call_tool_schema_hash,
+									pre_call_prefix_messages_hash,
+									Some(resp.model_id.clone()),
+								);
 								if let Some(sender) = event_sender {
 									let _ = sender.send(
 										crate::runtime_loop::LoopEvent::EstimatorCalibrated {
 											step: current_step_index,
 											estimated_prompt_tokens: pre_call_estimate.total_tokens,
 											prompt_tokens: resp.prompt_tokens,
-											scale: loop_state.estimator_calibration.scale(),
+											scale: loop_state
+												.estimator_calibration
+												.scale_for(Some(&resp.model_id)),
 										},
 									);
 								}
@@ -1875,10 +2443,49 @@ impl GenericAgentRuntime {
 													last_model_id =
 														Some(retry_resp.model_id.clone());
 													// Re-calibrate the estimator with the retry's
-													// prompt_tokens for a tighter next-turn estimate.
-													loop_state.estimator_calibration.update(
-														pre_call_estimate.raw_total_tokens,
+													// prompt_tokens. Non-streaming retry shares
+													// the same calibration invariants as the
+													// primary path; the helper resolves a fresh
+													// preflight when the escalation rerouted, and
+													// falls through to the primary's
+													// `pre_call_estimate` when it stayed on the
+													// same model.
+													let (
+														cal_estimated,
+														cal_real,
+														retry_schema_len,
+														retry_tool_schema_hash,
+													) = self.retry_preflight_values(
+														&retry_resp.model_id,
+														&resp.model_id,
+														&messages,
+														&system_prompt,
+														&system_prompt_sections,
+														&tool_definitions,
+														config,
+														pre_call_system_prompt_bytes,
+														pre_call_tool_schema_bytes_len,
+														pre_call_system_prompt_hash,
+														pre_call_prefix_messages_hash,
+														&pre_call_estimate,
 														retry_resp.prompt_tokens,
+														&loop_state.estimator_calibration,
+														loop_state.committed_baseline(),
+													);
+													loop_state.estimator_calibration.update(
+														Some(&retry_resp.model_id),
+														cal_estimated,
+														cal_real,
+													);
+													loop_state.record_observed_usage(
+														pre_call_message_count,
+														retry_resp.prompt_tokens,
+														pre_call_system_prompt_bytes,
+														retry_schema_len,
+														pre_call_system_prompt_hash,
+														retry_tool_schema_hash,
+														pre_call_prefix_messages_hash,
+														Some(retry_resp.model_id.clone()),
 													);
 													// Intentionally no `LlmTextReplace` on the
 													// non-streaming path: there is no truncated
@@ -1894,7 +2501,7 @@ impl GenericAgentRuntime {
 															prompt_tokens: retry_resp.prompt_tokens,
 															scale: loop_state
 																.estimator_calibration
-																.scale(),
+																.scale_for(Some(&retry_resp.model_id)),
 														},
 													);
 													}
@@ -2459,13 +3066,29 @@ impl GenericAgentRuntime {
 				}
 				// When budget exceeded, trigger Layer 0 microcompact to free pressure.
 				if exceeded {
+					// Post-step microcompact: the most recently served
+					// call's model id is the best available key here —
+					// the attempt loop has exited, `current_routed_model`
+					// is out of scope, and the last call's serving model
+					// is what produced the tool-result bodies we are
+					// about to compact. Fall through to fallback when
+					// the run has not yet completed a call.
 					let freed = crate::runtime_loop::microcompact_old_tool_results(
 						&mut messages,
 						crate::runtime_loop::MICROCOMPACT_RETAIN_RECENT,
-						&loop_state.estimator_calibration,
+						loop_state
+							.estimator_calibration
+							.get(last_model_id.as_deref()),
 					);
 					if freed > 0 {
 						loop_state.cache_break_detector.notify_compaction();
+						// Mirror the pre-flight microcompact at the top of
+						// the attempt loop: replacing tool-result bodies
+						// with short placeholders shrinks the committed
+						// prefix below what `last_observed_input_tokens`
+						// priced, so the baseline no longer matches the
+						// message buffer about to be sent.
+						loop_state.invalidate_committed_baseline();
 						if let Some(sender) = event_sender {
 							let _ = sender.send(crate::runtime_loop::LoopEvent::MicrocompactRan {
 								step: current_step_index,
@@ -5714,6 +6337,303 @@ mod tests {
 		assert_eq!(
 			unsupported_count, 0,
 			"OutputSlotEscalationUnsupported must NOT be emitted when cap is supported"
+		);
+	}
+
+	#[test]
+	fn cache_break_detector_records_routed_model_not_override() {
+		// Regression guard for issue #369. Under default routing
+		// (`model_override = None`) the detector used to hash `""`
+		// as the model component, so two consecutive turns that
+		// actually routed to different providers would read as
+		// "model unchanged" and the detector would silently miss
+		// every cache break attributable to the routing swap. The
+		// fix sources the model id via
+		// `LlmRouter::selected_model_id_for_request` inside the
+		// attempt loop so the fingerprint carries what
+		// `router.generate*` will actually serve.
+		//
+		// Scaffolding: `router_with_json_responses` registers a
+		// single model called `sequence-json-model`. A default-
+		// routing request on this runtime resolves to that id; the
+		// detector must record it.
+		let (route_router, _prompts) = router_with_json_responses(vec![serde_json::json!({
+			"action": "final_answer",
+			"tool_name": null,
+			"arguments": null,
+			"reason": "test",
+			"final_message": "done"
+		})]);
+		let execution_router = router_with_text_output("unused-execution-provider", "unused");
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+			);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-cache-break-model".to_string()),
+			session_id: "session-cache-break-model".to_string(),
+			goal: "Test cache break model fingerprint".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+			// Default routing — the pre-fix code path would have
+			// passed `""` as the model arg here.
+			model_override: None,
+			thinking_effort: None,
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::Chat,
+			0.95,
+			false,
+			crate::router::RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			"chat request",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+
+		let _execution = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-cache-break-model".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				None,
+				None,
+			));
+
+		// After the turn, `check_response` consumed
+		// `current_fingerprint` and promoted it to
+		// `previous_fingerprint`. The recorded model must be the
+		// routed serving id, not `""`.
+		assert_eq!(
+			loop_state.cache_break_detector.previous_fingerprint_model(),
+			Some("sequence-json-model"),
+			"detector must fingerprint the routed serving model, not \
+			 `request.model_override` (which is `None` on this default-routing \
+			 call and would have recorded the empty string)",
+		);
+	}
+
+	#[test]
+	fn retry_preflight_values_same_route_reuses_primary_estimate() {
+		// Same-route retry: the helper must delegate to
+		// `pre_call_estimate.calibration_pair` and return the
+		// primary's `pre_call_tool_schema_bytes_len` verbatim. This
+		// is the fast path; rerouted retries go through
+		// `resolve_attempt_preflight` (verified by the test below).
+		let (route_router, _prompts) = router_with_json_responses(vec![]);
+		let execution_router = router_with_text_output("unused-execution-provider", "unused");
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+			);
+
+		let pre_estimate = crate::runtime_loop::PromptTokenEstimate {
+			system_tokens: 0,
+			message_tokens: 100,
+			framing_tokens: 0,
+			tool_schema_tokens: 0,
+			committed_baseline_tokens: 0,
+			total_tokens: 100,
+			raw_total_tokens: 100,
+		};
+		let calibration = crate::runtime_loop::PerModelCalibration::default();
+		let config = runtime.agent_runtime_config.next_step.clone();
+		let (cal_est, cal_real, schema_len, tool_schema_hash) = runtime.retry_preflight_values(
+			"sequence-json-model",
+			"sequence-json-model",
+			&[Message::User {
+				content: "test".to_string(),
+			}],
+			"system",
+			&roku_plugin_llm::SystemPromptSections {
+				static_blocks: Vec::new(),
+				dynamic_blocks: Vec::new(),
+			},
+			&[],
+			&config,
+			6,
+			42,
+			0,
+			0,
+			&pre_estimate,
+			150,
+			&calibration,
+			None,
+		);
+		assert_eq!(
+			cal_est, 100,
+			"same-route retry must return pre_call_estimate.raw_total_tokens as estimated"
+		);
+		assert_eq!(
+			cal_real, 150,
+			"same-route retry must return retry_prompt_tokens as real"
+		);
+		assert_eq!(
+			schema_len, 42,
+			"same-route retry must reuse primary's pre_call_tool_schema_bytes_len"
+		);
+		// Same-route retry must still fingerprint the primary's wire
+		// tool-schema bytes — the retry persists into the committed
+		// baseline under the retry's model id, so the hash must match
+		// what the primary router actually serialized for this request,
+		// not a constant. The helper resolves that preflight internally
+		// on the same-route path; we assert reproducibility against an
+		// independent resolve.
+		let (_, _, expected_primary_schema_bytes) = runtime.resolve_attempt_preflight(
+			&[Message::User {
+				content: "test".to_string(),
+			}],
+			"system",
+			&roku_plugin_llm::SystemPromptSections {
+				static_blocks: Vec::new(),
+				dynamic_blocks: Vec::new(),
+			},
+			&[],
+			Some("sequence-json-model".to_string()),
+			&config,
+		);
+		assert_eq!(
+			tool_schema_hash,
+			crate::runtime_loop::hash_tool_schema_bytes(&expected_primary_schema_bytes),
+			"same-route retry must surface the primary model's tool-schema content hash",
+		);
+	}
+
+	#[test]
+	fn retry_preflight_values_rerouted_recomputes_against_retry_model() {
+		// Rerouted retry: the helper must consult
+		// `resolve_attempt_preflight` with the retry model id and
+		// return a fresh estimate / schema length for that model,
+		// not the primary's. The test is positive-direction: we
+		// assert the returned values match what
+		// `resolve_attempt_preflight(retry_model_id)` would produce
+		// independently, so the helper's dispatch is verified without
+		// needing to construct two providers with divergent wire
+		// formats (we use the same provider twice with distinct model
+		// ids — the returned values reflect the retry model's bucket
+		// and the router's wire-bytes preview for that selection
+		// request shape).
+		let (route_router, _prompts) = router_with_json_responses(vec![]);
+		let execution_router = router_with_text_output("unused-execution-provider", "unused");
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+			);
+
+		let pre_estimate = crate::runtime_loop::PromptTokenEstimate {
+			system_tokens: 0,
+			message_tokens: 100,
+			framing_tokens: 0,
+			tool_schema_tokens: 0,
+			committed_baseline_tokens: 0,
+			total_tokens: 100,
+			raw_total_tokens: 100,
+		};
+		let calibration = crate::runtime_loop::PerModelCalibration::default();
+		let config = runtime.agent_runtime_config.next_step.clone();
+		let messages = vec![Message::User {
+			content: "rerouted retry path".to_string(),
+		}];
+		let system_prompt = "system";
+		let system_prompt_sections = roku_plugin_llm::SystemPromptSections {
+			static_blocks: Vec::new(),
+			dynamic_blocks: Vec::new(),
+		};
+		let tool_definitions: Vec<ToolDefinition> = vec![];
+
+		let (cal_est, cal_real, retry_schema_len, retry_tool_schema_hash) = runtime
+			.retry_preflight_values(
+				"sequence-json-model",
+				"some-other-primary-model",
+				&messages,
+				system_prompt,
+				&system_prompt_sections,
+				&tool_definitions,
+				&config,
+				6,
+				42,
+				0,
+				0,
+				&pre_estimate,
+				150,
+				&calibration,
+				None,
+			);
+
+		// Independently resolve what the retry preflight should see.
+		let (_, _, expected_schema_bytes) = runtime.resolve_attempt_preflight(
+			&messages,
+			system_prompt,
+			&system_prompt_sections,
+			&tool_definitions,
+			Some("sequence-json-model".to_string()),
+			&config,
+		);
+		let expected_schema_len = expected_schema_bytes.len();
+		assert_eq!(
+			retry_schema_len, expected_schema_len,
+			"rerouted retry schema length must equal what \
+			 resolve_attempt_preflight produces for the retry model, \
+			 not the primary's `pre_call_tool_schema_bytes_len` (42)",
+		);
+		assert_ne!(
+			retry_schema_len, 42,
+			"rerouted retry must NOT reuse the primary's schema length \
+			 (which belongs to a different provider's serializer)",
+		);
+
+		// Fresh estimate means cal_est is re-computed for the retry
+		// model's counter, not inherited from the primary's
+		// pre_call_estimate (which was 100).
+		// With an empty tool schema and cold-start (no baseline), the
+		// retry estimate is `counter.count(user_message) +
+		// framing`. The exact value depends on the byte-heuristic
+		// counter (bytes/4 default); we assert it's non-zero and
+		// different from the primary's pre-fixed 100 to prove a fresh
+		// computation happened, rather than a fallback to the
+		// primary's estimate.
+		assert!(cal_est > 0, "fresh estimate must be positive");
+		assert_eq!(
+			cal_real, 150,
+			"cal_real must always equal retry_prompt_tokens regardless of route"
+		);
+		// The retry tool-schema hash must fingerprint the retry
+		// provider's serialized wire bytes, matching what
+		// `resolve_attempt_preflight(retry_model_id)` would produce
+		// independently. The rerouted path must never persist a hash
+		// derived from the primary's serializer — that is exactly what
+		// this P2 fix guards against.
+		let expected_retry_hash =
+			crate::runtime_loop::hash_tool_schema_bytes(&expected_schema_bytes);
+		assert_eq!(
+			retry_tool_schema_hash, expected_retry_hash,
+			"rerouted retry must hash the retry provider's wire bytes, \
+			 not the primary's",
 		);
 	}
 

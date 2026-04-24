@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use roku_plugin_llm::{
-	CompactRequest, GenerationRequest, LlmAdapterError, LlmRouter, Message, RiskTier,
+	CompactRequest, GenerationRequest, LlmAdapterError, LlmRouter, Message, RiskTier, TokenCounter,
 };
 use serde::{Deserialize, Serialize};
 
@@ -369,8 +372,221 @@ pub struct PromptTokenEstimate {
 	/// when provided so cold-start turns do not under-estimate before the
 	/// calibration scale has samples to fit.
 	pub tool_schema_tokens: u64,
+	/// Provider-authoritative `usage.prompt_tokens` carried over from the
+	/// last successful call. Zero in cold-start and post-compaction mode.
+	/// When non-zero, the system / tools / committed message prefix are
+	/// represented here (exactly) and the other fields describe only the
+	/// uncommitted tail appended since that call. The invariant
+	/// `raw_total_tokens = system + message + framing + tool_schema +
+	///  committed_baseline_tokens` holds in both modes.
+	pub committed_baseline_tokens: u64,
 	pub total_tokens: u64,
 	pub raw_total_tokens: u64,
+}
+
+impl PromptTokenEstimate {
+	/// Returns the `(estimated, real)` pair to feed into
+	/// [`EstimatorCalibration::update`] for the observed provider-reported
+	/// `usage.prompt_tokens`.
+	///
+	/// In committed-baseline mode the committed prefix dominates both the
+	/// estimated and the real totals by construction (the baseline equals
+	/// the provider's last `usage.prompt_tokens` for everything up to the
+	/// commit boundary). Feeding the raw totals into `update` would make
+	/// the ratio collapse toward `1.0` on long sessions — the unchanged
+	/// baseline cancels out — and calibration would stop correcting the
+	/// only component the estimator still guesses, the uncommitted tail.
+	/// Subtracting the baseline from both sides keeps the ratio sensitive
+	/// to tail bias.
+	///
+	/// In cold-start mode (`committed_baseline_tokens == 0`) returns the
+	/// full totals so the ratio reflects end-to-end estimator error.
+	///
+	/// Saturating arithmetic keeps the pair well-defined if the provider
+	/// reports fewer prompt tokens than the committed baseline (for
+	/// example a cache-credit quirk); `EstimatorCalibration::update`
+	/// already no-ops when either term is zero.
+	pub fn calibration_pair(&self, observed_prompt_tokens: u64) -> (u64, u64) {
+		if self.committed_baseline_tokens > 0 {
+			let estimated_tail = self
+				.raw_total_tokens
+				.saturating_sub(self.committed_baseline_tokens);
+			let real_tail = observed_prompt_tokens.saturating_sub(self.committed_baseline_tokens);
+			(estimated_tail, real_tail)
+		} else {
+			(self.raw_total_tokens, observed_prompt_tokens)
+		}
+	}
+}
+
+/// Authoritative committed-token state carried across turns.
+///
+/// Captured right after each successful provider response that reports a
+/// non-zero `usage.prompt_tokens`. The runtime then feeds this back into
+/// the next pre-flight estimate so everything up to `message_count` is
+/// treated as exact and only the tail uses byte-heuristic counting. This
+/// mirrors the codex CLI's approach: hardcoded `APPROX_BYTES_PER_TOKEN`
+/// for the tail, real API usage feedback for the committed prefix.
+///
+/// The three `*_bytes` / `model_id` fields are guards — the committed
+/// prefix is only valid for the next call if the system prompt, the tool
+/// schema surface, and the provider's tokenizer are all unchanged since
+/// the commit. Mismatch on any of them means `input_tokens` no longer
+/// describes the actual prefix the provider will see, and the next
+/// estimate must fall back to whole-history cold-start counting.
+/// [`Self::is_valid_for`] encodes that invariant in one place so call
+/// sites do not have to replicate the comparison logic.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommittedBaseline {
+	/// `usage.prompt_tokens` as reported by the provider for the last
+	/// successful call. Authoritative for system + tools + committed
+	/// messages (up to `message_count`).
+	pub input_tokens: u64,
+	/// Number of messages that were in the committed request. Any message
+	/// at `messages[message_count..]` on a later turn is an uncommitted
+	/// delta that still needs byte-heuristic estimation.
+	pub message_count: usize,
+	/// Byte length of the system prompt that was in the committed call.
+	/// Debuggability aid; real change-detection is done by
+	/// [`Self::system_prompt_hash`] because two dynamic prompt blocks can
+	/// be edited to the same length (e.g. `/a/foo.txt` → `/b/bar.txt`)
+	/// without flipping the byte count.
+	pub system_prompt_bytes: u64,
+	/// Byte length of the serialized tool-schema block the provider saw
+	/// on the committed call. Debuggability aid; real change-detection
+	/// uses [`Self::tool_schema_hash`] because a same-length edit to a
+	/// tool description or parameter name would otherwise slip past.
+	pub tool_schema_bytes_len: u64,
+	/// Content hash of the composed system-prompt string the provider
+	/// saw on the committed call. A divergence means the dynamic
+	/// system-prompt surface (working-directory, memory blocks,
+	/// runtime-memory sections) shifted and the baseline must be
+	/// discarded — regardless of whether the shift changed byte count.
+	#[serde(default)]
+	pub system_prompt_hash: u64,
+	/// Content hash of the serialized tool-schema wire bytes the provider
+	/// saw on the committed call. A divergence means the deferred-tools
+	/// surface, plan-mode visibility, disallowed-tools list, or any
+	/// tool description / parameter text moved and the baseline no
+	/// longer describes the schema the provider tokenized.
+	#[serde(default)]
+	pub tool_schema_hash: u64,
+	/// Content hash of the first `message_count` messages as they
+	/// appeared on the committed call. Catches in-place prefix rewrites
+	/// (`truncate_large_tool_results`, `microcompact_old_tool_results`,
+	/// any future helper that edits historical message bodies while
+	/// leaving the count unchanged). Without this guard the estimator
+	/// would keep reusing a pre-rewrite `input_tokens` against a buffer
+	/// the provider no longer tokenizes the same way.
+	#[serde(default)]
+	pub prefix_messages_hash: u64,
+	/// Model ID that served the committed call. Different providers carry
+	/// different tokenizers (o200k_base vs cl100k_base vs Anthropic BPE),
+	/// so a model swap invalidates the `input_tokens` figure even when
+	/// every other surface is unchanged.
+	pub model_id: Option<String>,
+}
+
+impl CommittedBaseline {
+	/// Returns `true` when every guard matches the current request
+	/// context and the caller can safely use `input_tokens` as the exact
+	/// committed-prefix cost.
+	///
+	/// The two byte-length arguments are kept for historical compatibility
+	/// with call sites that already carry the numbers for diagnostics.
+	/// Correctness-wise, the hash arguments are what matters — two
+	/// same-length-different-content prompts or tool schemas must
+	/// invalidate the baseline, or the previous call's `input_tokens`
+	/// will be reused against a prefix the provider no longer sees.
+	pub fn is_valid_for(
+		&self,
+		current_system_prompt_bytes: u64,
+		current_tool_schema_bytes_len: u64,
+		current_system_prompt_hash: u64,
+		current_tool_schema_hash: u64,
+		current_prefix_messages_hash: u64,
+		current_model_id: Option<&str>,
+	) -> bool {
+		self.input_tokens > 0
+			&& self.system_prompt_bytes == current_system_prompt_bytes
+			&& self.tool_schema_bytes_len == current_tool_schema_bytes_len
+			&& self.system_prompt_hash == current_system_prompt_hash
+			&& self.tool_schema_hash == current_tool_schema_hash
+			&& self.prefix_messages_hash == current_prefix_messages_hash
+			&& self.model_id.as_deref() == current_model_id
+	}
+}
+
+/// Content fingerprint of the composed system-prompt string the provider
+/// will tokenize. Pair with [`hash_tool_schema_bytes`] to fully describe
+/// the non-message portion of a committed baseline.
+pub fn hash_system_prompt_text(system_prompt: &str) -> u64 {
+	let mut hasher = DefaultHasher::new();
+	system_prompt.hash(&mut hasher);
+	hasher.finish()
+}
+
+/// Content fingerprint of the serialized tool-schema wire bytes. Uses
+/// the same hashing family as [`hash_system_prompt_text`] so both fields
+/// of [`CommittedBaseline`] behave identically under the validity check.
+pub fn hash_tool_schema_bytes(bytes: &[u8]) -> u64 {
+	let mut hasher = DefaultHasher::new();
+	bytes.hash(&mut hasher);
+	hasher.finish()
+}
+
+/// Content fingerprint of a committed message prefix.
+///
+/// Walks the slice in order, mixing each message's discriminant with the
+/// structurally significant fields (role text, tool-result identifier,
+/// error flag, tool-call blocks). Feeding this into
+/// [`CommittedBaseline::is_valid_for`] makes the baseline sensitive to
+/// any in-place rewrite of a historical message body that leaves
+/// `message_count` unchanged (pre-flight `truncate_large_tool_results`,
+/// post-step `microcompact_old_tool_results`, or any future helper with
+/// the same shape).
+///
+/// The caller passes the slice they want to fingerprint — usually
+/// `&messages[..baseline.message_count]` for validity checks and
+/// `&messages[..pre_call_message_count]` for the post-response commit.
+/// Framing tokens and role prefixes are not hashed because the provider
+/// tokenizer is supposed to produce the same framing for the same role,
+/// so variance there would not be a real prefix shift.
+pub fn hash_message_prefix(messages: &[Message]) -> u64 {
+	let mut hasher = DefaultHasher::new();
+	for msg in messages {
+		match msg {
+			Message::User { content } => {
+				0u8.hash(&mut hasher);
+				content.hash(&mut hasher);
+			}
+			Message::Assistant { text, tool_calls } => {
+				1u8.hash(&mut hasher);
+				text.hash(&mut hasher);
+				// Hash each tool call's identifying surface. Serialize
+				// the arguments JSON for a deterministic, pointer-
+				// independent fingerprint.
+				(tool_calls.len() as u64).hash(&mut hasher);
+				for call in tool_calls {
+					call.id.hash(&mut hasher);
+					call.name.hash(&mut hasher);
+					let args = call.arguments.to_string();
+					args.hash(&mut hasher);
+				}
+			}
+			Message::ToolResult {
+				tool_use_id,
+				content,
+				is_error,
+			} => {
+				2u8.hash(&mut hasher);
+				tool_use_id.hash(&mut hasher);
+				content.hash(&mut hasher);
+				is_error.hash(&mut hasher);
+			}
+		}
+	}
+	hasher.finish()
 }
 
 /// Bounded calibration state for the byte-based estimator.
@@ -472,52 +688,159 @@ impl EstimatorCalibration {
 	}
 }
 
+/// Per-model wrapper around [`EstimatorCalibration`].
+///
+/// The byte-based estimator now routes through provider-owned
+/// [`roku_plugin_llm::TokenCounter`] implementations, each of which can
+/// bias the estimate differently (a 4-bytes-per-token heuristic, a
+/// tokenizer-backed count, a provider-specific message-wrapping
+/// overhead, etc.). Mixing samples from multiple models into a single
+/// ring buffer lets one model's residual bias distort the scale used
+/// for another — a 1.3x under-counter alternating with a 0.8x
+/// over-counter would average toward ~1.0 and hide both directions.
+///
+/// This wrapper keys samples by routed `model_id`, so each model
+/// accumulates its own bounded sample window and its own converged
+/// scale. Requests made before a model id can be resolved (the
+/// pre-flight microcompact inside and outside the attempt loop, the
+/// classifier/router-mode shortcut in `maybe_compact`) fall through
+/// to the `fallback` bucket — preserving the pre-split behavior for
+/// those surfaces so they still benefit from a single global scale
+/// where we cannot attribute the sample to a specific model.
+///
+/// `Default` is an empty map plus an uncalibrated fallback, so fresh
+/// runs, serialized-snapshot reloads without a matching field, and
+/// old-format state-store rows all start in the same known state.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PerModelCalibration {
+	#[serde(default)]
+	per_model: std::collections::HashMap<String, EstimatorCalibration>,
+	/// Scale used when no routed model id is available (pre-routing
+	/// pressure checks) or when the routed model has no samples yet.
+	#[serde(default)]
+	fallback: EstimatorCalibration,
+}
+
+impl PerModelCalibration {
+	/// Resolve the calibration to consult when estimating pressure
+	/// for a request routed to `model_id`.
+	///
+	/// Returns the per-model calibration if we have samples for that
+	/// id; otherwise returns the fallback so the estimator still sees
+	/// a sensible scale on the model's first turn (and while the
+	/// routing stays the same the bucket will grow naturally).
+	pub fn get(&self, model_id: Option<&str>) -> &EstimatorCalibration {
+		model_id
+			.and_then(|m| self.per_model.get(m))
+			.unwrap_or(&self.fallback)
+	}
+
+	/// Fold a successful `(estimated, real)` observation into the
+	/// bucket for `model_id`.
+	///
+	/// Passing `None` stores the sample in the fallback bucket — used
+	/// by surfaces that apply calibration before routing has resolved
+	/// (pre-routing microcompact, maybe_compact outside the attempt
+	/// loop). The fallback is intentionally *not* mirrored to from
+	/// per-model updates: letting every model's samples flow into it
+	/// would reproduce the exact global-mixing bug this type is meant
+	/// to eliminate.
+	pub fn update(&mut self, model_id: Option<&str>, estimated: u64, real: u64) {
+		match model_id {
+			Some(m) => self
+				.per_model
+				.entry(m.to_string())
+				.or_default()
+				.update(estimated, real),
+			None => self.fallback.update(estimated, real),
+		}
+	}
+
+	/// Effective scale for the routed model, or fallback when
+	/// absent. 1.0 when both buckets are uncalibrated.
+	pub fn scale_for(&self, model_id: Option<&str>) -> f64 {
+		self.get(model_id).scale()
+	}
+}
+
 /// Estimate prompt tokens for what will actually be sent to the LLM.
 ///
-/// O(n) over total byte length. Pure function: no IO, no panic. Per-segment
-/// classification rules are documented on [`byte_estimate_for_text`].
+/// O(n) over total byte length. Pure function: no IO, no panic.
 ///
-/// `system_prompt` is treated identically to a message body — code-heavy
-/// system prompts (which describe tool schemas as JSON) are auto-detected as
-/// structured and use the denser byte/2 rule.
+/// Byte→token mapping is delegated to the supplied [`TokenCounter`], which
+/// each provider owns. The default provider counter is a uniform `bytes/4`
+/// heuristic; Anthropic or any future tokenizer-backed provider can override
+/// with a higher-fidelity implementation without touching this function.
+///
+/// When `baseline` is `Some(b)` and `messages.len() >= b.message_count`, the
+/// function runs in **committed-baseline** mode: `b.input_tokens` is the
+/// authoritative value reported by the provider for the last call, so only
+/// the uncommitted tail `messages[b.message_count..]` plus its per-message
+/// framing needs byte-heuristic counting. `system_prompt` and
+/// `tool_schema_bytes` are ignored in this branch under the assumption that
+/// they were part of the committed call; callers must invalidate the
+/// baseline whenever those surfaces change.
+///
+/// When `baseline` is `None`, the function runs in **cold-start** mode and
+/// counts the entire request (system + all messages + framing + tool schema).
 ///
 /// `tool_schema_bytes` is the serialized tool-definition block for this
-/// request, typically produced by `serde_json::to_vec(&tool_definitions)`.
-/// Supplying it is what removes the cold-start under-estimate — the tool
-/// schema frequently adds 1–2K tokens that the message-only estimate misses
-/// until calibration accumulates samples. Pass `None` when callers legitimately
-/// have no tool schema (router/classifier requests, etc.).
+/// request, typically produced by the router's
+/// `preview_wire_tool_schema_bytes_for_request`. Supplying it is what
+/// removes the cold-start under-estimate — the tool schema frequently adds
+/// 1–2K tokens that the message-only estimate misses until calibration
+/// accumulates samples. Pass `None` when callers legitimately have no tool
+/// schema (router/classifier requests, etc.).
 pub fn estimate_prompt_tokens_calibrated(
 	messages: &[Message],
 	system_prompt: Option<&str>,
 	tool_schema_bytes: Option<&[u8]>,
 	calibration: &EstimatorCalibration,
+	counter: &dyn TokenCounter,
+	baseline: Option<CommittedBaseline>,
 ) -> PromptTokenEstimate {
-	let system_tokens = system_prompt.map(byte_estimate_for_text).unwrap_or(0);
+	// Committed-baseline mode: the provider already reported an exact
+	// `input_tokens` for everything at `messages[..baseline.message_count]`,
+	// along with the system prompt and tool schema. Only the tail appended
+	// since then needs byte-heuristic counting.
+	if let Some(b) = baseline
+		&& b.input_tokens > 0
+		&& messages.len() >= b.message_count
+	{
+		let tail = &messages[b.message_count..];
+		let delta_message_tokens: u64 = tail
+			.iter()
+			.map(|m| counter.count_message(m))
+			.fold(0_u64, u64::saturating_add);
+		let delta_framing_tokens = (tail.len() as u64).saturating_mul(4);
+		let raw_delta = delta_message_tokens.saturating_add(delta_framing_tokens);
+		let scaled_delta = calibration.apply(raw_delta);
+		let total = b.input_tokens.saturating_add(scaled_delta);
+		let raw_total = b.input_tokens.saturating_add(raw_delta);
+		return PromptTokenEstimate {
+			// Per-segment fields describe only the uncommitted delta in
+			// this mode so trace consumers can see how the new pressure
+			// distributes; the exact committed portion lives in
+			// `committed_baseline_tokens`.
+			system_tokens: 0,
+			message_tokens: delta_message_tokens,
+			framing_tokens: delta_framing_tokens,
+			tool_schema_tokens: 0,
+			committed_baseline_tokens: b.input_tokens,
+			total_tokens: total,
+			raw_total_tokens: raw_total,
+		};
+	}
+
+	// Cold-start mode: count the whole request.
+	let system_tokens = system_prompt.map(|s| counter.count_text(s)).unwrap_or(0);
 	let message_tokens: u64 = messages
 		.iter()
-		.map(byte_estimate_for_message)
+		.map(|m| counter.count_message(m))
 		.fold(0_u64, u64::saturating_add);
-
-	// Per-message framing overhead charged by chat APIs (~4 tokens each).
 	let framing_tokens = (messages.len() as u64).saturating_mul(4);
-
-	// Tool schema needs a dedicated byte-to-token ratio, not the generic
-	// "JSON = bytes/2" rule. An OpenAI tool schema is mostly *prose*
-	// (the `description` field is natural English) wrapped in JSON
-	// scaffolding, and the scaffolding itself (`"type"`, `"function"`,
-	// `"name"`, `"description"`, `"parameters"`) tokenizes into single
-	// tokens in cl100k / o200k. Empirically a representative 20-tool
-	// Roku schema (~10K bytes) tokenizes to ~1300 tokens on the OpenAI
-	// Responses backend — a real ratio of ~7.7 bytes/token.
-	//
-	// Using `bytes/2` overshoots by roughly 3.8×, which pins the
-	// calibration scale at `CAL_SCALE_MIN = 0.5` so the bias cannot be
-	// absorbed. `bytes/5` lands inside the calibration band (raw/real ≈
-	// 0.65) while staying on the safe side (slight over-estimate →
-	// compaction triggers early, not late).
 	let tool_schema_tokens: u64 = tool_schema_bytes
-		.map(|bytes| (bytes.len() as u64).div_ceil(5))
+		.map(|bytes| counter.count_tool_schema_bytes(bytes))
 		.unwrap_or(0);
 
 	let raw = system_tokens
@@ -531,6 +854,7 @@ pub fn estimate_prompt_tokens_calibrated(
 		message_tokens,
 		framing_tokens,
 		tool_schema_tokens,
+		committed_baseline_tokens: 0,
 		total_tokens: total,
 		raw_total_tokens: raw,
 	}
@@ -546,27 +870,18 @@ pub fn estimate_prompt_pressure(
 	system_prompt: Option<&str>,
 	tool_schema_bytes: Option<&[u8]>,
 	calibration: &EstimatorCalibration,
+	counter: &dyn TokenCounter,
+	baseline: Option<CommittedBaseline>,
 ) -> u64 {
-	estimate_prompt_tokens_calibrated(messages, system_prompt, tool_schema_bytes, calibration)
-		.total_tokens
-}
-
-/// Per-message byte→token estimate.
-fn byte_estimate_for_message(msg: &Message) -> u64 {
-	match msg {
-		Message::User { content } => byte_estimate_for_text(content),
-		Message::Assistant { text, tool_calls } => {
-			let mut t = byte_estimate_for_text(text);
-			for tc in tool_calls {
-				t = t.saturating_add(byte_estimate_for_text(&tc.name));
-				// Arguments are always JSON — use the structured rule.
-				let args_bytes = tc.arguments.to_string().len() as u64;
-				t = t.saturating_add(args_bytes.div_ceil(2));
-			}
-			t
-		}
-		Message::ToolResult { content, .. } => byte_estimate_for_text(content),
-	}
+	estimate_prompt_tokens_calibrated(
+		messages,
+		system_prompt,
+		tool_schema_bytes,
+		calibration,
+		counter,
+		baseline,
+	)
+	.total_tokens
 }
 
 /// Classify a free-form string and return its byte-based token estimate.
@@ -1385,7 +1700,14 @@ mod tests {
 	use crate::runtime_loop::state_update::InterpretedObservation;
 	use crate::runtime_loop::step_record::StepRecord;
 	use crate::runtime_loop::{NextStepAction, NextStepDecision, StepObservation};
+	use roku_plugin_llm::ByteHeuristicCounter;
 	use serde_json::json;
+
+	/// Test-only counter that mirrors the runtime default (uniform 4/byte),
+	/// shared by every estimator test in this module.
+	fn default_test_counter() -> ByteHeuristicCounter {
+		ByteHeuristicCounter::default()
+	}
 
 	fn minimal_loop_state() -> LoopState {
 		LoopState {
@@ -1418,7 +1740,15 @@ mod tests {
 			ambiguity_stagnation: None,
 			sub_agent_depth: 0,
 			disallowed_tools: Vec::new(),
-			estimator_calibration: EstimatorCalibration::default(),
+			estimator_calibration: PerModelCalibration::default(),
+			last_observed_input_tokens: None,
+			committed_message_count: 0,
+			committed_system_prompt_bytes: 0,
+			committed_tool_schema_bytes_len: 0,
+			committed_system_prompt_hash: 0,
+			committed_tool_schema_hash: 0,
+			committed_prefix_messages_hash: 0,
+			committed_model_id: None,
 			consecutive_autocompact_failures: 0,
 			frozen_tool_schema: None,
 			tool_schema_dirty: true,
@@ -2993,7 +3323,15 @@ mod tests {
 				tool_calls: vec![],
 			},
 		];
-		let est = estimate_prompt_tokens_calibrated(&messages, Some("system context"), None, &cal);
+		let counter = default_test_counter();
+		let est = estimate_prompt_tokens_calibrated(
+			&messages,
+			Some("system context"),
+			None,
+			&cal,
+			&counter,
+			None,
+		);
 		assert!(est.system_tokens > 0, "system tokens populated");
 		assert!(est.message_tokens > 0, "message tokens populated");
 		assert_eq!(est.framing_tokens, 8, "two messages × 4 tokens framing");
@@ -3017,7 +3355,9 @@ mod tests {
 				+ &"y".repeat(800)
 				+ "\"}",
 		}];
-		let pre_call = estimate_prompt_tokens_calibrated(&messages, None, None, &cal);
+		let counter = default_test_counter();
+		let pre_call =
+			estimate_prompt_tokens_calibrated(&messages, None, None, &cal, &counter, None);
 
 		// Pretend the provider reported 60% of our pre-call estimate.
 		let real = ((pre_call.total_tokens as f64) * 0.6).round() as u64;
@@ -3037,7 +3377,8 @@ mod tests {
 			cal.scale()
 		);
 
-		let post_call = estimate_prompt_tokens_calibrated(&messages, None, None, &cal);
+		let post_call =
+			estimate_prompt_tokens_calibrated(&messages, None, None, &cal, &counter, None);
 		let post_err = relative_error(post_call.total_tokens, real);
 		assert!(
 			post_err < pre_err,
@@ -3061,8 +3402,10 @@ mod tests {
 				+ "\"}",
 		}];
 
+		let counter = default_test_counter();
 		for _ in 0..6 {
-			let est = estimate_prompt_tokens_calibrated(&messages, None, None, &cal);
+			let est =
+				estimate_prompt_tokens_calibrated(&messages, None, None, &cal, &counter, None);
 			let real = ((est.raw_total_tokens as f64) * 0.6).round() as u64;
 			cal.update(est.raw_total_tokens, real);
 		}
@@ -3087,15 +3430,23 @@ mod tests {
 			content: "hello".to_string(),
 		}];
 
-		let without = estimate_prompt_tokens_calibrated(&messages, None, None, &cal);
+		let counter = default_test_counter();
+		let without =
+			estimate_prompt_tokens_calibrated(&messages, None, None, &cal, &counter, None);
 		assert_eq!(
 			without.tool_schema_tokens, 0,
 			"None input must leave the tool_schema field at zero"
 		);
 
 		let schema_small = br#"[{"name":"Read","description":"read file","parameters":{}}]"#;
-		let with_small =
-			estimate_prompt_tokens_calibrated(&messages, None, Some(schema_small), &cal);
+		let with_small = estimate_prompt_tokens_calibrated(
+			&messages,
+			None,
+			Some(schema_small),
+			&cal,
+			&counter,
+			None,
+		);
 		assert!(
 			with_small.tool_schema_tokens > 0,
 			"non-empty tool schema must contribute tokens"
@@ -3109,8 +3460,14 @@ mod tests {
 		);
 
 		let schema_large = br#"[{"name":"Read","description":"read file","parameters":{}},{"name":"Edit","description":"edit file","parameters":{}},{"name":"Bash","description":"run shell","parameters":{}},{"name":"Grep","description":"search","parameters":{}}]"#;
-		let with_large =
-			estimate_prompt_tokens_calibrated(&messages, None, Some(schema_large), &cal);
+		let with_large = estimate_prompt_tokens_calibrated(
+			&messages,
+			None,
+			Some(schema_large),
+			&cal,
+			&counter,
+			None,
+		);
 		assert!(
 			with_large.tool_schema_tokens > with_small.tool_schema_tokens,
 			"larger tool schema must contribute more tokens \
@@ -3139,7 +3496,9 @@ mod tests {
 		let schema =
 			br#"[{"name":"Read","description":"read file","parameters":{"type":"object"}}]"#;
 
-		let pre = estimate_prompt_tokens_calibrated(&messages, None, Some(schema), &cal);
+		let counter = default_test_counter();
+		let pre =
+			estimate_prompt_tokens_calibrated(&messages, None, Some(schema), &cal, &counter, None);
 		let raw_with_schema = pre.raw_total_tokens;
 		assert!(raw_with_schema >= pre.tool_schema_tokens);
 		// Pretend the provider reported a real count 40% higher than our
@@ -3148,7 +3507,8 @@ mod tests {
 		cal.update(raw_with_schema, real);
 		assert!(cal.sample_count() > 0);
 
-		let post = estimate_prompt_tokens_calibrated(&messages, None, Some(schema), &cal);
+		let post =
+			estimate_prompt_tokens_calibrated(&messages, None, Some(schema), &cal, &counter, None);
 		assert!(
 			post.total_tokens > pre.total_tokens,
 			"calibration with real > raw must raise the calibrated total"
@@ -3174,7 +3534,9 @@ mod tests {
 		let messages = vec![Message::User {
 			content: "hi".to_string(),
 		}];
-		let pre = estimate_prompt_tokens_calibrated(&messages, None, Some(&schema), &cal);
+		let counter = default_test_counter();
+		let pre =
+			estimate_prompt_tokens_calibrated(&messages, None, Some(&schema), &cal, &counter, None);
 		// Representative "real" count for a ~10K-byte schema.
 		let representative_real = 1300_u64;
 		let ratio = (pre.raw_total_tokens as f64) / (representative_real as f64);
@@ -3188,6 +3550,450 @@ mod tests {
 			ratio >= 0.5,
 			"estimator ratio raw/real must stay >= CAL_SCALE_MIN=0.5 so \
 			 the safe-direction (over-estimate) property holds; got ratio={ratio:.3}",
+		);
+	}
+
+	// ------------------------------------------------------------------
+	// Committed / uncommitted token accounting (codex-parity)
+	// ------------------------------------------------------------------
+
+	#[test]
+	fn committed_baseline_returns_authoritative_total_plus_tail_delta() {
+		// Two messages in the committed request → baseline input_tokens = 1500.
+		// Next turn appends one more user message; the estimator must return
+		// 1500 + counter.count(tail) + framing (4 tokens for the new message).
+		let cal = EstimatorCalibration::default();
+		let counter = default_test_counter();
+		let baseline = CommittedBaseline {
+			input_tokens: 1500,
+			message_count: 2,
+			..Default::default()
+		};
+		let messages = vec![
+			Message::User {
+				content: "old content 1".to_string(),
+			},
+			Message::Assistant {
+				text: "old reply".to_string(),
+				tool_calls: vec![],
+			},
+			Message::User {
+				content: "x".repeat(40), // 40 bytes / 4 = 10 tokens
+			},
+		];
+		let est = estimate_prompt_tokens_calibrated(
+			&messages,
+			Some("ignored system prompt"),
+			Some(b"[ignored schema]"),
+			&cal,
+			&counter,
+			Some(baseline),
+		);
+		assert_eq!(est.committed_baseline_tokens, 1500);
+		assert_eq!(
+			est.message_tokens, 10,
+			"tail of 40 bytes → 10 tokens under 4/byte heuristic"
+		);
+		assert_eq!(est.framing_tokens, 4, "one new message × 4 framing tokens");
+		assert_eq!(
+			est.system_tokens, 0,
+			"system prompt already included in committed baseline"
+		);
+		assert_eq!(
+			est.tool_schema_tokens, 0,
+			"tool schema already included in committed baseline"
+		);
+		assert_eq!(est.raw_total_tokens, 1500 + 10 + 4);
+		assert_eq!(
+			est.total_tokens, est.raw_total_tokens,
+			"scale=1.0 default → calibrated == raw"
+		);
+	}
+
+	#[test]
+	fn committed_baseline_with_zero_tail_returns_baseline_exactly() {
+		// messages.len() == baseline.message_count → empty delta → total
+		// equals the provider-reported input_tokens exactly.
+		let cal = EstimatorCalibration::default();
+		let counter = default_test_counter();
+		let baseline = CommittedBaseline {
+			input_tokens: 2048,
+			message_count: 3,
+			..Default::default()
+		};
+		let messages = vec![
+			Message::User {
+				content: "a".to_string(),
+			},
+			Message::Assistant {
+				text: "b".to_string(),
+				tool_calls: vec![],
+			},
+			Message::User {
+				content: "c".to_string(),
+			},
+		];
+		let est = estimate_prompt_tokens_calibrated(
+			&messages,
+			None,
+			None,
+			&cal,
+			&counter,
+			Some(baseline),
+		);
+		assert_eq!(est.total_tokens, 2048);
+		assert_eq!(est.raw_total_tokens, 2048);
+		assert_eq!(est.message_tokens, 0);
+		assert_eq!(est.framing_tokens, 0);
+	}
+
+	#[test]
+	fn committed_baseline_falls_back_to_cold_start_when_messages_shrunk() {
+		// Compaction removed messages so `messages.len() < baseline.message_count`.
+		// The baseline is stale; the estimator must ignore it and count the
+		// full (post-compaction) request from scratch.
+		let cal = EstimatorCalibration::default();
+		let counter = default_test_counter();
+		let baseline = CommittedBaseline {
+			input_tokens: 5000,
+			message_count: 10,
+			..Default::default()
+		};
+		let messages = vec![Message::User {
+			content: "survivor".to_string(),
+		}];
+		let est = estimate_prompt_tokens_calibrated(
+			&messages,
+			None,
+			None,
+			&cal,
+			&counter,
+			Some(baseline),
+		);
+		// Fallback branch: committed_baseline_tokens stays zero, and the
+		// total is the whole-history estimate (not the stale 5000).
+		assert_eq!(est.committed_baseline_tokens, 0);
+		assert!(est.total_tokens < 100, "whole-history estimate, not 5000");
+	}
+
+	#[test]
+	fn committed_baseline_falls_back_when_input_tokens_is_zero() {
+		// A baseline with `input_tokens = 0` is effectively no baseline at
+		// all — treat as cold-start. Guards against a caller accidentally
+		// constructing an empty baseline.
+		let cal = EstimatorCalibration::default();
+		let counter = default_test_counter();
+		let baseline = CommittedBaseline {
+			input_tokens: 0,
+			message_count: 1,
+			..Default::default()
+		};
+		let messages = vec![Message::User {
+			content: "hello".to_string(),
+		}];
+		let est = estimate_prompt_tokens_calibrated(
+			&messages,
+			None,
+			None,
+			&cal,
+			&counter,
+			Some(baseline),
+		);
+		// Cold-start path populates message_tokens from the actual counter.
+		assert_eq!(est.committed_baseline_tokens, 0);
+		assert!(est.message_tokens > 0);
+	}
+
+	#[test]
+	fn committed_baseline_scale_applies_to_delta_only_not_to_baseline() {
+		// Install a calibration scale of 2.0 (upper clamp). In cold-start
+		// mode the scale multiplies the full raw estimate; in committed
+		// mode it must only multiply the uncommitted delta so the
+		// authoritative `input_tokens` is not double-counted.
+		let mut cal = EstimatorCalibration::default();
+		// Push scale to the upper clamp with one extreme sample.
+		cal.update(100, 1_000);
+		assert!((cal.scale() - 2.0).abs() < 1e-9);
+		let counter = default_test_counter();
+		let baseline = CommittedBaseline {
+			input_tokens: 1000,
+			message_count: 1,
+			..Default::default()
+		};
+		let messages = vec![
+			Message::User {
+				content: "old".to_string(),
+			},
+			Message::User {
+				content: "y".repeat(40), // 10 tokens + 4 framing = 14 raw
+			},
+		];
+		let est = estimate_prompt_tokens_calibrated(
+			&messages,
+			None,
+			None,
+			&cal,
+			&counter,
+			Some(baseline),
+		);
+		let raw_delta = 10 + 4;
+		let scaled_delta = (raw_delta as f64 * 2.0).round() as u64;
+		assert_eq!(est.total_tokens, 1000 + scaled_delta);
+		assert_eq!(
+			est.raw_total_tokens,
+			1000 + raw_delta as u64,
+			"raw feedback skips the scale so calibration update stays well-defined"
+		);
+	}
+
+	#[test]
+	fn estimate_prompt_pressure_uses_committed_baseline_when_provided() {
+		// `estimate_prompt_pressure` is the thin wrapper used by the
+		// compaction-trigger fast path; it must honor the baseline too.
+		let cal = EstimatorCalibration::default();
+		let counter = default_test_counter();
+		let baseline = CommittedBaseline {
+			input_tokens: 500,
+			message_count: 1,
+			..Default::default()
+		};
+		let messages = vec![
+			Message::User {
+				content: "x".to_string(),
+			},
+			Message::User {
+				content: "y".repeat(20), // 5 tokens + 4 framing
+			},
+		];
+		let pressure =
+			estimate_prompt_pressure(&messages, None, None, &cal, &counter, Some(baseline));
+		assert_eq!(pressure, 500 + 5 + 4);
+	}
+
+	#[test]
+	fn committed_baseline_is_valid_for_rejects_same_length_different_content() {
+		// Regression: byte-length-only guards accepted any same-length
+		// edit to the dynamic system-prompt surface or the serialized
+		// tool schema, so `input_tokens` would be reused against a
+		// prefix the provider no longer sees. Content hashes are the
+		// authoritative guards now; the byte-length pair stays for
+		// cheap pre-filter / diagnostics.
+		let committed_system = "You are Roku. wd=/tmp/a";
+		let committed_tools: &[u8] = br#"{"tools":[{"name":"read_a"}]}"#;
+		let committed_prefix_hash = 12345_u64;
+		let baseline = CommittedBaseline {
+			input_tokens: 1_000,
+			message_count: 3,
+			system_prompt_bytes: committed_system.len() as u64,
+			tool_schema_bytes_len: committed_tools.len() as u64,
+			system_prompt_hash: hash_system_prompt_text(committed_system),
+			tool_schema_hash: hash_tool_schema_bytes(committed_tools),
+			prefix_messages_hash: committed_prefix_hash,
+			model_id: Some("gpt-5.4".to_string()),
+		};
+
+		// Exact match — baseline is valid.
+		assert!(baseline.is_valid_for(
+			committed_system.len() as u64,
+			committed_tools.len() as u64,
+			hash_system_prompt_text(committed_system),
+			hash_tool_schema_bytes(committed_tools),
+			committed_prefix_hash,
+			Some("gpt-5.4"),
+		));
+
+		// Same byte length, different system-prompt content: one
+		// character changed, byte count preserved.
+		let drifted_system = "You are Roku. wd=/tmp/b";
+		assert_eq!(drifted_system.len(), committed_system.len());
+		assert!(
+			!baseline.is_valid_for(
+				drifted_system.len() as u64,
+				committed_tools.len() as u64,
+				hash_system_prompt_text(drifted_system),
+				hash_tool_schema_bytes(committed_tools),
+				committed_prefix_hash,
+				Some("gpt-5.4"),
+			),
+			"same-length system-prompt content edit must invalidate the baseline"
+		);
+
+		// Same byte length, different tool-schema content: tool name
+		// renamed without changing wire byte count.
+		let drifted_tools: &[u8] = br#"{"tools":[{"name":"read_b"}]}"#;
+		assert_eq!(drifted_tools.len(), committed_tools.len());
+		assert!(
+			!baseline.is_valid_for(
+				committed_system.len() as u64,
+				drifted_tools.len() as u64,
+				hash_system_prompt_text(committed_system),
+				hash_tool_schema_bytes(drifted_tools),
+				committed_prefix_hash,
+				Some("gpt-5.4"),
+			),
+			"same-length tool-schema content edit must invalidate the baseline"
+		);
+	}
+
+	#[test]
+	fn committed_baseline_is_valid_for_rejects_in_place_prefix_rewrite() {
+		// Regression: `truncate_large_tool_results` and
+		// `microcompact_old_tool_results` can rewrite historical
+		// `Message::ToolResult.content` in place without changing
+		// `messages.len()`. Byte-length / system / tools / model
+		// guards all stay happy; only a prefix-content hash catches
+		// the divergence.
+		let committed_system = "sys";
+		let committed_tools: &[u8] = b"{}";
+		let pre_rewrite_prefix = vec![
+			Message::User {
+				content: "step-1".to_string(),
+			},
+			Message::Assistant {
+				text: "calling tool".to_string(),
+				tool_calls: Vec::new(),
+			},
+			Message::ToolResult {
+				tool_use_id: "call-1".to_string(),
+				content: "a".repeat(10_000),
+				is_error: false,
+			},
+		];
+		let post_rewrite_prefix = vec![
+			Message::User {
+				content: "step-1".to_string(),
+			},
+			Message::Assistant {
+				text: "calling tool".to_string(),
+				tool_calls: Vec::new(),
+			},
+			Message::ToolResult {
+				// `truncate_large_tool_results` swaps `content` for a
+				// truncation marker while leaving the enclosing
+				// `ToolResult` at the same index; same
+				// `message_count` / same role shape.
+				tool_use_id: "call-1".to_string(),
+				content: "[truncated]".to_string(),
+				is_error: false,
+			},
+		];
+
+		let baseline = CommittedBaseline {
+			input_tokens: 5_000,
+			message_count: pre_rewrite_prefix.len(),
+			system_prompt_bytes: committed_system.len() as u64,
+			tool_schema_bytes_len: committed_tools.len() as u64,
+			system_prompt_hash: hash_system_prompt_text(committed_system),
+			tool_schema_hash: hash_tool_schema_bytes(committed_tools),
+			prefix_messages_hash: hash_message_prefix(&pre_rewrite_prefix),
+			model_id: Some("gpt-5.4".to_string()),
+		};
+
+		// Pre-rewrite: baseline is valid against the identical prefix.
+		assert!(baseline.is_valid_for(
+			committed_system.len() as u64,
+			committed_tools.len() as u64,
+			hash_system_prompt_text(committed_system),
+			hash_tool_schema_bytes(committed_tools),
+			hash_message_prefix(&pre_rewrite_prefix),
+			Some("gpt-5.4"),
+		));
+
+		// Post-rewrite: same count, same system, same tools, same
+		// model — only the tool-result body changed. Baseline must
+		// reject so the estimator re-counts rather than reusing the
+		// stale 5 000-token commit.
+		assert!(
+			!baseline.is_valid_for(
+				committed_system.len() as u64,
+				committed_tools.len() as u64,
+				hash_system_prompt_text(committed_system),
+				hash_tool_schema_bytes(committed_tools),
+				hash_message_prefix(&post_rewrite_prefix),
+				Some("gpt-5.4"),
+			),
+			"in-place tool-result rewrite must invalidate the committed baseline"
+		);
+	}
+
+	#[test]
+	fn hash_message_prefix_is_deterministic_and_role_sensitive() {
+		let a = vec![
+			Message::User {
+				content: "hello".to_string(),
+			},
+			Message::Assistant {
+				text: "hi".to_string(),
+				tool_calls: Vec::new(),
+			},
+		];
+		let a_repeat = vec![
+			Message::User {
+				content: "hello".to_string(),
+			},
+			Message::Assistant {
+				text: "hi".to_string(),
+				tool_calls: Vec::new(),
+			},
+		];
+		// Determinism: same slice → same hash.
+		assert_eq!(hash_message_prefix(&a), hash_message_prefix(&a_repeat));
+
+		// Role discriminant matters: User{"x"} must not hash the same
+		// as Assistant{"x"}. Otherwise role swaps within the prefix
+		// (rare but possible under future compaction helpers) would
+		// silently keep the baseline valid.
+		let user_variant = vec![Message::User {
+			content: "x".to_string(),
+		}];
+		let assistant_variant = vec![Message::Assistant {
+			text: "x".to_string(),
+			tool_calls: Vec::new(),
+		}];
+		assert_ne!(
+			hash_message_prefix(&user_variant),
+			hash_message_prefix(&assistant_variant),
+		);
+
+		// Tool-result error flag flips hash. A tool-result's
+		// `is_error: false → true` rewrite with identical content
+		// otherwise must not look "unchanged".
+		let tool_ok = vec![Message::ToolResult {
+			tool_use_id: "id-1".to_string(),
+			content: "body".to_string(),
+			is_error: false,
+		}];
+		let tool_err = vec![Message::ToolResult {
+			tool_use_id: "id-1".to_string(),
+			content: "body".to_string(),
+			is_error: true,
+		}];
+		assert_ne!(
+			hash_message_prefix(&tool_ok),
+			hash_message_prefix(&tool_err),
+		);
+	}
+
+	#[test]
+	fn hash_helpers_are_deterministic_and_sensitive_to_content() {
+		// Same input → same hash (reproducibility guarantee).
+		assert_eq!(
+			hash_system_prompt_text("hello world"),
+			hash_system_prompt_text("hello world"),
+		);
+		assert_eq!(
+			hash_tool_schema_bytes(b"schema-bytes"),
+			hash_tool_schema_bytes(b"schema-bytes"),
+		);
+
+		// Different content, same length → different hash.
+		assert_ne!(
+			hash_system_prompt_text("hello world"),
+			hash_system_prompt_text("hello earth"),
+		);
+		assert_ne!(
+			hash_tool_schema_bytes(b"schema-a12345"),
+			hash_tool_schema_bytes(b"schema-b12345"),
 		);
 	}
 
@@ -3236,6 +4042,231 @@ mod tests {
 		let cal = EstimatorCalibration::default();
 		assert_eq!(cal.apply(0), 0);
 		assert_eq!(cal.apply(123), 123);
+	}
+
+	#[test]
+	fn calibration_pair_in_baseline_mode_subtracts_committed_prefix_from_both_sides() {
+		// Scenario: large committed prefix (100k tokens) that the provider
+		// re-prices identically each turn, plus a small uncommitted tail
+		// the byte estimator under-counts by 2x.
+		//
+		// Feeding the raw totals into `EstimatorCalibration::update`
+		// would compute `100_100 / 100_050 ≈ 1.0005` — the unchanged
+		// baseline on both sides cancels the tail bias and calibration
+		// stops correcting. The tail-only pair `(50, 100)` yields a
+		// ratio of 2.0 and lets the scale track the only component the
+		// estimator still guesses.
+		let estimate = PromptTokenEstimate {
+			system_tokens: 0,
+			message_tokens: 50,
+			framing_tokens: 0,
+			tool_schema_tokens: 0,
+			committed_baseline_tokens: 100_000,
+			total_tokens: 100_050,
+			raw_total_tokens: 100_050,
+		};
+		let (estimated, real) = estimate.calibration_pair(100_100);
+		assert_eq!(
+			estimated, 50,
+			"estimated must be tail-only (raw_total - committed) in baseline mode",
+		);
+		assert_eq!(
+			real, 100,
+			"real must be tail-only (prompt_tokens - committed) in baseline mode",
+		);
+	}
+
+	#[test]
+	fn calibration_pair_in_cold_start_returns_full_totals_unchanged() {
+		// No committed baseline → pass through the raw totals. The
+		// full-total ratio is meaningful when the estimator is pricing
+		// the whole request from scratch.
+		let estimate = PromptTokenEstimate {
+			system_tokens: 200,
+			message_tokens: 300,
+			framing_tokens: 100,
+			tool_schema_tokens: 400,
+			committed_baseline_tokens: 0,
+			total_tokens: 1_000,
+			raw_total_tokens: 1_000,
+		};
+		let (estimated, real) = estimate.calibration_pair(1_200);
+		assert_eq!(
+			estimated, 1_000,
+			"estimated passes through raw_total_tokens when no baseline",
+		);
+		assert_eq!(
+			real, 1_200,
+			"real passes through observed prompt_tokens when no baseline",
+		);
+	}
+
+	#[test]
+	fn calibration_pair_saturates_when_provider_reports_below_baseline() {
+		// Defensive: cache-credit quirks or provider bugs can make
+		// `usage.prompt_tokens` come in below our recorded committed
+		// baseline. Saturating to 0 lets `update` no-op on the sample
+		// (it skips zero-valued terms) rather than producing a negative
+		// ratio that the scale clamp would then distort.
+		let estimate = PromptTokenEstimate {
+			system_tokens: 0,
+			message_tokens: 40,
+			framing_tokens: 8,
+			tool_schema_tokens: 0,
+			committed_baseline_tokens: 1_000,
+			total_tokens: 1_048,
+			raw_total_tokens: 1_048,
+		};
+		let (estimated, real) = estimate.calibration_pair(900);
+		assert_eq!(
+			real, 0,
+			"real_tail must saturate to 0 when prompt_tokens < committed",
+		);
+		assert_eq!(
+			estimated, 48,
+			"estimated_tail remains the pre-bug tail estimate"
+		);
+	}
+
+	#[test]
+	fn calibration_update_in_baseline_mode_tracks_tail_bias_not_full_ratio() {
+		// End-to-end: simulate ten consecutive turns with a large
+		// committed prefix and a biased tail estimate. Using the pair
+		// helper, the scale should move toward the tail ratio (2.0).
+		// Using the raw totals (the pre-fix behavior), the scale would
+		// stay pinned near 1.0 because the baseline dominates both
+		// sides. We assert the post-fix scale moves meaningfully off
+		// 1.0 — the exact value depends on clamp + sample-window
+		// behavior, but the direction and magnitude are the signal.
+		let mut cal_pair = EstimatorCalibration::default();
+		let mut cal_raw = EstimatorCalibration::default();
+		for _ in 0..CAL_SAMPLE_CAP {
+			let estimate = PromptTokenEstimate {
+				system_tokens: 0,
+				message_tokens: 50,
+				framing_tokens: 0,
+				tool_schema_tokens: 0,
+				committed_baseline_tokens: 100_000,
+				total_tokens: 100_050,
+				raw_total_tokens: 100_050,
+			};
+			let (est_pair, real_pair) = estimate.calibration_pair(100_100);
+			cal_pair.update(est_pair, real_pair);
+			cal_raw.update(estimate.raw_total_tokens, 100_100);
+		}
+		// Pair-based update rides the tail ratio up to the 2.0 clamp.
+		assert!(
+			(cal_pair.scale() - 2.0).abs() < 1e-9,
+			"baseline-aware pair must lift scale toward the tail bias \
+			 (2.0 clamp), got {}",
+			cal_pair.scale(),
+		);
+		// Raw-total update cannot distinguish tail from prefix; scale
+		// stays essentially at 1.0.
+		assert!(
+			(cal_raw.scale() - 1.0).abs() < 1e-3,
+			"raw-total update collapses to ~1.0 under a dominant \
+			 committed prefix (the bug this pair helper avoids); got {}",
+			cal_raw.scale(),
+		);
+	}
+
+	#[test]
+	fn per_model_calibration_isolates_bias_across_models() {
+		// Scenario: two providers with opposite residual biases.
+		// Model A under-counts by 2x (real = 2 × estimated); Model B
+		// over-counts by 0.5x (real = 0.5 × estimated). A shared ring
+		// buffer would average these toward ~1.0 — each sample
+		// cancelling the other — and report a falsely-calibrated
+		// scale for both. Per-model isolation keeps each bucket
+		// converging to its own true ratio.
+		let mut cal = PerModelCalibration::default();
+		for _ in 0..CAL_SAMPLE_CAP {
+			cal.update(Some("model-a"), 100, 200); // 2.0 ratio
+			cal.update(Some("model-b"), 100, 50); // 0.5 ratio
+		}
+		assert!(
+			(cal.scale_for(Some("model-a")) - 2.0).abs() < 1e-9,
+			"model-a scale must track its own 2.0 ratio (upper clamp); got {}",
+			cal.scale_for(Some("model-a")),
+		);
+		assert!(
+			(cal.scale_for(Some("model-b")) - 0.5).abs() < 1e-9,
+			"model-b scale must track its own 0.5 ratio (lower clamp); got {}",
+			cal.scale_for(Some("model-b")),
+		);
+	}
+
+	#[test]
+	fn per_model_calibration_does_not_mirror_per_model_samples_into_fallback() {
+		// Defensive: the fallback bucket is consulted by pre-routing
+		// surfaces (pre-flight microcompact, the compact-mode
+		// pressure check before a model id is known). Mirroring every
+		// model's samples into it would rebuild the global-average
+		// mixing that `PerModelCalibration` is meant to fix, so
+		// per-model updates must stay isolated to their own bucket.
+		let mut cal = PerModelCalibration::default();
+		for _ in 0..CAL_SAMPLE_CAP {
+			cal.update(Some("model-a"), 100, 200);
+		}
+		assert!(
+			(cal.scale_for(Some("model-a")) - 2.0).abs() < 1e-9,
+			"model-a accumulated its own samples",
+		);
+		assert!(
+			(cal.scale_for(None) - 1.0).abs() < 1e-9,
+			"fallback stays uncalibrated — per-model updates must not \
+			 mirror back into it; got {}",
+			cal.scale_for(None),
+		);
+	}
+
+	#[test]
+	fn per_model_calibration_fallback_receives_unkeyed_updates() {
+		// `update(None, ..)` — pre-routing surfaces that haven't
+		// resolved a model id yet — must still record samples, and
+		// they land in the fallback bucket (nowhere else to put
+		// them). This guards the microcompact / maybe_compact
+		// fallback path: those sites call `update` via the fallback
+		// directly only when no routed model is available.
+		let mut cal = PerModelCalibration::default();
+		for _ in 0..CAL_SAMPLE_CAP {
+			cal.update(None, 100, 200);
+		}
+		assert!(
+			(cal.scale_for(None) - 2.0).abs() < 1e-9,
+			"fallback absorbs unkeyed samples; got {}",
+			cal.scale_for(None),
+		);
+		// And per-model lookups still see no samples — they should
+		// return the fallback's scale (the only data we have).
+		assert_eq!(
+			cal.scale_for(Some("unknown")),
+			cal.scale_for(None),
+			"unknown model falls through to fallback until its bucket fills",
+		);
+	}
+
+	#[test]
+	fn per_model_calibration_unseen_model_returns_fallback_then_accumulates_own() {
+		// First lookup for a never-updated model returns the
+		// fallback's scale (default 1.0). After the first update is
+		// recorded against that model, subsequent lookups return its
+		// own bucket's scale, not the fallback's.
+		let mut cal = PerModelCalibration::default();
+		assert!(
+			(cal.scale_for(Some("fresh-model")) - 1.0).abs() < 1e-9,
+			"unseen model returns default fallback scale",
+		);
+		for _ in 0..CAL_SAMPLE_CAP {
+			cal.update(Some("fresh-model"), 100, 150);
+		}
+		let expected = 1.5_f64;
+		assert!(
+			(cal.scale_for(Some("fresh-model")) - expected).abs() < 1e-9,
+			"after updates, model returns its own bucket's scale; got {}",
+			cal.scale_for(Some("fresh-model")),
+		);
 	}
 
 	// ------------------------------------------------------------------
