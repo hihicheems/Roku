@@ -14,7 +14,7 @@
 
 # Build with the repository root as context:
 #   docker build -f deploy/Dockerfile .
-FROM --platform=$TARGETPLATFORM rust:1.94-alpine AS chef
+FROM --platform=$TARGETPLATFORM rust:1.95-alpine AS chef
 RUN apk add --no-cache build-base musl-dev && \
     cargo install --locked cargo-chef --version 0.1.77
 WORKDIR /app
