@@ -866,12 +866,22 @@ impl GenericAgentRuntime {
 			system_prompt_sections: None,
 		};
 
+		// Route all three preflight resolutions (wire-bytes preview,
+		// token counter, routed-model id) through `route_router` — the
+		// same router instance whose `generate*` will actually serve
+		// the upcoming call. When the runtime is configured with
+		// distinct route / execution routers (subagent execution vs.
+		// main-loop generation), consulting `execution_router` here
+		// would predict a different provider's wire shape, tokenizer,
+		// and routed model id than what the real call lands on, so the
+		// estimator and committed-baseline validator would operate
+		// against the wrong router on every turn.
 		let rebuilt_schema_bytes: Option<Vec<u8>> = effective_definitions.and_then(|defs| {
 			if defs.is_empty() {
 				return None;
 			}
 			let wire_bytes = self
-				.execution_router
+				.route_router
 				.as_ref()
 				.map(|r| r.preview_wire_tool_schema_bytes_for_request(&selection_request, &defs))
 				.unwrap_or_else(|| serde_json::to_vec(&defs).unwrap_or_default());
@@ -886,7 +896,7 @@ impl GenericAgentRuntime {
 
 		let threshold = self.agent_runtime_config.r#loop.compact_threshold_tokens();
 		let counter = self
-			.execution_router
+			.route_router
 			.as_ref()
 			.map(|r| r.token_counter_for_request(&selection_request))
 			.unwrap_or_else(roku_plugin_llm::default_counter);
@@ -910,7 +920,7 @@ impl GenericAgentRuntime {
 		let current_system_bytes = system_prompt.len() as u64;
 		let current_schema_bytes = effective_schema_bytes.map(|b| b.len() as u64).unwrap_or(0);
 		let current_model = self
-			.execution_router
+			.route_router
 			.as_ref()
 			.and_then(|r| r.selected_model_id_for_request(&selection_request));
 		let validated_baseline = loop_state.committed_baseline().filter(|b| {
@@ -1289,7 +1299,7 @@ impl GenericAgentRuntime {
 				system_prompt_sections: None,
 			};
 			let tool_schema_bytes_vec = self
-				.execution_router
+				.route_router
 				.as_ref()
 				.map(|r| {
 					r.preview_wire_tool_schema_bytes_for_request(
@@ -1444,7 +1454,7 @@ impl GenericAgentRuntime {
 					system_prompt_sections: Some(system_prompt_sections.clone()),
 				};
 				let counter = self
-					.execution_router
+					.route_router
 					.as_ref()
 					.map(|r| r.token_counter_for_request(&counter_selection_request))
 					.unwrap_or_else(roku_plugin_llm::default_counter);
@@ -1456,8 +1466,13 @@ impl GenericAgentRuntime {
 				// actually land on. Returns `None` when no registered
 				// model is eligible — treated as a mismatch below, which
 				// correctly falls back to whole-history estimation.
+				//
+				// Must consult `route_router` (not `execution_router`)
+				// so the routed id matches what `router.generate*` will
+				// actually serve; under the two-router configuration
+				// they diverge in provider / model selection.
 				let current_routed_model = self
-					.execution_router
+					.route_router
 					.as_ref()
 					.and_then(|r| r.selected_model_id_for_request(&counter_selection_request));
 
