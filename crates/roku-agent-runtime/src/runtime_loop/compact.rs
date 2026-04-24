@@ -389,7 +389,16 @@ pub struct PromptTokenEstimate {
 /// treated as exact and only the tail uses byte-heuristic counting. This
 /// mirrors the codex CLI's approach: hardcoded `APPROX_BYTES_PER_TOKEN`
 /// for the tail, real API usage feedback for the committed prefix.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// The three `*_bytes` / `model_id` fields are guards — the committed
+/// prefix is only valid for the next call if the system prompt, the tool
+/// schema surface, and the provider's tokenizer are all unchanged since
+/// the commit. Mismatch on any of them means `input_tokens` no longer
+/// describes the actual prefix the provider will see, and the next
+/// estimate must fall back to whole-history cold-start counting.
+/// [`Self::is_valid_for`] encodes that invariant in one place so call
+/// sites do not have to replicate the comparison logic.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommittedBaseline {
 	/// `usage.prompt_tokens` as reported by the provider for the last
 	/// successful call. Authoritative for system + tools + committed
@@ -399,6 +408,38 @@ pub struct CommittedBaseline {
 	/// at `messages[message_count..]` on a later turn is an uncommitted
 	/// delta that still needs byte-heuristic estimation.
 	pub message_count: usize,
+	/// Byte length of the system prompt that was in the committed call.
+	/// A divergence means the dynamic system-prompt surface
+	/// (working-directory, memory blocks, runtime-memory sections)
+	/// changed and the baseline must be discarded.
+	pub system_prompt_bytes: u64,
+	/// Byte length of the serialized tool-schema block the provider saw
+	/// on the committed call. A divergence means the deferred-tools
+	/// surface, plan-mode visibility, or disallowed-tools list moved and
+	/// the baseline no longer matches what the provider will tokenize.
+	pub tool_schema_bytes_len: u64,
+	/// Model ID that served the committed call. Different providers carry
+	/// different tokenizers (o200k_base vs cl100k_base vs Anthropic BPE),
+	/// so a model swap invalidates the `input_tokens` figure even when
+	/// every other surface is unchanged.
+	pub model_id: Option<String>,
+}
+
+impl CommittedBaseline {
+	/// Returns `true` when every guard matches the current request
+	/// context and the caller can safely use `input_tokens` as the exact
+	/// committed-prefix cost.
+	pub fn is_valid_for(
+		&self,
+		current_system_prompt_bytes: u64,
+		current_tool_schema_bytes_len: u64,
+		current_model_id: Option<&str>,
+	) -> bool {
+		self.input_tokens > 0
+			&& self.system_prompt_bytes == current_system_prompt_bytes
+			&& self.tool_schema_bytes_len == current_tool_schema_bytes_len
+			&& self.model_id.as_deref() == current_model_id
+	}
 }
 
 /// Bounded calibration state for the byte-based estimator.
@@ -1480,6 +1521,9 @@ mod tests {
 			estimator_calibration: EstimatorCalibration::default(),
 			last_observed_input_tokens: None,
 			committed_message_count: 0,
+			committed_system_prompt_bytes: 0,
+			committed_tool_schema_bytes_len: 0,
+			committed_model_id: None,
 			consecutive_autocompact_failures: 0,
 			frozen_tool_schema: None,
 			tool_schema_dirty: true,
@@ -3298,6 +3342,7 @@ mod tests {
 		let baseline = CommittedBaseline {
 			input_tokens: 1500,
 			message_count: 2,
+			..Default::default()
 		};
 		let messages = vec![
 			Message::User {
@@ -3349,6 +3394,7 @@ mod tests {
 		let baseline = CommittedBaseline {
 			input_tokens: 2048,
 			message_count: 3,
+			..Default::default()
 		};
 		let messages = vec![
 			Message::User {
@@ -3386,6 +3432,7 @@ mod tests {
 		let baseline = CommittedBaseline {
 			input_tokens: 5000,
 			message_count: 10,
+			..Default::default()
 		};
 		let messages = vec![Message::User {
 			content: "survivor".to_string(),
@@ -3414,6 +3461,7 @@ mod tests {
 		let baseline = CommittedBaseline {
 			input_tokens: 0,
 			message_count: 1,
+			..Default::default()
 		};
 		let messages = vec![Message::User {
 			content: "hello".to_string(),
@@ -3445,6 +3493,7 @@ mod tests {
 		let baseline = CommittedBaseline {
 			input_tokens: 1000,
 			message_count: 1,
+			..Default::default()
 		};
 		let messages = vec![
 			Message::User {
@@ -3481,6 +3530,7 @@ mod tests {
 		let baseline = CommittedBaseline {
 			input_tokens: 500,
 			message_count: 1,
+			..Default::default()
 		};
 		let messages = vec![
 			Message::User {

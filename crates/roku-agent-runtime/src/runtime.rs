@@ -890,13 +890,25 @@ impl GenericAgentRuntime {
 			.as_ref()
 			.map(|r| r.token_counter_for_request(&selection_request))
 			.unwrap_or_else(roku_plugin_llm::default_counter);
+		// Only trust the committed baseline when the system-prompt byte
+		// length, the tool-schema byte length, and the model override
+		// all match what the baseline was committed against. Any shift
+		// (e.g. dynamic working-directory block grew, plan mode flipped,
+		// user pinned a different model) means `last_observed_input_tokens`
+		// no longer priced the current prefix — fall back to cold-start.
+		let current_system_bytes = system_prompt.len() as u64;
+		let current_schema_bytes = effective_schema_bytes.map(|b| b.len() as u64).unwrap_or(0);
+		let current_model = selection_request.model_override.as_deref();
+		let validated_baseline = loop_state
+			.committed_baseline()
+			.filter(|b| b.is_valid_for(current_system_bytes, current_schema_bytes, current_model));
 		let estimated = crate::runtime_loop::estimate_prompt_pressure(
 			messages,
 			Some(system_prompt),
 			effective_schema_bytes,
 			&loop_state.estimator_calibration,
 			counter.as_ref(),
-			loop_state.committed_baseline(),
+			validated_baseline,
 		);
 		if estimated > threshold {
 			let _ = roku_common_types::emit_global_log(roku_common_types::LogRecord::new(
@@ -1425,13 +1437,26 @@ impl GenericAgentRuntime {
 				// has not already been used this attempt (to avoid double-firing
 				// two compaction layers in the same turn).
 				if !reactive_compact_used {
+					// Same baseline validity check as `maybe_compact`: the
+					// committed prefix is only authoritative when the
+					// system prompt, tool-schema surface, and model are all
+					// unchanged since the commit.
+					let mid_system_bytes = system_prompt.len() as u64;
+					let mid_schema_bytes = tool_schema_bytes.map(|b| b.len() as u64).unwrap_or(0);
+					let mid_baseline = loop_state.committed_baseline().filter(|b| {
+						b.is_valid_for(
+							mid_system_bytes,
+							mid_schema_bytes,
+							request.model_override.as_deref(),
+						)
+					});
 					let mid_estimate = crate::runtime_loop::estimate_prompt_pressure(
 						&messages,
 						Some(&system_prompt),
 						tool_schema_bytes,
 						&loop_state.estimator_calibration,
 						counter.as_ref(),
-						loop_state.committed_baseline(),
+						mid_baseline,
 					);
 					let mid_threshold = (self.agent_runtime_config.r#loop.context_window_tokens
 						as f64 * crate::runtime_loop::MID_WATER_TRIGGER_RATIO)
@@ -1514,6 +1539,24 @@ impl GenericAgentRuntime {
 					}
 				}
 
+				// Pre-call snapshots: used below to (a) compare the current
+				// request context against the committed-token baseline —
+				// a shifted system prompt, tool-schema surface, or model
+				// invalidates the baseline — and (b) feed back into
+				// `record_observed_usage` after the response lands, so
+				// the next turn can run the same validity check.
+				let pre_call_message_count = messages.len();
+				let pre_call_system_prompt_bytes = system_prompt.len();
+				let pre_call_tool_schema_bytes_len =
+					tool_schema_bytes.map(|b| b.len()).unwrap_or(0);
+				let pre_call_baseline = loop_state.committed_baseline().filter(|b| {
+					b.is_valid_for(
+						pre_call_system_prompt_bytes as u64,
+						pre_call_tool_schema_bytes_len as u64,
+						request.model_override.as_deref(),
+					)
+				});
+
 				// Pre-call: snapshot the calibrated byte-based prompt estimate so
 				// we can fold the provider's reported `usage.prompt_tokens` back
 				// into the calibration after the call returns. Recomputed each
@@ -1525,11 +1568,8 @@ impl GenericAgentRuntime {
 					tool_schema_bytes,
 					&loop_state.estimator_calibration,
 					counter.as_ref(),
-					loop_state.committed_baseline(),
+					pre_call_baseline,
 				);
-				// Snapshot the message count at pre-call time so the
-				// post-response write-back records the exact commit boundary.
-				let pre_call_message_count = messages.len();
 				let gen_request = GenerationRequest {
 					system_prompt: Some(system_prompt.clone()),
 					prompt: String::new(),
@@ -1646,13 +1686,19 @@ impl GenericAgentRuntime {
 								loop_state
 									.estimator_calibration
 									.update(pre_call_estimate.raw_total_tokens, resp.prompt_tokens);
-								// Record the committed-token baseline: this call's
-								// exact input_tokens plus the message count at the
-								// moment of the call. Next turn's pre-flight only
-								// needs to estimate the tail appended after this.
+								// Record the committed-token baseline plus the three
+								// prefix-surface guards (system prompt byte length,
+								// tool-schema byte length, serving model). Next turn's
+								// pre-flight rejects the baseline if any guard diverges,
+								// so mid-session changes (dynamic system blocks, plan
+								// mode transitions, tool surface growth, model swap)
+								// no longer produce stale reuse of `input_tokens`.
 								loop_state.record_observed_usage(
 									pre_call_message_count,
 									resp.prompt_tokens,
+									pre_call_system_prompt_bytes,
+									pre_call_tool_schema_bytes_len,
+									Some(resp.model_id.clone()),
 								);
 								let _ = sender.send(
 									crate::runtime_loop::LoopEvent::EstimatorCalibrated {
@@ -1766,9 +1812,15 @@ impl GenericAgentRuntime {
 													// Retry shares the same committed message
 													// boundary as the primary call; use the
 													// retry's `prompt_tokens` as the baseline.
+													// The retry model id overrides the primary's
+													// — the server may have escalated to a larger
+													// model when filling the expanded output slot.
 													loop_state.record_observed_usage(
 														pre_call_message_count,
 														retry_resp.prompt_tokens,
+														pre_call_system_prompt_bytes,
+														pre_call_tool_schema_bytes_len,
+														Some(retry_resp.model_id.clone()),
 													);
 													// Replace the truncated streaming text in the
 													// TUI. `LlmDecisionComplete` was already sent
@@ -1848,6 +1900,9 @@ impl GenericAgentRuntime {
 								loop_state.record_observed_usage(
 									pre_call_message_count,
 									resp.prompt_tokens,
+									pre_call_system_prompt_bytes,
+									pre_call_tool_schema_bytes_len,
+									Some(resp.model_id.clone()),
 								);
 								if let Some(sender) = event_sender {
 									let _ = sender.send(
@@ -1965,6 +2020,9 @@ impl GenericAgentRuntime {
 													loop_state.record_observed_usage(
 														pre_call_message_count,
 														retry_resp.prompt_tokens,
+														pre_call_system_prompt_bytes,
+														pre_call_tool_schema_bytes_len,
+														Some(retry_resp.model_id.clone()),
 													);
 													// Intentionally no `LlmTextReplace` on the
 													// non-streaming path: there is no truncated

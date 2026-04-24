@@ -164,12 +164,29 @@ pub struct LoopState {
 	#[serde(skip)]
 	pub(crate) last_observed_input_tokens: Option<u64>,
 	/// Number of messages in the call that produced
-	/// `last_observed_input_tokens`. Together the two fields form a
-	/// [`CommittedBaseline`]; see [`LoopState::committed_baseline`].
-	/// Not serialized, for the same reason as
-	/// [`Self::last_observed_input_tokens`].
+	/// `last_observed_input_tokens`. Together with the snapshot fields
+	/// below, these form a [`CommittedBaseline`]; see
+	/// [`LoopState::committed_baseline`]. Not serialized, for the same
+	/// reason as [`Self::last_observed_input_tokens`].
 	#[serde(skip)]
 	pub(crate) committed_message_count: usize,
+	/// Byte length of the system prompt that was in the committed call.
+	/// Used by [`CommittedBaseline::is_valid_for`] to detect when the
+	/// dynamic system-prompt surface has shifted between turns (working
+	/// directory, memory blocks, or runtime-memory sections updated).
+	#[serde(skip)]
+	pub(crate) committed_system_prompt_bytes: u64,
+	/// Byte length of the serialized tool-schema block that was in the
+	/// committed call. Used by [`CommittedBaseline::is_valid_for`] to
+	/// detect deferred-tool transitions, plan-mode visibility changes,
+	/// or disallowed-tools list mutations between turns.
+	#[serde(skip)]
+	pub(crate) committed_tool_schema_bytes_len: u64,
+	/// Model ID the provider reported on the committed call. A change
+	/// means the tokenizer family may differ from what priced
+	/// `last_observed_input_tokens`, so the baseline cannot be trusted.
+	#[serde(skip)]
+	pub(crate) committed_model_id: Option<String>,
 	/// Run-scoped counter of consecutive Layer 3 structured-summary
 	/// compaction failures. Reset to `0` on any successful LLM-assisted
 	/// compaction. Once it reaches
@@ -287,6 +304,9 @@ impl LoopState {
 			estimator_calibration: EstimatorCalibration::default(),
 			last_observed_input_tokens: None,
 			committed_message_count: 0,
+			committed_system_prompt_bytes: 0,
+			committed_tool_schema_bytes_len: 0,
+			committed_model_id: None,
 			consecutive_autocompact_failures: 0,
 			frozen_tool_schema: None,
 			tool_schema_dirty: true,
@@ -346,31 +366,56 @@ impl LoopState {
 	/// Populated after any successful provider call that reported a
 	/// non-zero `usage.prompt_tokens`; cleared on compaction or any event
 	/// that changes the non-tail surface (tool schema, system prompt).
+	///
+	/// Callers must check [`CommittedBaseline::is_valid_for`] with the
+	/// current request context before trusting the baseline — a matching
+	/// `message_count` is necessary but not sufficient for the baseline
+	/// to describe the actual prefix the next call will send.
 	pub fn committed_baseline(&self) -> Option<CommittedBaseline> {
 		self.last_observed_input_tokens
 			.map(|input_tokens| CommittedBaseline {
 				input_tokens,
 				message_count: self.committed_message_count,
+				system_prompt_bytes: self.committed_system_prompt_bytes,
+				tool_schema_bytes_len: self.committed_tool_schema_bytes_len,
+				model_id: self.committed_model_id.clone(),
 			})
 	}
 
-	/// Record the real `usage.prompt_tokens` and message count for the
-	/// most recent successful call.
+	/// Record the real `usage.prompt_tokens` and full committed-prefix
+	/// snapshot for the most recent successful call.
 	///
 	/// `observed_input_tokens` is the provider's authoritative count;
 	/// `committed_count` is the number of messages that were in that
-	/// request. Zero `observed_input_tokens` is a no-op — the provider
-	/// either did not report usage or reported a cache-only hit, neither
-	/// of which can serve as a baseline for the tail heuristic.
-	pub fn record_observed_usage(&mut self, committed_count: usize, observed_input_tokens: u64) {
+	/// request. The three trailing arguments snapshot the other prefix
+	/// surfaces the provider tokenized — the system-prompt byte length,
+	/// the tool-schema byte length on the wire, and the model ID that
+	/// actually served the request. [`CommittedBaseline::is_valid_for`]
+	/// compares these against the next turn's context and invalidates
+	/// the baseline when any has shifted.
+	///
+	/// Zero `observed_input_tokens` is a no-op — the provider either did
+	/// not report usage or reported a cache-only hit, neither of which
+	/// can serve as a baseline for the tail heuristic.
+	pub fn record_observed_usage(
+		&mut self,
+		committed_count: usize,
+		observed_input_tokens: u64,
+		system_prompt_bytes: usize,
+		tool_schema_bytes_len: usize,
+		model_id: Option<String>,
+	) {
 		if observed_input_tokens == 0 {
 			return;
 		}
 		self.last_observed_input_tokens = Some(observed_input_tokens);
 		self.committed_message_count = committed_count;
+		self.committed_system_prompt_bytes = system_prompt_bytes as u64;
+		self.committed_tool_schema_bytes_len = tool_schema_bytes_len as u64;
+		self.committed_model_id = model_id;
 	}
 
-	/// Clear any cached committed-token baseline.
+	/// Clear any cached committed-token baseline and its prefix guards.
 	///
 	/// Called on compaction (which truncates / rewrites history so the
 	/// previous message_count is no longer meaningful) and on schema
@@ -379,6 +424,9 @@ impl LoopState {
 	pub fn invalidate_committed_baseline(&mut self) {
 		self.last_observed_input_tokens = None;
 		self.committed_message_count = 0;
+		self.committed_system_prompt_bytes = 0;
+		self.committed_tool_schema_bytes_len = 0;
+		self.committed_model_id = None;
 	}
 
 	/// Return a `Vec<ToolDefinition>` for the next LLM call, reusing the
@@ -536,6 +584,7 @@ mod tests {
 
 	use super::{LoopState, LoopStatus};
 	use crate::router::{IntentFamily, RouteDecision, RouteRisk};
+	use crate::runtime_loop::CommittedBaseline;
 	use crate::runtime_loop::LoopContext;
 	use crate::runtime_loop::ask_user::{AskUserPayload, AskUserResumeContract};
 	use crate::runtime_loop::cache_break::CacheBreakDetector;
@@ -792,7 +841,7 @@ mod tests {
 		// fresh buffer. The first post-restore call must fall back to the
 		// whole-history estimate.
 		let mut state = LoopState::new("loop-baseline-skip", &loop_context());
-		state.record_observed_usage(7, 2048);
+		state.record_observed_usage(7, 2048, 0, 0, None);
 		assert_eq!(state.last_observed_input_tokens, Some(2048));
 		assert_eq!(state.committed_message_count, 7);
 		assert!(state.committed_baseline().is_some());
@@ -816,7 +865,7 @@ mod tests {
 		// committed system + tools surface is stable, and a schema-dirty
 		// event explicitly breaks that assumption.
 		let mut state = LoopState::new("loop-dirty-reset", &loop_context());
-		state.record_observed_usage(5, 1500);
+		state.record_observed_usage(5, 1500, 0, 0, None);
 		assert!(state.committed_baseline().is_some());
 		state.tool_schema_dirty = false;
 
@@ -840,10 +889,76 @@ mod tests {
 		state.invalidate_committed_baseline();
 		assert!(state.committed_baseline().is_none());
 
-		state.record_observed_usage(3, 900);
+		state.record_observed_usage(3, 900, 0, 0, None);
 		state.invalidate_committed_baseline();
 		state.invalidate_committed_baseline();
 		assert!(state.committed_baseline().is_none());
+	}
+
+	#[test]
+	fn committed_baseline_is_valid_for_rejects_mismatch() {
+		// All three prefix guards must match before the baseline can be
+		// trusted. Each mismatch scenario below exercises one guard in
+		// isolation; regression for the reviewer-flagged scenarios where
+		// dynamic system-prompt content, deferred-tool transitions, or
+		// a model override swap silently reused stale `input_tokens`.
+		let mut state = LoopState::new("loop-baseline-guard", &loop_context());
+		state.record_observed_usage(5, 1500, 2048, 1024, Some("gpt-5.4".to_string()));
+		let baseline = state
+			.committed_baseline()
+			.expect("baseline populated after record_observed_usage");
+
+		// Exact match — baseline is valid.
+		assert!(baseline.is_valid_for(2048, 1024, Some("gpt-5.4")));
+
+		// System prompt byte length drifted (e.g. working-directory block grew).
+		assert!(!baseline.is_valid_for(2100, 1024, Some("gpt-5.4")));
+
+		// Tool-schema byte length drifted (e.g. new tool loaded via tool_search).
+		assert!(!baseline.is_valid_for(2048, 1100, Some("gpt-5.4")));
+
+		// Model changed — tokenizer family may differ, input_tokens figure
+		// cannot be trusted even if the text surfaces are identical.
+		assert!(!baseline.is_valid_for(2048, 1024, Some("claude-sonnet-4-6")));
+		assert!(!baseline.is_valid_for(2048, 1024, None));
+	}
+
+	#[test]
+	fn committed_baseline_is_valid_for_rejects_zero_input_tokens() {
+		// A default-constructed baseline (all zeros) must never be
+		// considered valid, even if the caller happens to pass matching
+		// zero byte-lengths and a matching None model. The `input_tokens`
+		// guard is the minimum bar.
+		let baseline = CommittedBaseline::default();
+		assert!(!baseline.is_valid_for(0, 0, None));
+	}
+
+	#[test]
+	fn record_observed_usage_stores_all_prefix_guards() {
+		// Pin the contract that `record_observed_usage` captures all three
+		// prefix-surface snapshots, so [`LoopState::committed_baseline`]
+		// returns them alongside `input_tokens`.
+		let mut state = LoopState::new("loop-record-guards", &loop_context());
+		state.record_observed_usage(6, 1800, 3072, 896, Some("gpt-5.4".to_string()));
+		let b = state.committed_baseline().expect("populated");
+		assert_eq!(b.input_tokens, 1800);
+		assert_eq!(b.message_count, 6);
+		assert_eq!(b.system_prompt_bytes, 3072);
+		assert_eq!(b.tool_schema_bytes_len, 896);
+		assert_eq!(b.model_id.as_deref(), Some("gpt-5.4"));
+	}
+
+	#[test]
+	fn invalidate_committed_baseline_clears_all_prefix_guards() {
+		// After invalidation, every prefix field returns to its default so
+		// a subsequent `record_observed_usage` starts fresh.
+		let mut state = LoopState::new("loop-invalidate-guards", &loop_context());
+		state.record_observed_usage(6, 1800, 3072, 896, Some("gpt-5.4".to_string()));
+		state.invalidate_committed_baseline();
+		assert!(state.committed_baseline().is_none());
+		assert_eq!(state.committed_system_prompt_bytes, 0);
+		assert_eq!(state.committed_tool_schema_bytes_len, 0);
+		assert!(state.committed_model_id.is_none());
 	}
 
 	#[test]
@@ -853,12 +968,12 @@ mod tests {
 		// valid baseline. The existing baseline (if any) stays untouched,
 		// and an absent baseline stays absent.
 		let mut state = LoopState::new("loop-zero-usage", &loop_context());
-		state.record_observed_usage(4, 0);
+		state.record_observed_usage(4, 0, 0, 0, None);
 		assert!(state.committed_baseline().is_none());
 
-		state.record_observed_usage(4, 1200);
+		state.record_observed_usage(4, 1200, 0, 0, None);
 		let original = state.committed_baseline();
-		state.record_observed_usage(8, 0);
+		state.record_observed_usage(8, 0, 0, 0, None);
 		assert_eq!(state.committed_baseline(), original);
 	}
 
