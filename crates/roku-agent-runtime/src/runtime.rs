@@ -49,8 +49,8 @@ use roku_plugin_host::{
 	PluginRegistrySnapshot, ToolExecutionResult, ToolInvocation, ToolRuntime, ToolRuntimeError,
 };
 use roku_plugin_llm::{
-	GenerationRequest, LlmAdapterError, LlmRouter, Message, RiskTier, StreamChunk, ThinkingEffort,
-	ToolCallBlock, ToolDefinition,
+	GenerationRequest, LlmAdapterError, LlmRouter, Message, RiskTier, StreamChunk,
+	SystemPromptSections, ThinkingEffort, TokenCounter, ToolCallBlock, ToolDefinition,
 };
 use roku_plugin_skills::SkillRegistry;
 use roku_plugin_tools::{
@@ -769,6 +769,68 @@ impl GenericAgentRuntime {
 		ToolObservation::from_runtime_error(tool_name, error, &self.resource_catalog)
 	}
 
+	/// Resolve the three preflight views the attempt loop depends on
+	/// through the full `select_model` policy: provider-owned token
+	/// counter, routed serving model id, and wire-bytes preview of the
+	/// tool-schema block. All three are sourced from the same
+	/// `GenerationRequest`-shaped selection payload so they agree on
+	/// the provider `router.generate*` will actually land on — model
+	/// override eligibility, risk tier, budgets, and message-size
+	/// context checks all contribute.
+	///
+	/// Called once per attempt before the mid-tier pre-flight block,
+	/// and again after the block if mid-tier compaction mutated
+	/// `messages` (the shorter buffer can flip `select_model`'s
+	/// eligibility decision, rerouting to a different provider whose
+	/// counter and wire format differ). Shared helper keeps the two
+	/// resolution sites from drifting.
+	///
+	/// `route_router` (not `execution_router`) is consulted so the
+	/// routed id matches what `router.generate*` will actually serve
+	/// under the two-router configuration where those diverge.
+	#[allow(clippy::type_complexity)]
+	fn resolve_attempt_preflight(
+		&self,
+		messages: &[Message],
+		system_prompt: &str,
+		system_prompt_sections: &SystemPromptSections,
+		tool_definitions: &[ToolDefinition],
+		model_override: Option<String>,
+		config: &crate::runtime_config::NextStepRuntimeConfig,
+	) -> (Arc<dyn TokenCounter>, Option<String>, Vec<u8>) {
+		let selection_request = GenerationRequest {
+			system_prompt: Some(system_prompt.to_string()),
+			prompt: String::new(),
+			messages: Some(messages.to_vec()),
+			expected_output_tokens: config.expected_output_tokens,
+			risk_tier: RiskTier::Low,
+			preferred_provider: None,
+			budget_tokens_remaining: config.budget_tokens_remaining,
+			budget_cost_remaining_usd: config.budget_cost_remaining_usd,
+			tools: None,
+			model_override,
+			thinking_effort: None,
+			system_prompt_sections: Some(system_prompt_sections.clone()),
+		};
+		let counter = self
+			.route_router
+			.as_ref()
+			.map(|r| r.token_counter_for_request(&selection_request))
+			.unwrap_or_else(roku_plugin_llm::default_counter);
+		let routed_model = self
+			.route_router
+			.as_ref()
+			.and_then(|r| r.selected_model_id_for_request(&selection_request));
+		let schema_bytes = self
+			.route_router
+			.as_ref()
+			.map(|r| {
+				r.preview_wire_tool_schema_bytes_for_request(&selection_request, tool_definitions)
+			})
+			.unwrap_or_else(|| serde_json::to_vec(tool_definitions).unwrap_or_default());
+		(counter, routed_model, schema_bytes)
+	}
+
 	/// Returns `(prompt_tokens, output_tokens)` consumed by compaction LLM calls.
 	async fn maybe_compact(
 		&self,
@@ -1428,154 +1490,82 @@ impl GenericAgentRuntime {
 					});
 				}
 
-				// Resolve the provider-owned token counter through the full
-				// `select_model` policy so the estimator consults the same
-				// provider that `generate_streaming` / `generate` will
-				// actually route to — `model_override` eligibility, risk
-				// tier, and budget filters all come into play. An earlier
-				// optimization routed via `model_id` only to avoid a
-				// `messages.clone()` per attempt, but that short-circuit
-				// can pick a different provider than the real call in
-				// multi-model setups (budget exhaustion, risk-tier
-				// demotion) and produce misleading pressure estimates.
-				// The clone pays for correctness on the hot path.
-				let counter_selection_request = GenerationRequest {
-					system_prompt: Some(system_prompt.clone()),
-					prompt: String::new(),
-					messages: Some(messages.clone()),
-					expected_output_tokens: config.expected_output_tokens,
-					risk_tier: RiskTier::Low,
-					preferred_provider: None,
-					budget_tokens_remaining: config.budget_tokens_remaining,
-					budget_cost_remaining_usd: config.budget_cost_remaining_usd,
-					tools: None,
-					model_override: request.model_override.clone(),
-					thinking_effort: None,
-					system_prompt_sections: Some(system_prompt_sections.clone()),
-				};
-				let counter = self
-					.route_router
-					.as_ref()
-					.map(|r| r.token_counter_for_request(&counter_selection_request))
-					.unwrap_or_else(roku_plugin_llm::default_counter);
-				// Routed serving model id for the committed-baseline
-				// validation below. Resolved via `select_model` on the
-				// same request shape the counter resolution used, so all
-				// three (mid baseline, pre-call baseline, pre-call
-				// estimator) agree on the model the next call will
-				// actually land on. Returns `None` when no registered
-				// model is eligible — treated as a mismatch below, which
-				// correctly falls back to whole-history estimation.
-				//
-				// Must consult `route_router` (not `execution_router`)
-				// so the routed id matches what `router.generate*` will
-				// actually serve; under the two-router configuration
-				// they diverge in provider / model selection.
-				let current_routed_model = self
-					.route_router
-					.as_ref()
-					.and_then(|r| r.selected_model_id_for_request(&counter_selection_request));
-
-				// Refresh the wire-bytes preview against the
-				// post-compaction routing request. Layer 0
-				// microcompact and Layer 1/2 mid-tier compaction
-				// mutate `messages`, which can shift
-				// `select_model`'s eligibility decision — the
-				// serving provider on this attempt may differ
-				// from the one that shaped the pre-loop snapshot
-				// at `tool_schema_bytes_vec`. If it does, the
-				// pre-loop snapshot has the wrong provider's wire
-				// format (OpenAI's `{"type":"function",...}` vs
-				// Anthropic's `input_schema`, etc.), so its byte
-				// length is wrong too. Committing that wrong
-				// length via `pre_call_tool_schema_bytes_len`
-				// would make the next turn's
-				// `CommittedBaseline::is_valid_for` reject on the
-				// schema-bytes guard and disable committed-baseline
-				// mode whenever a reroute happens. The
-				// `counter_selection_request` built above — same
-				// one driving counter and `current_routed_model`
-				// — is the right input; rebuilding the preview
-				// from it keeps the three preflight views (counter,
-				// routed model, schema bytes) consistent with the
-				// real serving call.
-				let attempt_schema_bytes_vec: Vec<u8> = self
-					.route_router
-					.as_ref()
-					.map(|r| {
-						r.preview_wire_tool_schema_bytes_for_request(
-							&counter_selection_request,
-							&tool_definitions,
-						)
-					})
-					.unwrap_or_else(|| serde_json::to_vec(&tool_definitions).unwrap_or_default());
-				let tool_schema_bytes: Option<&[u8]> = if attempt_schema_bytes_vec.is_empty() {
-					None
-				} else {
-					Some(&attempt_schema_bytes_vec)
-				};
-
-				// Cache break detector: snapshot the prompt prefix
-				// components (static system blocks + tool schema +
-				// model) so the post-call check can identify which
-				// component diverged when a break fires.
-				//
-				// Placed inside the attempt loop because
-				// `current_routed_model` — the id the next
-				// `router.generate*` call will actually serve — only
-				// resolves after `counter_selection_request` is
-				// built. Using `request.model_override` here instead
-				// would hash `""` on every default-routing turn, so
-				// two consecutive turns routed to different providers
-				// would read as "model unchanged" and the detector
-				// would silently miss every cache break caused by a
-				// routing swap.
-				//
-				// Reactive-retry iterations re-record unconditionally:
-				// `current_fingerprint` is consumed by `check_response`
-				// only on successful primary responses; a
-				// `ContextWindowExceeded` fail path loops back here
-				// and overwrites the previous iteration's fingerprint,
-				// which is the desired "last record before the real
-				// call wins" semantics.
-				loop_state.cache_break_detector.record_prompt_state(
-					&system_prompt_sections.static_blocks,
-					&tool_definitions,
-					current_routed_model.as_deref().unwrap_or(""),
-				);
+				// Initial preflight resolution for this attempt — may be
+				// superseded by a second resolution below if mid-tier
+				// compaction mutates `messages`. Layer 0 microcompact
+				// above already shrank the buffer; this resolution
+				// reflects its post-microcompact state. Reading the
+				// counter / routed model / wire-bytes preview through
+				// the full `select_model` policy (via the same
+				// `counter_selection_request`) keeps all three views
+				// consistent with the model `router.generate*` will
+				// actually serve — `model_override` eligibility, risk
+				// tier, and budget filters all come into play. An
+				// earlier optimization routed via `model_id` only to
+				// avoid a `messages.clone()` per attempt, but that
+				// short-circuit can pick a different provider than the
+				// real call in multi-model setups (budget exhaustion,
+				// risk-tier demotion) and produce misleading pressure
+				// estimates. The clone pays for correctness on the hot
+				// path. `route_router` (not `execution_router`) is
+				// consulted so the routed id matches what
+				// `router.generate*` will actually serve under the
+				// two-router configuration where those diverge.
+				let (counter_initial, current_routed_model_initial, attempt_schema_bytes_initial) =
+					self.resolve_attempt_preflight(
+						&messages,
+						&system_prompt,
+						&system_prompt_sections,
+						&tool_definitions,
+						request.model_override.clone(),
+						config,
+					);
 
 				// Mid-tier pre-flight (Layer 1 / Layer 2): runs between Layer 0
 				// microcompact and the Layer 3 high-water check. Only fires when
 				// pressure is above the mid-water threshold and reactive compaction
 				// has not already been used this attempt (to avoid double-firing
 				// two compaction layers in the same turn).
-				if !reactive_compact_used {
+				//
+				// Scoped: `mid_tool_schema_bytes` borrows the initial
+				// preview vec inside this block only. When the block
+				// exits the borrow drops, leaving the `_initial` vec
+				// free to be replaced by the post-mid-tier re-resolution
+				// below.
+				let mid_tier_ran = if !reactive_compact_used {
+					let mid_tool_schema_bytes: Option<&[u8]> =
+						if attempt_schema_bytes_initial.is_empty() {
+							None
+						} else {
+							Some(&attempt_schema_bytes_initial)
+						};
 					// Same baseline validity check as `maybe_compact`: the
 					// committed prefix is only authoritative when the
 					// system prompt, tool-schema surface, and routed
 					// model are all unchanged since the commit. The model
-					// guard uses `current_routed_model` (resolved via
-					// `select_model`), not `request.model_override` —
+					// guard uses `current_routed_model_initial` (resolved
+					// via `select_model`), not `request.model_override` —
 					// otherwise the default-routing case (override=None)
 					// would read as a permanent mismatch and the
 					// committed-baseline branch would never activate.
 					let mid_system_bytes = system_prompt.len() as u64;
-					let mid_schema_bytes = tool_schema_bytes.map(|b| b.len() as u64).unwrap_or(0);
+					let mid_schema_bytes =
+						mid_tool_schema_bytes.map(|b| b.len() as u64).unwrap_or(0);
 					let mid_baseline = loop_state.committed_baseline().filter(|b| {
 						b.is_valid_for(
 							mid_system_bytes,
 							mid_schema_bytes,
-							current_routed_model.as_deref(),
+							current_routed_model_initial.as_deref(),
 						)
 					});
 					let mid_estimate = crate::runtime_loop::estimate_prompt_pressure(
 						&messages,
 						Some(&system_prompt),
-						tool_schema_bytes,
+						mid_tool_schema_bytes,
 						loop_state
 							.estimator_calibration
-							.get(current_routed_model.as_deref()),
-						counter.as_ref(),
+							.get(current_routed_model_initial.as_deref()),
+						counter_initial.as_ref(),
 						mid_baseline,
 					);
 					let mid_threshold = (self.agent_runtime_config.r#loop.context_window_tokens
@@ -1623,7 +1613,8 @@ impl GenericAgentRuntime {
 							&mut messages,
 							session_summary_text.as_deref(),
 						);
-						if !matches!(outcome, crate::runtime_loop::MidCompactOutcome::Noop) {
+						let ran = !matches!(outcome, crate::runtime_loop::MidCompactOutcome::Noop);
+						if ran {
 							loop_state.cache_break_detector.notify_compaction();
 							// Mid-tier compaction rewrote the tail of the
 							// message buffer; the previously committed
@@ -1656,8 +1647,80 @@ impl GenericAgentRuntime {
 								crate::runtime_loop::MidCompactOutcome::Noop => {}
 							}
 						}
+						ran
+					} else {
+						false
 					}
-				}
+				} else {
+					false
+				};
+
+				// Re-resolve preflight state if mid-tier compaction
+				// actually mutated `messages`. The resulting buffer
+				// can flip `select_model`'s eligibility decision
+				// (message-size-sensitive budgets), so the serving
+				// provider may differ from the initial resolution.
+				// Without this refresh, `pre_call_estimate` would use
+				// the old provider's counter and wire-bytes while
+				// `router.generate*` lands on the new one — and the
+				// stored baseline's schema-bytes length would belong
+				// to the wrong provider, breaking next-turn validity.
+				let (counter, current_routed_model, attempt_schema_bytes_vec) = if mid_tier_ran {
+					self.resolve_attempt_preflight(
+						&messages,
+						&system_prompt,
+						&system_prompt_sections,
+						&tool_definitions,
+						request.model_override.clone(),
+						config,
+					)
+				} else {
+					(
+						counter_initial,
+						current_routed_model_initial,
+						attempt_schema_bytes_initial,
+					)
+				};
+				let tool_schema_bytes: Option<&[u8]> = if attempt_schema_bytes_vec.is_empty() {
+					None
+				} else {
+					Some(&attempt_schema_bytes_vec)
+				};
+
+				// Cache break detector: snapshot the prompt prefix
+				// components (static system blocks + tool schema +
+				// model) with the *final* routed model for this attempt
+				// — after any mid-tier reroute has settled. Recording
+				// before the mid-tier block would leave the fingerprint
+				// carrying the initial routed id while the real call
+				// lands on the post-compaction id, so next turn's
+				// cache-break comparison would read a spurious "model
+				// unchanged" on the leading edge of a legitimate
+				// routing swap.
+				//
+				// Placed inside the attempt loop because
+				// `current_routed_model` — the id the next
+				// `router.generate*` call will actually serve — only
+				// resolves after `counter_selection_request` is built.
+				// Using `request.model_override` here instead would
+				// hash `""` on every default-routing turn, so two
+				// consecutive turns routed to different providers would
+				// read as "model unchanged" and the detector would
+				// silently miss every cache break caused by a routing
+				// swap.
+				//
+				// Reactive-retry iterations re-record unconditionally:
+				// `current_fingerprint` is consumed by `check_response`
+				// only on successful primary responses; a
+				// `ContextWindowExceeded` fail path loops back here
+				// and overwrites the previous iteration's fingerprint,
+				// which is the desired "last record before the real
+				// call wins" semantics.
+				loop_state.cache_break_detector.record_prompt_state(
+					&system_prompt_sections.static_blocks,
+					&tool_definitions,
+					current_routed_model.as_deref().unwrap_or(""),
+				);
 
 				// Pre-call snapshots: used below to (a) compare the current
 				// request context against the committed-token baseline —
