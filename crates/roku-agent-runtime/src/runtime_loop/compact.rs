@@ -576,6 +576,81 @@ impl EstimatorCalibration {
 	}
 }
 
+/// Per-model wrapper around [`EstimatorCalibration`].
+///
+/// The byte-based estimator now routes through provider-owned
+/// [`roku_plugin_llm::TokenCounter`] implementations, each of which can
+/// bias the estimate differently (a 4-bytes-per-token heuristic, a
+/// tokenizer-backed count, a provider-specific message-wrapping
+/// overhead, etc.). Mixing samples from multiple models into a single
+/// ring buffer lets one model's residual bias distort the scale used
+/// for another — a 1.3x under-counter alternating with a 0.8x
+/// over-counter would average toward ~1.0 and hide both directions.
+///
+/// This wrapper keys samples by routed `model_id`, so each model
+/// accumulates its own bounded sample window and its own converged
+/// scale. Requests made before a model id can be resolved (the
+/// pre-flight microcompact inside and outside the attempt loop, the
+/// classifier/router-mode shortcut in `maybe_compact`) fall through
+/// to the `fallback` bucket — preserving the pre-split behavior for
+/// those surfaces so they still benefit from a single global scale
+/// where we cannot attribute the sample to a specific model.
+///
+/// `Default` is an empty map plus an uncalibrated fallback, so fresh
+/// runs, serialized-snapshot reloads without a matching field, and
+/// old-format state-store rows all start in the same known state.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PerModelCalibration {
+	#[serde(default)]
+	per_model: std::collections::HashMap<String, EstimatorCalibration>,
+	/// Scale used when no routed model id is available (pre-routing
+	/// pressure checks) or when the routed model has no samples yet.
+	#[serde(default)]
+	fallback: EstimatorCalibration,
+}
+
+impl PerModelCalibration {
+	/// Resolve the calibration to consult when estimating pressure
+	/// for a request routed to `model_id`.
+	///
+	/// Returns the per-model calibration if we have samples for that
+	/// id; otherwise returns the fallback so the estimator still sees
+	/// a sensible scale on the model's first turn (and while the
+	/// routing stays the same the bucket will grow naturally).
+	pub fn get(&self, model_id: Option<&str>) -> &EstimatorCalibration {
+		model_id
+			.and_then(|m| self.per_model.get(m))
+			.unwrap_or(&self.fallback)
+	}
+
+	/// Fold a successful `(estimated, real)` observation into the
+	/// bucket for `model_id`.
+	///
+	/// Passing `None` stores the sample in the fallback bucket — used
+	/// by surfaces that apply calibration before routing has resolved
+	/// (pre-routing microcompact, maybe_compact outside the attempt
+	/// loop). The fallback is intentionally *not* mirrored to from
+	/// per-model updates: letting every model's samples flow into it
+	/// would reproduce the exact global-mixing bug this type is meant
+	/// to eliminate.
+	pub fn update(&mut self, model_id: Option<&str>, estimated: u64, real: u64) {
+		match model_id {
+			Some(m) => self
+				.per_model
+				.entry(m.to_string())
+				.or_default()
+				.update(estimated, real),
+			None => self.fallback.update(estimated, real),
+		}
+	}
+
+	/// Effective scale for the routed model, or fallback when
+	/// absent. 1.0 when both buckets are uncalibrated.
+	pub fn scale_for(&self, model_id: Option<&str>) -> f64 {
+		self.get(model_id).scale()
+	}
+}
+
 /// Estimate prompt tokens for what will actually be sent to the LLM.
 ///
 /// O(n) over total byte length. Pure function: no IO, no panic.
@@ -1553,7 +1628,7 @@ mod tests {
 			ambiguity_stagnation: None,
 			sub_agent_depth: 0,
 			disallowed_tools: Vec::new(),
-			estimator_calibration: EstimatorCalibration::default(),
+			estimator_calibration: PerModelCalibration::default(),
 			last_observed_input_tokens: None,
 			committed_message_count: 0,
 			committed_system_prompt_bytes: 0,
@@ -3751,6 +3826,104 @@ mod tests {
 			"raw-total update collapses to ~1.0 under a dominant \
 			 committed prefix (the bug this pair helper avoids); got {}",
 			cal_raw.scale(),
+		);
+	}
+
+	#[test]
+	fn per_model_calibration_isolates_bias_across_models() {
+		// Scenario: two providers with opposite residual biases.
+		// Model A under-counts by 2x (real = 2 × estimated); Model B
+		// over-counts by 0.5x (real = 0.5 × estimated). A shared ring
+		// buffer would average these toward ~1.0 — each sample
+		// cancelling the other — and report a falsely-calibrated
+		// scale for both. Per-model isolation keeps each bucket
+		// converging to its own true ratio.
+		let mut cal = PerModelCalibration::default();
+		for _ in 0..CAL_SAMPLE_CAP {
+			cal.update(Some("model-a"), 100, 200); // 2.0 ratio
+			cal.update(Some("model-b"), 100, 50); // 0.5 ratio
+		}
+		assert!(
+			(cal.scale_for(Some("model-a")) - 2.0).abs() < 1e-9,
+			"model-a scale must track its own 2.0 ratio (upper clamp); got {}",
+			cal.scale_for(Some("model-a")),
+		);
+		assert!(
+			(cal.scale_for(Some("model-b")) - 0.5).abs() < 1e-9,
+			"model-b scale must track its own 0.5 ratio (lower clamp); got {}",
+			cal.scale_for(Some("model-b")),
+		);
+	}
+
+	#[test]
+	fn per_model_calibration_does_not_mirror_per_model_samples_into_fallback() {
+		// Defensive: the fallback bucket is consulted by pre-routing
+		// surfaces (pre-flight microcompact, the compact-mode
+		// pressure check before a model id is known). Mirroring every
+		// model's samples into it would rebuild the global-average
+		// mixing that `PerModelCalibration` is meant to fix, so
+		// per-model updates must stay isolated to their own bucket.
+		let mut cal = PerModelCalibration::default();
+		for _ in 0..CAL_SAMPLE_CAP {
+			cal.update(Some("model-a"), 100, 200);
+		}
+		assert!(
+			(cal.scale_for(Some("model-a")) - 2.0).abs() < 1e-9,
+			"model-a accumulated its own samples",
+		);
+		assert!(
+			(cal.scale_for(None) - 1.0).abs() < 1e-9,
+			"fallback stays uncalibrated — per-model updates must not \
+			 mirror back into it; got {}",
+			cal.scale_for(None),
+		);
+	}
+
+	#[test]
+	fn per_model_calibration_fallback_receives_unkeyed_updates() {
+		// `update(None, ..)` — pre-routing surfaces that haven't
+		// resolved a model id yet — must still record samples, and
+		// they land in the fallback bucket (nowhere else to put
+		// them). This guards the microcompact / maybe_compact
+		// fallback path: those sites call `update` via the fallback
+		// directly only when no routed model is available.
+		let mut cal = PerModelCalibration::default();
+		for _ in 0..CAL_SAMPLE_CAP {
+			cal.update(None, 100, 200);
+		}
+		assert!(
+			(cal.scale_for(None) - 2.0).abs() < 1e-9,
+			"fallback absorbs unkeyed samples; got {}",
+			cal.scale_for(None),
+		);
+		// And per-model lookups still see no samples — they should
+		// return the fallback's scale (the only data we have).
+		assert_eq!(
+			cal.scale_for(Some("unknown")),
+			cal.scale_for(None),
+			"unknown model falls through to fallback until its bucket fills",
+		);
+	}
+
+	#[test]
+	fn per_model_calibration_unseen_model_returns_fallback_then_accumulates_own() {
+		// First lookup for a never-updated model returns the
+		// fallback's scale (default 1.0). After the first update is
+		// recorded against that model, subsequent lookups return its
+		// own bucket's scale, not the fallback's.
+		let mut cal = PerModelCalibration::default();
+		assert!(
+			(cal.scale_for(Some("fresh-model")) - 1.0).abs() < 1e-9,
+			"unseen model returns default fallback scale",
+		);
+		for _ in 0..CAL_SAMPLE_CAP {
+			cal.update(Some("fresh-model"), 100, 150);
+		}
+		let expected = 1.5_f64;
+		assert!(
+			(cal.scale_for(Some("fresh-model")) - expected).abs() < 1e-9,
+			"after updates, model returns its own bucket's scale; got {}",
+			cal.scale_for(Some("fresh-model")),
 		);
 	}
 

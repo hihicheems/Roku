@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::router::RouteDecision;
 use crate::runtime_config::LoopRuntimeConfig;
 use crate::runtime_loop::cache_break::CacheBreakDetector;
-use crate::runtime_loop::compact::{CommittedBaseline, EstimatorCalibration};
+use crate::runtime_loop::compact::{CommittedBaseline, PerModelCalibration};
 use crate::runtime_loop::grounding::{
 	extract_explicit_path_candidates, extract_explicit_python_code, extract_explicit_shell_command,
 	extract_explicit_table_path, extract_glob_pattern, extract_web_query,
@@ -143,13 +143,18 @@ pub struct LoopState {
 	/// Used by sub-agents to enforce `SubAgentConfig::disallowed_tools`.
 	#[serde(default)]
 	pub disallowed_tools: Vec<String>,
-	/// Run-scoped calibration state for the byte-based prompt token
-	/// estimator. Updated after each successful LLM call from the provider's
-	/// reported `usage.prompt_tokens` so subsequent estimates converge on
-	/// the real token cost. Defaults to an uncalibrated (scale=1.0) state
-	/// for backwards compatibility with serialized snapshots.
+	/// Run-scoped, per-model calibration state for the byte-based
+	/// prompt token estimator. Updated after each successful LLM call
+	/// from the provider's reported `usage.prompt_tokens` so
+	/// subsequent estimates for that model converge on its real token
+	/// cost. Samples are keyed by routed `model_id` because each
+	/// provider owns its own [`roku_plugin_llm::TokenCounter`] and
+	/// their residual biases differ; mixing them into a single ring
+	/// buffer lets one model's bias contaminate another's scale.
+	/// Defaults to an empty map plus an uncalibrated fallback for
+	/// backwards compatibility with serialized snapshots.
 	#[serde(default)]
-	pub estimator_calibration: EstimatorCalibration,
+	pub estimator_calibration: PerModelCalibration,
 	/// Provider-reported `usage.prompt_tokens` captured right after the
 	/// most recent successful call. Authoritative for everything that was
 	/// in that request; `None` on cold-start or after any state that
@@ -301,7 +306,7 @@ impl LoopState {
 			ambiguity_stagnation: None,
 			sub_agent_depth: 0,
 			disallowed_tools: Vec::new(),
-			estimator_calibration: EstimatorCalibration::default(),
+			estimator_calibration: PerModelCalibration::default(),
 			last_observed_input_tokens: None,
 			committed_message_count: 0,
 			committed_system_prompt_bytes: 0,

@@ -934,7 +934,9 @@ impl GenericAgentRuntime {
 			messages,
 			Some(system_prompt),
 			effective_schema_bytes,
-			&loop_state.estimator_calibration,
+			loop_state
+				.estimator_calibration
+				.get(current_model.as_deref()),
 			counter.as_ref(),
 			validated_baseline,
 		);
@@ -1401,10 +1403,18 @@ impl GenericAgentRuntime {
 				// call, no threshold — runs on every attempt (including after
 				// reactive compaction) so `pre_call_estimate` reflects the
 				// post-microcompact state.
+				// Pre-routing apply site: microcompact runs before
+				// `current_routed_model` is resolved on this
+				// attempt, so there is no model id to key the
+				// scale by yet. Fall through to the fallback
+				// bucket via `get(None)` — microcompact's
+				// calibration is used only to scale the freed-
+				// tokens figure for tracing, so a neutral scale
+				// is fine here.
 				let microcompact_freed = crate::runtime_loop::microcompact_old_tool_results(
 					&mut messages,
 					crate::runtime_loop::MICROCOMPACT_RETAIN_RECENT,
-					&loop_state.estimator_calibration,
+					loop_state.estimator_calibration.get(None),
 				);
 				// Notify the cache break detector that message content changed.
 				// Also invalidate the committed-token baseline: microcompact
@@ -1543,7 +1553,9 @@ impl GenericAgentRuntime {
 						&messages,
 						Some(&system_prompt),
 						tool_schema_bytes,
-						&loop_state.estimator_calibration,
+						loop_state
+							.estimator_calibration
+							.get(current_routed_model.as_deref()),
 						counter.as_ref(),
 						mid_baseline,
 					);
@@ -1655,7 +1667,9 @@ impl GenericAgentRuntime {
 					&messages,
 					Some(&system_prompt),
 					tool_schema_bytes,
-					&loop_state.estimator_calibration,
+					loop_state
+						.estimator_calibration
+						.get(current_routed_model.as_deref()),
 					counter.as_ref(),
 					pre_call_baseline,
 				);
@@ -1779,9 +1793,15 @@ impl GenericAgentRuntime {
 								// unchanged.
 								let (cal_estimated, cal_real) =
 									pre_call_estimate.calibration_pair(resp.prompt_tokens);
-								loop_state
-									.estimator_calibration
-									.update(cal_estimated, cal_real);
+								// Key the sample by the serving model id so the
+								// next turn's apply against this provider sees
+								// its own bias, not the average-of-everything
+								// from a shared ring buffer.
+								loop_state.estimator_calibration.update(
+									Some(&resp.model_id),
+									cal_estimated,
+									cal_real,
+								);
 								// Record the committed-token baseline plus the three
 								// prefix-surface guards (system prompt byte length,
 								// tool-schema byte length, serving model). Next turn's
@@ -1801,7 +1821,9 @@ impl GenericAgentRuntime {
 										step: current_step_index,
 										estimated_prompt_tokens: pre_call_estimate.total_tokens,
 										prompt_tokens: resp.prompt_tokens,
-										scale: loop_state.estimator_calibration.scale(),
+										scale: loop_state
+											.estimator_calibration
+											.scale_for(Some(&resp.model_id)),
 									},
 								);
 								// Cache break detection: compare this turn's
@@ -1908,9 +1930,17 @@ impl GenericAgentRuntime {
 														pre_call_estimate.calibration_pair(
 															retry_resp.prompt_tokens,
 														);
-													loop_state
-														.estimator_calibration
-														.update(cal_estimated, cal_real);
+													// Attribute the retry sample to the retry
+													// response's serving model — output-slot
+													// escalation can swap to a larger model
+													// on-the-fly, and that new model's bias
+													// should be logged against its own bucket,
+													// not the primary attempt's (aborted) one.
+													loop_state.estimator_calibration.update(
+														Some(&retry_resp.model_id),
+														cal_estimated,
+														cal_real,
+													);
 													// Retry shares the same committed message
 													// boundary as the primary call; use the
 													// retry's `prompt_tokens` as the baseline.
@@ -1944,7 +1974,7 @@ impl GenericAgentRuntime {
 														prompt_tokens: retry_resp.prompt_tokens,
 														scale: loop_state
 															.estimator_calibration
-															.scale(),
+															.scale_for(Some(&retry_resp.model_id)),
 													},
 												);
 													let retry_tool_calls =
@@ -2002,9 +2032,13 @@ impl GenericAgentRuntime {
 								// ratio collapses toward 1.0 — use tail-only terms.
 								let (cal_estimated, cal_real) =
 									pre_call_estimate.calibration_pair(resp.prompt_tokens);
-								loop_state
-									.estimator_calibration
-									.update(cal_estimated, cal_real);
+								// Per-model bucket keyed by the non-streaming
+								// response's serving model id.
+								loop_state.estimator_calibration.update(
+									Some(&resp.model_id),
+									cal_estimated,
+									cal_real,
+								);
 								loop_state.record_observed_usage(
 									pre_call_message_count,
 									resp.prompt_tokens,
@@ -2018,7 +2052,9 @@ impl GenericAgentRuntime {
 											step: current_step_index,
 											estimated_prompt_tokens: pre_call_estimate.total_tokens,
 											prompt_tokens: resp.prompt_tokens,
-											scale: loop_state.estimator_calibration.scale(),
+											scale: loop_state
+												.estimator_calibration
+												.scale_for(Some(&resp.model_id)),
 										},
 									);
 								}
@@ -2127,9 +2163,11 @@ impl GenericAgentRuntime {
 														pre_call_estimate.calibration_pair(
 															retry_resp.prompt_tokens,
 														);
-													loop_state
-														.estimator_calibration
-														.update(cal_estimated, cal_real);
+													loop_state.estimator_calibration.update(
+														Some(&retry_resp.model_id),
+														cal_estimated,
+														cal_real,
+													);
 													loop_state.record_observed_usage(
 														pre_call_message_count,
 														retry_resp.prompt_tokens,
@@ -2151,7 +2189,7 @@ impl GenericAgentRuntime {
 															prompt_tokens: retry_resp.prompt_tokens,
 															scale: loop_state
 																.estimator_calibration
-																.scale(),
+																.scale_for(Some(&retry_resp.model_id)),
 														},
 													);
 													}
@@ -2716,10 +2754,19 @@ impl GenericAgentRuntime {
 				}
 				// When budget exceeded, trigger Layer 0 microcompact to free pressure.
 				if exceeded {
+					// Post-step microcompact: the most recently served
+					// call's model id is the best available key here —
+					// the attempt loop has exited, `current_routed_model`
+					// is out of scope, and the last call's serving model
+					// is what produced the tool-result bodies we are
+					// about to compact. Fall through to fallback when
+					// the run has not yet completed a call.
 					let freed = crate::runtime_loop::microcompact_old_tool_results(
 						&mut messages,
 						crate::runtime_loop::MICROCOMPACT_RETAIN_RECENT,
-						&loop_state.estimator_calibration,
+						loop_state
+							.estimator_calibration
+							.get(last_model_id.as_deref()),
 					);
 					if freed > 0 {
 						loop_state.cache_break_detector.notify_compaction();
