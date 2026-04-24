@@ -1358,16 +1358,6 @@ impl GenericAgentRuntime {
 			let tool_schema_hash =
 				crate::runtime_loop::cache_break::hash_tool_definitions(&tool_definitions);
 
-			// Cache break detector: snapshot the prompt prefix components
-			// (static system blocks + tool schema + model) so the post-call
-			// check can identify which component diverged when a break fires.
-			let model_for_fingerprint = request.model_override.as_deref().unwrap_or("");
-			loop_state.cache_break_detector.record_prompt_state(
-				&system_prompt_sections.static_blocks,
-				&tool_definitions,
-				model_for_fingerprint,
-			);
-
 			let config = &self.agent_runtime_config.next_step;
 			let thinking_effort = request.thinking_effort.as_deref().and_then(|s| match s {
 				"low" => Some(ThinkingEffort::Low),
@@ -1524,6 +1514,35 @@ impl GenericAgentRuntime {
 				} else {
 					Some(&attempt_schema_bytes_vec)
 				};
+
+				// Cache break detector: snapshot the prompt prefix
+				// components (static system blocks + tool schema +
+				// model) so the post-call check can identify which
+				// component diverged when a break fires.
+				//
+				// Placed inside the attempt loop because
+				// `current_routed_model` — the id the next
+				// `router.generate*` call will actually serve — only
+				// resolves after `counter_selection_request` is
+				// built. Using `request.model_override` here instead
+				// would hash `""` on every default-routing turn, so
+				// two consecutive turns routed to different providers
+				// would read as "model unchanged" and the detector
+				// would silently miss every cache break caused by a
+				// routing swap.
+				//
+				// Reactive-retry iterations re-record unconditionally:
+				// `current_fingerprint` is consumed by `check_response`
+				// only on successful primary responses; a
+				// `ContextWindowExceeded` fail path loops back here
+				// and overwrites the previous iteration's fingerprint,
+				// which is the desired "last record before the real
+				// call wins" semantics.
+				loop_state.cache_break_detector.record_prompt_state(
+					&system_prompt_sections.static_blocks,
+					&tool_definitions,
+					current_routed_model.as_deref().unwrap_or(""),
+				);
 
 				// Mid-tier pre-flight (Layer 1 / Layer 2): runs between Layer 0
 				// microcompact and the Layer 3 high-water check. Only fires when
@@ -6025,6 +6044,92 @@ mod tests {
 		assert_eq!(
 			unsupported_count, 0,
 			"OutputSlotEscalationUnsupported must NOT be emitted when cap is supported"
+		);
+	}
+
+	#[test]
+	fn cache_break_detector_records_routed_model_not_override() {
+		// Regression guard for issue #369. Under default routing
+		// (`model_override = None`) the detector used to hash `""`
+		// as the model component, so two consecutive turns that
+		// actually routed to different providers would read as
+		// "model unchanged" and the detector would silently miss
+		// every cache break attributable to the routing swap. The
+		// fix sources the model id via
+		// `LlmRouter::selected_model_id_for_request` inside the
+		// attempt loop so the fingerprint carries what
+		// `router.generate*` will actually serve.
+		//
+		// Scaffolding: `router_with_json_responses` registers a
+		// single model called `sequence-json-model`. A default-
+		// routing request on this runtime resolves to that id; the
+		// detector must record it.
+		let (route_router, _prompts) = router_with_json_responses(vec![serde_json::json!({
+			"action": "final_answer",
+			"tool_name": null,
+			"arguments": null,
+			"reason": "test",
+			"final_message": "done"
+		})]);
+		let execution_router = router_with_text_output("unused-execution-provider", "unused");
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+			);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-cache-break-model".to_string()),
+			session_id: "session-cache-break-model".to_string(),
+			goal: "Test cache break model fingerprint".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+			// Default routing — the pre-fix code path would have
+			// passed `""` as the model arg here.
+			model_override: None,
+			thinking_effort: None,
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::Chat,
+			0.95,
+			false,
+			crate::router::RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			"chat request",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+
+		let _execution = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-cache-break-model".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				None,
+				None,
+			));
+
+		// After the turn, `check_response` consumed
+		// `current_fingerprint` and promoted it to
+		// `previous_fingerprint`. The recorded model must be the
+		// routed serving id, not `""`.
+		assert_eq!(
+			loop_state.cache_break_detector.previous_fingerprint_model(),
+			Some("sequence-json-model"),
+			"detector must fingerprint the routed serving model, not \
+			 `request.model_override` (which is `None` on this default-routing \
+			 call and would have recorded the empty string)",
 		);
 	}
 
