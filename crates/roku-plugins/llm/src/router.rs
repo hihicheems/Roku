@@ -826,6 +826,20 @@ impl LlmRouter {
 		}
 	}
 
+	/// Return the `model_id` that `select_model` would route `request` to.
+	///
+	/// Runs the same policy as `generate` / `generate_streaming` — model
+	/// override eligibility first, then the cost / risk / budget
+	/// ordering. Returns `None` when no registered model can serve the
+	/// request. Callers validating the committed-token baseline against
+	/// the serving model must use this (not `request.model_override`)
+	/// because a null override routes via priority and a populated but
+	/// ineligible override falls through to ordering; in both cases the
+	/// routed id can differ from the override.
+	pub fn selected_model_id_for_request(&self, request: &GenerationRequest) -> Option<String> {
+		self.select_model(request).ok().map(|m| m.model_id.clone())
+	}
+
 	/// Resolve the [`TokenCounter`] for a given `model_id`.
 	///
 	/// When `model_id` is `None`, falls back to the highest-priority
@@ -1296,6 +1310,151 @@ mod tests {
 		assert_eq!(
 			override_bytes, b"PRIORITY",
 			"explicit model_override must route to that model's provider"
+		);
+	}
+
+	#[test]
+	fn selected_model_id_for_request_returns_routed_id_not_override() {
+		// The committed-token baseline validator compares the stored
+		// serving model against what the router will actually pick for
+		// the next call. `selected_model_id_for_request` must run the
+		// full `select_model` policy so:
+		//
+		// - A null override returns the routed model (not `None`), so
+		//   the default-routing case doesn't permanently mis-match the
+		//   committed `resp.model_id`.
+		// - An override that falls through eligibility returns the
+		//   fallback model (not the override), so baseline validation
+		//   catches the model swap.
+		// - A populated, eligible override returns that override's id.
+
+		struct NoopProvider {
+			name: &'static str,
+		}
+
+		#[async_trait]
+		impl LlmProvider for NoopProvider {
+			fn provider_name(&self) -> &'static str {
+				self.name
+			}
+
+			async fn complete(
+				&self,
+				_model: &ModelProfile,
+				_request: &GenerationRequest,
+			) -> Result<ProviderResponse, ProviderCallError> {
+				unreachable!("NoopProvider is only used for routing tests")
+			}
+		}
+
+		let mut router = LlmRouter::new(RoutingPolicy {
+			max_request_cost_usd: 10.0,
+			max_latency_ms: 10_000,
+		});
+		router.register_provider(NoopProvider {
+			name: "provider-priority",
+		});
+		router.register_provider(NoopProvider {
+			name: "provider-fallback",
+		});
+		router.register_model(ModelProfile {
+			model_id: "priority-model".to_string(),
+			provider: "provider-priority".to_string(),
+			max_context_tokens: 8_000,
+			cost_per_1k_tokens_usd: 5.0,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 100,
+		});
+		router.register_model(ModelProfile {
+			model_id: "fallback-model".to_string(),
+			provider: "provider-fallback".to_string(),
+			max_context_tokens: 8_000,
+			cost_per_1k_tokens_usd: 0.01,
+			max_risk_tier: RiskTier::Critical,
+			route_priority: 1,
+		});
+
+		// Case 1: no override, `RiskTier::Critical` (which exercises the
+		// priority-then-cost ordering) → routes to priority-model. The
+		// critical point for baseline validation is that the runtime
+		// receives a stable id to compare against the committed
+		// `resp.model_id`. Previously the runtime passed
+		// `request.model_override.as_deref() = None` and the validator
+		// always read as a mismatch on the common default-routing path.
+		let default_routing = GenerationRequest {
+			system_prompt: None,
+			prompt: String::new(),
+			messages: Some(vec![Message::User {
+				content: "x".to_string(),
+			}]),
+			expected_output_tokens: 100,
+			risk_tier: RiskTier::Critical,
+			preferred_provider: None,
+			budget_tokens_remaining: 4_000,
+			budget_cost_remaining_usd: 10.0,
+			tools: None,
+			model_override: None,
+			thinking_effort: None,
+			system_prompt_sections: None,
+		};
+		assert_eq!(
+			router.selected_model_id_for_request(&default_routing),
+			Some("priority-model".to_string()),
+			"null override under Critical risk must resolve to the \
+			 priority-max routed model, not `None` (default-routing case)",
+		);
+		let default_routed = "priority-model".to_string();
+
+		// Case 2: override pinned to a model with a budget that excludes
+		// it → router falls through to the other model. Returning the
+		// fallback id (not the override id) is what lets the baseline
+		// validator detect a mid-session provider swap.
+		let tight_override = GenerationRequest {
+			model_override: Some("priority-model".to_string()),
+			budget_cost_remaining_usd: 0.01,
+			..default_routing.clone()
+		};
+		let tight_routed = router
+			.selected_model_id_for_request(&tight_override)
+			.expect("tight routing resolved");
+		assert_ne!(
+			tight_routed, "priority-model",
+			"ineligible override must fall through to a different \
+			 routed model, not return the override id",
+		);
+
+		// Case 3: override pinned with a matching generous budget → the
+		// routed id equals the override (override wins eligibility).
+		let eligible_override = GenerationRequest {
+			model_override: Some("priority-model".to_string()),
+			budget_cost_remaining_usd: 10.0,
+			..default_routing.clone()
+		};
+		assert_eq!(
+			router.selected_model_id_for_request(&eligible_override),
+			Some("priority-model".to_string()),
+			"eligible override returns its own id",
+		);
+
+		// Case 4: no registered model fits the request → None. The
+		// baseline validator treats None as a mismatch and falls back
+		// to whole-history estimation.
+		let impossible = GenerationRequest {
+			budget_cost_remaining_usd: 0.0,
+			budget_tokens_remaining: 0,
+			..default_routing.clone()
+		};
+		assert!(
+			router.selected_model_id_for_request(&impossible).is_none(),
+			"no eligible model → None (signals baseline mismatch)",
+		);
+
+		// Sanity: cases 1 and 2 must disagree on the routed id — the
+		// test is only meaningful if a model swap is actually observable.
+		assert_ne!(
+			default_routed, tight_routed,
+			"default routing and tight-budget routing must land on \
+			 different models for this scenario to exercise the bug",
 		);
 	}
 

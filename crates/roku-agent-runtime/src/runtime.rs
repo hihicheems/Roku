@@ -891,17 +891,35 @@ impl GenericAgentRuntime {
 			.map(|r| r.token_counter_for_request(&selection_request))
 			.unwrap_or_else(roku_plugin_llm::default_counter);
 		// Only trust the committed baseline when the system-prompt byte
-		// length, the tool-schema byte length, and the model override
-		// all match what the baseline was committed against. Any shift
-		// (e.g. dynamic working-directory block grew, plan mode flipped,
-		// user pinned a different model) means `last_observed_input_tokens`
-		// no longer priced the current prefix — fall back to cold-start.
+		// length, the tool-schema byte length, and the routed serving
+		// model all match what the baseline was committed against. Any
+		// shift (dynamic working-directory block grew, plan mode
+		// flipped, router fell back to a different model because the
+		// committed model became ineligible) means
+		// `last_observed_input_tokens` no longer priced the current
+		// prefix — fall back to cold-start.
+		//
+		// The routed model id comes from `selected_model_id_for_request`
+		// (which runs the full `select_model` policy), not from
+		// `request.model_override`. A null override is the default case,
+		// and even a populated override can fall through to priority
+		// ordering when the targeted model is ineligible; comparing
+		// `model_override` against the committed serving `resp.model_id`
+		// would read as a mismatch every turn and permanently disable
+		// committed-baseline mode.
 		let current_system_bytes = system_prompt.len() as u64;
 		let current_schema_bytes = effective_schema_bytes.map(|b| b.len() as u64).unwrap_or(0);
-		let current_model = selection_request.model_override.as_deref();
-		let validated_baseline = loop_state
-			.committed_baseline()
-			.filter(|b| b.is_valid_for(current_system_bytes, current_schema_bytes, current_model));
+		let current_model = self
+			.execution_router
+			.as_ref()
+			.and_then(|r| r.selected_model_id_for_request(&selection_request));
+		let validated_baseline = loop_state.committed_baseline().filter(|b| {
+			b.is_valid_for(
+				current_system_bytes,
+				current_schema_bytes,
+				current_model.as_deref(),
+			)
+		});
 		let estimated = crate::runtime_loop::estimate_prompt_pressure(
 			messages,
 			Some(system_prompt),
@@ -1430,6 +1448,18 @@ impl GenericAgentRuntime {
 					.as_ref()
 					.map(|r| r.token_counter_for_request(&counter_selection_request))
 					.unwrap_or_else(roku_plugin_llm::default_counter);
+				// Routed serving model id for the committed-baseline
+				// validation below. Resolved via `select_model` on the
+				// same request shape the counter resolution used, so all
+				// three (mid baseline, pre-call baseline, pre-call
+				// estimator) agree on the model the next call will
+				// actually land on. Returns `None` when no registered
+				// model is eligible — treated as a mismatch below, which
+				// correctly falls back to whole-history estimation.
+				let current_routed_model = self
+					.execution_router
+					.as_ref()
+					.and_then(|r| r.selected_model_id_for_request(&counter_selection_request));
 
 				// Mid-tier pre-flight (Layer 1 / Layer 2): runs between Layer 0
 				// microcompact and the Layer 3 high-water check. Only fires when
@@ -1439,15 +1469,20 @@ impl GenericAgentRuntime {
 				if !reactive_compact_used {
 					// Same baseline validity check as `maybe_compact`: the
 					// committed prefix is only authoritative when the
-					// system prompt, tool-schema surface, and model are all
-					// unchanged since the commit.
+					// system prompt, tool-schema surface, and routed
+					// model are all unchanged since the commit. The model
+					// guard uses `current_routed_model` (resolved via
+					// `select_model`), not `request.model_override` —
+					// otherwise the default-routing case (override=None)
+					// would read as a permanent mismatch and the
+					// committed-baseline branch would never activate.
 					let mid_system_bytes = system_prompt.len() as u64;
 					let mid_schema_bytes = tool_schema_bytes.map(|b| b.len() as u64).unwrap_or(0);
 					let mid_baseline = loop_state.committed_baseline().filter(|b| {
 						b.is_valid_for(
 							mid_system_bytes,
 							mid_schema_bytes,
-							request.model_override.as_deref(),
+							current_routed_model.as_deref(),
 						)
 					});
 					let mid_estimate = crate::runtime_loop::estimate_prompt_pressure(
@@ -1553,7 +1588,7 @@ impl GenericAgentRuntime {
 					b.is_valid_for(
 						pre_call_system_prompt_bytes as u64,
 						pre_call_tool_schema_bytes_len as u64,
-						request.model_override.as_deref(),
+						current_routed_model.as_deref(),
 					)
 				});
 
