@@ -874,6 +874,7 @@ impl GenericAgentRuntime {
 		pre_call_system_prompt_bytes: usize,
 		pre_call_tool_schema_bytes_len: usize,
 		pre_call_system_prompt_hash: u64,
+		pre_call_prefix_messages_hash: u64,
 		pre_call_estimate: &crate::runtime_loop::PromptTokenEstimate,
 		retry_prompt_tokens: u64,
 		calibration: &crate::runtime_loop::PerModelCalibration,
@@ -927,6 +928,7 @@ impl GenericAgentRuntime {
 				retry_schema_len as u64,
 				pre_call_system_prompt_hash,
 				retry_tool_schema_hash,
+				pre_call_prefix_messages_hash,
 				Some(retry_resp_model_id),
 			)
 		});
@@ -1101,11 +1103,17 @@ impl GenericAgentRuntime {
 			.as_ref()
 			.and_then(|r| r.selected_model_id_for_request(&selection_request));
 		let validated_baseline = loop_state.committed_baseline().filter(|b| {
+			if messages.len() < b.message_count {
+				return false;
+			}
+			let current_prefix_messages_hash =
+				crate::runtime_loop::hash_message_prefix(&messages[..b.message_count]);
 			b.is_valid_for(
 				current_system_bytes,
 				current_schema_bytes,
 				current_system_prompt_hash,
 				current_tool_schema_hash,
+				current_prefix_messages_hash,
 				current_model.as_deref(),
 			)
 		});
@@ -1674,11 +1682,17 @@ impl GenericAgentRuntime {
 						mid_tool_schema_bytes.unwrap_or_default(),
 					);
 					let mid_baseline = loop_state.committed_baseline().filter(|b| {
+						if messages.len() < b.message_count {
+							return false;
+						}
+						let mid_prefix_messages_hash =
+							crate::runtime_loop::hash_message_prefix(&messages[..b.message_count]);
 						b.is_valid_for(
 							mid_system_bytes,
 							mid_schema_bytes,
 							mid_system_prompt_hash,
 							mid_tool_schema_hash,
+							mid_prefix_messages_hash,
 							current_routed_model_initial.as_deref(),
 						)
 					});
@@ -1864,12 +1878,25 @@ impl GenericAgentRuntime {
 				let pre_call_tool_schema_hash = crate::runtime_loop::hash_tool_schema_bytes(
 					tool_schema_bytes.unwrap_or_default(),
 				);
+				// Full-buffer prefix hash commits the entire `messages`
+				// slice at this point — the next turn's baseline check
+				// will compare against `messages[..pre_call_message_count]`,
+				// which is the same slice because `message_count` equals
+				// `messages.len()` now.
+				let pre_call_prefix_messages_hash =
+					crate::runtime_loop::hash_message_prefix(&messages);
 				let pre_call_baseline = loop_state.committed_baseline().filter(|b| {
+					if messages.len() < b.message_count {
+						return false;
+					}
+					let current_prefix_messages_hash =
+						crate::runtime_loop::hash_message_prefix(&messages[..b.message_count]);
 					b.is_valid_for(
 						pre_call_system_prompt_bytes as u64,
 						pre_call_tool_schema_bytes_len as u64,
 						pre_call_system_prompt_hash,
 						pre_call_tool_schema_hash,
+						current_prefix_messages_hash,
 						current_routed_model.as_deref(),
 					)
 				});
@@ -2035,6 +2062,7 @@ impl GenericAgentRuntime {
 									pre_call_tool_schema_bytes_len,
 									pre_call_system_prompt_hash,
 									pre_call_tool_schema_hash,
+									pre_call_prefix_messages_hash,
 									Some(resp.model_id.clone()),
 								);
 								let _ = sender.send(
@@ -2170,6 +2198,7 @@ impl GenericAgentRuntime {
 														pre_call_system_prompt_bytes,
 														pre_call_tool_schema_bytes_len,
 														pre_call_system_prompt_hash,
+														pre_call_prefix_messages_hash,
 														&pre_call_estimate,
 														retry_resp.prompt_tokens,
 														&loop_state.estimator_calibration,
@@ -2195,7 +2224,10 @@ impl GenericAgentRuntime {
 													// `retry_schema_len` / `retry_tool_schema_hash`
 													// are either the primary's (same route) or the
 													// retry provider's fresh wire-bytes view
-													// (rerouted).
+													// (rerouted). The prefix hash is always
+													// `pre_call_prefix_messages_hash` because the
+													// message buffer does not change between primary
+													// and retry.
 													loop_state.record_observed_usage(
 														pre_call_message_count,
 														retry_resp.prompt_tokens,
@@ -2203,6 +2235,7 @@ impl GenericAgentRuntime {
 														retry_schema_len,
 														pre_call_system_prompt_hash,
 														retry_tool_schema_hash,
+														pre_call_prefix_messages_hash,
 														Some(retry_resp.model_id.clone()),
 													);
 													// Replace the truncated streaming text in the
@@ -2297,6 +2330,7 @@ impl GenericAgentRuntime {
 									pre_call_tool_schema_bytes_len,
 									pre_call_system_prompt_hash,
 									pre_call_tool_schema_hash,
+									pre_call_prefix_messages_hash,
 									Some(resp.model_id.clone()),
 								);
 								if let Some(sender) = event_sender {
@@ -2432,6 +2466,7 @@ impl GenericAgentRuntime {
 														pre_call_system_prompt_bytes,
 														pre_call_tool_schema_bytes_len,
 														pre_call_system_prompt_hash,
+														pre_call_prefix_messages_hash,
 														&pre_call_estimate,
 														retry_resp.prompt_tokens,
 														&loop_state.estimator_calibration,
@@ -2449,6 +2484,7 @@ impl GenericAgentRuntime {
 														retry_schema_len,
 														pre_call_system_prompt_hash,
 														retry_tool_schema_hash,
+														pre_call_prefix_messages_hash,
 														Some(retry_resp.model_id.clone()),
 													);
 													// Intentionally no `LlmTextReplace` on the
@@ -6437,6 +6473,7 @@ mod tests {
 			6,
 			42,
 			0,
+			0,
 			&pre_estimate,
 			150,
 			&calibration,
@@ -6540,6 +6577,7 @@ mod tests {
 				&config,
 				6,
 				42,
+				0,
 				0,
 				&pre_estimate,
 				150,

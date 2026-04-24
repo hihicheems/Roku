@@ -471,6 +471,15 @@ pub struct CommittedBaseline {
 	/// longer describes the schema the provider tokenized.
 	#[serde(default)]
 	pub tool_schema_hash: u64,
+	/// Content hash of the first `message_count` messages as they
+	/// appeared on the committed call. Catches in-place prefix rewrites
+	/// (`truncate_large_tool_results`, `microcompact_old_tool_results`,
+	/// any future helper that edits historical message bodies while
+	/// leaving the count unchanged). Without this guard the estimator
+	/// would keep reusing a pre-rewrite `input_tokens` against a buffer
+	/// the provider no longer tokenizes the same way.
+	#[serde(default)]
+	pub prefix_messages_hash: u64,
 	/// Model ID that served the committed call. Different providers carry
 	/// different tokenizers (o200k_base vs cl100k_base vs Anthropic BPE),
 	/// so a model swap invalidates the `input_tokens` figure even when
@@ -495,6 +504,7 @@ impl CommittedBaseline {
 		current_tool_schema_bytes_len: u64,
 		current_system_prompt_hash: u64,
 		current_tool_schema_hash: u64,
+		current_prefix_messages_hash: u64,
 		current_model_id: Option<&str>,
 	) -> bool {
 		self.input_tokens > 0
@@ -502,6 +512,7 @@ impl CommittedBaseline {
 			&& self.tool_schema_bytes_len == current_tool_schema_bytes_len
 			&& self.system_prompt_hash == current_system_prompt_hash
 			&& self.tool_schema_hash == current_tool_schema_hash
+			&& self.prefix_messages_hash == current_prefix_messages_hash
 			&& self.model_id.as_deref() == current_model_id
 	}
 }
@@ -521,6 +532,60 @@ pub fn hash_system_prompt_text(system_prompt: &str) -> u64 {
 pub fn hash_tool_schema_bytes(bytes: &[u8]) -> u64 {
 	let mut hasher = DefaultHasher::new();
 	bytes.hash(&mut hasher);
+	hasher.finish()
+}
+
+/// Content fingerprint of a committed message prefix.
+///
+/// Walks the slice in order, mixing each message's discriminant with the
+/// structurally significant fields (role text, tool-result identifier,
+/// error flag, tool-call blocks). Feeding this into
+/// [`CommittedBaseline::is_valid_for`] makes the baseline sensitive to
+/// any in-place rewrite of a historical message body that leaves
+/// `message_count` unchanged (pre-flight `truncate_large_tool_results`,
+/// post-step `microcompact_old_tool_results`, or any future helper with
+/// the same shape).
+///
+/// The caller passes the slice they want to fingerprint — usually
+/// `&messages[..baseline.message_count]` for validity checks and
+/// `&messages[..pre_call_message_count]` for the post-response commit.
+/// Framing tokens and role prefixes are not hashed because the provider
+/// tokenizer is supposed to produce the same framing for the same role,
+/// so variance there would not be a real prefix shift.
+pub fn hash_message_prefix(messages: &[Message]) -> u64 {
+	let mut hasher = DefaultHasher::new();
+	for msg in messages {
+		match msg {
+			Message::User { content } => {
+				0u8.hash(&mut hasher);
+				content.hash(&mut hasher);
+			}
+			Message::Assistant { text, tool_calls } => {
+				1u8.hash(&mut hasher);
+				text.hash(&mut hasher);
+				// Hash each tool call's identifying surface. Serialize
+				// the arguments JSON for a deterministic, pointer-
+				// independent fingerprint.
+				(tool_calls.len() as u64).hash(&mut hasher);
+				for call in tool_calls {
+					call.id.hash(&mut hasher);
+					call.name.hash(&mut hasher);
+					let args = call.arguments.to_string();
+					args.hash(&mut hasher);
+				}
+			}
+			Message::ToolResult {
+				tool_use_id,
+				content,
+				is_error,
+			} => {
+				2u8.hash(&mut hasher);
+				tool_use_id.hash(&mut hasher);
+				content.hash(&mut hasher);
+				is_error.hash(&mut hasher);
+			}
+		}
+	}
 	hasher.finish()
 }
 
@@ -1682,6 +1747,7 @@ mod tests {
 			committed_tool_schema_bytes_len: 0,
 			committed_system_prompt_hash: 0,
 			committed_tool_schema_hash: 0,
+			committed_prefix_messages_hash: 0,
 			committed_model_id: None,
 			consecutive_autocompact_failures: 0,
 			frozen_tool_schema: None,
@@ -3714,6 +3780,7 @@ mod tests {
 		// cheap pre-filter / diagnostics.
 		let committed_system = "You are Roku. wd=/tmp/a";
 		let committed_tools: &[u8] = br#"{"tools":[{"name":"read_a"}]}"#;
+		let committed_prefix_hash = 12345_u64;
 		let baseline = CommittedBaseline {
 			input_tokens: 1_000,
 			message_count: 3,
@@ -3721,6 +3788,7 @@ mod tests {
 			tool_schema_bytes_len: committed_tools.len() as u64,
 			system_prompt_hash: hash_system_prompt_text(committed_system),
 			tool_schema_hash: hash_tool_schema_bytes(committed_tools),
+			prefix_messages_hash: committed_prefix_hash,
 			model_id: Some("gpt-5.4".to_string()),
 		};
 
@@ -3730,6 +3798,7 @@ mod tests {
 			committed_tools.len() as u64,
 			hash_system_prompt_text(committed_system),
 			hash_tool_schema_bytes(committed_tools),
+			committed_prefix_hash,
 			Some("gpt-5.4"),
 		));
 
@@ -3743,6 +3812,7 @@ mod tests {
 				committed_tools.len() as u64,
 				hash_system_prompt_text(drifted_system),
 				hash_tool_schema_bytes(committed_tools),
+				committed_prefix_hash,
 				Some("gpt-5.4"),
 			),
 			"same-length system-prompt content edit must invalidate the baseline"
@@ -3758,9 +3828,149 @@ mod tests {
 				drifted_tools.len() as u64,
 				hash_system_prompt_text(committed_system),
 				hash_tool_schema_bytes(drifted_tools),
+				committed_prefix_hash,
 				Some("gpt-5.4"),
 			),
 			"same-length tool-schema content edit must invalidate the baseline"
+		);
+	}
+
+	#[test]
+	fn committed_baseline_is_valid_for_rejects_in_place_prefix_rewrite() {
+		// Regression: `truncate_large_tool_results` and
+		// `microcompact_old_tool_results` can rewrite historical
+		// `Message::ToolResult.content` in place without changing
+		// `messages.len()`. Byte-length / system / tools / model
+		// guards all stay happy; only a prefix-content hash catches
+		// the divergence.
+		let committed_system = "sys";
+		let committed_tools: &[u8] = b"{}";
+		let pre_rewrite_prefix = vec![
+			Message::User {
+				content: "step-1".to_string(),
+			},
+			Message::Assistant {
+				text: "calling tool".to_string(),
+				tool_calls: Vec::new(),
+			},
+			Message::ToolResult {
+				tool_use_id: "call-1".to_string(),
+				content: "a".repeat(10_000),
+				is_error: false,
+			},
+		];
+		let post_rewrite_prefix = vec![
+			Message::User {
+				content: "step-1".to_string(),
+			},
+			Message::Assistant {
+				text: "calling tool".to_string(),
+				tool_calls: Vec::new(),
+			},
+			Message::ToolResult {
+				// `truncate_large_tool_results` swaps `content` for a
+				// truncation marker while leaving the enclosing
+				// `ToolResult` at the same index; same
+				// `message_count` / same role shape.
+				tool_use_id: "call-1".to_string(),
+				content: "[truncated]".to_string(),
+				is_error: false,
+			},
+		];
+
+		let baseline = CommittedBaseline {
+			input_tokens: 5_000,
+			message_count: pre_rewrite_prefix.len(),
+			system_prompt_bytes: committed_system.len() as u64,
+			tool_schema_bytes_len: committed_tools.len() as u64,
+			system_prompt_hash: hash_system_prompt_text(committed_system),
+			tool_schema_hash: hash_tool_schema_bytes(committed_tools),
+			prefix_messages_hash: hash_message_prefix(&pre_rewrite_prefix),
+			model_id: Some("gpt-5.4".to_string()),
+		};
+
+		// Pre-rewrite: baseline is valid against the identical prefix.
+		assert!(baseline.is_valid_for(
+			committed_system.len() as u64,
+			committed_tools.len() as u64,
+			hash_system_prompt_text(committed_system),
+			hash_tool_schema_bytes(committed_tools),
+			hash_message_prefix(&pre_rewrite_prefix),
+			Some("gpt-5.4"),
+		));
+
+		// Post-rewrite: same count, same system, same tools, same
+		// model — only the tool-result body changed. Baseline must
+		// reject so the estimator re-counts rather than reusing the
+		// stale 5 000-token commit.
+		assert!(
+			!baseline.is_valid_for(
+				committed_system.len() as u64,
+				committed_tools.len() as u64,
+				hash_system_prompt_text(committed_system),
+				hash_tool_schema_bytes(committed_tools),
+				hash_message_prefix(&post_rewrite_prefix),
+				Some("gpt-5.4"),
+			),
+			"in-place tool-result rewrite must invalidate the committed baseline"
+		);
+	}
+
+	#[test]
+	fn hash_message_prefix_is_deterministic_and_role_sensitive() {
+		let a = vec![
+			Message::User {
+				content: "hello".to_string(),
+			},
+			Message::Assistant {
+				text: "hi".to_string(),
+				tool_calls: Vec::new(),
+			},
+		];
+		let a_repeat = vec![
+			Message::User {
+				content: "hello".to_string(),
+			},
+			Message::Assistant {
+				text: "hi".to_string(),
+				tool_calls: Vec::new(),
+			},
+		];
+		// Determinism: same slice → same hash.
+		assert_eq!(hash_message_prefix(&a), hash_message_prefix(&a_repeat));
+
+		// Role discriminant matters: User{"x"} must not hash the same
+		// as Assistant{"x"}. Otherwise role swaps within the prefix
+		// (rare but possible under future compaction helpers) would
+		// silently keep the baseline valid.
+		let user_variant = vec![Message::User {
+			content: "x".to_string(),
+		}];
+		let assistant_variant = vec![Message::Assistant {
+			text: "x".to_string(),
+			tool_calls: Vec::new(),
+		}];
+		assert_ne!(
+			hash_message_prefix(&user_variant),
+			hash_message_prefix(&assistant_variant),
+		);
+
+		// Tool-result error flag flips hash. A tool-result's
+		// `is_error: false → true` rewrite with identical content
+		// otherwise must not look "unchanged".
+		let tool_ok = vec![Message::ToolResult {
+			tool_use_id: "id-1".to_string(),
+			content: "body".to_string(),
+			is_error: false,
+		}];
+		let tool_err = vec![Message::ToolResult {
+			tool_use_id: "id-1".to_string(),
+			content: "body".to_string(),
+			is_error: true,
+		}];
+		assert_ne!(
+			hash_message_prefix(&tool_ok),
+			hash_message_prefix(&tool_err),
 		);
 	}
 
