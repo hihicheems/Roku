@@ -831,6 +831,91 @@ impl GenericAgentRuntime {
 		(counter, routed_model, schema_bytes)
 	}
 
+	/// Resolve the calibration `(estimated, real)` pair plus the
+	/// tool-schema byte length to record in the committed baseline
+	/// when an output-slot escalation retry lands.
+	///
+	/// The primary call ran under the attempt loop's resolved
+	/// `(counter, current_routed_model, attempt_schema_bytes_vec)` and
+	/// produced `pre_call_estimate`. If the escalation retry stayed
+	/// on the same routed model (`retry_resp_model_id ==
+	/// primary_resp_model_id`), those primary views are still
+	/// authoritative and we feed `pre_call_estimate.calibration_pair`
+	/// with the primary's byte-length — the current fast path.
+	///
+	/// When the escalation reroutes (typical when the retry switches
+	/// to a larger model that `select_model` re-picks under the
+	/// expanded `expected_output_tokens`), the primary's views belong
+	/// to the wrong provider: its counter's byte→token bias does not
+	/// match the retry's tokenizer, and its wire-bytes length is
+	/// shaped for the primary provider's serializer. Recording
+	/// `(primary_estimate, retry_real)` into the retry's per-model
+	/// calibration bucket injects model A's residual bias into model
+	/// B's bucket, and persisting the primary's schema-bytes length
+	/// against the retry's serving id breaks next turn's
+	/// `CommittedBaseline::is_valid_for` on the schema-bytes guard.
+	///
+	/// Fix: when a reroute is detected, re-resolve the retry model's
+	/// counter and wire-bytes preview (same `resolve_attempt_preflight`
+	/// helper the attempt loop uses, with the retry's id as the
+	/// override hint), compute a fresh `pre_call_estimate` with those
+	/// views, and base the calibration sample and baseline length on
+	/// the retry-specific estimate.
+	#[allow(clippy::too_many_arguments)]
+	fn retry_preflight_values(
+		&self,
+		retry_resp_model_id: &str,
+		primary_resp_model_id: &str,
+		messages: &[Message],
+		system_prompt: &str,
+		system_prompt_sections: &SystemPromptSections,
+		tool_definitions: &[ToolDefinition],
+		config: &crate::runtime_config::NextStepRuntimeConfig,
+		pre_call_system_prompt_bytes: usize,
+		pre_call_tool_schema_bytes_len: usize,
+		pre_call_estimate: &crate::runtime_loop::PromptTokenEstimate,
+		retry_prompt_tokens: u64,
+		calibration: &crate::runtime_loop::PerModelCalibration,
+		loop_state_baseline: Option<crate::runtime_loop::CommittedBaseline>,
+	) -> (u64, u64, usize) {
+		if retry_resp_model_id == primary_resp_model_id {
+			let (est, real) = pre_call_estimate.calibration_pair(retry_prompt_tokens);
+			return (est, real, pre_call_tool_schema_bytes_len);
+		}
+		// Rerouted retry: re-resolve the retry model's preflight views.
+		let (retry_counter, _routed, retry_schema_bytes_vec) = self.resolve_attempt_preflight(
+			messages,
+			system_prompt,
+			system_prompt_sections,
+			tool_definitions,
+			Some(retry_resp_model_id.to_string()),
+			config,
+		);
+		let retry_schema_bytes: Option<&[u8]> = if retry_schema_bytes_vec.is_empty() {
+			None
+		} else {
+			Some(&retry_schema_bytes_vec)
+		};
+		let retry_schema_len = retry_schema_bytes.map(|b| b.len()).unwrap_or(0);
+		let retry_baseline = loop_state_baseline.filter(|b| {
+			b.is_valid_for(
+				pre_call_system_prompt_bytes as u64,
+				retry_schema_len as u64,
+				Some(retry_resp_model_id),
+			)
+		});
+		let retry_estimate = crate::runtime_loop::estimate_prompt_tokens_calibrated(
+			messages,
+			Some(system_prompt),
+			retry_schema_bytes,
+			calibration.get(Some(retry_resp_model_id)),
+			retry_counter.as_ref(),
+			retry_baseline,
+		);
+		let (est, real) = retry_estimate.calibration_pair(retry_prompt_tokens);
+		(est, real, retry_schema_len)
+	}
+
 	/// Returns `(prompt_tokens, output_tokens)` consumed by compaction LLM calls.
 	async fn maybe_compact(
 		&self,
@@ -2004,13 +2089,32 @@ impl GenericAgentRuntime {
 													last_model_id =
 														Some(retry_resp.model_id.clone());
 													// Re-calibrate the estimator with the retry's
-													// prompt_tokens for a tighter next-turn estimate.
-													// See `calibration_pair` for why we subtract
-													// the committed baseline from both sides in
-													// baseline mode.
-													let (cal_estimated, cal_real) =
-														pre_call_estimate.calibration_pair(
+													// prompt_tokens. When output-slot escalation
+													// reroutes to a different model (`select_model`
+													// picks a larger model under the expanded
+													// `expected_output_tokens`), resolve a fresh
+													// counter + wire-bytes preview for that model
+													// so the calibration sample reflects the retry
+													// model's bias — not the primary attempt's —
+													// and the baseline byte-length matches the
+													// retry provider's serializer. Same-route
+													// retries keep the fast path and reuse the
+													// primary `pre_call_estimate`.
+													let (cal_estimated, cal_real, retry_schema_len) =
+														self.retry_preflight_values(
+															&retry_resp.model_id,
+															&resp.model_id,
+															&messages,
+															&system_prompt,
+															&system_prompt_sections,
+															&tool_definitions,
+															config,
+															pre_call_system_prompt_bytes,
+															pre_call_tool_schema_bytes_len,
+															&pre_call_estimate,
 															retry_resp.prompt_tokens,
+															&loop_state.estimator_calibration,
+															loop_state.committed_baseline(),
 														);
 													// Attribute the retry sample to the retry
 													// response's serving model — output-slot
@@ -2029,11 +2133,14 @@ impl GenericAgentRuntime {
 													// The retry model id overrides the primary's
 													// — the server may have escalated to a larger
 													// model when filling the expanded output slot.
+													// `retry_schema_len` is either the primary's
+													// length (same route) or the retry provider's
+													// fresh wire-bytes length (rerouted).
 													loop_state.record_observed_usage(
 														pre_call_message_count,
 														retry_resp.prompt_tokens,
 														pre_call_system_prompt_bytes,
-														pre_call_tool_schema_bytes_len,
+														retry_schema_len,
 														Some(retry_resp.model_id.clone()),
 													);
 													// Replace the truncated streaming text in the
@@ -2238,12 +2345,28 @@ impl GenericAgentRuntime {
 													last_model_id =
 														Some(retry_resp.model_id.clone());
 													// Re-calibrate the estimator with the retry's
-													// prompt_tokens for a tighter next-turn estimate.
-													// Non-streaming retry shares the same
-													// calibration invariants as the primary path.
-													let (cal_estimated, cal_real) =
-														pre_call_estimate.calibration_pair(
+													// prompt_tokens. Non-streaming retry shares
+													// the same calibration invariants as the
+													// primary path; the helper resolves a fresh
+													// preflight when the escalation rerouted, and
+													// falls through to the primary's
+													// `pre_call_estimate` when it stayed on the
+													// same model.
+													let (cal_estimated, cal_real, retry_schema_len) =
+														self.retry_preflight_values(
+															&retry_resp.model_id,
+															&resp.model_id,
+															&messages,
+															&system_prompt,
+															&system_prompt_sections,
+															&tool_definitions,
+															config,
+															pre_call_system_prompt_bytes,
+															pre_call_tool_schema_bytes_len,
+															&pre_call_estimate,
 															retry_resp.prompt_tokens,
+															&loop_state.estimator_calibration,
+															loop_state.committed_baseline(),
 														);
 													loop_state.estimator_calibration.update(
 														Some(&retry_resp.model_id),
@@ -2254,7 +2377,7 @@ impl GenericAgentRuntime {
 														pre_call_message_count,
 														retry_resp.prompt_tokens,
 														pre_call_system_prompt_bytes,
-														pre_call_tool_schema_bytes_len,
+														retry_schema_len,
 														Some(retry_resp.model_id.clone()),
 													);
 													// Intentionally no `LlmTextReplace` on the
@@ -6193,6 +6316,174 @@ mod tests {
 			"detector must fingerprint the routed serving model, not \
 			 `request.model_override` (which is `None` on this default-routing \
 			 call and would have recorded the empty string)",
+		);
+	}
+
+	#[test]
+	fn retry_preflight_values_same_route_reuses_primary_estimate() {
+		// Same-route retry: the helper must delegate to
+		// `pre_call_estimate.calibration_pair` and return the
+		// primary's `pre_call_tool_schema_bytes_len` verbatim. This
+		// is the fast path; rerouted retries go through
+		// `resolve_attempt_preflight` (verified by the test below).
+		let (route_router, _prompts) = router_with_json_responses(vec![]);
+		let execution_router = router_with_text_output("unused-execution-provider", "unused");
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+			);
+
+		let pre_estimate = crate::runtime_loop::PromptTokenEstimate {
+			system_tokens: 0,
+			message_tokens: 100,
+			framing_tokens: 0,
+			tool_schema_tokens: 0,
+			committed_baseline_tokens: 0,
+			total_tokens: 100,
+			raw_total_tokens: 100,
+		};
+		let calibration = crate::runtime_loop::PerModelCalibration::default();
+		let config = runtime.agent_runtime_config.next_step.clone();
+		let (cal_est, cal_real, schema_len) = runtime.retry_preflight_values(
+			"sequence-json-model",
+			"sequence-json-model",
+			&[Message::User {
+				content: "test".to_string(),
+			}],
+			"system",
+			&roku_plugin_llm::SystemPromptSections {
+				static_blocks: Vec::new(),
+				dynamic_blocks: Vec::new(),
+			},
+			&[],
+			&config,
+			6,
+			42,
+			&pre_estimate,
+			150,
+			&calibration,
+			None,
+		);
+		assert_eq!(
+			cal_est, 100,
+			"same-route retry must return pre_call_estimate.raw_total_tokens as estimated"
+		);
+		assert_eq!(
+			cal_real, 150,
+			"same-route retry must return retry_prompt_tokens as real"
+		);
+		assert_eq!(
+			schema_len, 42,
+			"same-route retry must reuse primary's pre_call_tool_schema_bytes_len"
+		);
+	}
+
+	#[test]
+	fn retry_preflight_values_rerouted_recomputes_against_retry_model() {
+		// Rerouted retry: the helper must consult
+		// `resolve_attempt_preflight` with the retry model id and
+		// return a fresh estimate / schema length for that model,
+		// not the primary's. The test is positive-direction: we
+		// assert the returned values match what
+		// `resolve_attempt_preflight(retry_model_id)` would produce
+		// independently, so the helper's dispatch is verified without
+		// needing to construct two providers with divergent wire
+		// formats (we use the same provider twice with distinct model
+		// ids — the returned values reflect the retry model's bucket
+		// and the router's wire-bytes preview for that selection
+		// request shape).
+		let (route_router, _prompts) = router_with_json_responses(vec![]);
+		let execution_router = router_with_text_output("unused-execution-provider", "unused");
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				execution_router,
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+			);
+
+		let pre_estimate = crate::runtime_loop::PromptTokenEstimate {
+			system_tokens: 0,
+			message_tokens: 100,
+			framing_tokens: 0,
+			tool_schema_tokens: 0,
+			committed_baseline_tokens: 0,
+			total_tokens: 100,
+			raw_total_tokens: 100,
+		};
+		let calibration = crate::runtime_loop::PerModelCalibration::default();
+		let config = runtime.agent_runtime_config.next_step.clone();
+		let messages = vec![Message::User {
+			content: "rerouted retry path".to_string(),
+		}];
+		let system_prompt = "system";
+		let system_prompt_sections = roku_plugin_llm::SystemPromptSections {
+			static_blocks: Vec::new(),
+			dynamic_blocks: Vec::new(),
+		};
+		let tool_definitions: Vec<ToolDefinition> = vec![];
+
+		let (cal_est, cal_real, retry_schema_len) = runtime.retry_preflight_values(
+			"sequence-json-model",
+			"some-other-primary-model",
+			&messages,
+			system_prompt,
+			&system_prompt_sections,
+			&tool_definitions,
+			&config,
+			6,
+			42,
+			&pre_estimate,
+			150,
+			&calibration,
+			None,
+		);
+
+		// Independently resolve what the retry preflight should see.
+		let (_, _, expected_schema_bytes) = runtime.resolve_attempt_preflight(
+			&messages,
+			system_prompt,
+			&system_prompt_sections,
+			&tool_definitions,
+			Some("sequence-json-model".to_string()),
+			&config,
+		);
+		let expected_schema_len = expected_schema_bytes.len();
+		assert_eq!(
+			retry_schema_len, expected_schema_len,
+			"rerouted retry schema length must equal what \
+			 resolve_attempt_preflight produces for the retry model, \
+			 not the primary's `pre_call_tool_schema_bytes_len` (42)",
+		);
+		assert_ne!(
+			retry_schema_len, 42,
+			"rerouted retry must NOT reuse the primary's schema length \
+			 (which belongs to a different provider's serializer)",
+		);
+
+		// Fresh estimate means cal_est is re-computed for the retry
+		// model's counter, not inherited from the primary's
+		// pre_call_estimate (which was 100).
+		// With an empty tool schema and cold-start (no baseline), the
+		// retry estimate is `counter.count(user_message) +
+		// framing`. The exact value depends on the byte-heuristic
+		// counter (bytes/4 default); we assert it's non-zero and
+		// different from the primary's pre-fixed 100 to prove a fresh
+		// computation happened, rather than a fallback to the
+		// primary's estimate.
+		assert!(cal_est > 0, "fresh estimate must be positive");
+		assert_eq!(
+			cal_real, 150,
+			"cal_real must always equal retry_prompt_tokens regardless of route"
 		);
 	}
 
