@@ -1476,6 +1476,45 @@ impl GenericAgentRuntime {
 					.as_ref()
 					.and_then(|r| r.selected_model_id_for_request(&counter_selection_request));
 
+				// Refresh the wire-bytes preview against the
+				// post-compaction routing request. Layer 0
+				// microcompact and Layer 1/2 mid-tier compaction
+				// mutate `messages`, which can shift
+				// `select_model`'s eligibility decision — the
+				// serving provider on this attempt may differ
+				// from the one that shaped the pre-loop snapshot
+				// at `tool_schema_bytes_vec`. If it does, the
+				// pre-loop snapshot has the wrong provider's wire
+				// format (OpenAI's `{"type":"function",...}` vs
+				// Anthropic's `input_schema`, etc.), so its byte
+				// length is wrong too. Committing that wrong
+				// length via `pre_call_tool_schema_bytes_len`
+				// would make the next turn's
+				// `CommittedBaseline::is_valid_for` reject on the
+				// schema-bytes guard and disable committed-baseline
+				// mode whenever a reroute happens. The
+				// `counter_selection_request` built above — same
+				// one driving counter and `current_routed_model`
+				// — is the right input; rebuilding the preview
+				// from it keeps the three preflight views (counter,
+				// routed model, schema bytes) consistent with the
+				// real serving call.
+				let attempt_schema_bytes_vec: Vec<u8> = self
+					.route_router
+					.as_ref()
+					.map(|r| {
+						r.preview_wire_tool_schema_bytes_for_request(
+							&counter_selection_request,
+							&tool_definitions,
+						)
+					})
+					.unwrap_or_else(|| serde_json::to_vec(&tool_definitions).unwrap_or_default());
+				let tool_schema_bytes: Option<&[u8]> = if attempt_schema_bytes_vec.is_empty() {
+					None
+				} else {
+					Some(&attempt_schema_bytes_vec)
+				};
+
 				// Mid-tier pre-flight (Layer 1 / Layer 2): runs between Layer 0
 				// microcompact and the Layer 3 high-water check. Only fires when
 				// pressure is above the mid-water threshold and reactive compaction
