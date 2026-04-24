@@ -1717,10 +1717,17 @@ impl GenericAgentRuntime {
 								last_model_id = Some(resp.model_id.clone());
 								// Fold the real `usage.prompt_tokens` back into the
 								// estimator calibration so the next turn's pressure
-								// check is closer to ground truth.
+								// check is closer to ground truth. In
+								// committed-baseline mode `calibration_pair`
+								// subtracts the unchanged committed prefix from
+								// both sides so the ratio reflects tail bias only;
+								// in cold-start mode it returns the raw totals
+								// unchanged.
+								let (cal_estimated, cal_real) =
+									pre_call_estimate.calibration_pair(resp.prompt_tokens);
 								loop_state
 									.estimator_calibration
-									.update(pre_call_estimate.raw_total_tokens, resp.prompt_tokens);
+									.update(cal_estimated, cal_real);
 								// Record the committed-token baseline plus the three
 								// prefix-surface guards (system prompt byte length,
 								// tool-schema byte length, serving model). Next turn's
@@ -1840,10 +1847,16 @@ impl GenericAgentRuntime {
 														Some(retry_resp.model_id.clone());
 													// Re-calibrate the estimator with the retry's
 													// prompt_tokens for a tighter next-turn estimate.
-													loop_state.estimator_calibration.update(
-														pre_call_estimate.raw_total_tokens,
-														retry_resp.prompt_tokens,
-													);
+													// See `calibration_pair` for why we subtract
+													// the committed baseline from both sides in
+													// baseline mode.
+													let (cal_estimated, cal_real) =
+														pre_call_estimate.calibration_pair(
+															retry_resp.prompt_tokens,
+														);
+													loop_state
+														.estimator_calibration
+														.update(cal_estimated, cal_real);
 													// Retry shares the same committed message
 													// boundary as the primary call; use the
 													// retry's `prompt_tokens` as the baseline.
@@ -1929,9 +1942,15 @@ impl GenericAgentRuntime {
 								total_cache_read_input_tokens = total_cache_read_input_tokens
 									.saturating_add(resp.cache_read_input_tokens);
 								last_model_id = Some(resp.model_id.clone());
+								// Baseline-aware calibration update: in committed
+								// mode the raw total contains the unchanged
+								// committed prefix on both sides and the full-total
+								// ratio collapses toward 1.0 — use tail-only terms.
+								let (cal_estimated, cal_real) =
+									pre_call_estimate.calibration_pair(resp.prompt_tokens);
 								loop_state
 									.estimator_calibration
-									.update(pre_call_estimate.raw_total_tokens, resp.prompt_tokens);
+									.update(cal_estimated, cal_real);
 								loop_state.record_observed_usage(
 									pre_call_message_count,
 									resp.prompt_tokens,
@@ -2048,10 +2067,15 @@ impl GenericAgentRuntime {
 														Some(retry_resp.model_id.clone());
 													// Re-calibrate the estimator with the retry's
 													// prompt_tokens for a tighter next-turn estimate.
-													loop_state.estimator_calibration.update(
-														pre_call_estimate.raw_total_tokens,
-														retry_resp.prompt_tokens,
-													);
+													// Non-streaming retry shares the same
+													// calibration invariants as the primary path.
+													let (cal_estimated, cal_real) =
+														pre_call_estimate.calibration_pair(
+															retry_resp.prompt_tokens,
+														);
+													loop_state
+														.estimator_calibration
+														.update(cal_estimated, cal_real);
 													loop_state.record_observed_usage(
 														pre_call_message_count,
 														retry_resp.prompt_tokens,

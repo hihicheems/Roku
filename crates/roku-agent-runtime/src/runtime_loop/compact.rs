@@ -381,6 +381,41 @@ pub struct PromptTokenEstimate {
 	pub raw_total_tokens: u64,
 }
 
+impl PromptTokenEstimate {
+	/// Returns the `(estimated, real)` pair to feed into
+	/// [`EstimatorCalibration::update`] for the observed provider-reported
+	/// `usage.prompt_tokens`.
+	///
+	/// In committed-baseline mode the committed prefix dominates both the
+	/// estimated and the real totals by construction (the baseline equals
+	/// the provider's last `usage.prompt_tokens` for everything up to the
+	/// commit boundary). Feeding the raw totals into `update` would make
+	/// the ratio collapse toward `1.0` on long sessions — the unchanged
+	/// baseline cancels out — and calibration would stop correcting the
+	/// only component the estimator still guesses, the uncommitted tail.
+	/// Subtracting the baseline from both sides keeps the ratio sensitive
+	/// to tail bias.
+	///
+	/// In cold-start mode (`committed_baseline_tokens == 0`) returns the
+	/// full totals so the ratio reflects end-to-end estimator error.
+	///
+	/// Saturating arithmetic keeps the pair well-defined if the provider
+	/// reports fewer prompt tokens than the committed baseline (for
+	/// example a cache-credit quirk); `EstimatorCalibration::update`
+	/// already no-ops when either term is zero.
+	pub fn calibration_pair(&self, observed_prompt_tokens: u64) -> (u64, u64) {
+		if self.committed_baseline_tokens > 0 {
+			let estimated_tail = self
+				.raw_total_tokens
+				.saturating_sub(self.committed_baseline_tokens);
+			let real_tail = observed_prompt_tokens.saturating_sub(self.committed_baseline_tokens);
+			(estimated_tail, real_tail)
+		} else {
+			(self.raw_total_tokens, observed_prompt_tokens)
+		}
+	}
+}
+
 /// Authoritative committed-token state carried across turns.
 ///
 /// Captured right after each successful provider response that reports a
@@ -3590,6 +3625,133 @@ mod tests {
 		let cal = EstimatorCalibration::default();
 		assert_eq!(cal.apply(0), 0);
 		assert_eq!(cal.apply(123), 123);
+	}
+
+	#[test]
+	fn calibration_pair_in_baseline_mode_subtracts_committed_prefix_from_both_sides() {
+		// Scenario: large committed prefix (100k tokens) that the provider
+		// re-prices identically each turn, plus a small uncommitted tail
+		// the byte estimator under-counts by 2x.
+		//
+		// Feeding the raw totals into `EstimatorCalibration::update`
+		// would compute `100_100 / 100_050 ≈ 1.0005` — the unchanged
+		// baseline on both sides cancels the tail bias and calibration
+		// stops correcting. The tail-only pair `(50, 100)` yields a
+		// ratio of 2.0 and lets the scale track the only component the
+		// estimator still guesses.
+		let estimate = PromptTokenEstimate {
+			system_tokens: 0,
+			message_tokens: 50,
+			framing_tokens: 0,
+			tool_schema_tokens: 0,
+			committed_baseline_tokens: 100_000,
+			total_tokens: 100_050,
+			raw_total_tokens: 100_050,
+		};
+		let (estimated, real) = estimate.calibration_pair(100_100);
+		assert_eq!(
+			estimated, 50,
+			"estimated must be tail-only (raw_total - committed) in baseline mode",
+		);
+		assert_eq!(
+			real, 100,
+			"real must be tail-only (prompt_tokens - committed) in baseline mode",
+		);
+	}
+
+	#[test]
+	fn calibration_pair_in_cold_start_returns_full_totals_unchanged() {
+		// No committed baseline → pass through the raw totals. The
+		// full-total ratio is meaningful when the estimator is pricing
+		// the whole request from scratch.
+		let estimate = PromptTokenEstimate {
+			system_tokens: 200,
+			message_tokens: 300,
+			framing_tokens: 100,
+			tool_schema_tokens: 400,
+			committed_baseline_tokens: 0,
+			total_tokens: 1_000,
+			raw_total_tokens: 1_000,
+		};
+		let (estimated, real) = estimate.calibration_pair(1_200);
+		assert_eq!(
+			estimated, 1_000,
+			"estimated passes through raw_total_tokens when no baseline",
+		);
+		assert_eq!(
+			real, 1_200,
+			"real passes through observed prompt_tokens when no baseline",
+		);
+	}
+
+	#[test]
+	fn calibration_pair_saturates_when_provider_reports_below_baseline() {
+		// Defensive: cache-credit quirks or provider bugs can make
+		// `usage.prompt_tokens` come in below our recorded committed
+		// baseline. Saturating to 0 lets `update` no-op on the sample
+		// (it skips zero-valued terms) rather than producing a negative
+		// ratio that the scale clamp would then distort.
+		let estimate = PromptTokenEstimate {
+			system_tokens: 0,
+			message_tokens: 40,
+			framing_tokens: 8,
+			tool_schema_tokens: 0,
+			committed_baseline_tokens: 1_000,
+			total_tokens: 1_048,
+			raw_total_tokens: 1_048,
+		};
+		let (estimated, real) = estimate.calibration_pair(900);
+		assert_eq!(
+			real, 0,
+			"real_tail must saturate to 0 when prompt_tokens < committed",
+		);
+		assert_eq!(
+			estimated, 48,
+			"estimated_tail remains the pre-bug tail estimate"
+		);
+	}
+
+	#[test]
+	fn calibration_update_in_baseline_mode_tracks_tail_bias_not_full_ratio() {
+		// End-to-end: simulate ten consecutive turns with a large
+		// committed prefix and a biased tail estimate. Using the pair
+		// helper, the scale should move toward the tail ratio (2.0).
+		// Using the raw totals (the pre-fix behavior), the scale would
+		// stay pinned near 1.0 because the baseline dominates both
+		// sides. We assert the post-fix scale moves meaningfully off
+		// 1.0 — the exact value depends on clamp + sample-window
+		// behavior, but the direction and magnitude are the signal.
+		let mut cal_pair = EstimatorCalibration::default();
+		let mut cal_raw = EstimatorCalibration::default();
+		for _ in 0..CAL_SAMPLE_CAP {
+			let estimate = PromptTokenEstimate {
+				system_tokens: 0,
+				message_tokens: 50,
+				framing_tokens: 0,
+				tool_schema_tokens: 0,
+				committed_baseline_tokens: 100_000,
+				total_tokens: 100_050,
+				raw_total_tokens: 100_050,
+			};
+			let (est_pair, real_pair) = estimate.calibration_pair(100_100);
+			cal_pair.update(est_pair, real_pair);
+			cal_raw.update(estimate.raw_total_tokens, 100_100);
+		}
+		// Pair-based update rides the tail ratio up to the 2.0 clamp.
+		assert!(
+			(cal_pair.scale() - 2.0).abs() < 1e-9,
+			"baseline-aware pair must lift scale toward the tail bias \
+			 (2.0 clamp), got {}",
+			cal_pair.scale(),
+		);
+		// Raw-total update cannot distinguish tail from prefix; scale
+		// stays essentially at 1.0.
+		assert!(
+			(cal_raw.scale() - 1.0).abs() < 1e-3,
+			"raw-total update collapses to ~1.0 under a dominant \
+			 committed prefix (the bug this pair helper avoids); got {}",
+			cal_raw.scale(),
+		);
 	}
 
 	// ------------------------------------------------------------------
