@@ -873,14 +873,36 @@ impl GenericAgentRuntime {
 		config: &crate::runtime_config::NextStepRuntimeConfig,
 		pre_call_system_prompt_bytes: usize,
 		pre_call_tool_schema_bytes_len: usize,
+		pre_call_system_prompt_hash: u64,
 		pre_call_estimate: &crate::runtime_loop::PromptTokenEstimate,
 		retry_prompt_tokens: u64,
 		calibration: &crate::runtime_loop::PerModelCalibration,
 		loop_state_baseline: Option<crate::runtime_loop::CommittedBaseline>,
-	) -> (u64, u64, usize) {
+	) -> (u64, u64, usize, u64) {
 		if retry_resp_model_id == primary_resp_model_id {
 			let (est, real) = pre_call_estimate.calibration_pair(retry_prompt_tokens);
-			return (est, real, pre_call_tool_schema_bytes_len);
+			// Same-route retry reuses the primary's pre-call estimate /
+			// schema-bytes length and must persist the same tool-schema
+			// content hash so next turn's `is_valid_for` sees the exact
+			// wire bytes the provider tokenized this turn.
+			let primary_schema_hash = {
+				// Reconstruct the primary's tool schema for hashing.
+				let (_counter, _routed, primary_schema_bytes_vec) = self.resolve_attempt_preflight(
+					messages,
+					system_prompt,
+					system_prompt_sections,
+					tool_definitions,
+					Some(primary_resp_model_id.to_string()),
+					config,
+				);
+				crate::runtime_loop::hash_tool_schema_bytes(&primary_schema_bytes_vec)
+			};
+			return (
+				est,
+				real,
+				pre_call_tool_schema_bytes_len,
+				primary_schema_hash,
+			);
 		}
 		// Rerouted retry: re-resolve the retry model's preflight views.
 		let (retry_counter, _routed, retry_schema_bytes_vec) = self.resolve_attempt_preflight(
@@ -897,10 +919,14 @@ impl GenericAgentRuntime {
 			Some(&retry_schema_bytes_vec)
 		};
 		let retry_schema_len = retry_schema_bytes.map(|b| b.len()).unwrap_or(0);
+		let retry_tool_schema_hash =
+			crate::runtime_loop::hash_tool_schema_bytes(&retry_schema_bytes_vec);
 		let retry_baseline = loop_state_baseline.filter(|b| {
 			b.is_valid_for(
 				pre_call_system_prompt_bytes as u64,
 				retry_schema_len as u64,
+				pre_call_system_prompt_hash,
+				retry_tool_schema_hash,
 				Some(retry_resp_model_id),
 			)
 		});
@@ -913,7 +939,7 @@ impl GenericAgentRuntime {
 			retry_baseline,
 		);
 		let (est, real) = retry_estimate.calibration_pair(retry_prompt_tokens);
-		(est, real, retry_schema_len)
+		(est, real, retry_schema_len, retry_tool_schema_hash)
 	}
 
 	/// Returns `(prompt_tokens, output_tokens)` consumed by compaction LLM calls.
@@ -1066,6 +1092,10 @@ impl GenericAgentRuntime {
 		// committed-baseline mode.
 		let current_system_bytes = system_prompt.len() as u64;
 		let current_schema_bytes = effective_schema_bytes.map(|b| b.len() as u64).unwrap_or(0);
+		let current_system_prompt_hash =
+			crate::runtime_loop::hash_system_prompt_text(system_prompt);
+		let current_tool_schema_hash =
+			crate::runtime_loop::hash_tool_schema_bytes(effective_schema_bytes.unwrap_or_default());
 		let current_model = self
 			.route_router
 			.as_ref()
@@ -1074,6 +1104,8 @@ impl GenericAgentRuntime {
 			b.is_valid_for(
 				current_system_bytes,
 				current_schema_bytes,
+				current_system_prompt_hash,
+				current_tool_schema_hash,
 				current_model.as_deref(),
 			)
 		});
@@ -1636,10 +1668,17 @@ impl GenericAgentRuntime {
 					let mid_system_bytes = system_prompt.len() as u64;
 					let mid_schema_bytes =
 						mid_tool_schema_bytes.map(|b| b.len() as u64).unwrap_or(0);
+					let mid_system_prompt_hash =
+						crate::runtime_loop::hash_system_prompt_text(&system_prompt);
+					let mid_tool_schema_hash = crate::runtime_loop::hash_tool_schema_bytes(
+						mid_tool_schema_bytes.unwrap_or_default(),
+					);
 					let mid_baseline = loop_state.committed_baseline().filter(|b| {
 						b.is_valid_for(
 							mid_system_bytes,
 							mid_schema_bytes,
+							mid_system_prompt_hash,
+							mid_tool_schema_hash,
 							current_routed_model_initial.as_deref(),
 						)
 					});
@@ -1812,15 +1851,25 @@ impl GenericAgentRuntime {
 				// a shifted system prompt, tool-schema surface, or model
 				// invalidates the baseline — and (b) feed back into
 				// `record_observed_usage` after the response lands, so
-				// the next turn can run the same validity check.
+				// the next turn can run the same validity check. Content
+				// hashes catch the same-length edits byte count alone
+				// would miss (e.g. a dynamic block swapping a path of
+				// equal length, or a tool description rename).
 				let pre_call_message_count = messages.len();
 				let pre_call_system_prompt_bytes = system_prompt.len();
 				let pre_call_tool_schema_bytes_len =
 					tool_schema_bytes.map(|b| b.len()).unwrap_or(0);
+				let pre_call_system_prompt_hash =
+					crate::runtime_loop::hash_system_prompt_text(&system_prompt);
+				let pre_call_tool_schema_hash = crate::runtime_loop::hash_tool_schema_bytes(
+					tool_schema_bytes.unwrap_or_default(),
+				);
 				let pre_call_baseline = loop_state.committed_baseline().filter(|b| {
 					b.is_valid_for(
 						pre_call_system_prompt_bytes as u64,
 						pre_call_tool_schema_bytes_len as u64,
+						pre_call_system_prompt_hash,
+						pre_call_tool_schema_hash,
 						current_routed_model.as_deref(),
 					)
 				});
@@ -1971,16 +2020,21 @@ impl GenericAgentRuntime {
 								);
 								// Record the committed-token baseline plus the three
 								// prefix-surface guards (system prompt byte length,
-								// tool-schema byte length, serving model). Next turn's
-								// pre-flight rejects the baseline if any guard diverges,
-								// so mid-session changes (dynamic system blocks, plan
-								// mode transitions, tool surface growth, model swap)
-								// no longer produce stale reuse of `input_tokens`.
+								// tool-schema byte length and content hash, system
+								// prompt hash, serving model). Next turn's pre-flight
+								// rejects the baseline if any guard diverges, so
+								// mid-session changes (dynamic system blocks,
+								// plan mode transitions, tool surface growth, model
+								// swap, or same-length content edits that byte
+								// counts alone would miss) no longer produce stale
+								// reuse of `input_tokens`.
 								loop_state.record_observed_usage(
 									pre_call_message_count,
 									resp.prompt_tokens,
 									pre_call_system_prompt_bytes,
 									pre_call_tool_schema_bytes_len,
+									pre_call_system_prompt_hash,
+									pre_call_tool_schema_hash,
 									Some(resp.model_id.clone()),
 								);
 								let _ = sender.send(
@@ -2100,22 +2154,27 @@ impl GenericAgentRuntime {
 													// retry provider's serializer. Same-route
 													// retries keep the fast path and reuse the
 													// primary `pre_call_estimate`.
-													let (cal_estimated, cal_real, retry_schema_len) =
-														self.retry_preflight_values(
-															&retry_resp.model_id,
-															&resp.model_id,
-															&messages,
-															&system_prompt,
-															&system_prompt_sections,
-															&tool_definitions,
-															config,
-															pre_call_system_prompt_bytes,
-															pre_call_tool_schema_bytes_len,
-															&pre_call_estimate,
-															retry_resp.prompt_tokens,
-															&loop_state.estimator_calibration,
-															loop_state.committed_baseline(),
-														);
+													let (
+														cal_estimated,
+														cal_real,
+														retry_schema_len,
+														retry_tool_schema_hash,
+													) = self.retry_preflight_values(
+														&retry_resp.model_id,
+														&resp.model_id,
+														&messages,
+														&system_prompt,
+														&system_prompt_sections,
+														&tool_definitions,
+														config,
+														pre_call_system_prompt_bytes,
+														pre_call_tool_schema_bytes_len,
+														pre_call_system_prompt_hash,
+														&pre_call_estimate,
+														retry_resp.prompt_tokens,
+														&loop_state.estimator_calibration,
+														loop_state.committed_baseline(),
+													);
 													// Attribute the retry sample to the retry
 													// response's serving model — output-slot
 													// escalation can swap to a larger model
@@ -2133,14 +2192,17 @@ impl GenericAgentRuntime {
 													// The retry model id overrides the primary's
 													// — the server may have escalated to a larger
 													// model when filling the expanded output slot.
-													// `retry_schema_len` is either the primary's
-													// length (same route) or the retry provider's
-													// fresh wire-bytes length (rerouted).
+													// `retry_schema_len` / `retry_tool_schema_hash`
+													// are either the primary's (same route) or the
+													// retry provider's fresh wire-bytes view
+													// (rerouted).
 													loop_state.record_observed_usage(
 														pre_call_message_count,
 														retry_resp.prompt_tokens,
 														pre_call_system_prompt_bytes,
 														retry_schema_len,
+														pre_call_system_prompt_hash,
+														retry_tool_schema_hash,
 														Some(retry_resp.model_id.clone()),
 													);
 													// Replace the truncated streaming text in the
@@ -2233,6 +2295,8 @@ impl GenericAgentRuntime {
 									resp.prompt_tokens,
 									pre_call_system_prompt_bytes,
 									pre_call_tool_schema_bytes_len,
+									pre_call_system_prompt_hash,
+									pre_call_tool_schema_hash,
 									Some(resp.model_id.clone()),
 								);
 								if let Some(sender) = event_sender {
@@ -2352,22 +2416,27 @@ impl GenericAgentRuntime {
 													// falls through to the primary's
 													// `pre_call_estimate` when it stayed on the
 													// same model.
-													let (cal_estimated, cal_real, retry_schema_len) =
-														self.retry_preflight_values(
-															&retry_resp.model_id,
-															&resp.model_id,
-															&messages,
-															&system_prompt,
-															&system_prompt_sections,
-															&tool_definitions,
-															config,
-															pre_call_system_prompt_bytes,
-															pre_call_tool_schema_bytes_len,
-															&pre_call_estimate,
-															retry_resp.prompt_tokens,
-															&loop_state.estimator_calibration,
-															loop_state.committed_baseline(),
-														);
+													let (
+														cal_estimated,
+														cal_real,
+														retry_schema_len,
+														retry_tool_schema_hash,
+													) = self.retry_preflight_values(
+														&retry_resp.model_id,
+														&resp.model_id,
+														&messages,
+														&system_prompt,
+														&system_prompt_sections,
+														&tool_definitions,
+														config,
+														pre_call_system_prompt_bytes,
+														pre_call_tool_schema_bytes_len,
+														pre_call_system_prompt_hash,
+														&pre_call_estimate,
+														retry_resp.prompt_tokens,
+														&loop_state.estimator_calibration,
+														loop_state.committed_baseline(),
+													);
 													loop_state.estimator_calibration.update(
 														Some(&retry_resp.model_id),
 														cal_estimated,
@@ -2378,6 +2447,8 @@ impl GenericAgentRuntime {
 														retry_resp.prompt_tokens,
 														pre_call_system_prompt_bytes,
 														retry_schema_len,
+														pre_call_system_prompt_hash,
+														retry_tool_schema_hash,
 														Some(retry_resp.model_id.clone()),
 													);
 													// Intentionally no `LlmTextReplace` on the
@@ -6350,7 +6421,7 @@ mod tests {
 		};
 		let calibration = crate::runtime_loop::PerModelCalibration::default();
 		let config = runtime.agent_runtime_config.next_step.clone();
-		let (cal_est, cal_real, schema_len) = runtime.retry_preflight_values(
+		let (cal_est, cal_real, schema_len, tool_schema_hash) = runtime.retry_preflight_values(
 			"sequence-json-model",
 			"sequence-json-model",
 			&[Message::User {
@@ -6365,6 +6436,7 @@ mod tests {
 			&config,
 			6,
 			42,
+			0,
 			&pre_estimate,
 			150,
 			&calibration,
@@ -6381,6 +6453,31 @@ mod tests {
 		assert_eq!(
 			schema_len, 42,
 			"same-route retry must reuse primary's pre_call_tool_schema_bytes_len"
+		);
+		// Same-route retry must still fingerprint the primary's wire
+		// tool-schema bytes — the retry persists into the committed
+		// baseline under the retry's model id, so the hash must match
+		// what the primary router actually serialized for this request,
+		// not a constant. The helper resolves that preflight internally
+		// on the same-route path; we assert reproducibility against an
+		// independent resolve.
+		let (_, _, expected_primary_schema_bytes) = runtime.resolve_attempt_preflight(
+			&[Message::User {
+				content: "test".to_string(),
+			}],
+			"system",
+			&roku_plugin_llm::SystemPromptSections {
+				static_blocks: Vec::new(),
+				dynamic_blocks: Vec::new(),
+			},
+			&[],
+			Some("sequence-json-model".to_string()),
+			&config,
+		);
+		assert_eq!(
+			tool_schema_hash,
+			crate::runtime_loop::hash_tool_schema_bytes(&expected_primary_schema_bytes),
+			"same-route retry must surface the primary model's tool-schema content hash",
 		);
 	}
 
@@ -6432,21 +6529,23 @@ mod tests {
 		};
 		let tool_definitions: Vec<ToolDefinition> = vec![];
 
-		let (cal_est, cal_real, retry_schema_len) = runtime.retry_preflight_values(
-			"sequence-json-model",
-			"some-other-primary-model",
-			&messages,
-			system_prompt,
-			&system_prompt_sections,
-			&tool_definitions,
-			&config,
-			6,
-			42,
-			&pre_estimate,
-			150,
-			&calibration,
-			None,
-		);
+		let (cal_est, cal_real, retry_schema_len, retry_tool_schema_hash) = runtime
+			.retry_preflight_values(
+				"sequence-json-model",
+				"some-other-primary-model",
+				&messages,
+				system_prompt,
+				&system_prompt_sections,
+				&tool_definitions,
+				&config,
+				6,
+				42,
+				0,
+				&pre_estimate,
+				150,
+				&calibration,
+				None,
+			);
 
 		// Independently resolve what the retry preflight should see.
 		let (_, _, expected_schema_bytes) = runtime.resolve_attempt_preflight(
@@ -6484,6 +6583,19 @@ mod tests {
 		assert_eq!(
 			cal_real, 150,
 			"cal_real must always equal retry_prompt_tokens regardless of route"
+		);
+		// The retry tool-schema hash must fingerprint the retry
+		// provider's serialized wire bytes, matching what
+		// `resolve_attempt_preflight(retry_model_id)` would produce
+		// independently. The rerouted path must never persist a hash
+		// derived from the primary's serializer — that is exactly what
+		// this P2 fix guards against.
+		let expected_retry_hash =
+			crate::runtime_loop::hash_tool_schema_bytes(&expected_schema_bytes);
+		assert_eq!(
+			retry_tool_schema_hash, expected_retry_hash,
+			"rerouted retry must hash the retry provider's wire bytes, \
+			 not the primary's",
 		);
 	}
 

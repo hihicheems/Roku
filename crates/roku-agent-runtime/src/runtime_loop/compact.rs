@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use roku_plugin_llm::{
 	CompactRequest, GenerationRequest, LlmAdapterError, LlmRouter, Message, RiskTier, TokenCounter,
 };
@@ -444,15 +447,30 @@ pub struct CommittedBaseline {
 	/// delta that still needs byte-heuristic estimation.
 	pub message_count: usize,
 	/// Byte length of the system prompt that was in the committed call.
-	/// A divergence means the dynamic system-prompt surface
-	/// (working-directory, memory blocks, runtime-memory sections)
-	/// changed and the baseline must be discarded.
+	/// Debuggability aid; real change-detection is done by
+	/// [`Self::system_prompt_hash`] because two dynamic prompt blocks can
+	/// be edited to the same length (e.g. `/a/foo.txt` → `/b/bar.txt`)
+	/// without flipping the byte count.
 	pub system_prompt_bytes: u64,
 	/// Byte length of the serialized tool-schema block the provider saw
-	/// on the committed call. A divergence means the deferred-tools
-	/// surface, plan-mode visibility, or disallowed-tools list moved and
-	/// the baseline no longer matches what the provider will tokenize.
+	/// on the committed call. Debuggability aid; real change-detection
+	/// uses [`Self::tool_schema_hash`] because a same-length edit to a
+	/// tool description or parameter name would otherwise slip past.
 	pub tool_schema_bytes_len: u64,
+	/// Content hash of the composed system-prompt string the provider
+	/// saw on the committed call. A divergence means the dynamic
+	/// system-prompt surface (working-directory, memory blocks,
+	/// runtime-memory sections) shifted and the baseline must be
+	/// discarded — regardless of whether the shift changed byte count.
+	#[serde(default)]
+	pub system_prompt_hash: u64,
+	/// Content hash of the serialized tool-schema wire bytes the provider
+	/// saw on the committed call. A divergence means the deferred-tools
+	/// surface, plan-mode visibility, disallowed-tools list, or any
+	/// tool description / parameter text moved and the baseline no
+	/// longer describes the schema the provider tokenized.
+	#[serde(default)]
+	pub tool_schema_hash: u64,
 	/// Model ID that served the committed call. Different providers carry
 	/// different tokenizers (o200k_base vs cl100k_base vs Anthropic BPE),
 	/// so a model swap invalidates the `input_tokens` figure even when
@@ -464,17 +482,46 @@ impl CommittedBaseline {
 	/// Returns `true` when every guard matches the current request
 	/// context and the caller can safely use `input_tokens` as the exact
 	/// committed-prefix cost.
+	///
+	/// The two byte-length arguments are kept for historical compatibility
+	/// with call sites that already carry the numbers for diagnostics.
+	/// Correctness-wise, the hash arguments are what matters — two
+	/// same-length-different-content prompts or tool schemas must
+	/// invalidate the baseline, or the previous call's `input_tokens`
+	/// will be reused against a prefix the provider no longer sees.
 	pub fn is_valid_for(
 		&self,
 		current_system_prompt_bytes: u64,
 		current_tool_schema_bytes_len: u64,
+		current_system_prompt_hash: u64,
+		current_tool_schema_hash: u64,
 		current_model_id: Option<&str>,
 	) -> bool {
 		self.input_tokens > 0
 			&& self.system_prompt_bytes == current_system_prompt_bytes
 			&& self.tool_schema_bytes_len == current_tool_schema_bytes_len
+			&& self.system_prompt_hash == current_system_prompt_hash
+			&& self.tool_schema_hash == current_tool_schema_hash
 			&& self.model_id.as_deref() == current_model_id
 	}
+}
+
+/// Content fingerprint of the composed system-prompt string the provider
+/// will tokenize. Pair with [`hash_tool_schema_bytes`] to fully describe
+/// the non-message portion of a committed baseline.
+pub fn hash_system_prompt_text(system_prompt: &str) -> u64 {
+	let mut hasher = DefaultHasher::new();
+	system_prompt.hash(&mut hasher);
+	hasher.finish()
+}
+
+/// Content fingerprint of the serialized tool-schema wire bytes. Uses
+/// the same hashing family as [`hash_system_prompt_text`] so both fields
+/// of [`CommittedBaseline`] behave identically under the validity check.
+pub fn hash_tool_schema_bytes(bytes: &[u8]) -> u64 {
+	let mut hasher = DefaultHasher::new();
+	bytes.hash(&mut hasher);
+	hasher.finish()
 }
 
 /// Bounded calibration state for the byte-based estimator.
@@ -1633,6 +1680,8 @@ mod tests {
 			committed_message_count: 0,
 			committed_system_prompt_bytes: 0,
 			committed_tool_schema_bytes_len: 0,
+			committed_system_prompt_hash: 0,
+			committed_tool_schema_hash: 0,
 			committed_model_id: None,
 			consecutive_autocompact_failures: 0,
 			frozen_tool_schema: None,
@@ -3653,6 +3702,89 @@ mod tests {
 		let pressure =
 			estimate_prompt_pressure(&messages, None, None, &cal, &counter, Some(baseline));
 		assert_eq!(pressure, 500 + 5 + 4);
+	}
+
+	#[test]
+	fn committed_baseline_is_valid_for_rejects_same_length_different_content() {
+		// Regression: byte-length-only guards accepted any same-length
+		// edit to the dynamic system-prompt surface or the serialized
+		// tool schema, so `input_tokens` would be reused against a
+		// prefix the provider no longer sees. Content hashes are the
+		// authoritative guards now; the byte-length pair stays for
+		// cheap pre-filter / diagnostics.
+		let committed_system = "You are Roku. wd=/tmp/a";
+		let committed_tools: &[u8] = br#"{"tools":[{"name":"read_a"}]}"#;
+		let baseline = CommittedBaseline {
+			input_tokens: 1_000,
+			message_count: 3,
+			system_prompt_bytes: committed_system.len() as u64,
+			tool_schema_bytes_len: committed_tools.len() as u64,
+			system_prompt_hash: hash_system_prompt_text(committed_system),
+			tool_schema_hash: hash_tool_schema_bytes(committed_tools),
+			model_id: Some("gpt-5.4".to_string()),
+		};
+
+		// Exact match — baseline is valid.
+		assert!(baseline.is_valid_for(
+			committed_system.len() as u64,
+			committed_tools.len() as u64,
+			hash_system_prompt_text(committed_system),
+			hash_tool_schema_bytes(committed_tools),
+			Some("gpt-5.4"),
+		));
+
+		// Same byte length, different system-prompt content: one
+		// character changed, byte count preserved.
+		let drifted_system = "You are Roku. wd=/tmp/b";
+		assert_eq!(drifted_system.len(), committed_system.len());
+		assert!(
+			!baseline.is_valid_for(
+				drifted_system.len() as u64,
+				committed_tools.len() as u64,
+				hash_system_prompt_text(drifted_system),
+				hash_tool_schema_bytes(committed_tools),
+				Some("gpt-5.4"),
+			),
+			"same-length system-prompt content edit must invalidate the baseline"
+		);
+
+		// Same byte length, different tool-schema content: tool name
+		// renamed without changing wire byte count.
+		let drifted_tools: &[u8] = br#"{"tools":[{"name":"read_b"}]}"#;
+		assert_eq!(drifted_tools.len(), committed_tools.len());
+		assert!(
+			!baseline.is_valid_for(
+				committed_system.len() as u64,
+				drifted_tools.len() as u64,
+				hash_system_prompt_text(committed_system),
+				hash_tool_schema_bytes(drifted_tools),
+				Some("gpt-5.4"),
+			),
+			"same-length tool-schema content edit must invalidate the baseline"
+		);
+	}
+
+	#[test]
+	fn hash_helpers_are_deterministic_and_sensitive_to_content() {
+		// Same input → same hash (reproducibility guarantee).
+		assert_eq!(
+			hash_system_prompt_text("hello world"),
+			hash_system_prompt_text("hello world"),
+		);
+		assert_eq!(
+			hash_tool_schema_bytes(b"schema-bytes"),
+			hash_tool_schema_bytes(b"schema-bytes"),
+		);
+
+		// Different content, same length → different hash.
+		assert_ne!(
+			hash_system_prompt_text("hello world"),
+			hash_system_prompt_text("hello earth"),
+		);
+		assert_ne!(
+			hash_tool_schema_bytes(b"schema-a12345"),
+			hash_tool_schema_bytes(b"schema-b12345"),
+		);
 	}
 
 	#[test]

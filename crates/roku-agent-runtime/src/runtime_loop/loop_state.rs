@@ -176,17 +176,30 @@ pub struct LoopState {
 	#[serde(skip)]
 	pub(crate) committed_message_count: usize,
 	/// Byte length of the system prompt that was in the committed call.
-	/// Used by [`CommittedBaseline::is_valid_for`] to detect when the
-	/// dynamic system-prompt surface has shifted between turns (working
-	/// directory, memory blocks, or runtime-memory sections updated).
+	/// Debuggability aid; real change detection is done by
+	/// [`Self::committed_system_prompt_hash`], because same-length
+	/// content edits (a dynamic block swapping one path for another of
+	/// equal length) would otherwise slip past the validity check.
 	#[serde(skip)]
 	pub(crate) committed_system_prompt_bytes: u64,
 	/// Byte length of the serialized tool-schema block that was in the
-	/// committed call. Used by [`CommittedBaseline::is_valid_for`] to
-	/// detect deferred-tool transitions, plan-mode visibility changes,
-	/// or disallowed-tools list mutations between turns.
+	/// committed call. Debuggability aid; paired with
+	/// [`Self::committed_tool_schema_hash`] for content-sensitive
+	/// detection of deferred-tool transitions, plan-mode visibility
+	/// changes, and tool description / parameter edits.
 	#[serde(skip)]
 	pub(crate) committed_tool_schema_bytes_len: u64,
+	/// Content hash of the composed system-prompt string at commit time.
+	/// Used by [`CommittedBaseline::is_valid_for`] to detect any shift
+	/// in the dynamic system-prompt surface, including edits that
+	/// preserve byte count.
+	#[serde(skip)]
+	pub(crate) committed_system_prompt_hash: u64,
+	/// Content hash of the serialized tool-schema wire bytes at commit
+	/// time. Used by [`CommittedBaseline::is_valid_for`] to detect any
+	/// tool-schema surface change the provider will retokenize.
+	#[serde(skip)]
+	pub(crate) committed_tool_schema_hash: u64,
 	/// Model ID the provider reported on the committed call. A change
 	/// means the tokenizer family may differ from what priced
 	/// `last_observed_input_tokens`, so the baseline cannot be trusted.
@@ -311,6 +324,8 @@ impl LoopState {
 			committed_message_count: 0,
 			committed_system_prompt_bytes: 0,
 			committed_tool_schema_bytes_len: 0,
+			committed_system_prompt_hash: 0,
+			committed_tool_schema_hash: 0,
 			committed_model_id: None,
 			consecutive_autocompact_failures: 0,
 			frozen_tool_schema: None,
@@ -383,6 +398,8 @@ impl LoopState {
 				message_count: self.committed_message_count,
 				system_prompt_bytes: self.committed_system_prompt_bytes,
 				tool_schema_bytes_len: self.committed_tool_schema_bytes_len,
+				system_prompt_hash: self.committed_system_prompt_hash,
+				tool_schema_hash: self.committed_tool_schema_hash,
 				model_id: self.committed_model_id.clone(),
 			})
 	}
@@ -392,22 +409,27 @@ impl LoopState {
 	///
 	/// `observed_input_tokens` is the provider's authoritative count;
 	/// `committed_count` is the number of messages that were in that
-	/// request. The three trailing arguments snapshot the other prefix
-	/// surfaces the provider tokenized — the system-prompt byte length,
-	/// the tool-schema byte length on the wire, and the model ID that
-	/// actually served the request. [`CommittedBaseline::is_valid_for`]
+	/// request. The trailing arguments snapshot every non-tail surface
+	/// the provider tokenized — system-prompt byte length and content
+	/// hash, tool-schema byte length and content hash, and the model ID
+	/// that actually served the request. [`CommittedBaseline::is_valid_for`]
 	/// compares these against the next turn's context and invalidates
-	/// the baseline when any has shifted.
+	/// the baseline when any has shifted. The two hashes are the
+	/// content-sensitive guards; the byte-length pair is kept for
+	/// diagnostics and cheap pre-filtering.
 	///
 	/// Zero `observed_input_tokens` is a no-op — the provider either did
 	/// not report usage or reported a cache-only hit, neither of which
 	/// can serve as a baseline for the tail heuristic.
+	#[allow(clippy::too_many_arguments)]
 	pub fn record_observed_usage(
 		&mut self,
 		committed_count: usize,
 		observed_input_tokens: u64,
 		system_prompt_bytes: usize,
 		tool_schema_bytes_len: usize,
+		system_prompt_hash: u64,
+		tool_schema_hash: u64,
 		model_id: Option<String>,
 	) {
 		if observed_input_tokens == 0 {
@@ -417,6 +439,8 @@ impl LoopState {
 		self.committed_message_count = committed_count;
 		self.committed_system_prompt_bytes = system_prompt_bytes as u64;
 		self.committed_tool_schema_bytes_len = tool_schema_bytes_len as u64;
+		self.committed_system_prompt_hash = system_prompt_hash;
+		self.committed_tool_schema_hash = tool_schema_hash;
 		self.committed_model_id = model_id;
 	}
 
@@ -431,6 +455,8 @@ impl LoopState {
 		self.committed_message_count = 0;
 		self.committed_system_prompt_bytes = 0;
 		self.committed_tool_schema_bytes_len = 0;
+		self.committed_system_prompt_hash = 0;
+		self.committed_tool_schema_hash = 0;
 		self.committed_model_id = None;
 	}
 
@@ -846,7 +872,7 @@ mod tests {
 		// fresh buffer. The first post-restore call must fall back to the
 		// whole-history estimate.
 		let mut state = LoopState::new("loop-baseline-skip", &loop_context());
-		state.record_observed_usage(7, 2048, 0, 0, None);
+		state.record_observed_usage(7, 2048, 0, 0, 0, 0, None);
 		assert_eq!(state.last_observed_input_tokens, Some(2048));
 		assert_eq!(state.committed_message_count, 7);
 		assert!(state.committed_baseline().is_some());
@@ -870,7 +896,7 @@ mod tests {
 		// committed system + tools surface is stable, and a schema-dirty
 		// event explicitly breaks that assumption.
 		let mut state = LoopState::new("loop-dirty-reset", &loop_context());
-		state.record_observed_usage(5, 1500, 0, 0, None);
+		state.record_observed_usage(5, 1500, 0, 0, 0, 0, None);
 		assert!(state.committed_baseline().is_some());
 		state.tool_schema_dirty = false;
 
@@ -894,7 +920,7 @@ mod tests {
 		state.invalidate_committed_baseline();
 		assert!(state.committed_baseline().is_none());
 
-		state.record_observed_usage(3, 900, 0, 0, None);
+		state.record_observed_usage(3, 900, 0, 0, 0, 0, None);
 		state.invalidate_committed_baseline();
 		state.invalidate_committed_baseline();
 		assert!(state.committed_baseline().is_none());
@@ -902,54 +928,64 @@ mod tests {
 
 	#[test]
 	fn committed_baseline_is_valid_for_rejects_mismatch() {
-		// All three prefix guards must match before the baseline can be
+		// Every prefix guard must match before the baseline can be
 		// trusted. Each mismatch scenario below exercises one guard in
 		// isolation; regression for the reviewer-flagged scenarios where
 		// dynamic system-prompt content, deferred-tool transitions, or
 		// a model override swap silently reused stale `input_tokens`.
 		let mut state = LoopState::new("loop-baseline-guard", &loop_context());
-		state.record_observed_usage(5, 1500, 2048, 1024, Some("gpt-5.4".to_string()));
+		state.record_observed_usage(5, 1500, 2048, 1024, 777, 888, Some("gpt-5.4".to_string()));
 		let baseline = state
 			.committed_baseline()
 			.expect("baseline populated after record_observed_usage");
 
 		// Exact match — baseline is valid.
-		assert!(baseline.is_valid_for(2048, 1024, Some("gpt-5.4")));
+		assert!(baseline.is_valid_for(2048, 1024, 777, 888, Some("gpt-5.4")));
 
 		// System prompt byte length drifted (e.g. working-directory block grew).
-		assert!(!baseline.is_valid_for(2100, 1024, Some("gpt-5.4")));
+		assert!(!baseline.is_valid_for(2100, 1024, 777, 888, Some("gpt-5.4")));
 
 		// Tool-schema byte length drifted (e.g. new tool loaded via tool_search).
-		assert!(!baseline.is_valid_for(2048, 1100, Some("gpt-5.4")));
+		assert!(!baseline.is_valid_for(2048, 1100, 777, 888, Some("gpt-5.4")));
+
+		// System prompt content hash drifted (same length, different content —
+		// e.g. a dynamic block swapping one path for another of equal length).
+		assert!(!baseline.is_valid_for(2048, 1024, 9999, 888, Some("gpt-5.4")));
+
+		// Tool-schema content hash drifted (same wire length, edited
+		// description / parameter text).
+		assert!(!baseline.is_valid_for(2048, 1024, 777, 9999, Some("gpt-5.4")));
 
 		// Model changed — tokenizer family may differ, input_tokens figure
 		// cannot be trusted even if the text surfaces are identical.
-		assert!(!baseline.is_valid_for(2048, 1024, Some("claude-sonnet-4-6")));
-		assert!(!baseline.is_valid_for(2048, 1024, None));
+		assert!(!baseline.is_valid_for(2048, 1024, 777, 888, Some("claude-sonnet-4-6")));
+		assert!(!baseline.is_valid_for(2048, 1024, 777, 888, None));
 	}
 
 	#[test]
 	fn committed_baseline_is_valid_for_rejects_zero_input_tokens() {
 		// A default-constructed baseline (all zeros) must never be
 		// considered valid, even if the caller happens to pass matching
-		// zero byte-lengths and a matching None model. The `input_tokens`
-		// guard is the minimum bar.
+		// zero byte-lengths/hashes and a matching None model. The
+		// `input_tokens` guard is the minimum bar.
 		let baseline = CommittedBaseline::default();
-		assert!(!baseline.is_valid_for(0, 0, None));
+		assert!(!baseline.is_valid_for(0, 0, 0, 0, None));
 	}
 
 	#[test]
 	fn record_observed_usage_stores_all_prefix_guards() {
-		// Pin the contract that `record_observed_usage` captures all three
-		// prefix-surface snapshots, so [`LoopState::committed_baseline`]
+		// Pin the contract that `record_observed_usage` captures every
+		// prefix-surface snapshot, so [`LoopState::committed_baseline`]
 		// returns them alongside `input_tokens`.
 		let mut state = LoopState::new("loop-record-guards", &loop_context());
-		state.record_observed_usage(6, 1800, 3072, 896, Some("gpt-5.4".to_string()));
+		state.record_observed_usage(6, 1800, 3072, 896, 1234, 5678, Some("gpt-5.4".to_string()));
 		let b = state.committed_baseline().expect("populated");
 		assert_eq!(b.input_tokens, 1800);
 		assert_eq!(b.message_count, 6);
 		assert_eq!(b.system_prompt_bytes, 3072);
 		assert_eq!(b.tool_schema_bytes_len, 896);
+		assert_eq!(b.system_prompt_hash, 1234);
+		assert_eq!(b.tool_schema_hash, 5678);
 		assert_eq!(b.model_id.as_deref(), Some("gpt-5.4"));
 	}
 
@@ -958,11 +994,13 @@ mod tests {
 		// After invalidation, every prefix field returns to its default so
 		// a subsequent `record_observed_usage` starts fresh.
 		let mut state = LoopState::new("loop-invalidate-guards", &loop_context());
-		state.record_observed_usage(6, 1800, 3072, 896, Some("gpt-5.4".to_string()));
+		state.record_observed_usage(6, 1800, 3072, 896, 1234, 5678, Some("gpt-5.4".to_string()));
 		state.invalidate_committed_baseline();
 		assert!(state.committed_baseline().is_none());
 		assert_eq!(state.committed_system_prompt_bytes, 0);
 		assert_eq!(state.committed_tool_schema_bytes_len, 0);
+		assert_eq!(state.committed_system_prompt_hash, 0);
+		assert_eq!(state.committed_tool_schema_hash, 0);
 		assert!(state.committed_model_id.is_none());
 	}
 
@@ -973,12 +1011,12 @@ mod tests {
 		// valid baseline. The existing baseline (if any) stays untouched,
 		// and an absent baseline stays absent.
 		let mut state = LoopState::new("loop-zero-usage", &loop_context());
-		state.record_observed_usage(4, 0, 0, 0, None);
+		state.record_observed_usage(4, 0, 0, 0, 0, 0, None);
 		assert!(state.committed_baseline().is_none());
 
-		state.record_observed_usage(4, 1200, 0, 0, None);
+		state.record_observed_usage(4, 1200, 0, 0, 0, 0, None);
 		let original = state.committed_baseline();
-		state.record_observed_usage(8, 0, 0, 0, None);
+		state.record_observed_usage(8, 0, 0, 0, 0, 0, None);
 		assert_eq!(state.committed_baseline(), original);
 	}
 

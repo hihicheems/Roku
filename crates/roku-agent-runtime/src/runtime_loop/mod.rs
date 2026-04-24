@@ -47,8 +47,9 @@ pub use compact::{
 	PER_TURN_TOOL_BUDGET_TOKENS, PerModelCalibration, PromptTokenEstimate, compact_history,
 	compact_history_with_llm, compact_messages, compact_messages_with_structured_summary,
 	estimate_context_tokens, estimate_prompt_pressure, estimate_prompt_tokens_calibrated,
-	estimate_turn_tool_tokens, microcompact_old_tool_results, mid_compact_messages,
-	summarize_discarded_steps, truncate_large_tool_results,
+	estimate_turn_tool_tokens, hash_system_prompt_text, hash_tool_schema_bytes,
+	microcompact_old_tool_results, mid_compact_messages, summarize_discarded_steps,
+	truncate_large_tool_results,
 };
 // Structured-summary compaction contract surface. Exported so downstream
 // crates can construct / inspect the outcome directly and reuse the
