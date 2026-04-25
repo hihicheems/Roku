@@ -1364,19 +1364,16 @@ impl GenericAgentRuntime {
 			&loop_state.working_directory,
 		);
 
-		// Per-turn token accumulators: summed across all LLM calls in this loop execution.
-		let mut total_prompt_tokens: u64 = 0;
-		let mut total_output_tokens: u64 = 0;
-		// Per-tier cache accumulators — additive counters mirroring the
-		// provider's `usage.cache_*_input_tokens` (Anthropic) and
-		// `usage.*_tokens_details.cached_tokens` (OpenAI). Stay at `0`
-		// through every turn until 09 / 10 land the cache markers /
-		// prompt_cache_key; after that they track the real cache activity
-		// emitted alongside `prompt_tokens` / `output_tokens`.
-		let mut total_cache_creation_input_tokens: u64 = 0;
-		let mut total_cache_read_input_tokens: u64 = 0;
-		// Track the model that served this request (updated on each successful LLM call).
-		let mut last_model_id: Option<String> = None;
+		// `LoopEvent::TokenUsage` is emitted **per LLM call** (primary,
+		// output-slot retry, and the summarizer inside reactive compaction).
+		// Consumers that want a loop-level grand total accumulate across the
+		// per-call events they observe — `turn.rs` / `render/engine.rs` /
+		// `bot.rs` already use `saturating_add` so no consumer-side change is
+		// needed. We deliberately do not maintain `total_*` accumulators in
+		// the runtime: any aggregate that lives only inside this function
+		// would be impossible to expose to the warm-turn cache-utilization
+		// gate without the same cold-start dilution that motivated the
+		// per-call switch.
 
 		// Fallback cost constants used when no cost profile is found for the model.
 		// These are rough estimates for Claude Sonnet tier.
@@ -1515,17 +1512,9 @@ impl GenericAgentRuntime {
 					"Step budget exhausted.",
 					Some(message.clone()),
 				);
-				emit_token_usage(
-					event_sender,
-					loop_state.step_index.saturating_add(1),
-					total_prompt_tokens,
-					total_output_tokens,
-					FALLBACK_COST_PER_M_INPUT_USD,
-					FALLBACK_COST_PER_M_OUTPUT_USD,
-					last_model_id.as_deref(),
-					total_cache_creation_input_tokens,
-					total_cache_read_input_tokens,
-				);
+				// No `emit_token_usage` here: budget exhaustion fires before
+				// any LLM call this turn, and prior calls already emitted
+				// their own per-call events.
 				return self.synthetic_loop_terminal_result(
 					task_id,
 					"tool",
@@ -1573,55 +1562,68 @@ impl GenericAgentRuntime {
 			// the call again. After at most one retry per turn we surface the
 			// failure so the loop does not spin indefinitely.
 			let mut reactive_compact_used = false;
-			let (accumulated_text, accumulated_tool_calls) = loop {
-				// Layer 0 pre-flight microcompaction: unconditionally clear
-				// historical tool result content so the prompt only carries the
-				// most recent observations. Pure mechanical mutation, no LLM
-				// call, no threshold — runs on every attempt (including after
-				// reactive compaction) so `pre_call_estimate` reflects the
-				// post-microcompact state.
-				// Pre-routing apply site: microcompact runs before
-				// `current_routed_model` is resolved on this
-				// attempt, so there is no model id to key the
-				// scale by yet. Fall through to the fallback
-				// bucket via `get(None)` — microcompact's
-				// calibration is used only to scale the freed-
-				// tokens figure for tracing, so a neutral scale
-				// is fine here.
-				let microcompact_freed = crate::runtime_loop::microcompact_old_tool_results(
-					&mut messages,
-					crate::runtime_loop::MICROCOMPACT_RETAIN_RECENT,
-					loop_state.estimator_calibration.get(None),
-				);
-				// Notify the cache break detector that message content changed.
-				// Also invalidate the committed-token baseline: microcompact
-				// replaced tool-result bodies with short placeholders, so the
-				// previously recorded `usage.prompt_tokens` no longer matches
-				// what the next call will actually send.
-				if microcompact_freed > 0 {
+			// Time-gated microcompaction: only fires when the gap since
+			// the last successful LLM call exceeds the prompt-cache TTL
+			// (5 min on both Anthropic and OpenAI). Inside that window
+			// the cache prefix is hot and any local rewrite would break
+			// it; outside it the cache has already expired so the
+			// rewrite costs nothing on the cache-prefix axis. Cold
+			// starts (no previous call recorded — first turn of the
+			// session, or first turn after a session restore where
+			// `last_llm_call_at` is `None` due to `#[serde(skip)]`)
+			// always skip.
+			//
+			// Hoisted above the reactive-retry loop: the cache-TTL signal
+			// is per-turn, not per-attempt. Re-evaluating inside the loop
+			// would let a reactive retry within the same turn re-emit
+			// `TimeBasedMicrocompactRan` (idempotent on the buffer but
+			// noisy in trace consumers) since `last_llm_call_at` does not
+			// advance until a successful response.
+			{
+				let time_gate_now = std::time::SystemTime::now();
+				if crate::runtime_loop::time_based_microcompact_due(
+					loop_state.last_llm_call_at(),
+					time_gate_now,
+					crate::runtime_loop::CACHE_COLD_GAP,
+				) {
+					// Notify the cache-break detector before mutating the
+					// buffer so the next response's `cache_read` drop is
+					// classified as intentional and never surfaces as an
+					// "unexpected break" diagnostic. Idempotent if the
+					// rewrite below ends up clearing nothing.
 					loop_state.cache_break_detector.notify_compaction();
-					loop_state.invalidate_committed_baseline();
+					let freed = crate::runtime_loop::microcompact_old_tool_results(
+						&mut messages,
+						crate::runtime_loop::MICROCOMPACT_RETAIN_RECENT,
+						loop_state.estimator_calibration.get(None),
+					);
+					let gap_minutes = loop_state
+						.last_llm_call_at()
+						.and_then(|prev| time_gate_now.duration_since(prev).ok())
+						.map(|gap| gap.as_secs() / 60)
+						.unwrap_or(0);
+					if freed > 0 {
+						// Replacing tool-result bodies with short
+						// placeholders shrinks the committed prefix below
+						// what the previous `usage.prompt_tokens` priced.
+						loop_state.invalidate_committed_baseline();
+					}
+					if let Some(sender) = event_sender {
+						let _ =
+							sender.send(crate::runtime_loop::LoopEvent::TimeBasedMicrocompactRan {
+								step: current_step_index,
+								gap_minutes,
+								freed_tokens: freed,
+							});
+					}
 				}
-				// Emit only when the pre-flight pass actually freed tokens. On
-				// retry iterations after reactive compaction the buffer is
-				// already lean; suppressing zero-freed events keeps trace
-				// consumers from attributing a no-op to this attempt.
-				if microcompact_freed > 0
-					&& let Some(sender) = event_sender
-				{
-					let _ = sender.send(crate::runtime_loop::LoopEvent::MicrocompactRan {
-						step: current_step_index,
-						freed_tokens: microcompact_freed,
-					});
-				}
-
+			}
+			let (accumulated_text, accumulated_tool_calls) = loop {
 				// Initial preflight resolution for this attempt — may be
 				// superseded by a second resolution below if mid-tier
-				// compaction mutates `messages`. Layer 0 microcompact
-				// above already shrank the buffer; this resolution
-				// reflects its post-microcompact state. Reading the
-				// counter / routed model / wire-bytes preview through
-				// the full `select_model` policy (via the same
+				// compaction mutates `messages`. Reading the counter /
+				// routed model / wire-bytes preview through the full
+				// `select_model` policy (via the same
 				// `counter_selection_request`) keeps all three views
 				// consistent with the model `router.generate*` will
 				// actually serve — `model_override` eligibility, risk
@@ -2016,16 +2018,23 @@ impl GenericAgentRuntime {
 										step: current_step_index,
 									},
 								);
-								total_prompt_tokens =
-									total_prompt_tokens.saturating_add(resp.prompt_tokens);
-								total_output_tokens =
-									total_output_tokens.saturating_add(resp.output_tokens);
-								total_cache_creation_input_tokens =
-									total_cache_creation_input_tokens
-										.saturating_add(resp.cache_creation_input_tokens);
-								total_cache_read_input_tokens = total_cache_read_input_tokens
-									.saturating_add(resp.cache_read_input_tokens);
-								last_model_id = Some(resp.model_id.clone());
+								// Per-call token usage: the warm-turn cache gate
+								// reads `cache_read_input_tokens / prompt_tokens`
+								// from each event and excludes step 1 as cold
+								// start, which only works if the values describe
+								// just this LLM call (not running totals).
+								emit_token_usage(
+									event_sender,
+									current_step_index,
+									resp.prompt_tokens,
+									resp.output_tokens,
+									FALLBACK_COST_PER_M_INPUT_USD,
+									FALLBACK_COST_PER_M_OUTPUT_USD,
+									Some(&resp.model_id),
+									resp.cache_creation_input_tokens,
+									resp.cache_read_input_tokens,
+									false,
+								);
 								// Fold the real `usage.prompt_tokens` back into the
 								// estimator calibration so the next turn's pressure
 								// check is closer to ground truth. In
@@ -2065,6 +2074,8 @@ impl GenericAgentRuntime {
 									pre_call_prefix_messages_hash,
 									Some(resp.model_id.clone()),
 								);
+								loop_state
+									.record_llm_call_observed_at(std::time::SystemTime::now());
 								let _ = sender.send(
 									crate::runtime_loop::LoopEvent::EstimatorCalibrated {
 										step: current_step_index,
@@ -2146,30 +2157,26 @@ impl GenericAgentRuntime {
 												if let Ok(retry_resp) =
 													router.generate(&escalated_request).await
 												{
-													// Token totals are billing-oriented: both
-													// the truncated call and the retry were
-													// charged by the provider, so we accumulate
-													// both. Consumers that need "response length"
-													// should use the retry's output_tokens only.
-													total_prompt_tokens = total_prompt_tokens
-														.saturating_add(retry_resp.prompt_tokens);
-													total_output_tokens = total_output_tokens
-														.saturating_add(retry_resp.output_tokens);
-													total_cache_creation_input_tokens =
-														total_cache_creation_input_tokens
-															.saturating_add(
-																retry_resp
-																	.cache_creation_input_tokens,
-															);
-													total_cache_read_input_tokens =
-														total_cache_read_input_tokens
-															.saturating_add(
-																retry_resp.cache_read_input_tokens,
-															);
-													// Update model ID so cost reporting uses the
-													// retry response's model, not the original.
-													last_model_id =
-														Some(retry_resp.model_id.clone());
+													// Per-call emission — both the truncated
+													// streaming attempt and this retry were
+													// charged by the provider, and consumers'
+													// `saturating_add` accumulators give the
+													// caller the full billable total. Cost
+													// reporting now reflects the retry's serving
+													// model directly because each event carries
+													// its own `model_id`.
+													emit_token_usage(
+														event_sender,
+														current_step_index,
+														retry_resp.prompt_tokens,
+														retry_resp.output_tokens,
+														FALLBACK_COST_PER_M_INPUT_USD,
+														FALLBACK_COST_PER_M_OUTPUT_USD,
+														Some(&retry_resp.model_id),
+														retry_resp.cache_creation_input_tokens,
+														retry_resp.cache_read_input_tokens,
+														false,
+													);
 													// Re-calibrate the estimator with the retry's
 													// prompt_tokens. When output-slot escalation
 													// reroutes to a different model (`select_model`
@@ -2238,6 +2245,9 @@ impl GenericAgentRuntime {
 														pre_call_prefix_messages_hash,
 														Some(retry_resp.model_id.clone()),
 													);
+													loop_state.record_llm_call_observed_at(
+														std::time::SystemTime::now(),
+													);
 													// Replace the truncated streaming text in the
 													// TUI. `LlmDecisionComplete` was already sent
 													// before the retry, so the render engine's
@@ -2300,16 +2310,23 @@ impl GenericAgentRuntime {
 						tool_schema_frozen_emitted = true;
 						match router.generate(&gen_request).await {
 							Ok(resp) => {
-								total_prompt_tokens =
-									total_prompt_tokens.saturating_add(resp.prompt_tokens);
-								total_output_tokens =
-									total_output_tokens.saturating_add(resp.output_tokens);
-								total_cache_creation_input_tokens =
-									total_cache_creation_input_tokens
-										.saturating_add(resp.cache_creation_input_tokens);
-								total_cache_read_input_tokens = total_cache_read_input_tokens
-									.saturating_add(resp.cache_read_input_tokens);
-								last_model_id = Some(resp.model_id.clone());
+								// Per-call token usage — same rationale as the
+								// streaming branch: the warm-turn cache gate
+								// only computes a sound `cache_read_input_tokens /
+								// prompt_tokens` ratio when each sample is one
+								// LLM call.
+								emit_token_usage(
+									event_sender,
+									current_step_index,
+									resp.prompt_tokens,
+									resp.output_tokens,
+									FALLBACK_COST_PER_M_INPUT_USD,
+									FALLBACK_COST_PER_M_OUTPUT_USD,
+									Some(&resp.model_id),
+									resp.cache_creation_input_tokens,
+									resp.cache_read_input_tokens,
+									false,
+								);
 								// Baseline-aware calibration update: in committed
 								// mode the raw total contains the unchanged
 								// committed prefix on both sides and the full-total
@@ -2333,6 +2350,8 @@ impl GenericAgentRuntime {
 									pre_call_prefix_messages_hash,
 									Some(resp.model_id.clone()),
 								);
+								loop_state
+									.record_llm_call_observed_at(std::time::SystemTime::now());
 								if let Some(sender) = event_sender {
 									let _ = sender.send(
 										crate::runtime_loop::LoopEvent::EstimatorCalibrated {
@@ -2419,29 +2438,21 @@ impl GenericAgentRuntime {
 												if let Ok(retry_resp) =
 													router.generate(&escalated_request).await
 												{
-													// Token totals are billing-oriented: both
-													// the truncated call and the retry were
-													// charged by the provider, so we accumulate
-													// both. Consumers that need "response length"
-													// should use the retry's output_tokens only.
-													total_prompt_tokens = total_prompt_tokens
-														.saturating_add(retry_resp.prompt_tokens);
-													total_output_tokens = total_output_tokens
-														.saturating_add(retry_resp.output_tokens);
-													total_cache_creation_input_tokens =
-														total_cache_creation_input_tokens
-															.saturating_add(
-																retry_resp
-																	.cache_creation_input_tokens,
-															);
-													total_cache_read_input_tokens =
-														total_cache_read_input_tokens
-															.saturating_add(
-																retry_resp.cache_read_input_tokens,
-															);
-													// Update model ID for cost reporting.
-													last_model_id =
-														Some(retry_resp.model_id.clone());
+													// Per-call emission for the non-streaming
+													// retry — same rationale as the streaming
+													// retry branch above.
+													emit_token_usage(
+														event_sender,
+														current_step_index,
+														retry_resp.prompt_tokens,
+														retry_resp.output_tokens,
+														FALLBACK_COST_PER_M_INPUT_USD,
+														FALLBACK_COST_PER_M_OUTPUT_USD,
+														Some(&retry_resp.model_id),
+														retry_resp.cache_creation_input_tokens,
+														retry_resp.cache_read_input_tokens,
+														false,
+													);
 													// Re-calibrate the estimator with the retry's
 													// prompt_tokens. Non-streaming retry shares
 													// the same calibration invariants as the
@@ -2486,6 +2497,9 @@ impl GenericAgentRuntime {
 														retry_tool_schema_hash,
 														pre_call_prefix_messages_hash,
 														Some(retry_resp.model_id.clone()),
+													);
+													loop_state.record_llm_call_observed_at(
+														std::time::SystemTime::now(),
 													);
 													// Intentionally no `LlmTextReplace` on the
 													// non-streaming path: there is no truncated
@@ -2542,8 +2556,31 @@ impl GenericAgentRuntime {
 								&detail,
 							)
 							.await;
-						total_prompt_tokens = total_prompt_tokens.saturating_add(compact_pt);
-						total_output_tokens = total_output_tokens.saturating_add(compact_ot);
+						// Per-call emission for the summarizer LLM call inside
+						// reactive compaction. The summarizer is a real billed
+						// call, so consumers that accumulate `prompt_tokens` /
+						// `output_tokens` need to see it. `is_compaction=true`
+						// is the positive marker the warm-turn cache gate keys
+						// off to skip these synthetic zero-cache events.
+						emit_token_usage(
+							event_sender,
+							current_step_index,
+							compact_pt,
+							compact_ot,
+							FALLBACK_COST_PER_M_INPUT_USD,
+							FALLBACK_COST_PER_M_OUTPUT_USD,
+							None,
+							0,
+							0,
+							true,
+						);
+						// Update the time-gated microcompact baseline: the
+						// summarizer just ran, so the next turn's prompt cache
+						// is warm and `time_based_microcompact_due` must not
+						// trigger a redundant rewrite.
+						if compact_pt > 0 || compact_ot > 0 {
+							loop_state.record_llm_call_observed_at(std::time::SystemTime::now());
+						}
 						// Retry the LLM call with the compacted message buffer.
 						continue;
 					}
@@ -2567,17 +2604,9 @@ impl GenericAgentRuntime {
 							trace_msg,
 							Some(message.clone()),
 						);
-						emit_token_usage(
-							event_sender,
-							current_step_index,
-							total_prompt_tokens,
-							total_output_tokens,
-							FALLBACK_COST_PER_M_INPUT_USD,
-							FALLBACK_COST_PER_M_OUTPUT_USD,
-							last_model_id.as_deref(),
-							total_cache_creation_input_tokens,
-							total_cache_read_input_tokens,
-						);
+						// No `emit_token_usage` here: per-call events for any
+						// successful prior calls were already emitted, and the
+						// failing call did not return a billable response.
 						return self.synthetic_loop_terminal_result(
 							task_id,
 							"tool",
@@ -2609,17 +2638,8 @@ impl GenericAgentRuntime {
 					"LLM produced a text response with no tool calls.",
 					Some(message.clone()),
 				);
-				emit_token_usage(
-					event_sender,
-					current_step_index,
-					total_prompt_tokens,
-					total_output_tokens,
-					FALLBACK_COST_PER_M_INPUT_USD,
-					FALLBACK_COST_PER_M_OUTPUT_USD,
-					last_model_id.as_deref(),
-					total_cache_creation_input_tokens,
-					total_cache_read_input_tokens,
-				);
+				// No `emit_token_usage` here: the per-call event for this LLM
+				// call was already emitted in the success branch above.
 				return self.synthetic_loop_terminal_result(
 					task_id,
 					"tool",
@@ -2646,17 +2666,8 @@ impl GenericAgentRuntime {
 							"LLM called final_answer.",
 							Some(message.clone()),
 						);
-						emit_token_usage(
-							event_sender,
-							current_step_index,
-							total_prompt_tokens,
-							total_output_tokens,
-							FALLBACK_COST_PER_M_INPUT_USD,
-							FALLBACK_COST_PER_M_OUTPUT_USD,
-							last_model_id.as_deref(),
-							total_cache_creation_input_tokens,
-							total_cache_read_input_tokens,
-						);
+						// Per-call event for this LLM call was already emitted
+						// in the success branch.
 						return self.synthetic_loop_terminal_result(
 							task_id,
 							"tool",
@@ -2680,17 +2691,8 @@ impl GenericAgentRuntime {
 						);
 						let message = payload.final_message.clone();
 						self.record_ask_user_step(loop_state, "LLM called ask_user.", payload);
-						emit_token_usage(
-							event_sender,
-							current_step_index,
-							total_prompt_tokens,
-							total_output_tokens,
-							FALLBACK_COST_PER_M_INPUT_USD,
-							FALLBACK_COST_PER_M_OUTPUT_USD,
-							last_model_id.as_deref(),
-							total_cache_creation_input_tokens,
-							total_cache_read_input_tokens,
-						);
+						// Per-call event for this LLM call was already emitted
+						// in the success branch.
 						return self.synthetic_loop_terminal_result(
 							task_id,
 							"tool",
@@ -2713,17 +2715,8 @@ impl GenericAgentRuntime {
 							"LLM called fail.",
 							Some(reason.clone()),
 						);
-						emit_token_usage(
-							event_sender,
-							current_step_index,
-							total_prompt_tokens,
-							total_output_tokens,
-							FALLBACK_COST_PER_M_INPUT_USD,
-							FALLBACK_COST_PER_M_OUTPUT_USD,
-							last_model_id.as_deref(),
-							total_cache_creation_input_tokens,
-							total_cache_read_input_tokens,
-						);
+						// Per-call event for this LLM call was already emitted
+						// in the success branch.
 						return self.synthetic_loop_terminal_result(
 							task_id,
 							"tool",
@@ -3064,39 +3057,6 @@ impl GenericAgentRuntime {
 						exceeded,
 					});
 				}
-				// When budget exceeded, trigger Layer 0 microcompact to free pressure.
-				if exceeded {
-					// Post-step microcompact: the most recently served
-					// call's model id is the best available key here —
-					// the attempt loop has exited, `current_routed_model`
-					// is out of scope, and the last call's serving model
-					// is what produced the tool-result bodies we are
-					// about to compact. Fall through to fallback when
-					// the run has not yet completed a call.
-					let freed = crate::runtime_loop::microcompact_old_tool_results(
-						&mut messages,
-						crate::runtime_loop::MICROCOMPACT_RETAIN_RECENT,
-						loop_state
-							.estimator_calibration
-							.get(last_model_id.as_deref()),
-					);
-					if freed > 0 {
-						loop_state.cache_break_detector.notify_compaction();
-						// Mirror the pre-flight microcompact at the top of
-						// the attempt loop: replacing tool-result bodies
-						// with short placeholders shrinks the committed
-						// prefix below what `last_observed_input_tokens`
-						// priced, so the baseline no longer matches the
-						// message buffer about to be sent.
-						loop_state.invalidate_committed_baseline();
-						if let Some(sender) = event_sender {
-							let _ = sender.send(crate::runtime_loop::LoopEvent::MicrocompactRan {
-								step: current_step_index,
-								freed_tokens: freed,
-							});
-						}
-					}
-				}
 			}
 
 			let (compact_pt, compact_ot) = self
@@ -3112,9 +3072,35 @@ impl GenericAgentRuntime {
 				.await;
 			if compact_pt > 0 || compact_ot > 0 {
 				loop_state.cache_break_detector.notify_compaction();
+				// Per-call emission for the summarizer LLM call inside
+				// `maybe_compact`. The summarizer is a real billed call, so
+				// consumers that accumulate `prompt_tokens` / `output_tokens`
+				// need to see it. `is_compaction=true` is the positive
+				// marker the warm-turn cache gate keys off to skip these
+				// synthetic zero-cache events.
+				emit_token_usage(
+					event_sender,
+					current_step_index,
+					compact_pt,
+					compact_ot,
+					FALLBACK_COST_PER_M_INPUT_USD,
+					FALLBACK_COST_PER_M_OUTPUT_USD,
+					None,
+					0,
+					0,
+					true,
+				);
+				// Update the time-gated microcompact baseline: the
+				// summarizer just ran, so the next turn's prompt cache is
+				// warm and `time_based_microcompact_due` must not trigger
+				// a redundant rewrite — without this, a slow tool step
+				// followed by `maybe_compact` near the >5 min mark would
+				// leave `last_llm_call_at` stale, the next turn would
+				// classify the cache as cold, and the time gate would
+				// re-rewrite tool-result content even though an LLM call
+				// just occurred.
+				loop_state.record_llm_call_observed_at(std::time::SystemTime::now());
 			}
-			total_prompt_tokens = total_prompt_tokens.saturating_add(compact_pt);
-			total_output_tokens = total_output_tokens.saturating_add(compact_ot);
 
 			// Emit StepComplete after all tools in this turn are done.
 			if let Some(sender) = event_sender {
@@ -3703,6 +3689,7 @@ fn emit_token_usage(
 	model_id: Option<&str>,
 	cache_creation_input_tokens: u64,
 	cache_read_input_tokens: u64,
+	is_compaction: bool,
 ) {
 	if let Some(sender) = event_sender {
 		let total_tokens = prompt_tokens.saturating_add(output_tokens);
@@ -3746,6 +3733,7 @@ fn emit_token_usage(
 			cache_write_cost_usd,
 			cache_read_cost_usd,
 			output_cost_usd,
+			is_compaction,
 		});
 	}
 }
@@ -5716,6 +5704,378 @@ mod tests {
 		assert_eq!(result.terminal_step_action, Some(StepAction::FinalAnswer));
 		cleanup_fixture(&text_path);
 	}
+
+	#[test]
+	fn execute_tool_loop_keeps_tool_result_content_byte_stable_across_turns() {
+		// Regression: the runtime must not rewrite historical
+		// `Message::ToolResult.content` between turns. After a tool call
+		// returns, its body becomes part of the prompt prefix and must
+		// remain byte-stable so the provider's prompt-prefix cache stays
+		// hot.
+		//
+		// The fixture issues four `Read` calls before `final_answer`,
+		// one more than `MICROCOMPACT_RETAIN_RECENT = 3`. If a future
+		// regression re-introduces an unconditional pre-flight rewrite,
+		// the OLDEST tool result (fixture A) would be replaced with the
+		// placeholder before turn 5's LLM call and the marker assertion
+		// below would flag it. A two-call fixture would leave the
+		// rewrite path observationally idle because the
+		// eligible-old-results window is empty under retain=3.
+		let paths = [
+			regression_fixture_path(".txt", "MARKER-ALPHA-byte-stability-fixture-A\n"),
+			regression_fixture_path(".txt", "MARKER-BETA-byte-stability-fixture-B\n"),
+			regression_fixture_path(".txt", "MARKER-GAMMA-byte-stability-fixture-C\n"),
+			regression_fixture_path(".txt", "MARKER-DELTA-byte-stability-fixture-D\n"),
+		];
+		let markers = [
+			"MARKER-ALPHA-byte-stability-fixture-A",
+			"MARKER-BETA-byte-stability-fixture-B",
+			"MARKER-GAMMA-byte-stability-fixture-C",
+			"MARKER-DELTA-byte-stability-fixture-D",
+		];
+		let responses = vec![
+			serde_json::json!({
+				"action": "call_tool",
+				"tool_name": "Read",
+				"arguments": { "path": &paths[0] },
+				"reason": "load fixture 0",
+				"final_message": null,
+			}),
+			serde_json::json!({
+				"action": "call_tool",
+				"tool_name": "Read",
+				"arguments": { "path": &paths[1] },
+				"reason": "load fixture 1",
+				"final_message": null,
+			}),
+			serde_json::json!({
+				"action": "call_tool",
+				"tool_name": "Read",
+				"arguments": { "path": &paths[2] },
+				"reason": "load fixture 2",
+				"final_message": null,
+			}),
+			serde_json::json!({
+				"action": "call_tool",
+				"tool_name": "Read",
+				"arguments": { "path": &paths[3] },
+				"reason": "load fixture 3",
+				"final_message": null,
+			}),
+			serde_json::json!({
+				"action": "final_answer",
+				"tool_name": null,
+				"arguments": null,
+				"reason": "all fixtures loaded",
+				"final_message": "fixtures loaded",
+			}),
+		];
+		let (route_router, prompts) = router_with_json_responses(responses);
+
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				router_with_text_output("execution-provider", "live answer"),
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+			);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-byte-stability".to_string()),
+			session_id: "session-byte-stability".to_string(),
+			goal: "Read all fixtures".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::FilesystemRead,
+			0.9,
+			false,
+			crate::router::RouteRisk::Low,
+			vec!["Read".to_string()],
+			vec!["core-fs".to_string()],
+			Vec::new(),
+			"byte-stability regression",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+
+		let _result = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-byte-stability".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				// `None` keeps the loop on the non-streaming path: the
+				// test fixture's `SequenceJsonProvider` has no `stream()`
+				// override and the default trait impl drops the
+				// `tool_calls` field, which would force every call_tool
+				// response into the "no tool calls" fallback.
+				None,
+				None,
+			));
+
+		let captured = prompts.lock().expect("prompt lock should succeed");
+		assert_eq!(
+			captured.len(),
+			5,
+			"five turns expected (4 Read + final_answer); got {}",
+			captured.len(),
+		);
+
+		// The microcompact placeholder MUST NOT appear in any prompt
+		// captured during normal multi-turn tool use.
+		let placeholder = crate::runtime_loop::MICROCOMPACT_PLACEHOLDER;
+		for (idx, prompt) in captured.iter().enumerate() {
+			assert!(
+				!prompt.contains(placeholder),
+				"prompt[{idx}] unexpectedly contains the microcompact placeholder \
+				 (`{placeholder}`); historical tool_result content must remain \
+				 byte-stable across turns",
+			);
+		}
+
+		// The final_answer prompt (index 4) sees the prefix of all four
+		// tool results — including the OLDEST (turn 1, fixture A).
+		// `MICROCOMPACT_RETAIN_RECENT = 3` would have left the oldest
+		// eligible for rewriting under the deleted pre-flight path, so a
+		// missing marker means a historical tool_result body was
+		// rewritten by some path.
+		for marker in markers {
+			assert!(
+				captured[4].contains(marker),
+				"final_answer prompt must contain `{marker}` (intact body \
+				 from earlier turn)"
+			);
+		}
+
+		for path in &paths {
+			cleanup_fixture(path);
+		}
+	}
+
+	#[test]
+	fn execute_tool_loop_emits_time_based_microcompact_event_when_last_llm_call_was_long_ago() {
+		// Force the time-gated path to fire on turn 1 by seeding
+		// `last_llm_call_at` with `UNIX_EPOCH` before running the loop.
+		// The runtime computes `now - last_llm_call_at` and compares
+		// against `CACHE_COLD_GAP` (5 min); the resulting gap (decades)
+		// exceeds the threshold so the gate fires. The buffer has no
+		// historical tool_results so `freed_tokens` is `0`, but the
+		// event is still emitted so trace consumers can observe the
+		// rewrite attempt.
+		let (route_router, _prompts) = router_with_json_responses(vec![serde_json::json!({
+			"action": "final_answer",
+			"tool_name": null,
+			"arguments": null,
+			"reason": "done",
+			"final_message": "ok"
+		})]);
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				router_with_text_output("execution-provider", "unused"),
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+			);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-time-gated-fires".to_string()),
+			session_id: "session-time-gated-fires".to_string(),
+			goal: "force the time gate to fire".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::Chat,
+			0.9,
+			false,
+			crate::router::RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			"chat",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+		// Inject a `last_llm_call_at` from the dawn of the unix epoch so
+		// the gate's gap is decades, well above the 5-minute threshold.
+		loop_state.record_llm_call_observed_at(std::time::SystemTime::UNIX_EPOCH);
+
+		let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+		let _execution = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-time-gated-fires".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				Some(&event_tx),
+				None,
+			));
+		drop(event_tx);
+
+		let mut events = Vec::new();
+		while let Ok(event) = event_rx.try_recv() {
+			events.push(event);
+		}
+
+		let time_gated: Vec<_> = events
+			.iter()
+			.filter_map(|e| match e {
+				crate::runtime_loop::LoopEvent::TimeBasedMicrocompactRan {
+					gap_minutes,
+					freed_tokens,
+					..
+				} => Some((*gap_minutes, *freed_tokens)),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(
+			time_gated.len(),
+			1,
+			"time-gated microcompact must fire exactly once when \
+			 last_llm_call_at is decades in the past; got {time_gated:?}",
+		);
+		let (gap_minutes, _freed) = time_gated[0];
+		assert!(
+			gap_minutes >= 5,
+			"gap_minutes must reflect a cold-cache window (≥ 5 min); got {gap_minutes}",
+		);
+
+		// Per-call TokenUsage emission: a single-LLM-call loop must emit
+		// exactly one event whose `prompt_tokens` matches the provider's
+		// per-call value (24, from `SequenceJsonProvider`). A regression
+		// to cumulative-totals emission would still pass the count check on
+		// a single call, but would surface as `total_prompt_tokens` in
+		// multi-call scenarios — the contract is asserted at the value
+		// level so the warm-turn cache gate sees clean per-call ratios.
+		let token_usage_events: Vec<_> = events
+			.iter()
+			.filter_map(|e| match e {
+				crate::runtime_loop::LoopEvent::TokenUsage { prompt_tokens, .. } => {
+					Some(*prompt_tokens)
+				}
+				_ => None,
+			})
+			.collect();
+		assert_eq!(
+			token_usage_events.len(),
+			1,
+			"single-LLM-call loop must emit exactly one per-call TokenUsage event; \
+			 got {token_usage_events:?}",
+		);
+		assert_eq!(
+			token_usage_events[0], 24,
+			"TokenUsage.prompt_tokens must carry the per-call value from the \
+			 provider (24), not a cumulative running total",
+		);
+	}
+
+	#[test]
+	fn execute_tool_loop_does_not_emit_time_based_microcompact_on_cold_start_session() {
+		// Cold-start path: no `last_llm_call_at` is seeded before the
+		// loop runs, so the gate sees `None` and must skip — no
+		// `TimeBasedMicrocompactRan` event in the trace. The
+		// warm-window branch (gap < 5 min after a previous successful
+		// call) is covered by the pure-function tests in
+		// `compact.rs::tests` because exercising it through
+		// `execute_tool_loop` would require either time injection or a
+		// streaming provider that propagates `tool_calls` through the
+		// default `stream()` impl (the test fixture's
+		// `SequenceJsonProvider` does not).
+		let (route_router, _prompts) = router_with_json_responses(vec![serde_json::json!({
+			"action": "final_answer",
+			"tool_name": null,
+			"arguments": null,
+			"reason": "done",
+			"final_message": "ok"
+		})]);
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				router_with_text_output("execution-provider", "unused"),
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+			);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId("req-time-gated-skip".to_string()),
+			session_id: "session-time-gated-skip".to_string(),
+			goal: "verify gate stays closed in warm window".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::Chat,
+			0.9,
+			false,
+			crate::router::RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			"chat",
+		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
+		// Do NOT seed `last_llm_call_at` — cold-start path; gate must stay closed.
+
+		let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+		let _execution = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-time-gated-skip".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				Some(&event_tx),
+				None,
+			));
+		drop(event_tx);
+
+		let mut events = Vec::new();
+		while let Ok(event) = event_rx.try_recv() {
+			events.push(event);
+		}
+
+		let time_gated_count = events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e,
+					crate::runtime_loop::LoopEvent::TimeBasedMicrocompactRan { .. }
+				)
+			})
+			.count();
+		assert_eq!(
+			time_gated_count, 0,
+			"time-gated microcompact must not fire on cold start or within \
+			 the warm window; observed events: {events:?}",
+		);
+	}
+
 	#[test]
 	fn visible_tools_recompute_keeps_shortlist_and_safe_baseline_after_tool_steps() {
 		let runtime = GenericAgentRuntime {

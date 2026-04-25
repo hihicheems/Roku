@@ -319,10 +319,17 @@ impl RenderEngine {
 					))
 				);
 			}
+			LoopEvent::TimeBasedMicrocompactRan { .. } => {
+				// Time-gated microcompaction is a rare cold-cache rewrite;
+				// suppress the per-step line to keep the live UX quiet.
+				// Trace consumers see gap_minutes / freed_tokens via the
+				// LoopEvent stream.
+			}
+			#[allow(deprecated)]
 			LoopEvent::MicrocompactRan { .. } => {
-				// Layer 0 microcompact runs on every pre-flight; suppress the
-				// per-step line to keep live UX quiet. Trace consumers see the
-				// freed_tokens via the LoopEvent stream.
+				// Legacy variant retained for historical trace
+				// deserialization only. The runtime no longer emits it,
+				// so a live event stream can never carry this branch.
 			}
 			LoopEvent::MidCompactLayer2Ran { .. } | LoopEvent::MidCompactLayer1Ran { .. } => {
 				// Mid-tier compaction events are diagnostic; no user-facing line.

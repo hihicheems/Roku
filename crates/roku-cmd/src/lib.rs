@@ -835,10 +835,19 @@ where
 							} => {
 								eprintln!("[compact] step {step} reactive trigger: {detail}");
 							}
+							roku_agent_runtime::LoopEvent::TimeBasedMicrocompactRan { .. } => {
+								// Time-gated microcompaction is a rare cold-cache rewrite;
+								// suppress the per-step line to keep the live UX quiet.
+								// Trace consumers see the gap / freed_tokens fields via
+								// the LoopEvent stream.
+							}
+							#[allow(deprecated)]
 							roku_agent_runtime::LoopEvent::MicrocompactRan { .. } => {
-								// Layer 0 microcompact runs on every pre-flight; suppress
-								// the per-step line to keep live UX quiet. Trace consumers
-								// see the freed_tokens via the LoopEvent stream.
+								// Legacy variant retained for historical trace
+								// deserialization only. The runtime no longer emits it,
+								// so a live event stream can never carry this branch —
+								// match arm exists purely to keep the enum exhaustive
+								// when reading old `loop-req-*.jsonl` files.
 							}
 							roku_agent_runtime::LoopEvent::MidCompactLayer2Ran { .. }
 							| roku_agent_runtime::LoopEvent::MidCompactLayer1Ran { .. } => {

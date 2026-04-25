@@ -64,12 +64,34 @@ pub enum LoopEvent {
 		/// Provider-reported detail (e.g. "prompt is too long: 215321 tokens > 200000").
 		detail: String,
 	},
-	/// Layer 0 microcompaction ran during pre-flight before this LLM call.
+	/// Time-gated microcompaction ran during pre-flight after the prompt
+	/// cache TTL (~5 min) elapsed since the last successful LLM call.
 	///
-	/// `freed_tokens` is the calibrated estimate of tokens released by
-	/// replacing historical tool result content with the placeholder. A value
-	/// of `0` means there were no eligible historical tool results to clear.
+	/// `gap_minutes` is `floor((now - last_llm_call_at).as_secs() / 60)` so
+	/// the trace shows how cold the cache was when the rewrite fired.
+	/// `freed_tokens` is the calibrated estimate of bytes-to-tokens released
+	/// by replacing eligible historical tool result content with the
+	/// placeholder; `0` means the gate fired but no eligible bodies were
+	/// present (the path is still safe — local rewrite during cold cache
+	/// has no cache-break cost).
 	/// Schema is frozen once introduced — additive fields only.
+	TimeBasedMicrocompactRan {
+		step: u32,
+		gap_minutes: u64,
+		freed_tokens: u64,
+	},
+	/// Legacy pre-flight microcompaction event, retained as a
+	/// deserialize-only variant so historical `loop-req-*.jsonl` traces
+	/// from before the time-gated rewrite still parse cleanly through
+	/// `TraceStore::load_events` (which silently drops any line that
+	/// fails to deserialize).
+	///
+	/// The runtime no longer emits this variant — `TimeBasedMicrocompactRan`
+	/// is the live one. Removing this variant entirely would silently
+	/// strip historical entries from the trace listing on upgrade.
+	#[deprecated(
+		note = "Replaced by TimeBasedMicrocompactRan; retained for legacy trace deserialization only."
+	)]
 	MicrocompactRan { step: u32, freed_tokens: u64 },
 	/// Layer 2 mid-tier compaction consumed a pre-existing session memory
 	/// summary.
@@ -145,7 +167,18 @@ pub enum LoopEvent {
 	},
 	/// One full loop iteration (decide + optional tool execution) is complete.
 	StepComplete { step: u32 },
-	/// Token usage summary emitted at the end of each tool loop execution.
+	/// Token usage emitted **per LLM call** within a tool loop execution.
+	///
+	/// One event is sent for the primary call, one for any output-slot retry,
+	/// and one for the summarizer call inside reactive compaction. The fields
+	/// describe just that call (not running totals): consumers that want the
+	/// loop's grand total accumulate across the events they observe.
+	///
+	/// Per-call semantics is what makes the warm-turn cache-utilization gate
+	/// (`scripts/cache-utilization-check.py`) sound — the `step >= 2` filter
+	/// excludes the cold-start call's prompt tokens from the denominator.
+	/// Cumulative emission would have left step-1 tokens diluting every
+	/// downstream sample.
 	TokenUsage {
 		step: u32,
 		prompt_tokens: u64,
@@ -184,6 +217,17 @@ pub enum LoopEvent {
 		/// Cost of output tokens in USD. `0.0` when no cost profile was found.
 		#[serde(default)]
 		output_cost_usd: f64,
+		/// `true` when this event was emitted for the summarizer LLM call
+		/// inside reactive / mid-loop compaction, `false` for primary
+		/// decision calls and output-slot retries. Compaction events do not
+		/// surface their summarizer's cache info today — `cache_read_input_tokens`
+		/// is hard-coded to `0` — so warm-turn cache-utilization sampling
+		/// must skip them. Older traces emitted before this field existed
+		/// deserialize as `false` (`#[serde(default)]`), which is correct
+		/// for that schema generation: the cumulative event represented the
+		/// loop's primary LLM activity.
+		#[serde(default)]
+		is_compaction: bool,
 	},
 	/// Calibration sample emitted after each successful LLM call.
 	///
@@ -515,6 +559,30 @@ mod tests {
 				assert!(!rebuilt);
 			}
 			other => panic!("expected ToolSchemaFrozen, got {other:?}"),
+		}
+	}
+
+	#[test]
+	#[allow(deprecated)]
+	fn legacy_microcompact_ran_event_still_deserializes() {
+		// Pre-existing `loop-req-*.jsonl` traces emitted
+		// `{"event":"microcompact_ran","step":N,"freed_tokens":M}` from
+		// the pre-flight microcompact code path. After that path was
+		// removed and replaced with `TimeBasedMicrocompactRan`, the
+		// reader-side trace store (`TraceStore::load_events`) silently
+		// drops any line that fails to deserialize — so dropping the
+		// variant entirely would silently strip historical entries from
+		// `/trace` listings on upgrade. Pin the legacy wire shape so
+		// future refactors that touch `LoopEvent` cannot regress this.
+		let legacy = r#"{"event":"microcompact_ran","step":3,"freed_tokens":1730}"#;
+		let decoded: LoopEvent =
+			serde_json::from_str(legacy).expect("legacy microcompact_ran must deserialize");
+		match decoded {
+			LoopEvent::MicrocompactRan { step, freed_tokens } => {
+				assert_eq!(step, 3);
+				assert_eq!(freed_tokens, 1730);
+			}
+			other => panic!("expected legacy MicrocompactRan, got {other:?}"),
 		}
 	}
 }

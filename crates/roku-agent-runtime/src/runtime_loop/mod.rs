@@ -43,23 +43,26 @@ pub(crate) use ask_user::effective_ask_user_payload;
 pub use ask_user::{AskUserPayload, AskUserResumeContract, AskUserResumeDirective};
 pub(crate) use compact::seed_compact_summary_if_missing;
 pub use compact::{
-	CompactConfig, MICROCOMPACT_RETAIN_RECENT, MID_WATER_TRIGGER_RATIO, MidCompactOutcome,
-	PER_TURN_TOOL_BUDGET_TOKENS, PerModelCalibration, PromptTokenEstimate, compact_history,
-	compact_history_with_llm, compact_messages, compact_messages_with_structured_summary,
-	estimate_context_tokens, estimate_prompt_pressure, estimate_prompt_tokens_calibrated,
-	estimate_turn_tool_tokens, hash_message_prefix, hash_system_prompt_text,
-	hash_tool_schema_bytes, microcompact_old_tool_results, mid_compact_messages,
-	summarize_discarded_steps, truncate_large_tool_results,
+	CACHE_COLD_GAP, CompactConfig, MICROCOMPACT_RETAIN_RECENT, MID_WATER_TRIGGER_RATIO,
+	MidCompactOutcome, PER_TURN_TOOL_BUDGET_TOKENS, PerModelCalibration, PromptTokenEstimate,
+	compact_history, compact_history_with_llm, compact_messages,
+	compact_messages_with_structured_summary, estimate_context_tokens, estimate_prompt_pressure,
+	estimate_prompt_tokens_calibrated, estimate_turn_tool_tokens, hash_message_prefix,
+	hash_system_prompt_text, hash_tool_schema_bytes, microcompact_old_tool_results,
+	mid_compact_messages, summarize_discarded_steps, time_based_microcompact_due,
+	truncate_large_tool_results,
 };
 // Structured-summary compaction contract surface. Exported so downstream
 // crates can construct / inspect the outcome directly and reuse the
-// validation helper. These names are not referenced by name inside this
-// crate (the return type flows through without destructuring by name), so
-// the re-exports get an explicit `unused_imports` allow.
+// validation helper. `CACHE_COLD_GAP_MINUTES` and `MICROCOMPACT_PLACEHOLDER`
+// have no in-crate consumers but are exposed so external trace / CLI
+// surfaces can reference them by name; the explicit `unused_imports` allow
+// keeps the lint quiet.
 #[allow(unused_imports)]
 pub use compact::{
-	CommittedBaseline, MAX_DROP_OLDEST_RETRIES, STRUCTURED_SUMMARY_SECTIONS,
-	StructuredCompactError, StructuredCompactOutcome, validate_structured_summary,
+	CACHE_COLD_GAP_MINUTES, CommittedBaseline, MAX_DROP_OLDEST_RETRIES, MICROCOMPACT_PLACEHOLDER,
+	STRUCTURED_SUMMARY_SECTIONS, StructuredCompactError, StructuredCompactOutcome,
+	validate_structured_summary,
 };
 pub use context_assembly::LoopContext;
 pub(crate) use context_assembly::build_loop_context;
