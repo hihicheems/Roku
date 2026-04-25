@@ -63,11 +63,14 @@ def collect_warm_turn_samples(
     same branch is a counted skip — older traces from before the
     field was wired in must not flunk a developer's local run, but
     the count surfaces in the verdict line so a real regression on
-    new traces stays visible. Both ``model_id`` and
-    ``cache_read_input_tokens`` are tracked through the same counter:
-    silently fail-open skipping either field would let an adapter or
-    runtime regression degrade the gate to ``warm_samples=0``
-    SOFT_PASS without anyone noticing.
+    new traces stays visible. ``model_id``, ``cache_read_input_tokens``,
+    ``step``, and ``prompt_tokens`` are all tracked through the same
+    counter: silently fail-open skipping any of them would let an
+    adapter or runtime regression degrade the gate to ``warm_samples=0``
+    SOFT_PASS without anyone noticing. ``step < 2`` (cold-start
+    exclusion) and non-positive ``prompt_tokens`` on a present field
+    are not schema drift — they are legitimate filters / defensive
+    type checks and skip silently.
 
     Compaction summarizer events are excluded from the sample pool
     via the explicit ``is_compaction: true`` marker the runtime
@@ -132,11 +135,42 @@ def collect_warm_turn_samples(
                         )
                     missing_field += 1
                     continue
+                # `step` and `prompt_tokens` are also required for a
+                # warm-turn sample. Missing-field gets the same
+                # schema-drift treatment as the fields above so a
+                # runtime regression that drops either cannot
+                # collapse the sample pool to SOFT_PASS via the
+                # silent-skip type-check below.
+                if "step" not in event:
+                    if strict:
+                        raise ValueError(
+                            f"{trace}:{line_num} token_usage event is "
+                            f"missing `step`; refusing to silently drop "
+                            f"(schema drift would hide a real regression)"
+                        )
+                    missing_field += 1
+                    continue
+                if "prompt_tokens" not in event:
+                    if strict:
+                        raise ValueError(
+                            f"{trace}:{line_num} token_usage event is "
+                            f"missing `prompt_tokens`; refusing to "
+                            f"silently default to 0 (schema drift would "
+                            f"hide a real regression by collapsing the "
+                            f"sample pool to warm_samples=0 SOFT_PASS)"
+                        )
+                    missing_field += 1
+                    continue
                 step = event.get("step")
-                prompt_tokens = event.get("prompt_tokens", 0)
-                cache_read = event.get("cache_read_input_tokens", 0)
+                prompt_tokens = event.get("prompt_tokens")
+                cache_read = event.get("cache_read_input_tokens")
+                # Cold-start exclusion (legitimate filter, not schema drift):
+                # `step < 2` is the warm-turn floor by construction.
                 if not isinstance(step, int) or step < WARM_TURN_FLOOR:
                     continue
+                # Defensive type/value checks: at this point the field is
+                # present, so a non-int / non-positive value is a malformed
+                # event rather than missing-field schema drift.
                 if not isinstance(prompt_tokens, int) or prompt_tokens <= 0:
                     continue
                 if not isinstance(cache_read, int) or cache_read < 0:
@@ -154,13 +188,15 @@ def evaluate(
     """Print a one-line summary plus PASS/FAIL/SOFT_PASS verdict and
     return the exit code: 0 on pass / soft-pass, 1 on regression.
 
-    ``missing_field`` reports the count of legacy ``token_usage`` events
-    that lacked ``cache_read_input_tokens``; surfaced in the verdict
-    line so schema drift on new traces is visible without blocking
-    pre-rollout traces from a developer's local run.
+    ``missing_field`` is the aggregate count of ``token_usage`` events
+    that lacked any of the required fields (``model_id``,
+    ``cache_read_input_tokens``, ``step``, ``prompt_tokens``);
+    surfaced in the verdict line so schema drift on new traces is
+    visible without blocking pre-rollout traces from a developer's
+    local run.
     """
     suffix = (
-        f" missing_cache_field={missing_field}" if missing_field > 0 else ""
+        f" missing_required_field={missing_field}" if missing_field > 0 else ""
     )
     n = len(samples)
     if n == 0:
@@ -488,6 +524,84 @@ def run_self_test() -> int:
                 "model-id-drift-fixture: loose mode must skip the "
                 "event and increment missing_field=1 with no samples; "
                 f"got samples={drift_samples!r} missing={drift_missing}"
+            )
+
+        # Fixture G: a token_usage event missing `prompt_tokens` is
+        # schema drift. Without explicit guarding, the previous code
+        # defaulted the field to 0 and silently dropped via the
+        # `prompt_tokens <= 0` check — a runtime regression that
+        # nukes the field from real LLM events would have collapsed
+        # the sample pool to warm_samples=0 SOFT_PASS, bypassing the
+        # gate entirely.
+        pt_drift = tmp / "loop-req-prompt-tokens-drift.jsonl"
+        pt_drift.write_text(
+            json.dumps(
+                {
+                    "event": "token_usage",
+                    "step": 2,
+                    "cache_read_input_tokens": 1800,
+                    "model_id": model_id,
+                    # `prompt_tokens` deliberately omitted.
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        try:
+            collect_warm_turn_samples([pt_drift], strict=True)
+        except ValueError:
+            pass
+        else:
+            failures.append(
+                "prompt-tokens-drift-fixture: expected ValueError in "
+                "strict mode on missing `prompt_tokens`, got no exception"
+            )
+        pt_samples, pt_missing = collect_warm_turn_samples(
+            [pt_drift], strict=False
+        )
+        if pt_missing != 1 or pt_samples:
+            failures.append(
+                "prompt-tokens-drift-fixture: loose mode must skip "
+                "the event and increment missing_field=1 with no "
+                f"samples; got samples={pt_samples!r} missing={pt_missing}"
+            )
+
+        # Fixture H: a token_usage event missing `step` is schema
+        # drift. Same fail-open risk as `prompt_tokens` — without
+        # this guard a regression that drops `step` would collapse
+        # the warm-turn filter (which is keyed on `step >= 2`) and
+        # SOFT_PASS the gate.
+        step_drift = tmp / "loop-req-step-drift.jsonl"
+        step_drift.write_text(
+            json.dumps(
+                {
+                    "event": "token_usage",
+                    "prompt_tokens": 2000,
+                    "cache_read_input_tokens": 1800,
+                    "model_id": model_id,
+                    # `step` deliberately omitted.
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        try:
+            collect_warm_turn_samples([step_drift], strict=True)
+        except ValueError:
+            pass
+        else:
+            failures.append(
+                "step-drift-fixture: expected ValueError in strict "
+                "mode on missing `step`, got no exception"
+            )
+        step_samples, step_missing = collect_warm_turn_samples(
+            [step_drift], strict=False
+        )
+        if step_missing != 1 or step_samples:
+            failures.append(
+                "step-drift-fixture: loose mode must skip the event "
+                "and increment missing_field=1 with no samples; "
+                f"got samples={step_samples!r} missing={step_missing}"
             )
 
     if failures:
