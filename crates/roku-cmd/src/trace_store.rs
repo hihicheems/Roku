@@ -302,6 +302,10 @@ pub(crate) fn render_trace_detail(events: &[TimestampedEvent]) -> String {
 			} => format!(
 				"[step {step}] time_based_microcompact_ran: gap={gap_minutes}m freed={freed_tokens} tokens"
 			),
+			#[allow(deprecated)]
+			LoopEvent::MicrocompactRan { step, freed_tokens } => format!(
+				"[step {step}] microcompact_ran: freed={freed_tokens} tokens (legacy event)"
+			),
 			LoopEvent::MidCompactLayer2Ran {
 				step,
 				messages_replaced,

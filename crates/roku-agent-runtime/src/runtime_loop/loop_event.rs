@@ -80,6 +80,19 @@ pub enum LoopEvent {
 		gap_minutes: u64,
 		freed_tokens: u64,
 	},
+	/// Legacy pre-flight microcompaction event, retained as a
+	/// deserialize-only variant so historical `loop-req-*.jsonl` traces
+	/// from before the time-gated rewrite still parse cleanly through
+	/// `TraceStore::load_events` (which silently drops any line that
+	/// fails to deserialize).
+	///
+	/// The runtime no longer emits this variant — `TimeBasedMicrocompactRan`
+	/// is the live one. Removing this variant entirely would silently
+	/// strip historical entries from the trace listing on upgrade.
+	#[deprecated(
+		note = "Replaced by TimeBasedMicrocompactRan; retained for legacy trace deserialization only."
+	)]
+	MicrocompactRan { step: u32, freed_tokens: u64 },
 	/// Layer 2 mid-tier compaction consumed a pre-existing session memory
 	/// summary.
 	///
@@ -535,6 +548,30 @@ mod tests {
 				assert!(!rebuilt);
 			}
 			other => panic!("expected ToolSchemaFrozen, got {other:?}"),
+		}
+	}
+
+	#[test]
+	#[allow(deprecated)]
+	fn legacy_microcompact_ran_event_still_deserializes() {
+		// Pre-existing `loop-req-*.jsonl` traces emitted
+		// `{"event":"microcompact_ran","step":N,"freed_tokens":M}` from
+		// the pre-flight microcompact code path. After that path was
+		// removed and replaced with `TimeBasedMicrocompactRan`, the
+		// reader-side trace store (`TraceStore::load_events`) silently
+		// drops any line that fails to deserialize — so dropping the
+		// variant entirely would silently strip historical entries from
+		// `/trace` listings on upgrade. Pin the legacy wire shape so
+		// future refactors that touch `LoopEvent` cannot regress this.
+		let legacy = r#"{"event":"microcompact_ran","step":3,"freed_tokens":1730}"#;
+		let decoded: LoopEvent =
+			serde_json::from_str(legacy).expect("legacy microcompact_ran must deserialize");
+		match decoded {
+			LoopEvent::MicrocompactRan { step, freed_tokens } => {
+				assert_eq!(step, 3);
+				assert_eq!(freed_tokens, 1730);
+			}
+			other => panic!("expected legacy MicrocompactRan, got {other:?}"),
 		}
 	}
 }

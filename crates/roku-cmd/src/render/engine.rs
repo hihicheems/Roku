@@ -325,6 +325,12 @@ impl RenderEngine {
 				// Trace consumers see gap_minutes / freed_tokens via the
 				// LoopEvent stream.
 			}
+			#[allow(deprecated)]
+			LoopEvent::MicrocompactRan { .. } => {
+				// Legacy variant retained for historical trace
+				// deserialization only. The runtime no longer emits it,
+				// so a live event stream can never carry this branch.
+			}
 			LoopEvent::MidCompactLayer2Ran { .. } | LoopEvent::MidCompactLayer1Ran { .. } => {
 				// Mid-tier compaction events are diagnostic; no user-facing line.
 				// Trace consumers see the details via the LoopEvent stream.

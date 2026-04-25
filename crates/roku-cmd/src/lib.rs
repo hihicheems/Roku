@@ -841,6 +841,14 @@ where
 								// Trace consumers see the gap / freed_tokens fields via
 								// the LoopEvent stream.
 							}
+							#[allow(deprecated)]
+							roku_agent_runtime::LoopEvent::MicrocompactRan { .. } => {
+								// Legacy variant retained for historical trace
+								// deserialization only. The runtime no longer emits it,
+								// so a live event stream can never carry this branch —
+								// match arm exists purely to keep the enum exhaustive
+								// when reading old `loop-req-*.jsonl` files.
+							}
 							roku_agent_runtime::LoopEvent::MidCompactLayer2Ran { .. }
 							| roku_agent_runtime::LoopEvent::MidCompactLayer1Ran { .. } => {
 								// Mid-tier compaction events are diagnostic; no user-facing
