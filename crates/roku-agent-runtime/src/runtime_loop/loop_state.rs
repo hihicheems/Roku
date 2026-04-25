@@ -858,11 +858,12 @@ mod tests {
 
 		// `frozen_tool_schema`, `tool_schema_dirty`, `observed_plan_mode`,
 		// `cache_break_detector`, `deferred_tools`, `tool_result_store`,
-		// `last_observed_input_tokens`, and `committed_message_count` are
-		// `#[serde(skip)]` — they do not survive a snapshot roundtrip by
-		// design (baseline message-positions cannot be trusted against a
-		// buffer rebuilt from scratch on restore), so normalize before
-		// structural compare.
+		// `last_observed_input_tokens`, `committed_message_count`, and
+		// `last_llm_call_at` are `#[serde(skip)]` — they do not survive a
+		// snapshot roundtrip by design (baseline message-positions cannot
+		// be trusted against a buffer rebuilt from scratch on restore;
+		// the wall-clock signal carries no provider-side cache contract
+		// across a restart), so normalize before structural compare.
 		state.frozen_tool_schema = None;
 		state.tool_schema_dirty = false;
 		state.observed_plan_mode = None;
@@ -871,6 +872,7 @@ mod tests {
 		state.tool_result_store = ToolResultStore::default();
 		state.last_observed_input_tokens = None;
 		state.committed_message_count = 0;
+		state.last_llm_call_at = None;
 
 		assert_eq!(state, deserialized);
 		assert_eq!(deserialized.history.len(), 3);
@@ -932,6 +934,32 @@ mod tests {
 		);
 		assert_eq!(restored.committed_message_count, 0);
 		assert!(restored.committed_baseline().is_none());
+	}
+
+	#[test]
+	fn last_llm_call_at_does_not_survive_checkpoint_roundtrip() {
+		// Lock the `#[serde(skip)]` contract on `last_llm_call_at`: the
+		// wall-clock instant at which the previous call landed carries
+		// no contract about the provider-side prompt-cache state across
+		// a process restart. Carrying the old timestamp through a
+		// restore would silently let a long pause pre-restore look like
+		// a long pause post-restore and trigger a tool-result rewrite
+		// that the cold-start branch is supposed to suppress. The first
+		// post-restore turn must observe `None` here so the time gate
+		// short-circuits.
+		let mut state = LoopState::new("loop-time-gate-skip", &loop_context());
+		let recorded_at = std::time::SystemTime::now();
+		state.record_llm_call_observed_at(recorded_at);
+		assert_eq!(state.last_llm_call_at(), Some(recorded_at));
+
+		let json = serde_json::to_string(&state).expect("serialize");
+		let restored: LoopState = serde_json::from_str(&json).expect("deserialize");
+
+		assert!(
+			restored.last_llm_call_at().is_none(),
+			"last_llm_call_at must reset to None on restore so the time \
+			 gate sees a cold start and skips the rewrite",
+		);
 	}
 
 	#[test]

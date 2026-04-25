@@ -5962,10 +5962,17 @@ mod tests {
 	}
 
 	#[test]
-	fn execute_tool_loop_does_not_emit_time_based_microcompact_within_warm_window() {
-		// Cold-start (no prior LLM call recorded) and warm-window
-		// (back-to-back turns within seconds) must both leave the gate
-		// closed: no `TimeBasedMicrocompactRan` event in the trace.
+	fn execute_tool_loop_does_not_emit_time_based_microcompact_on_cold_start_session() {
+		// Cold-start path: no `last_llm_call_at` is seeded before the
+		// loop runs, so the gate sees `None` and must skip — no
+		// `TimeBasedMicrocompactRan` event in the trace. The
+		// warm-window branch (gap < 5 min after a previous successful
+		// call) is covered by the pure-function tests in
+		// `compact.rs::tests` because exercising it through
+		// `execute_tool_loop` would require either time injection or a
+		// streaming provider that propagates `tool_calls` through the
+		// default `stream()` impl (the test fixture's
+		// `SequenceJsonProvider` does not).
 		let (route_router, _prompts) = router_with_json_responses(vec![serde_json::json!({
 			"action": "final_answer",
 			"tool_name": null,
