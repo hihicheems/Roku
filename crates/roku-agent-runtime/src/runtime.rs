@@ -1573,17 +1573,24 @@ impl GenericAgentRuntime {
 			// the call again. After at most one retry per turn we surface the
 			// failure so the loop does not spin indefinitely.
 			let mut reactive_compact_used = false;
-			let (accumulated_text, accumulated_tool_calls) = loop {
-				// Time-gated microcompaction: only fires when the gap since
-				// the last successful LLM call exceeds the prompt-cache TTL
-				// (5 min on both Anthropic and OpenAI). Inside that window
-				// the cache prefix is hot and any local rewrite would break
-				// it; outside it the cache has already expired so the
-				// rewrite costs nothing on the cache-prefix axis. Cold
-				// starts (no previous call recorded — first turn of the
-				// session, or first turn after a session restore where
-				// `last_llm_call_at` is `None` due to `#[serde(skip)]`)
-				// always skip.
+			// Time-gated microcompaction: only fires when the gap since
+			// the last successful LLM call exceeds the prompt-cache TTL
+			// (5 min on both Anthropic and OpenAI). Inside that window
+			// the cache prefix is hot and any local rewrite would break
+			// it; outside it the cache has already expired so the
+			// rewrite costs nothing on the cache-prefix axis. Cold
+			// starts (no previous call recorded — first turn of the
+			// session, or first turn after a session restore where
+			// `last_llm_call_at` is `None` due to `#[serde(skip)]`)
+			// always skip.
+			//
+			// Hoisted above the reactive-retry loop: the cache-TTL signal
+			// is per-turn, not per-attempt. Re-evaluating inside the loop
+			// would let a reactive retry within the same turn re-emit
+			// `TimeBasedMicrocompactRan` (idempotent on the buffer but
+			// noisy in trace consumers) since `last_llm_call_at` does not
+			// advance until a successful response.
+			{
 				let time_gate_now = std::time::SystemTime::now();
 				if crate::runtime_loop::time_based_microcompact_due(
 					loop_state.last_llm_call_at(),
@@ -1613,16 +1620,16 @@ impl GenericAgentRuntime {
 						loop_state.invalidate_committed_baseline();
 					}
 					if let Some(sender) = event_sender {
-						let _ = sender.send(
-							crate::runtime_loop::LoopEvent::TimeBasedMicrocompactRan {
+						let _ =
+							sender.send(crate::runtime_loop::LoopEvent::TimeBasedMicrocompactRan {
 								step: current_step_index,
 								gap_minutes,
 								freed_tokens: freed,
-							},
-						);
+							});
 					}
 				}
-
+			}
+			let (accumulated_text, accumulated_tool_calls) = loop {
 				// Initial preflight resolution for this attempt — may be
 				// superseded by a second resolution below if mid-tier
 				// compaction mutates `messages`. Reading the counter /
@@ -5709,10 +5716,8 @@ mod tests {
 		// hot. Pre-flight in-place rewriting would replace the body with a
 		// placeholder and break the cache; this test pins that invariant
 		// down by inspecting the prompts captured by the fake provider.
-		let path_a =
-			regression_fixture_path(".txt", "MARKER-ALPHA-byte-stability-fixture-A\n");
-		let path_b =
-			regression_fixture_path(".txt", "MARKER-BETA-byte-stability-fixture-B\n");
+		let path_a = regression_fixture_path(".txt", "MARKER-ALPHA-byte-stability-fixture-A\n");
+		let path_b = regression_fixture_path(".txt", "MARKER-BETA-byte-stability-fixture-B\n");
 		let (route_router, prompts) = router_with_json_responses(vec![
 			serde_json::json!({
 				"action": "call_tool",
@@ -5747,9 +5752,7 @@ mod tests {
 				ToolsRuntimeConfig::default(),
 			);
 		let request = RequestEnvelope {
-			request_id: roku_common_types::RequestId(
-				"req-byte-stability".to_string(),
-			),
+			request_id: roku_common_types::RequestId("req-byte-stability".to_string()),
 			session_id: "session-byte-stability".to_string(),
 			goal: "Read both fixtures".to_string(),
 			planning_mode_hint: None,
@@ -5767,12 +5770,8 @@ mod tests {
 			Vec::new(),
 			"byte-stability regression",
 		);
-		let mut loop_state = runtime.initialize_runtime_loop(
-			&request,
-			&request.session_id,
-			&decision,
-			Vec::new(),
-		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
 
 		let _result = tokio::runtime::Builder::new_multi_thread()
 			.enable_all()
@@ -5857,9 +5856,7 @@ mod tests {
 				ToolsRuntimeConfig::default(),
 			);
 		let request = RequestEnvelope {
-			request_id: roku_common_types::RequestId(
-				"req-time-gated-fires".to_string(),
-			),
+			request_id: roku_common_types::RequestId("req-time-gated-fires".to_string()),
 			session_id: "session-time-gated-fires".to_string(),
 			goal: "force the time gate to fire".to_string(),
 			planning_mode_hint: None,
@@ -5877,12 +5874,8 @@ mod tests {
 			Vec::new(),
 			"chat",
 		);
-		let mut loop_state = runtime.initialize_runtime_loop(
-			&request,
-			&request.session_id,
-			&decision,
-			Vec::new(),
-		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
 		// Inject a `last_llm_call_at` from the dawn of the unix epoch so
 		// the gate's gap is decades, well above the 5-minute threshold.
 		loop_state.record_llm_call_observed_at(std::time::SystemTime::UNIX_EPOCH);
@@ -5955,9 +5948,7 @@ mod tests {
 				ToolsRuntimeConfig::default(),
 			);
 		let request = RequestEnvelope {
-			request_id: roku_common_types::RequestId(
-				"req-time-gated-skip".to_string(),
-			),
+			request_id: roku_common_types::RequestId("req-time-gated-skip".to_string()),
 			session_id: "session-time-gated-skip".to_string(),
 			goal: "verify gate stays closed in warm window".to_string(),
 			planning_mode_hint: None,
@@ -5975,12 +5966,8 @@ mod tests {
 			Vec::new(),
 			"chat",
 		);
-		let mut loop_state = runtime.initialize_runtime_loop(
-			&request,
-			&request.session_id,
-			&decision,
-			Vec::new(),
-		);
+		let mut loop_state =
+			runtime.initialize_runtime_loop(&request, &request.session_id, &decision, Vec::new());
 		// Do NOT seed `last_llm_call_at` — cold-start path; gate must stay closed.
 
 		let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
