@@ -276,7 +276,10 @@ fn run_single_scenario(
 					LoopEvent::TokenUsage {
 						total_tokens: t, ..
 					} => {
-						total_tokens = t;
+						// Per-call emission: TokenUsage now fires once per LLM
+						// call inside the loop, so accumulate to track the
+						// loop's grand total.
+						total_tokens = total_tokens.saturating_add(t);
 					}
 					_ => {}
 				}

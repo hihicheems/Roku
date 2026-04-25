@@ -154,7 +154,18 @@ pub enum LoopEvent {
 	},
 	/// One full loop iteration (decide + optional tool execution) is complete.
 	StepComplete { step: u32 },
-	/// Token usage summary emitted at the end of each tool loop execution.
+	/// Token usage emitted **per LLM call** within a tool loop execution.
+	///
+	/// One event is sent for the primary call, one for any output-slot retry,
+	/// and one for the summarizer call inside reactive compaction. The fields
+	/// describe just that call (not running totals): consumers that want the
+	/// loop's grand total accumulate across the events they observe.
+	///
+	/// Per-call semantics is what makes the warm-turn cache-utilization gate
+	/// (`scripts/cache-utilization-check.py`) sound — the `step >= 2` filter
+	/// excludes the cold-start call's prompt tokens from the denominator.
+	/// Cumulative emission would have left step-1 tokens diluting every
+	/// downstream sample.
 	TokenUsage {
 		step: u32,
 		prompt_tokens: u64,

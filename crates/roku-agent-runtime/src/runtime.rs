@@ -1364,19 +1364,16 @@ impl GenericAgentRuntime {
 			&loop_state.working_directory,
 		);
 
-		// Per-turn token accumulators: summed across all LLM calls in this loop execution.
-		let mut total_prompt_tokens: u64 = 0;
-		let mut total_output_tokens: u64 = 0;
-		// Per-tier cache accumulators — additive counters mirroring the
-		// provider's `usage.cache_*_input_tokens` (Anthropic) and
-		// `usage.*_tokens_details.cached_tokens` (OpenAI). Stay at `0`
-		// through every turn until 09 / 10 land the cache markers /
-		// prompt_cache_key; after that they track the real cache activity
-		// emitted alongside `prompt_tokens` / `output_tokens`.
-		let mut total_cache_creation_input_tokens: u64 = 0;
-		let mut total_cache_read_input_tokens: u64 = 0;
-		// Track the model that served this request (updated on each successful LLM call).
-		let mut last_model_id: Option<String> = None;
+		// `LoopEvent::TokenUsage` is emitted **per LLM call** (primary,
+		// output-slot retry, and the summarizer inside reactive compaction).
+		// Consumers that want a loop-level grand total accumulate across the
+		// per-call events they observe — `turn.rs` / `render/engine.rs` /
+		// `bot.rs` already use `saturating_add` so no consumer-side change is
+		// needed. We deliberately do not maintain `total_*` accumulators in
+		// the runtime: any aggregate that lives only inside this function
+		// would be impossible to expose to the warm-turn cache-utilization
+		// gate without the same cold-start dilution that motivated the
+		// per-call switch.
 
 		// Fallback cost constants used when no cost profile is found for the model.
 		// These are rough estimates for Claude Sonnet tier.
@@ -1515,17 +1512,9 @@ impl GenericAgentRuntime {
 					"Step budget exhausted.",
 					Some(message.clone()),
 				);
-				emit_token_usage(
-					event_sender,
-					loop_state.step_index.saturating_add(1),
-					total_prompt_tokens,
-					total_output_tokens,
-					FALLBACK_COST_PER_M_INPUT_USD,
-					FALLBACK_COST_PER_M_OUTPUT_USD,
-					last_model_id.as_deref(),
-					total_cache_creation_input_tokens,
-					total_cache_read_input_tokens,
-				);
+				// No `emit_token_usage` here: budget exhaustion fires before
+				// any LLM call this turn, and prior calls already emitted
+				// their own per-call events.
 				return self.synthetic_loop_terminal_result(
 					task_id,
 					"tool",
@@ -2029,16 +2018,22 @@ impl GenericAgentRuntime {
 										step: current_step_index,
 									},
 								);
-								total_prompt_tokens =
-									total_prompt_tokens.saturating_add(resp.prompt_tokens);
-								total_output_tokens =
-									total_output_tokens.saturating_add(resp.output_tokens);
-								total_cache_creation_input_tokens =
-									total_cache_creation_input_tokens
-										.saturating_add(resp.cache_creation_input_tokens);
-								total_cache_read_input_tokens = total_cache_read_input_tokens
-									.saturating_add(resp.cache_read_input_tokens);
-								last_model_id = Some(resp.model_id.clone());
+								// Per-call token usage: the warm-turn cache gate
+								// reads `cache_read_input_tokens / prompt_tokens`
+								// from each event and excludes step 1 as cold
+								// start, which only works if the values describe
+								// just this LLM call (not running totals).
+								emit_token_usage(
+									event_sender,
+									current_step_index,
+									resp.prompt_tokens,
+									resp.output_tokens,
+									FALLBACK_COST_PER_M_INPUT_USD,
+									FALLBACK_COST_PER_M_OUTPUT_USD,
+									Some(&resp.model_id),
+									resp.cache_creation_input_tokens,
+									resp.cache_read_input_tokens,
+								);
 								// Fold the real `usage.prompt_tokens` back into the
 								// estimator calibration so the next turn's pressure
 								// check is closer to ground truth. In
@@ -2161,30 +2156,25 @@ impl GenericAgentRuntime {
 												if let Ok(retry_resp) =
 													router.generate(&escalated_request).await
 												{
-													// Token totals are billing-oriented: both
-													// the truncated call and the retry were
-													// charged by the provider, so we accumulate
-													// both. Consumers that need "response length"
-													// should use the retry's output_tokens only.
-													total_prompt_tokens = total_prompt_tokens
-														.saturating_add(retry_resp.prompt_tokens);
-													total_output_tokens = total_output_tokens
-														.saturating_add(retry_resp.output_tokens);
-													total_cache_creation_input_tokens =
-														total_cache_creation_input_tokens
-															.saturating_add(
-																retry_resp
-																	.cache_creation_input_tokens,
-															);
-													total_cache_read_input_tokens =
-														total_cache_read_input_tokens
-															.saturating_add(
-																retry_resp.cache_read_input_tokens,
-															);
-													// Update model ID so cost reporting uses the
-													// retry response's model, not the original.
-													last_model_id =
-														Some(retry_resp.model_id.clone());
+													// Per-call emission — both the truncated
+													// streaming attempt and this retry were
+													// charged by the provider, and consumers'
+													// `saturating_add` accumulators give the
+													// caller the full billable total. Cost
+													// reporting now reflects the retry's serving
+													// model directly because each event carries
+													// its own `model_id`.
+													emit_token_usage(
+														event_sender,
+														current_step_index,
+														retry_resp.prompt_tokens,
+														retry_resp.output_tokens,
+														FALLBACK_COST_PER_M_INPUT_USD,
+														FALLBACK_COST_PER_M_OUTPUT_USD,
+														Some(&retry_resp.model_id),
+														retry_resp.cache_creation_input_tokens,
+														retry_resp.cache_read_input_tokens,
+													);
 													// Re-calibrate the estimator with the retry's
 													// prompt_tokens. When output-slot escalation
 													// reroutes to a different model (`select_model`
@@ -2318,16 +2308,22 @@ impl GenericAgentRuntime {
 						tool_schema_frozen_emitted = true;
 						match router.generate(&gen_request).await {
 							Ok(resp) => {
-								total_prompt_tokens =
-									total_prompt_tokens.saturating_add(resp.prompt_tokens);
-								total_output_tokens =
-									total_output_tokens.saturating_add(resp.output_tokens);
-								total_cache_creation_input_tokens =
-									total_cache_creation_input_tokens
-										.saturating_add(resp.cache_creation_input_tokens);
-								total_cache_read_input_tokens = total_cache_read_input_tokens
-									.saturating_add(resp.cache_read_input_tokens);
-								last_model_id = Some(resp.model_id.clone());
+								// Per-call token usage — same rationale as the
+								// streaming branch: the warm-turn cache gate
+								// only computes a sound `cache_read_input_tokens /
+								// prompt_tokens` ratio when each sample is one
+								// LLM call.
+								emit_token_usage(
+									event_sender,
+									current_step_index,
+									resp.prompt_tokens,
+									resp.output_tokens,
+									FALLBACK_COST_PER_M_INPUT_USD,
+									FALLBACK_COST_PER_M_OUTPUT_USD,
+									Some(&resp.model_id),
+									resp.cache_creation_input_tokens,
+									resp.cache_read_input_tokens,
+								);
 								// Baseline-aware calibration update: in committed
 								// mode the raw total contains the unchanged
 								// committed prefix on both sides and the full-total
@@ -2439,29 +2435,20 @@ impl GenericAgentRuntime {
 												if let Ok(retry_resp) =
 													router.generate(&escalated_request).await
 												{
-													// Token totals are billing-oriented: both
-													// the truncated call and the retry were
-													// charged by the provider, so we accumulate
-													// both. Consumers that need "response length"
-													// should use the retry's output_tokens only.
-													total_prompt_tokens = total_prompt_tokens
-														.saturating_add(retry_resp.prompt_tokens);
-													total_output_tokens = total_output_tokens
-														.saturating_add(retry_resp.output_tokens);
-													total_cache_creation_input_tokens =
-														total_cache_creation_input_tokens
-															.saturating_add(
-																retry_resp
-																	.cache_creation_input_tokens,
-															);
-													total_cache_read_input_tokens =
-														total_cache_read_input_tokens
-															.saturating_add(
-																retry_resp.cache_read_input_tokens,
-															);
-													// Update model ID for cost reporting.
-													last_model_id =
-														Some(retry_resp.model_id.clone());
+													// Per-call emission for the non-streaming
+													// retry — same rationale as the streaming
+													// retry branch above.
+													emit_token_usage(
+														event_sender,
+														current_step_index,
+														retry_resp.prompt_tokens,
+														retry_resp.output_tokens,
+														FALLBACK_COST_PER_M_INPUT_USD,
+														FALLBACK_COST_PER_M_OUTPUT_USD,
+														Some(&retry_resp.model_id),
+														retry_resp.cache_creation_input_tokens,
+														retry_resp.cache_read_input_tokens,
+													);
 													// Re-calibrate the estimator with the retry's
 													// prompt_tokens. Non-streaming retry shares
 													// the same calibration invariants as the
@@ -2565,8 +2552,24 @@ impl GenericAgentRuntime {
 								&detail,
 							)
 							.await;
-						total_prompt_tokens = total_prompt_tokens.saturating_add(compact_pt);
-						total_output_tokens = total_output_tokens.saturating_add(compact_ot);
+						// Per-call emission for the summarizer LLM call inside
+						// reactive compaction. The summarizer is a real billed
+						// call, so consumers that accumulate `prompt_tokens` /
+						// `output_tokens` need to see it. The `step >= 2` warm
+						// filter still includes summarizer events — that's
+						// correct, the summarizer reads cached prefix when
+						// available.
+						emit_token_usage(
+							event_sender,
+							current_step_index,
+							compact_pt,
+							compact_ot,
+							FALLBACK_COST_PER_M_INPUT_USD,
+							FALLBACK_COST_PER_M_OUTPUT_USD,
+							None,
+							0,
+							0,
+						);
 						// Retry the LLM call with the compacted message buffer.
 						continue;
 					}
@@ -2590,17 +2593,9 @@ impl GenericAgentRuntime {
 							trace_msg,
 							Some(message.clone()),
 						);
-						emit_token_usage(
-							event_sender,
-							current_step_index,
-							total_prompt_tokens,
-							total_output_tokens,
-							FALLBACK_COST_PER_M_INPUT_USD,
-							FALLBACK_COST_PER_M_OUTPUT_USD,
-							last_model_id.as_deref(),
-							total_cache_creation_input_tokens,
-							total_cache_read_input_tokens,
-						);
+						// No `emit_token_usage` here: per-call events for any
+						// successful prior calls were already emitted, and the
+						// failing call did not return a billable response.
 						return self.synthetic_loop_terminal_result(
 							task_id,
 							"tool",
@@ -2632,17 +2627,8 @@ impl GenericAgentRuntime {
 					"LLM produced a text response with no tool calls.",
 					Some(message.clone()),
 				);
-				emit_token_usage(
-					event_sender,
-					current_step_index,
-					total_prompt_tokens,
-					total_output_tokens,
-					FALLBACK_COST_PER_M_INPUT_USD,
-					FALLBACK_COST_PER_M_OUTPUT_USD,
-					last_model_id.as_deref(),
-					total_cache_creation_input_tokens,
-					total_cache_read_input_tokens,
-				);
+				// No `emit_token_usage` here: the per-call event for this LLM
+				// call was already emitted in the success branch above.
 				return self.synthetic_loop_terminal_result(
 					task_id,
 					"tool",
@@ -2669,17 +2655,8 @@ impl GenericAgentRuntime {
 							"LLM called final_answer.",
 							Some(message.clone()),
 						);
-						emit_token_usage(
-							event_sender,
-							current_step_index,
-							total_prompt_tokens,
-							total_output_tokens,
-							FALLBACK_COST_PER_M_INPUT_USD,
-							FALLBACK_COST_PER_M_OUTPUT_USD,
-							last_model_id.as_deref(),
-							total_cache_creation_input_tokens,
-							total_cache_read_input_tokens,
-						);
+						// Per-call event for this LLM call was already emitted
+						// in the success branch.
 						return self.synthetic_loop_terminal_result(
 							task_id,
 							"tool",
@@ -2703,17 +2680,8 @@ impl GenericAgentRuntime {
 						);
 						let message = payload.final_message.clone();
 						self.record_ask_user_step(loop_state, "LLM called ask_user.", payload);
-						emit_token_usage(
-							event_sender,
-							current_step_index,
-							total_prompt_tokens,
-							total_output_tokens,
-							FALLBACK_COST_PER_M_INPUT_USD,
-							FALLBACK_COST_PER_M_OUTPUT_USD,
-							last_model_id.as_deref(),
-							total_cache_creation_input_tokens,
-							total_cache_read_input_tokens,
-						);
+						// Per-call event for this LLM call was already emitted
+						// in the success branch.
 						return self.synthetic_loop_terminal_result(
 							task_id,
 							"tool",
@@ -2736,17 +2704,8 @@ impl GenericAgentRuntime {
 							"LLM called fail.",
 							Some(reason.clone()),
 						);
-						emit_token_usage(
-							event_sender,
-							current_step_index,
-							total_prompt_tokens,
-							total_output_tokens,
-							FALLBACK_COST_PER_M_INPUT_USD,
-							FALLBACK_COST_PER_M_OUTPUT_USD,
-							last_model_id.as_deref(),
-							total_cache_creation_input_tokens,
-							total_cache_read_input_tokens,
-						);
+						// Per-call event for this LLM call was already emitted
+						// in the success branch.
 						return self.synthetic_loop_terminal_result(
 							task_id,
 							"tool",
@@ -3102,9 +3061,24 @@ impl GenericAgentRuntime {
 				.await;
 			if compact_pt > 0 || compact_ot > 0 {
 				loop_state.cache_break_detector.notify_compaction();
+				// Per-call emission for the summarizer LLM call inside
+				// `maybe_compact`. The summarizer is a real billed call, so
+				// consumers that accumulate `prompt_tokens` / `output_tokens`
+				// need to see it. The `step >= 2` warm filter still includes
+				// summarizer events — the summarizer reads cached prefix
+				// when available.
+				emit_token_usage(
+					event_sender,
+					current_step_index,
+					compact_pt,
+					compact_ot,
+					FALLBACK_COST_PER_M_INPUT_USD,
+					FALLBACK_COST_PER_M_OUTPUT_USD,
+					None,
+					0,
+					0,
+				);
 			}
-			total_prompt_tokens = total_prompt_tokens.saturating_add(compact_pt);
-			total_output_tokens = total_output_tokens.saturating_add(compact_ot);
 
 			// Emit StepComplete after all tools in this turn are done.
 			if let Some(sender) = event_sender {
@@ -5958,6 +5932,34 @@ mod tests {
 		assert!(
 			gap_minutes >= 5,
 			"gap_minutes must reflect a cold-cache window (≥ 5 min); got {gap_minutes}",
+		);
+
+		// Per-call TokenUsage emission: a single-LLM-call loop must emit
+		// exactly one event whose `prompt_tokens` matches the provider's
+		// per-call value (24, from `SequenceJsonProvider`). A regression
+		// to cumulative-totals emission would still pass the count check on
+		// a single call, but would surface as `total_prompt_tokens` in
+		// multi-call scenarios — the contract is asserted at the value
+		// level so the warm-turn cache gate sees clean per-call ratios.
+		let token_usage_events: Vec<_> = events
+			.iter()
+			.filter_map(|e| match e {
+				crate::runtime_loop::LoopEvent::TokenUsage { prompt_tokens, .. } => {
+					Some(*prompt_tokens)
+				}
+				_ => None,
+			})
+			.collect();
+		assert_eq!(
+			token_usage_events.len(),
+			1,
+			"single-LLM-call loop must emit exactly one per-call TokenUsage event; \
+			 got {token_usage_events:?}",
+		);
+		assert_eq!(
+			token_usage_events[0], 24,
+			"TokenUsage.prompt_tokens must carry the per-call value from the \
+			 provider (24), not a cumulative running total",
 		);
 	}
 
