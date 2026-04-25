@@ -2555,10 +2555,7 @@ impl GenericAgentRuntime {
 						// Per-call emission for the summarizer LLM call inside
 						// reactive compaction. The summarizer is a real billed
 						// call, so consumers that accumulate `prompt_tokens` /
-						// `output_tokens` need to see it. The `step >= 2` warm
-						// filter still includes summarizer events — that's
-						// correct, the summarizer reads cached prefix when
-						// available.
+						// `output_tokens` need to see it.
 						emit_token_usage(
 							event_sender,
 							current_step_index,
@@ -2570,6 +2567,13 @@ impl GenericAgentRuntime {
 							0,
 							0,
 						);
+						// Update the time-gated microcompact baseline: the
+						// summarizer just ran, so the next turn's prompt cache
+						// is warm and `time_based_microcompact_due` must not
+						// trigger a redundant rewrite.
+						if compact_pt > 0 || compact_ot > 0 {
+							loop_state.record_llm_call_observed_at(std::time::SystemTime::now());
+						}
 						// Retry the LLM call with the compacted message buffer.
 						continue;
 					}
@@ -3064,9 +3068,7 @@ impl GenericAgentRuntime {
 				// Per-call emission for the summarizer LLM call inside
 				// `maybe_compact`. The summarizer is a real billed call, so
 				// consumers that accumulate `prompt_tokens` / `output_tokens`
-				// need to see it. The `step >= 2` warm filter still includes
-				// summarizer events — the summarizer reads cached prefix
-				// when available.
+				// need to see it.
 				emit_token_usage(
 					event_sender,
 					current_step_index,
@@ -3078,6 +3080,16 @@ impl GenericAgentRuntime {
 					0,
 					0,
 				);
+				// Update the time-gated microcompact baseline: the
+				// summarizer just ran, so the next turn's prompt cache is
+				// warm and `time_based_microcompact_due` must not trigger
+				// a redundant rewrite — without this, a slow tool step
+				// followed by `maybe_compact` near the >5 min mark would
+				// leave `last_llm_call_at` stale, the next turn would
+				// classify the cache as cold, and the time gate would
+				// re-rewrite tool-result content even though an LLM call
+				// just occurred.
+				loop_state.record_llm_call_observed_at(std::time::SystemTime::now());
 			}
 
 			// Emit StepComplete after all tools in this turn are done.
