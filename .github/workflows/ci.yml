@@ -60,7 +60,16 @@ jobs:
 
       - name: Cache-utilization gate self-test
         shell: bash
-        run: python3 scripts/cache-utilization-check.py --self-test
+        run: |
+          # Surface a clear "missing python3" signal before invoking the
+          # script so a runner-image regression fails the step with a
+          # readable diagnostic instead of a generic "command not found".
+          if ! command -v python3 >/dev/null 2>&1; then
+            echo "ERROR: python3 not on PATH; cache-utilization gate cannot run." >&2
+            exit 1
+          fi
+          python3 --version
+          python3 scripts/cache-utilization-check.py --self-test
 
       - name: Check License Header
         run: hawkeye check
