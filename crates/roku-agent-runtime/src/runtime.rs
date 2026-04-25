@@ -1574,13 +1574,60 @@ impl GenericAgentRuntime {
 			// failure so the loop does not spin indefinitely.
 			let mut reactive_compact_used = false;
 			let (accumulated_text, accumulated_tool_calls) = loop {
+				// Time-gated microcompaction: only fires when the gap since
+				// the last successful LLM call exceeds the prompt-cache TTL
+				// (5 min on both Anthropic and OpenAI). Inside that window
+				// the cache prefix is hot and any local rewrite would break
+				// it; outside it the cache has already expired so the
+				// rewrite costs nothing on the cache-prefix axis. Cold
+				// starts (no previous call recorded — first turn of the
+				// session, or first turn after a session restore where
+				// `last_llm_call_at` is `None` due to `#[serde(skip)]`)
+				// always skip.
+				let time_gate_now = std::time::SystemTime::now();
+				if crate::runtime_loop::time_based_microcompact_due(
+					loop_state.last_llm_call_at(),
+					time_gate_now,
+					crate::runtime_loop::CACHE_COLD_GAP,
+				) {
+					// Notify the cache-break detector before mutating the
+					// buffer so the next response's `cache_read` drop is
+					// classified as intentional and never surfaces as an
+					// "unexpected break" diagnostic. Idempotent if the
+					// rewrite below ends up clearing nothing.
+					loop_state.cache_break_detector.notify_compaction();
+					let freed = crate::runtime_loop::microcompact_old_tool_results(
+						&mut messages,
+						crate::runtime_loop::MICROCOMPACT_RETAIN_RECENT,
+						loop_state.estimator_calibration.get(None),
+					);
+					let gap_minutes = loop_state
+						.last_llm_call_at()
+						.and_then(|prev| time_gate_now.duration_since(prev).ok())
+						.map(|gap| gap.as_secs() / 60)
+						.unwrap_or(0);
+					if freed > 0 {
+						// Replacing tool-result bodies with short
+						// placeholders shrinks the committed prefix below
+						// what the previous `usage.prompt_tokens` priced.
+						loop_state.invalidate_committed_baseline();
+					}
+					if let Some(sender) = event_sender {
+						let _ = sender.send(
+							crate::runtime_loop::LoopEvent::TimeBasedMicrocompactRan {
+								step: current_step_index,
+								gap_minutes,
+								freed_tokens: freed,
+							},
+						);
+					}
+				}
+
 				// Initial preflight resolution for this attempt — may be
 				// superseded by a second resolution below if mid-tier
-				// compaction mutates `messages`. Layer 0 microcompact
-				// above already shrank the buffer; this resolution
-				// reflects its post-microcompact state. Reading the
-				// counter / routed model / wire-bytes preview through
-				// the full `select_model` policy (via the same
+				// compaction mutates `messages`. Reading the counter /
+				// routed model / wire-bytes preview through the full
+				// `select_model` policy (via the same
 				// `counter_selection_request`) keeps all three views
 				// consistent with the model `router.generate*` will
 				// actually serve — `model_override` eligibility, risk
@@ -2024,6 +2071,8 @@ impl GenericAgentRuntime {
 									pre_call_prefix_messages_hash,
 									Some(resp.model_id.clone()),
 								);
+								loop_state
+									.record_llm_call_observed_at(std::time::SystemTime::now());
 								let _ = sender.send(
 									crate::runtime_loop::LoopEvent::EstimatorCalibrated {
 										step: current_step_index,
@@ -2197,6 +2246,9 @@ impl GenericAgentRuntime {
 														pre_call_prefix_messages_hash,
 														Some(retry_resp.model_id.clone()),
 													);
+													loop_state.record_llm_call_observed_at(
+														std::time::SystemTime::now(),
+													);
 													// Replace the truncated streaming text in the
 													// TUI. `LlmDecisionComplete` was already sent
 													// before the retry, so the render engine's
@@ -2292,6 +2344,8 @@ impl GenericAgentRuntime {
 									pre_call_prefix_messages_hash,
 									Some(resp.model_id.clone()),
 								);
+								loop_state
+									.record_llm_call_observed_at(std::time::SystemTime::now());
 								if let Some(sender) = event_sender {
 									let _ = sender.send(
 										crate::runtime_loop::LoopEvent::EstimatorCalibrated {
@@ -2445,6 +2499,9 @@ impl GenericAgentRuntime {
 														retry_tool_schema_hash,
 														pre_call_prefix_messages_hash,
 														Some(retry_resp.model_id.clone()),
+													);
+													loop_state.record_llm_call_observed_at(
+														std::time::SystemTime::now(),
 													);
 													// Intentionally no `LlmTextReplace` on the
 													// non-streaming path: there is no truncated
@@ -5770,6 +5827,197 @@ mod tests {
 
 		cleanup_fixture(&path_a);
 		cleanup_fixture(&path_b);
+	}
+
+	#[test]
+	fn execute_tool_loop_emits_time_based_microcompact_event_when_last_llm_call_was_long_ago() {
+		// Force the time-gated path to fire on turn 1 by seeding
+		// `last_llm_call_at` with `UNIX_EPOCH` before running the loop.
+		// The runtime computes `now - last_llm_call_at` and compares
+		// against `CACHE_COLD_GAP` (5 min); the resulting gap (decades)
+		// exceeds the threshold so the gate fires. The buffer has no
+		// historical tool_results so `freed_tokens` is `0`, but the
+		// event is still emitted so trace consumers can observe the
+		// rewrite attempt.
+		let (route_router, _prompts) = router_with_json_responses(vec![serde_json::json!({
+			"action": "final_answer",
+			"tool_name": null,
+			"arguments": null,
+			"reason": "done",
+			"final_message": "ok"
+		})]);
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				router_with_text_output("execution-provider", "unused"),
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+			);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId(
+				"req-time-gated-fires".to_string(),
+			),
+			session_id: "session-time-gated-fires".to_string(),
+			goal: "force the time gate to fire".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::Chat,
+			0.9,
+			false,
+			crate::router::RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			"chat",
+		);
+		let mut loop_state = runtime.initialize_runtime_loop(
+			&request,
+			&request.session_id,
+			&decision,
+			Vec::new(),
+		);
+		// Inject a `last_llm_call_at` from the dawn of the unix epoch so
+		// the gate's gap is decades, well above the 5-minute threshold.
+		loop_state.record_llm_call_observed_at(std::time::SystemTime::UNIX_EPOCH);
+
+		let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+		let _execution = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-time-gated-fires".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				Some(&event_tx),
+				None,
+			));
+		drop(event_tx);
+
+		let mut events = Vec::new();
+		while let Ok(event) = event_rx.try_recv() {
+			events.push(event);
+		}
+
+		let time_gated: Vec<_> = events
+			.iter()
+			.filter_map(|e| match e {
+				crate::runtime_loop::LoopEvent::TimeBasedMicrocompactRan {
+					gap_minutes,
+					freed_tokens,
+					..
+				} => Some((*gap_minutes, *freed_tokens)),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(
+			time_gated.len(),
+			1,
+			"time-gated microcompact must fire exactly once when \
+			 last_llm_call_at is decades in the past; got {time_gated:?}",
+		);
+		let (gap_minutes, _freed) = time_gated[0];
+		assert!(
+			gap_minutes >= 5,
+			"gap_minutes must reflect a cold-cache window (≥ 5 min); got {gap_minutes}",
+		);
+	}
+
+	#[test]
+	fn execute_tool_loop_does_not_emit_time_based_microcompact_within_warm_window() {
+		// Cold-start (no prior LLM call recorded) and warm-window
+		// (back-to-back turns within seconds) must both leave the gate
+		// closed: no `TimeBasedMicrocompactRan` event in the trace.
+		let (route_router, _prompts) = router_with_json_responses(vec![serde_json::json!({
+			"action": "final_answer",
+			"tool_name": null,
+			"arguments": null,
+			"reason": "done",
+			"final_message": "ok"
+		})]);
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				router_with_text_output("execution-provider", "unused"),
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+			);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId(
+				"req-time-gated-skip".to_string(),
+			),
+			session_id: "session-time-gated-skip".to_string(),
+			goal: "verify gate stays closed in warm window".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::Chat,
+			0.9,
+			false,
+			crate::router::RouteRisk::Low,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			"chat",
+		);
+		let mut loop_state = runtime.initialize_runtime_loop(
+			&request,
+			&request.session_id,
+			&decision,
+			Vec::new(),
+		);
+		// Do NOT seed `last_llm_call_at` — cold-start path; gate must stay closed.
+
+		let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+		let _execution = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-time-gated-skip".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				Some(&event_tx),
+				None,
+			));
+		drop(event_tx);
+
+		let mut events = Vec::new();
+		while let Ok(event) = event_rx.try_recv() {
+			events.push(event);
+		}
+
+		let time_gated_count = events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e,
+					crate::runtime_loop::LoopEvent::TimeBasedMicrocompactRan { .. }
+				)
+			})
+			.count();
+		assert_eq!(
+			time_gated_count, 0,
+			"time-gated microcompact must not fire on cold start or within \
+			 the warm window; observed events: {events:?}",
+		);
 	}
 
 	#[test]

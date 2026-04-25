@@ -14,6 +14,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::time::{Duration, SystemTime};
 
 use roku_plugin_llm::{
 	CompactRequest, GenerationRequest, LlmAdapterError, LlmRouter, Message, RiskTier, TokenCounter,
@@ -990,7 +991,6 @@ pub fn truncate_large_tool_results(messages: &mut [Message], max_chars: usize) {
 /// Placeholder text inserted in place of historical tool result content during
 /// time-gated microcompaction. Stable across calls so re-running microcompact
 /// is byte-deterministic and idempotent.
-#[allow(dead_code)]
 pub const MICROCOMPACT_PLACEHOLDER: &str = "[Old tool result content cleared]";
 
 /// Number of most recent tool result messages microcompact leaves untouched.
@@ -998,8 +998,45 @@ pub const MICROCOMPACT_PLACEHOLDER: &str = "[Old tool result content cleared]";
 /// Picked small enough to keep the freed-token signal meaningful on
 /// tool-heavy runs, but large enough that the LLM still has context for the
 /// last few observations it produced.
-#[allow(dead_code)]
 pub const MICROCOMPACT_RETAIN_RECENT: usize = 3;
+
+/// Minimum elapsed-time gap between successful LLM calls before the
+/// time-gated microcompact path becomes legal to fire. Aligned with the
+/// 5-minute prompt-cache TTL on both Anthropic and OpenAI: once the cache
+/// has expired, a local rewrite of historical tool-result bodies costs
+/// nothing on the cache-prefix axis.
+pub const CACHE_COLD_GAP_MINUTES: u64 = 5;
+
+/// `Duration` form of [`CACHE_COLD_GAP_MINUTES`]. Use this for comparisons
+/// against `SystemTime::duration_since` results so the threshold is shared
+/// between the runtime call site and the unit-tested gate function.
+pub const CACHE_COLD_GAP: Duration = Duration::from_secs(60 * CACHE_COLD_GAP_MINUTES);
+
+/// Decide whether the time-gated microcompact path should fire on the
+/// next pre-flight.
+///
+/// Returns `true` only when both:
+/// - `last_call_at` is `Some` (cold-start runs have no signal and must
+///   skip; otherwise the very first turn after restore would always
+///   trigger a rewrite even though the cache is already cold for an
+///   unrelated reason — there is nothing useful to rewrite anyway), and
+/// - `now.duration_since(last_call_at)` reports an elapsed gap strictly
+///   greater than `threshold`.
+///
+/// `now < last_call_at` (a backward clock jump) is treated as "not due"
+/// to err on the side of staying out of the rewrite path.
+pub fn time_based_microcompact_due(
+	last_call_at: Option<SystemTime>,
+	now: SystemTime,
+	threshold: Duration,
+) -> bool {
+	let Some(prev) = last_call_at else {
+		return false;
+	};
+	now.duration_since(prev)
+		.map(|gap| gap > threshold)
+		.unwrap_or(false)
+}
 
 /// Maximum estimated tokens from tool results in a single turn before
 /// the runtime triggers degradation (Layer 0 microcompact). Configurable
@@ -1045,11 +1082,10 @@ pub fn estimate_turn_tool_tokens(
 ///   second pass and returns 0 freed tokens on the second call.
 /// - Pure mechanical operation — no LLM calls, no IO, no threshold check.
 ///   Caller is responsible for gating (e.g. only invoke when the prompt
-///   cache has expired).
+///   cache has expired — see [`time_based_microcompact_due`]).
 /// - Never touches `User`, `Assistant`, or the trailing `retain_recent`
 ///   tool results. The system prompt is not in `messages` and is therefore
 ///   never inspected.
-#[allow(dead_code)]
 pub fn microcompact_old_tool_results(
 	messages: &mut [Message],
 	retain_recent: usize,
@@ -1761,6 +1797,7 @@ mod tests {
 			deferred_tools: None,
 			tool_result_store: crate::runtime_loop::tool_result_store::ToolResultStore::default(),
 			layer2_lookup_attempted_this_run: false,
+			last_llm_call_at: None,
 		}
 	}
 
@@ -2278,6 +2315,62 @@ mod tests {
 			assert!(content.len() < 500);
 			assert!(content.contains("bytes omitted"));
 		}
+	}
+
+	// ------------------------------------------------------------------
+	// Time-based microcompact gate tests
+	// ------------------------------------------------------------------
+
+	#[test]
+	fn time_based_microcompact_due_skips_cold_start_when_no_last_call() {
+		// First turn of a session (or first turn after a session restore
+		// that left `last_llm_call_at` as `None`) has no authoritative
+		// signal about the provider-side cache state. The gate must stay
+		// closed: a cold-cache rewrite without a prior call is just a
+		// destructive no-op against an empty history.
+		let now = SystemTime::now();
+		assert!(!time_based_microcompact_due(None, now, CACHE_COLD_GAP));
+	}
+
+	#[test]
+	fn time_based_microcompact_due_skips_when_gap_below_threshold() {
+		// Hot-cache window: gap is one second below the 5-minute TTL. The
+		// gate must stay closed; firing here would rewrite tool-result
+		// bodies that the next call's prefix-cache would otherwise hit.
+		let now = SystemTime::now();
+		let last = now - (CACHE_COLD_GAP - Duration::from_secs(1));
+		assert!(!time_based_microcompact_due(Some(last), now, CACHE_COLD_GAP));
+	}
+
+	#[test]
+	fn time_based_microcompact_due_fires_when_gap_exceeds_threshold() {
+		// Cold-cache window: gap is one second past the 5-minute TTL. The
+		// prompt-prefix cache has expired, so a local rewrite costs
+		// nothing on the cache axis; the gate must fire.
+		let now = SystemTime::now();
+		let last = now - (CACHE_COLD_GAP + Duration::from_secs(1));
+		assert!(time_based_microcompact_due(Some(last), now, CACHE_COLD_GAP));
+	}
+
+	#[test]
+	fn time_based_microcompact_due_treats_clock_skew_as_not_due() {
+		// `now < last_call_at` (a backward clock jump or NTP correction).
+		// `duration_since` returns `Err` in that case; the gate must err
+		// on the side of staying out of the rewrite path.
+		let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+		let last = now + Duration::from_secs(60 * 60); // last is 1h in the future
+		assert!(!time_based_microcompact_due(Some(last), now, CACHE_COLD_GAP));
+	}
+
+	#[test]
+	fn time_based_microcompact_due_at_exact_threshold_does_not_fire() {
+		// Boundary: gap equals the threshold exactly. The comparison is
+		// strict greater-than, so the gate stays closed at the exact
+		// boundary — the cache may still be live for the call that lands
+		// at the boundary instant.
+		let now = SystemTime::now();
+		let last = now - CACHE_COLD_GAP;
+		assert!(!time_based_microcompact_due(Some(last), now, CACHE_COLD_GAP));
 	}
 
 	// ------------------------------------------------------------------

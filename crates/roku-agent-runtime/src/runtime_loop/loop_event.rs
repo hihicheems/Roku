@@ -64,6 +64,22 @@ pub enum LoopEvent {
 		/// Provider-reported detail (e.g. "prompt is too long: 215321 tokens > 200000").
 		detail: String,
 	},
+	/// Time-gated microcompaction ran during pre-flight after the prompt
+	/// cache TTL (~5 min) elapsed since the last successful LLM call.
+	///
+	/// `gap_minutes` is `floor((now - last_llm_call_at).as_secs() / 60)` so
+	/// the trace shows how cold the cache was when the rewrite fired.
+	/// `freed_tokens` is the calibrated estimate of bytes-to-tokens released
+	/// by replacing eligible historical tool result content with the
+	/// placeholder; `0` means the gate fired but no eligible bodies were
+	/// present (the path is still safe — local rewrite during cold cache
+	/// has no cache-break cost).
+	/// Schema is frozen once introduced — additive fields only.
+	TimeBasedMicrocompactRan {
+		step: u32,
+		gap_minutes: u64,
+		freed_tokens: u64,
+	},
 	/// Layer 2 mid-tier compaction consumed a pre-existing session memory
 	/// summary.
 	///

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::SystemTime;
+
 use roku_common_types::ResourceSelector;
 use roku_plugin_llm::ToolDefinition;
 use serde::{Deserialize, Serialize};
@@ -282,6 +284,16 @@ pub struct LoopState {
 	/// the invariant holds even when a run is paused and resumed.
 	#[serde(default)]
 	pub(crate) layer2_lookup_attempted_this_run: bool,
+	/// Wall-clock time of the most recent successful provider call, captured
+	/// alongside `record_observed_usage` so the time-gated microcompact path
+	/// can decide whether the prompt-prefix cache has expired.
+	///
+	/// Intentionally not serialized: a freshly restored loop has no
+	/// authoritative signal about the provider-side cache state and must
+	/// behave like a cold start (gate stays closed for the first turn after
+	/// restore — see `time_based_microcompact_due`).
+	#[serde(skip)]
+	pub(crate) last_llm_call_at: Option<SystemTime>,
 }
 
 /// Maximum allowed consecutive Layer 3 structured-summary failures before
@@ -344,6 +356,7 @@ impl LoopState {
 			deferred_tools: None,
 			tool_result_store: ToolResultStore::default(),
 			layer2_lookup_attempted_this_run: false,
+			last_llm_call_at: None,
 		}
 	}
 
@@ -454,6 +467,25 @@ impl LoopState {
 		self.committed_tool_schema_hash = tool_schema_hash;
 		self.committed_prefix_messages_hash = prefix_messages_hash;
 		self.committed_model_id = model_id;
+	}
+
+	/// Record the wall-clock time of the most recent successful LLM call.
+	///
+	/// Caller is the runtime loop; the value is consumed only by the
+	/// time-gated microcompact path to decide whether the prompt-prefix
+	/// cache has expired since the previous call. Tests inject a synthetic
+	/// `SystemTime` so the gate can be exercised deterministically.
+	pub fn record_llm_call_observed_at(&mut self, at: SystemTime) {
+		self.last_llm_call_at = Some(at);
+	}
+
+	/// Most recent successful LLM-call wall-clock time, if any.
+	///
+	/// `None` before the first call of the session and after any session
+	/// restore (the field is `#[serde(skip)]` to keep cold-start safety
+	/// the default after a restart).
+	pub fn last_llm_call_at(&self) -> Option<SystemTime> {
+		self.last_llm_call_at
 	}
 
 	/// Clear any cached committed-token baseline and its prefix guards.

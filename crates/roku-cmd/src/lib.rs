@@ -835,6 +835,12 @@ where
 							} => {
 								eprintln!("[compact] step {step} reactive trigger: {detail}");
 							}
+							roku_agent_runtime::LoopEvent::TimeBasedMicrocompactRan { .. } => {
+								// Time-gated microcompaction is a rare cold-cache rewrite;
+								// suppress the per-step line to keep the live UX quiet.
+								// Trace consumers see the gap / freed_tokens fields via
+								// the LoopEvent stream.
+							}
 							roku_agent_runtime::LoopEvent::MidCompactLayer2Ran { .. }
 							| roku_agent_runtime::LoopEvent::MidCompactLayer1Ran { .. } => {
 								// Mid-tier compaction events are diagnostic; no user-facing
