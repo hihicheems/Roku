@@ -55,27 +55,31 @@ def collect_warm_turn_samples(
 ) -> tuple[list[float], int]:
     """Return warm-turn ``cache_read_input_tokens / prompt_tokens`` samples
     plus a count of skipped events whose ``token_usage`` payload is
-    missing the ``cache_read_input_tokens`` field.
+    missing a required field (``model_id`` or ``cache_read_input_tokens``).
 
-    In ``strict`` mode (used by ``--self-test``) the missing-field
-    branch raises ``ValueError`` so synthetic fixtures cannot regress
-    the schema-drift guard. In live-trace mode the same branch is a
-    counted skip — older traces from before the field was wired in
-    must not flunk a developer's local run, but the count surfaces in
-    the verdict line so schema drift on new traces is visible.
+    Schema-drift handling: in ``strict`` mode (used by ``--self-test``)
+    the missing-field branch raises ``ValueError`` so synthetic
+    fixtures cannot regress the schema guard. In live-trace mode the
+    same branch is a counted skip — older traces from before the
+    field was wired in must not flunk a developer's local run, but
+    the count surfaces in the verdict line so a real regression on
+    new traces stays visible. Both ``model_id`` and
+    ``cache_read_input_tokens`` are tracked through the same counter:
+    silently fail-open skipping either field would let an adapter or
+    runtime regression degrade the gate to ``warm_samples=0``
+    SOFT_PASS without anyone noticing.
 
-    Compaction summarizer events are excluded from the sample pool.
-    The runtime emits a per-call ``token_usage`` event for the
-    summarizer call inside reactive / mid-loop compaction with
-    ``model_id`` absent (the summarizer does not surface its serving
-    model to the loop) and ``cache_read_input_tokens=0`` (the
-    summarizer's response cache info is not plumbed back). Including
-    those events would inject synthetic zero-ratio samples that drag
-    the warm-turn p50 down even when normal decision calls are highly
-    cached. The presence of ``model_id`` on the wire (via the runtime's
-    ``#[serde(skip_serializing_if = "Option::is_none")]``) is the
-    canonical signal that an event came from a real LLM call rather
-    than a compaction summarizer.
+    Compaction summarizer events are excluded from the sample pool
+    via the explicit ``is_compaction: true`` marker the runtime
+    stamps on `LoopEvent::TokenUsage` when it fires inside reactive
+    or mid-loop compaction. Those events carry a hard-coded
+    ``cache_read_input_tokens=0`` (the summarizer's response cache
+    info is not plumbed back) and would inject synthetic zero-ratio
+    samples that drag the warm-turn p50 down even when normal
+    decision calls are highly cached. The marker is preferred over
+    inferring compaction from a missing ``model_id`` because the
+    latter conflates a real schema-drift signal with an intentional
+    filter.
     """
     samples: list[float] = []
     missing_field = 0
@@ -93,11 +97,30 @@ def collect_warm_turn_samples(
                     ) from exc
                 if event.get("event") != "token_usage":
                     continue
-                # Skip compaction summarizer events: they always carry
-                # `model_id=None` (absent) and a hard-coded
-                # `cache_read_input_tokens=0`, so a per-event sample
-                # would be a synthetic 0.0 that biases the median.
+                # Compaction summarizer events: skip silently. The
+                # runtime stamps `is_compaction=true` exactly on
+                # those, and they intentionally carry no real cache
+                # info — they are not warm-turn samples.
+                if event.get("is_compaction") is True:
+                    continue
+                # Real LLM-call events MUST carry `model_id` and
+                # `cache_read_input_tokens`. Treat either missing as
+                # schema drift: strict raises (fixtures cannot
+                # regress), loose counts (legacy traces don't flunk
+                # the gate) — but the count surfaces in the verdict
+                # so a regression that nukes the field stays visible
+                # instead of silently degrading to SOFT_PASS.
                 if "model_id" not in event:
+                    if strict:
+                        raise ValueError(
+                            f"{trace}:{line_num} token_usage event "
+                            f"is missing `model_id` and is not marked "
+                            f"`is_compaction=true`; refusing to silently "
+                            f"drop (schema drift would hide a real "
+                            f"regression by degrading the gate to "
+                            f"warm_samples=0 SOFT_PASS)"
+                        )
+                    missing_field += 1
                     continue
                 if "cache_read_input_tokens" not in event:
                     if strict:
@@ -363,14 +386,13 @@ def run_self_test() -> int:
                 "cold-start-fixture: turn-1 sample leaked into warm pool"
             )
 
-        # Fixture E: compaction summarizer events (no `model_id`,
-        # hard-coded `cache_read_input_tokens=0`) must be excluded from
-        # the sample pool. Without the filter, each compaction event
-        # injects a synthetic 0.0 ratio sample; with three compaction
-        # events alongside three healthy 0.6-ratio LLM-call events the
-        # cumulative median is 0.0 (FAIL) even though warm-turn cache
-        # utilization is at the threshold. The filter restores the
-        # median to 0.6 (PASS).
+        # Fixture E: compaction summarizer events (marked
+        # `is_compaction=true`) must be excluded from the sample pool.
+        # Without the filter, each compaction event injects a synthetic
+        # 0.0 ratio sample; with three compaction events alongside
+        # three healthy 0.6-ratio LLM-call events the cumulative median
+        # is 0.0 (FAIL) even though warm-turn cache utilization is at
+        # the threshold. The filter restores the median to 0.6 (PASS).
         compact = tmp / "loop-req-compaction.jsonl"
         compact_events = []
         for step in (2, 3, 4):
@@ -389,9 +411,16 @@ def run_self_test() -> int:
                     "step": step,
                     "prompt_tokens": 200,
                     "cache_read_input_tokens": 0,
-                    # `model_id` deliberately omitted — this is the
-                    # marker the runtime uses for compaction summarizer
-                    # events, and the filter must drop them.
+                    # `is_compaction=true` is the explicit positive
+                    # marker the runtime stamps on compaction
+                    # summarizer events. Note: `model_id` is also
+                    # absent here (the summarizer doesn't surface its
+                    # serving model), but the filter does NOT key off
+                    # that — `is_compaction` is the canonical signal
+                    # so a future regression that drops `model_id`
+                    # from real LLM calls cannot impersonate a
+                    # compaction event.
+                    "is_compaction": True,
                 }
             )
         compact.write_text(
@@ -414,6 +443,51 @@ def run_self_test() -> int:
             failures.append(
                 "compaction-fixture: filtered samples should PASS at "
                 f"threshold {DEFAULT_THRESHOLD}; got rc={compact_rc}"
+            )
+
+        # Fixture F: a real LLM-call event missing `model_id` (and not
+        # marked `is_compaction=true`) is schema drift, not a
+        # compaction event. Strict mode must raise; loose mode must
+        # count it through `missing_field` and exclude it from the
+        # sample pool — the regression scenario this guards against
+        # is an adapter / runtime change that silently nukes
+        # `model_id` from real LLM-call events, which under a
+        # fail-open skip would degrade the gate to warm_samples=0
+        # SOFT_PASS and bypass the regression check entirely.
+        drift = tmp / "loop-req-model-id-drift.jsonl"
+        drift.write_text(
+            json.dumps(
+                {
+                    "event": "token_usage",
+                    "step": 2,
+                    "prompt_tokens": 2000,
+                    "cache_read_input_tokens": 1800,
+                    # `model_id` deliberately omitted, no
+                    # `is_compaction` marker — this is the schema-drift
+                    # case the gate must surface.
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        try:
+            collect_warm_turn_samples([drift], strict=True)
+        except ValueError:
+            pass
+        else:
+            failures.append(
+                "model-id-drift-fixture: expected ValueError in strict "
+                "mode on missing `model_id` without `is_compaction` "
+                "marker, got no exception"
+            )
+        drift_samples, drift_missing = collect_warm_turn_samples(
+            [drift], strict=False
+        )
+        if drift_missing != 1 or drift_samples:
+            failures.append(
+                "model-id-drift-fixture: loose mode must skip the "
+                "event and increment missing_field=1 with no samples; "
+                f"got samples={drift_samples!r} missing={drift_missing}"
             )
 
     if failures:

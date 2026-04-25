@@ -2033,6 +2033,7 @@ impl GenericAgentRuntime {
 									Some(&resp.model_id),
 									resp.cache_creation_input_tokens,
 									resp.cache_read_input_tokens,
+									false,
 								);
 								// Fold the real `usage.prompt_tokens` back into the
 								// estimator calibration so the next turn's pressure
@@ -2174,6 +2175,7 @@ impl GenericAgentRuntime {
 														Some(&retry_resp.model_id),
 														retry_resp.cache_creation_input_tokens,
 														retry_resp.cache_read_input_tokens,
+														false,
 													);
 													// Re-calibrate the estimator with the retry's
 													// prompt_tokens. When output-slot escalation
@@ -2323,6 +2325,7 @@ impl GenericAgentRuntime {
 									Some(&resp.model_id),
 									resp.cache_creation_input_tokens,
 									resp.cache_read_input_tokens,
+									false,
 								);
 								// Baseline-aware calibration update: in committed
 								// mode the raw total contains the unchanged
@@ -2448,6 +2451,7 @@ impl GenericAgentRuntime {
 														Some(&retry_resp.model_id),
 														retry_resp.cache_creation_input_tokens,
 														retry_resp.cache_read_input_tokens,
+														false,
 													);
 													// Re-calibrate the estimator with the retry's
 													// prompt_tokens. Non-streaming retry shares
@@ -2555,7 +2559,9 @@ impl GenericAgentRuntime {
 						// Per-call emission for the summarizer LLM call inside
 						// reactive compaction. The summarizer is a real billed
 						// call, so consumers that accumulate `prompt_tokens` /
-						// `output_tokens` need to see it.
+						// `output_tokens` need to see it. `is_compaction=true`
+						// is the positive marker the warm-turn cache gate keys
+						// off to skip these synthetic zero-cache events.
 						emit_token_usage(
 							event_sender,
 							current_step_index,
@@ -2566,6 +2572,7 @@ impl GenericAgentRuntime {
 							None,
 							0,
 							0,
+							true,
 						);
 						// Update the time-gated microcompact baseline: the
 						// summarizer just ran, so the next turn's prompt cache
@@ -3068,7 +3075,9 @@ impl GenericAgentRuntime {
 				// Per-call emission for the summarizer LLM call inside
 				// `maybe_compact`. The summarizer is a real billed call, so
 				// consumers that accumulate `prompt_tokens` / `output_tokens`
-				// need to see it.
+				// need to see it. `is_compaction=true` is the positive
+				// marker the warm-turn cache gate keys off to skip these
+				// synthetic zero-cache events.
 				emit_token_usage(
 					event_sender,
 					current_step_index,
@@ -3079,6 +3088,7 @@ impl GenericAgentRuntime {
 					None,
 					0,
 					0,
+					true,
 				);
 				// Update the time-gated microcompact baseline: the
 				// summarizer just ran, so the next turn's prompt cache is
@@ -3679,6 +3689,7 @@ fn emit_token_usage(
 	model_id: Option<&str>,
 	cache_creation_input_tokens: u64,
 	cache_read_input_tokens: u64,
+	is_compaction: bool,
 ) {
 	if let Some(sender) = event_sender {
 		let total_tokens = prompt_tokens.saturating_add(output_tokens);
@@ -3722,6 +3733,7 @@ fn emit_token_usage(
 			cache_write_cost_usd,
 			cache_read_cost_usd,
 			output_cost_usd,
+			is_compaction,
 		});
 	}
 }

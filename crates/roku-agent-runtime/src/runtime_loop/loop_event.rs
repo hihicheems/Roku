@@ -217,6 +217,17 @@ pub enum LoopEvent {
 		/// Cost of output tokens in USD. `0.0` when no cost profile was found.
 		#[serde(default)]
 		output_cost_usd: f64,
+		/// `true` when this event was emitted for the summarizer LLM call
+		/// inside reactive / mid-loop compaction, `false` for primary
+		/// decision calls and output-slot retries. Compaction events do not
+		/// surface their summarizer's cache info today — `cache_read_input_tokens`
+		/// is hard-coded to `0` — so warm-turn cache-utilization sampling
+		/// must skip them. Older traces emitted before this field existed
+		/// deserialize as `false` (`#[serde(default)]`), which is correct
+		/// for that schema generation: the cumulative event represented the
+		/// loop's primary LLM activity.
+		#[serde(default)]
+		is_compaction: bool,
 	},
 	/// Calibration sample emitted after each successful LLM call.
 	///
