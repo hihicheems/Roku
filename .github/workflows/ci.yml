@@ -58,6 +58,10 @@ jobs:
             bash -n "$script"
           done
 
+      - name: Cache-utilization gate self-test
+        shell: bash
+        run: python3 scripts/cache-utilization-check.py --self-test
+
       - name: Check License Header
         run: hawkeye check
 
