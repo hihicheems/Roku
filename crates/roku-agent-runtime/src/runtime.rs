@@ -1574,47 +1574,6 @@ impl GenericAgentRuntime {
 			// failure so the loop does not spin indefinitely.
 			let mut reactive_compact_used = false;
 			let (accumulated_text, accumulated_tool_calls) = loop {
-				// Layer 0 pre-flight microcompaction: unconditionally clear
-				// historical tool result content so the prompt only carries the
-				// most recent observations. Pure mechanical mutation, no LLM
-				// call, no threshold — runs on every attempt (including after
-				// reactive compaction) so `pre_call_estimate` reflects the
-				// post-microcompact state.
-				// Pre-routing apply site: microcompact runs before
-				// `current_routed_model` is resolved on this
-				// attempt, so there is no model id to key the
-				// scale by yet. Fall through to the fallback
-				// bucket via `get(None)` — microcompact's
-				// calibration is used only to scale the freed-
-				// tokens figure for tracing, so a neutral scale
-				// is fine here.
-				let microcompact_freed = crate::runtime_loop::microcompact_old_tool_results(
-					&mut messages,
-					crate::runtime_loop::MICROCOMPACT_RETAIN_RECENT,
-					loop_state.estimator_calibration.get(None),
-				);
-				// Notify the cache break detector that message content changed.
-				// Also invalidate the committed-token baseline: microcompact
-				// replaced tool-result bodies with short placeholders, so the
-				// previously recorded `usage.prompt_tokens` no longer matches
-				// what the next call will actually send.
-				if microcompact_freed > 0 {
-					loop_state.cache_break_detector.notify_compaction();
-					loop_state.invalidate_committed_baseline();
-				}
-				// Emit only when the pre-flight pass actually freed tokens. On
-				// retry iterations after reactive compaction the buffer is
-				// already lean; suppressing zero-freed events keeps trace
-				// consumers from attributing a no-op to this attempt.
-				if microcompact_freed > 0
-					&& let Some(sender) = event_sender
-				{
-					let _ = sender.send(crate::runtime_loop::LoopEvent::MicrocompactRan {
-						step: current_step_index,
-						freed_tokens: microcompact_freed,
-					});
-				}
-
 				// Initial preflight resolution for this attempt — may be
 				// superseded by a second resolution below if mid-tier
 				// compaction mutates `messages`. Layer 0 microcompact
@@ -3063,39 +3022,6 @@ impl GenericAgentRuntime {
 						per_turn_tool_tokens,
 						exceeded,
 					});
-				}
-				// When budget exceeded, trigger Layer 0 microcompact to free pressure.
-				if exceeded {
-					// Post-step microcompact: the most recently served
-					// call's model id is the best available key here —
-					// the attempt loop has exited, `current_routed_model`
-					// is out of scope, and the last call's serving model
-					// is what produced the tool-result bodies we are
-					// about to compact. Fall through to fallback when
-					// the run has not yet completed a call.
-					let freed = crate::runtime_loop::microcompact_old_tool_results(
-						&mut messages,
-						crate::runtime_loop::MICROCOMPACT_RETAIN_RECENT,
-						loop_state
-							.estimator_calibration
-							.get(last_model_id.as_deref()),
-					);
-					if freed > 0 {
-						loop_state.cache_break_detector.notify_compaction();
-						// Mirror the pre-flight microcompact at the top of
-						// the attempt loop: replacing tool-result bodies
-						// with short placeholders shrinks the committed
-						// prefix below what `last_observed_input_tokens`
-						// priced, so the baseline no longer matches the
-						// message buffer about to be sent.
-						loop_state.invalidate_committed_baseline();
-						if let Some(sender) = event_sender {
-							let _ = sender.send(crate::runtime_loop::LoopEvent::MicrocompactRan {
-								step: current_step_index,
-								freed_tokens: freed,
-							});
-						}
-					}
 				}
 			}
 
@@ -5716,6 +5642,136 @@ mod tests {
 		assert_eq!(result.terminal_step_action, Some(StepAction::FinalAnswer));
 		cleanup_fixture(&text_path);
 	}
+
+	#[test]
+	fn execute_tool_loop_keeps_tool_result_content_byte_stable_across_turns() {
+		// Regression: the runtime must not rewrite historical
+		// `Message::ToolResult.content` between turns. After a tool call
+		// returns, its body becomes part of the prompt prefix and must
+		// remain byte-stable so the provider's prompt-prefix cache stays
+		// hot. Pre-flight in-place rewriting would replace the body with a
+		// placeholder and break the cache; this test pins that invariant
+		// down by inspecting the prompts captured by the fake provider.
+		let path_a =
+			regression_fixture_path(".txt", "MARKER-ALPHA-byte-stability-fixture-A\n");
+		let path_b =
+			regression_fixture_path(".txt", "MARKER-BETA-byte-stability-fixture-B\n");
+		let (route_router, prompts) = router_with_json_responses(vec![
+			serde_json::json!({
+				"action": "call_tool",
+				"tool_name": "Read",
+				"arguments": { "path": path_a },
+				"reason": "load fixture A",
+				"final_message": null
+			}),
+			serde_json::json!({
+				"action": "call_tool",
+				"tool_name": "Read",
+				"arguments": { "path": path_b },
+				"reason": "load fixture B",
+				"final_message": null
+			}),
+			serde_json::json!({
+				"action": "final_answer",
+				"tool_name": null,
+				"arguments": null,
+				"reason": "both fixtures loaded",
+				"final_message": "fixtures loaded"
+			}),
+		]);
+		let root = tempfile::tempdir().expect("temp root should exist");
+		let runtime =
+			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
+				route_router,
+				router_with_text_output("execution-provider", "live answer"),
+				SkillRegistry::file_backed(root.keep()),
+				ToolCatalogConfig::default(),
+				PluginRegistrySnapshot::permissive(),
+				ToolsRuntimeConfig::default(),
+			);
+		let request = RequestEnvelope {
+			request_id: roku_common_types::RequestId(
+				"req-byte-stability".to_string(),
+			),
+			session_id: "session-byte-stability".to_string(),
+			goal: "Read both fixtures".to_string(),
+			planning_mode_hint: None,
+			conversation_history: Vec::new(),
+			model_override: None,
+			thinking_effort: None,
+		};
+		let decision = crate::router::RouteDecision::new(
+			IntentFamily::FilesystemRead,
+			0.9,
+			false,
+			crate::router::RouteRisk::Low,
+			vec!["Read".to_string()],
+			vec!["core-fs".to_string()],
+			Vec::new(),
+			"byte-stability regression",
+		);
+		let mut loop_state = runtime.initialize_runtime_loop(
+			&request,
+			&request.session_id,
+			&decision,
+			Vec::new(),
+		);
+
+		let _result = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime for execute-tool-loop bridge should build")
+			.block_on(runtime.execute_tool_loop(
+				&TaskId("task-byte-stability".to_string()),
+				&request,
+				&mut loop_state,
+				&RuntimeMemorySections::default(),
+				None,
+				None,
+				None,
+			));
+
+		let captured = prompts.lock().expect("prompt lock should succeed");
+		assert_eq!(
+			captured.len(),
+			3,
+			"three turns expected (Read, Read, final_answer); got {}",
+			captured.len(),
+		);
+
+		// The microcompact placeholder MUST NOT appear in any prompt
+		// captured during normal multi-turn tool use. Its presence would
+		// indicate that some path in the runtime rewrote a historical
+		// tool_result body before this LLM call.
+		let placeholder = crate::runtime_loop::MICROCOMPACT_PLACEHOLDER;
+		for (idx, prompt) in captured.iter().enumerate() {
+			assert!(
+				!prompt.contains(placeholder),
+				"prompt[{idx}] unexpectedly contains the microcompact placeholder \
+				 (`{placeholder}`); historical tool_result content must remain \
+				 byte-stable across turns",
+			);
+		}
+
+		// Turn 2 prompt must include turn 1's tool result body byte-for-byte.
+		assert!(
+			captured[1].contains("MARKER-ALPHA-byte-stability-fixture-A"),
+			"prompt[1] must contain turn 1's intact tool_result body",
+		);
+		// Turn 3 prompt must include BOTH prior tool result bodies.
+		assert!(
+			captured[2].contains("MARKER-ALPHA-byte-stability-fixture-A"),
+			"prompt[2] must contain turn 1's intact tool_result body",
+		);
+		assert!(
+			captured[2].contains("MARKER-BETA-byte-stability-fixture-B"),
+			"prompt[2] must contain turn 2's intact tool_result body",
+		);
+
+		cleanup_fixture(&path_a);
+		cleanup_fixture(&path_b);
+	}
+
 	#[test]
 	fn visible_tools_recompute_keeps_shortlist_and_safe_baseline_after_tool_steps() {
 		let runtime = GenericAgentRuntime {

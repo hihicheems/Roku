@@ -64,13 +64,6 @@ pub enum LoopEvent {
 		/// Provider-reported detail (e.g. "prompt is too long: 215321 tokens > 200000").
 		detail: String,
 	},
-	/// Layer 0 microcompaction ran during pre-flight before this LLM call.
-	///
-	/// `freed_tokens` is the calibrated estimate of tokens released by
-	/// replacing historical tool result content with the placeholder. A value
-	/// of `0` means there were no eligible historical tool results to clear.
-	/// Schema is frozen once introduced — additive fields only.
-	MicrocompactRan { step: u32, freed_tokens: u64 },
 	/// Layer 2 mid-tier compaction consumed a pre-existing session memory
 	/// summary.
 	///

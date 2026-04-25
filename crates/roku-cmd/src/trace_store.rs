@@ -295,9 +295,6 @@ pub(crate) fn render_trace_detail(events: &[TimestampedEvent]) -> String {
 			LoopEvent::ReactiveCompactTriggered { step, detail } => {
 				format!("[step {step}] reactive_compact_triggered: {detail}")
 			}
-			LoopEvent::MicrocompactRan { step, freed_tokens } => {
-				format!("[step {step}] microcompact_ran: freed {freed_tokens} tokens")
-			}
 			LoopEvent::MidCompactLayer2Ran {
 				step,
 				messages_replaced,

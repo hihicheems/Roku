@@ -835,11 +835,6 @@ where
 							} => {
 								eprintln!("[compact] step {step} reactive trigger: {detail}");
 							}
-							roku_agent_runtime::LoopEvent::MicrocompactRan { .. } => {
-								// Layer 0 microcompact runs on every pre-flight; suppress
-								// the per-step line to keep live UX quiet. Trace consumers
-								// see the freed_tokens via the LoopEvent stream.
-							}
 							roku_agent_runtime::LoopEvent::MidCompactLayer2Ran { .. }
 							| roku_agent_runtime::LoopEvent::MidCompactLayer1Ran { .. } => {
 								// Mid-tier compaction events are diagnostic; no user-facing

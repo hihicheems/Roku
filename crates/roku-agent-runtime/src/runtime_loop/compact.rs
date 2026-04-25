@@ -988,8 +988,9 @@ pub fn truncate_large_tool_results(messages: &mut [Message], max_chars: usize) {
 }
 
 /// Placeholder text inserted in place of historical tool result content during
-/// pre-flight microcompaction. Stable across calls so re-running microcompact
+/// time-gated microcompaction. Stable across calls so re-running microcompact
 /// is byte-deterministic and idempotent.
+#[allow(dead_code)]
 pub const MICROCOMPACT_PLACEHOLDER: &str = "[Old tool result content cleared]";
 
 /// Number of most recent tool result messages microcompact leaves untouched.
@@ -997,6 +998,7 @@ pub const MICROCOMPACT_PLACEHOLDER: &str = "[Old tool result content cleared]";
 /// Picked small enough to keep the freed-token signal meaningful on
 /// tool-heavy runs, but large enough that the LLM still has context for the
 /// last few observations it produced.
+#[allow(dead_code)]
 pub const MICROCOMPACT_RETAIN_RECENT: usize = 3;
 
 /// Maximum estimated tokens from tool results in a single turn before
@@ -1035,17 +1037,19 @@ pub fn estimate_turn_tool_tokens(
 /// `retain_recent` tool results with [`MICROCOMPACT_PLACEHOLDER`]. Returns
 /// the calibrated number of tokens freed by the substitution.
 ///
-/// Invariants (see unit 03 acceptance):
+/// Invariants:
 ///
 /// - Message count, ordering, `tool_use_id`, and `is_error` flags are
 ///   unchanged. Only the `content` field of older tool results is mutated.
 /// - Idempotent: running twice on the same buffer yields a byte-identical
 ///   second pass and returns 0 freed tokens on the second call.
 /// - Pure mechanical operation — no LLM calls, no IO, no threshold check.
-///   Designed to run unconditionally on every pre-flight.
+///   Caller is responsible for gating (e.g. only invoke when the prompt
+///   cache has expired).
 /// - Never touches `User`, `Assistant`, or the trailing `retain_recent`
 ///   tool results. The system prompt is not in `messages` and is therefore
 ///   never inspected.
+#[allow(dead_code)]
 pub fn microcompact_old_tool_results(
 	messages: &mut [Message],
 	retain_recent: usize,
