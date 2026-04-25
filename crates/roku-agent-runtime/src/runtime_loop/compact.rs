@@ -2339,7 +2339,11 @@ mod tests {
 		// bodies that the next call's prefix-cache would otherwise hit.
 		let now = SystemTime::now();
 		let last = now - (CACHE_COLD_GAP - Duration::from_secs(1));
-		assert!(!time_based_microcompact_due(Some(last), now, CACHE_COLD_GAP));
+		assert!(!time_based_microcompact_due(
+			Some(last),
+			now,
+			CACHE_COLD_GAP
+		));
 	}
 
 	#[test]
@@ -2359,7 +2363,11 @@ mod tests {
 		// on the side of staying out of the rewrite path.
 		let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
 		let last = now + Duration::from_secs(60 * 60); // last is 1h in the future
-		assert!(!time_based_microcompact_due(Some(last), now, CACHE_COLD_GAP));
+		assert!(!time_based_microcompact_due(
+			Some(last),
+			now,
+			CACHE_COLD_GAP
+		));
 	}
 
 	#[test]
@@ -2370,7 +2378,11 @@ mod tests {
 		// at the boundary instant.
 		let now = SystemTime::now();
 		let last = now - CACHE_COLD_GAP;
-		assert!(!time_based_microcompact_due(Some(last), now, CACHE_COLD_GAP));
+		assert!(!time_based_microcompact_due(
+			Some(last),
+			now,
+			CACHE_COLD_GAP
+		));
 	}
 
 	// ------------------------------------------------------------------
