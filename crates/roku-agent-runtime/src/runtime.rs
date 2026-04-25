@@ -5713,34 +5713,67 @@ mod tests {
 		// `Message::ToolResult.content` between turns. After a tool call
 		// returns, its body becomes part of the prompt prefix and must
 		// remain byte-stable so the provider's prompt-prefix cache stays
-		// hot. Pre-flight in-place rewriting would replace the body with a
-		// placeholder and break the cache; this test pins that invariant
-		// down by inspecting the prompts captured by the fake provider.
-		let path_a = regression_fixture_path(".txt", "MARKER-ALPHA-byte-stability-fixture-A\n");
-		let path_b = regression_fixture_path(".txt", "MARKER-BETA-byte-stability-fixture-B\n");
-		let (route_router, prompts) = router_with_json_responses(vec![
+		// hot.
+		//
+		// The fixture issues four `Read` calls before `final_answer`,
+		// one more than `MICROCOMPACT_RETAIN_RECENT = 3`. If a future
+		// regression re-introduces an unconditional pre-flight rewrite,
+		// the OLDEST tool result (fixture A) would be replaced with the
+		// placeholder before turn 5's LLM call and the marker assertion
+		// below would flag it. A two-call fixture would leave the
+		// rewrite path observationally idle because the
+		// eligible-old-results window is empty under retain=3.
+		let paths = [
+			regression_fixture_path(".txt", "MARKER-ALPHA-byte-stability-fixture-A\n"),
+			regression_fixture_path(".txt", "MARKER-BETA-byte-stability-fixture-B\n"),
+			regression_fixture_path(".txt", "MARKER-GAMMA-byte-stability-fixture-C\n"),
+			regression_fixture_path(".txt", "MARKER-DELTA-byte-stability-fixture-D\n"),
+		];
+		let markers = [
+			"MARKER-ALPHA-byte-stability-fixture-A",
+			"MARKER-BETA-byte-stability-fixture-B",
+			"MARKER-GAMMA-byte-stability-fixture-C",
+			"MARKER-DELTA-byte-stability-fixture-D",
+		];
+		let responses = vec![
 			serde_json::json!({
 				"action": "call_tool",
 				"tool_name": "Read",
-				"arguments": { "path": path_a },
-				"reason": "load fixture A",
-				"final_message": null
+				"arguments": { "path": &paths[0] },
+				"reason": "load fixture 0",
+				"final_message": null,
 			}),
 			serde_json::json!({
 				"action": "call_tool",
 				"tool_name": "Read",
-				"arguments": { "path": path_b },
-				"reason": "load fixture B",
-				"final_message": null
+				"arguments": { "path": &paths[1] },
+				"reason": "load fixture 1",
+				"final_message": null,
+			}),
+			serde_json::json!({
+				"action": "call_tool",
+				"tool_name": "Read",
+				"arguments": { "path": &paths[2] },
+				"reason": "load fixture 2",
+				"final_message": null,
+			}),
+			serde_json::json!({
+				"action": "call_tool",
+				"tool_name": "Read",
+				"arguments": { "path": &paths[3] },
+				"reason": "load fixture 3",
+				"final_message": null,
 			}),
 			serde_json::json!({
 				"action": "final_answer",
 				"tool_name": null,
 				"arguments": null,
-				"reason": "both fixtures loaded",
-				"final_message": "fixtures loaded"
+				"reason": "all fixtures loaded",
+				"final_message": "fixtures loaded",
 			}),
-		]);
+		];
+		let (route_router, prompts) = router_with_json_responses(responses);
+
 		let root = tempfile::tempdir().expect("temp root should exist");
 		let runtime =
 			GenericAgentRuntime::with_route_and_execution_routers_skill_registry_tool_config_and_plugin_snapshot(
@@ -5754,7 +5787,7 @@ mod tests {
 		let request = RequestEnvelope {
 			request_id: roku_common_types::RequestId("req-byte-stability".to_string()),
 			session_id: "session-byte-stability".to_string(),
-			goal: "Read both fixtures".to_string(),
+			goal: "Read all fixtures".to_string(),
 			planning_mode_hint: None,
 			conversation_history: Vec::new(),
 			model_override: None,
@@ -5783,6 +5816,11 @@ mod tests {
 				&mut loop_state,
 				&RuntimeMemorySections::default(),
 				None,
+				// `None` keeps the loop on the non-streaming path: the
+				// test fixture's `SequenceJsonProvider` has no `stream()`
+				// override and the default trait impl drops the
+				// `tool_calls` field, which would force every call_tool
+				// response into the "no tool calls" fallback.
 				None,
 				None,
 			));
@@ -5790,15 +5828,13 @@ mod tests {
 		let captured = prompts.lock().expect("prompt lock should succeed");
 		assert_eq!(
 			captured.len(),
-			3,
-			"three turns expected (Read, Read, final_answer); got {}",
+			5,
+			"five turns expected (4 Read + final_answer); got {}",
 			captured.len(),
 		);
 
 		// The microcompact placeholder MUST NOT appear in any prompt
-		// captured during normal multi-turn tool use. Its presence would
-		// indicate that some path in the runtime rewrote a historical
-		// tool_result body before this LLM call.
+		// captured during normal multi-turn tool use.
 		let placeholder = crate::runtime_loop::MICROCOMPACT_PLACEHOLDER;
 		for (idx, prompt) in captured.iter().enumerate() {
 			assert!(
@@ -5809,23 +5845,23 @@ mod tests {
 			);
 		}
 
-		// Turn 2 prompt must include turn 1's tool result body byte-for-byte.
-		assert!(
-			captured[1].contains("MARKER-ALPHA-byte-stability-fixture-A"),
-			"prompt[1] must contain turn 1's intact tool_result body",
-		);
-		// Turn 3 prompt must include BOTH prior tool result bodies.
-		assert!(
-			captured[2].contains("MARKER-ALPHA-byte-stability-fixture-A"),
-			"prompt[2] must contain turn 1's intact tool_result body",
-		);
-		assert!(
-			captured[2].contains("MARKER-BETA-byte-stability-fixture-B"),
-			"prompt[2] must contain turn 2's intact tool_result body",
-		);
+		// The final_answer prompt (index 4) sees the prefix of all four
+		// tool results — including the OLDEST (turn 1, fixture A).
+		// `MICROCOMPACT_RETAIN_RECENT = 3` would have left the oldest
+		// eligible for rewriting under the deleted pre-flight path, so a
+		// missing marker means a historical tool_result body was
+		// rewritten by some path.
+		for marker in markers {
+			assert!(
+				captured[4].contains(marker),
+				"final_answer prompt must contain `{marker}` (intact body \
+				 from earlier turn)"
+			);
+		}
 
-		cleanup_fixture(&path_a);
-		cleanup_fixture(&path_b);
+		for path in &paths {
+			cleanup_fixture(path);
+		}
 	}
 
 	#[test]
