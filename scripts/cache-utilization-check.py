@@ -63,6 +63,19 @@ def collect_warm_turn_samples(
     counted skip — older traces from before the field was wired in
     must not flunk a developer's local run, but the count surfaces in
     the verdict line so schema drift on new traces is visible.
+
+    Compaction summarizer events are excluded from the sample pool.
+    The runtime emits a per-call ``token_usage`` event for the
+    summarizer call inside reactive / mid-loop compaction with
+    ``model_id`` absent (the summarizer does not surface its serving
+    model to the loop) and ``cache_read_input_tokens=0`` (the
+    summarizer's response cache info is not plumbed back). Including
+    those events would inject synthetic zero-ratio samples that drag
+    the warm-turn p50 down even when normal decision calls are highly
+    cached. The presence of ``model_id`` on the wire (via the runtime's
+    ``#[serde(skip_serializing_if = "Option::is_none")]``) is the
+    canonical signal that an event came from a real LLM call rather
+    than a compaction summarizer.
     """
     samples: list[float] = []
     missing_field = 0
@@ -79,6 +92,12 @@ def collect_warm_turn_samples(
                         f"{trace}:{line_num} is not valid JSON: {exc}"
                     ) from exc
                 if event.get("event") != "token_usage":
+                    continue
+                # Skip compaction summarizer events: they always carry
+                # `model_id=None` (absent) and a hard-coded
+                # `cache_read_input_tokens=0`, so a per-event sample
+                # would be a synthetic 0.0 that biases the median.
+                if "model_id" not in event:
                     continue
                 if "cache_read_input_tokens" not in event:
                     if strict:
@@ -171,6 +190,12 @@ def run_self_test() -> int:
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
 
+        # All real LLM-call fixtures carry `model_id` so the
+        # compaction-event filter does not exclude them. Compaction
+        # summarizer events emit with `model_id` absent — fixture E
+        # exercises that exclusion path.
+        model_id = "test-model"
+
         # Fixture A: warm samples all above the floor → PASS.
         good = tmp / "loop-req-good.jsonl"
         good.write_text(
@@ -182,24 +207,28 @@ def run_self_test() -> int:
                         "step": 1,
                         "prompt_tokens": 1000,
                         "cache_read_input_tokens": 0,
+                        "model_id": model_id,
                     },
                     {
                         "event": "token_usage",
                         "step": 2,
                         "prompt_tokens": 2000,
                         "cache_read_input_tokens": 1800,
+                        "model_id": model_id,
                     },
                     {
                         "event": "token_usage",
                         "step": 3,
                         "prompt_tokens": 2500,
                         "cache_read_input_tokens": 2100,
+                        "model_id": model_id,
                     },
                     {
                         "event": "token_usage",
                         "step": 4,
                         "prompt_tokens": 3000,
                         "cache_read_input_tokens": 2400,
+                        "model_id": model_id,
                     },
                 ]
             )
@@ -224,18 +253,21 @@ def run_self_test() -> int:
                         "step": 2,
                         "prompt_tokens": 2000,
                         "cache_read_input_tokens": 0,
+                        "model_id": model_id,
                     },
                     {
                         "event": "token_usage",
                         "step": 3,
                         "prompt_tokens": 2500,
                         "cache_read_input_tokens": 0,
+                        "model_id": model_id,
                     },
                     {
                         "event": "token_usage",
                         "step": 4,
                         "prompt_tokens": 3000,
                         "cache_read_input_tokens": 0,
+                        "model_id": model_id,
                     },
                 ]
             )
@@ -257,6 +289,7 @@ def run_self_test() -> int:
                     "event": "token_usage",
                     "step": 2,
                     "prompt_tokens": 2000,
+                    "model_id": model_id,
                     # cache_read_input_tokens missing on purpose
                 }
             )
@@ -296,24 +329,28 @@ def run_self_test() -> int:
                         "step": 1,
                         "prompt_tokens": 5000,
                         "cache_read_input_tokens": 0,
+                        "model_id": model_id,
                     },
                     {
                         "event": "token_usage",
                         "step": 2,
                         "prompt_tokens": 5000,
                         "cache_read_input_tokens": 4500,
+                        "model_id": model_id,
                     },
                     {
                         "event": "token_usage",
                         "step": 3,
                         "prompt_tokens": 5500,
                         "cache_read_input_tokens": 4900,
+                        "model_id": model_id,
                     },
                     {
                         "event": "token_usage",
                         "step": 4,
                         "prompt_tokens": 6000,
                         "cache_read_input_tokens": 5400,
+                        "model_id": model_id,
                     },
                 ]
             )
@@ -324,6 +361,59 @@ def run_self_test() -> int:
         if any(value < 0.5 for value in cold_samples):
             failures.append(
                 "cold-start-fixture: turn-1 sample leaked into warm pool"
+            )
+
+        # Fixture E: compaction summarizer events (no `model_id`,
+        # hard-coded `cache_read_input_tokens=0`) must be excluded from
+        # the sample pool. Without the filter, each compaction event
+        # injects a synthetic 0.0 ratio sample; with three compaction
+        # events alongside three healthy 0.6-ratio LLM-call events the
+        # cumulative median is 0.0 (FAIL) even though warm-turn cache
+        # utilization is at the threshold. The filter restores the
+        # median to 0.6 (PASS).
+        compact = tmp / "loop-req-compaction.jsonl"
+        compact_events = []
+        for step in (2, 3, 4):
+            compact_events.append(
+                {
+                    "event": "token_usage",
+                    "step": step,
+                    "prompt_tokens": 1000,
+                    "cache_read_input_tokens": 600,
+                    "model_id": model_id,
+                }
+            )
+            compact_events.append(
+                {
+                    "event": "token_usage",
+                    "step": step,
+                    "prompt_tokens": 200,
+                    "cache_read_input_tokens": 0,
+                    # `model_id` deliberately omitted — this is the
+                    # marker the runtime uses for compaction summarizer
+                    # events, and the filter must drop them.
+                }
+            )
+        compact.write_text(
+            "\n".join(json.dumps(event) for event in compact_events) + "\n",
+            encoding="utf-8",
+        )
+        compact_samples, _ = collect_warm_turn_samples([compact], strict=True)
+        if len(compact_samples) != 3 or any(
+            abs(value - 0.6) > 1e-9 for value in compact_samples
+        ):
+            failures.append(
+                "compaction-fixture: compaction summarizer events must be "
+                "excluded; expected exactly 3 samples of 0.6 (one per "
+                f"warm LLM-call step), got {compact_samples!r}"
+            )
+        compact_rc = evaluate(
+            compact_samples, DEFAULT_THRESHOLD, DEFAULT_MIN_SAMPLES
+        )
+        if compact_rc != 0:
+            failures.append(
+                "compaction-fixture: filtered samples should PASS at "
+                f"threshold {DEFAULT_THRESHOLD}; got rc={compact_rc}"
             )
 
     if failures:
