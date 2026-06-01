@@ -8,7 +8,7 @@ authors.workspace = true
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-rmcp = { version = "1.5", features = ["client", "transport-child-process"] }
+rmcp = { version = "1.7", features = ["client", "transport-child-process"] }
 tokio = { version = "1", features = ["rt"] }
 serde_json = "1"
 tracing = "0.1"
