@@ -13,7 +13,7 @@ env:
   # Disable incremental compilation for faster from-scratch builds
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_TEST_DEBUG: 0
-  RUST_TOOLCHAIN_VERSION: "1.92.0"
+  RUST_TOOLCHAIN_VERSION: "1.95.0"
   HAWKEYE_VERSION: "6.5.1"
   CARGO_NEXTEST_VERSION: "0.9.132"
 
