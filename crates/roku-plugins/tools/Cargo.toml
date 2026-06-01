@@ -7,7 +7,7 @@ authors.workspace = true
 
 [dependencies]
 async-trait = "0.1"
-calamine = "0.34"
+calamine = "0.35"
 csv = "1"
 glob = "0.3"
 regex = "1"
