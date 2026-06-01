@@ -3171,7 +3171,7 @@ impl GenericAgentRuntime {
 			worker: Arc::new(worker),
 		});
 		self.workers
-			.sort_by(|left, right| right.priority.cmp(&left.priority));
+			.sort_by_key(|entry| std::cmp::Reverse(entry.priority));
 	}
 
 	fn execute_with_worker(

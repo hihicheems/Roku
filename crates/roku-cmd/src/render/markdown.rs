@@ -167,19 +167,15 @@ pub(crate) fn render_markdown(input: &str) -> String {
 					output.push_str(&text);
 				}
 			}
-			Event::SoftBreak | Event::HardBreak => {
-				if !in_code_block {
-					output.push('\n');
-					// Re-apply blockquote prefix on new lines.
-					if in_blockquote {
-						output.push_str(&"│ ".with(Color::DarkGrey).to_string());
-					}
-				}
-			}
-			Event::Start(Tag::Paragraph) => {
-				if in_blockquote && !output.ends_with("│ ") {
+			Event::SoftBreak | Event::HardBreak if !in_code_block => {
+				output.push('\n');
+				// Re-apply blockquote prefix on new lines.
+				if in_blockquote {
 					output.push_str(&"│ ".with(Color::DarkGrey).to_string());
 				}
+			}
+			Event::Start(Tag::Paragraph) if in_blockquote && !output.ends_with("│ ") => {
+				output.push_str(&"│ ".with(Color::DarkGrey).to_string());
 			}
 			Event::End(TagEnd::Paragraph) => {
 				output.push_str("\n\n");
