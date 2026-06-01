@@ -260,7 +260,7 @@ impl SessionStore {
 				first_message,
 			});
 		}
-		sessions.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+		sessions.sort_by_key(|session| std::cmp::Reverse(session.last_modified));
 		Ok(sessions)
 	}
 

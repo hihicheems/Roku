@@ -309,12 +309,10 @@ pub(crate) fn read_text_input(prompt: &str) -> Option<String> {
 					let _ = execute!(tty, MoveLeft(w), Clear(ClearType::UntilNewLine));
 				}
 			}
-			KeyCode::Char('u') if ctrl => {
-				if !buf.is_empty() {
-					let cols = UnicodeWidthStr::width(buf.as_str()) as u16;
-					buf.clear();
-					let _ = execute!(tty, MoveLeft(cols), Clear(ClearType::UntilNewLine));
-				}
+			KeyCode::Char('u') if ctrl && !buf.is_empty() => {
+				let cols = UnicodeWidthStr::width(buf.as_str()) as u16;
+				buf.clear();
+				let _ = execute!(tty, MoveLeft(cols), Clear(ClearType::UntilNewLine));
 			}
 			KeyCode::Char(ch) if !ctrl => {
 				buf.push(ch);
