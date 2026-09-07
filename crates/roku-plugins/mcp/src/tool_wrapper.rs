@@ -121,10 +121,41 @@ fn call_result_to_value(result: rmcp::model::CallToolResult) -> Value {
 	Value::String(extract_text_content(&result.content))
 }
 
-fn extract_text_content(content: &[rmcp::model::Content]) -> String {
+fn extract_text_content(content: &[rmcp::model::ContentBlock]) -> String {
 	content
 		.iter()
 		.filter_map(|c| c.as_text().map(|t| t.text.as_str()))
 		.collect::<Vec<_>>()
 		.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+	use super::call_result_to_value;
+	use serde_json::json;
+
+	#[test]
+	fn tool_result_joins_text_blocks_and_skips_images() {
+		let result = serde_json::from_value(json!({
+			"content": [
+				{"type": "text", "text": "first"},
+				{"type": "image", "data": "", "mimeType": "image/png"},
+				{"type": "text", "text": "second"}
+			]
+		}))
+		.unwrap();
+
+		assert_eq!(call_result_to_value(result), json!("first\nsecond"));
+	}
+
+	#[test]
+	fn tool_result_preserves_structured_content() {
+		let result = serde_json::from_value(json!({
+			"content": [{"type": "text", "text": "fallback"}],
+			"structuredContent": {"count": 2}
+		}))
+		.unwrap();
+
+		assert_eq!(call_result_to_value(result), json!({"count": 2}));
+	}
 }

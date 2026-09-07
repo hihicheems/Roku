@@ -512,32 +512,32 @@ fn flush_code_block(_code: &str, _lang: &str) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::test_support::with_env_var;
 
 	#[test]
 	fn render_markdown_heading() {
-		// SAFETY: test-only env manipulation, single-threaded test.
-		unsafe { std::env::set_var("NO_COLOR", "1") };
-		let result = render_markdown("# Hello\n\nWorld");
-		assert!(result.contains("# Hello"));
-		assert!(result.contains("World"));
-		unsafe { std::env::remove_var("NO_COLOR") };
+		with_env_var("NO_COLOR", "1", || {
+			let result = render_markdown("# Hello\n\nWorld");
+			assert!(result.contains("# Hello"));
+			assert!(result.contains("World"));
+		});
 	}
 
 	#[test]
 	fn render_markdown_code_block_no_color() {
-		unsafe { std::env::set_var("NO_COLOR", "1") };
-		let input = "```rust\nfn main() {}\n```\n";
-		let result = render_markdown(input);
-		assert!(result.contains("fn main()"));
-		unsafe { std::env::remove_var("NO_COLOR") };
+		with_env_var("NO_COLOR", "1", || {
+			let input = "```rust\nfn main() {}\n```\n";
+			let result = render_markdown(input);
+			assert_eq!(result, input);
+		});
 	}
 
 	#[test]
 	fn stream_renderer_normal_passthrough() {
-		unsafe { std::env::set_var("NO_COLOR", "1") };
-		let mut sr = StreamRenderer::new();
-		let out = sr.push("hello world\n");
-		assert_eq!(out, "hello world\n");
-		unsafe { std::env::remove_var("NO_COLOR") };
+		with_env_var("NO_COLOR", "1", || {
+			let mut sr = StreamRenderer::new();
+			let out = sr.push("hello world\n");
+			assert_eq!(out, "hello world\n");
+		});
 	}
 }
