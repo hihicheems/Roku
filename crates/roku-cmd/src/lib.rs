@@ -1146,8 +1146,10 @@ fn format_unix_ms(ms: u64) -> String {
 	let secs = (ms / 1000) as i64;
 	let dt =
 		time::OffsetDateTime::from_unix_timestamp(secs).unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
-	let format = time::format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]")
-		.unwrap_or_default();
+	let format = time::format_description::parse_borrowed::<1>(
+		"[year]-[month]-[day] [hour]:[minute]:[second]",
+	)
+	.unwrap_or_default();
 	dt.format(&format).unwrap_or_else(|_| "unknown".to_string())
 }
 
