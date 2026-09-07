@@ -39,7 +39,7 @@ RUN cargo build --release --locked --package roku-cmd
 # ────────────────────────────────
 # Runtime stage
 # ────────────────────────────────
-FROM --platform=$TARGETPLATFORM alpine:3.23 AS runtime
+FROM --platform=$TARGETPLATFORM alpine:3.24 AS runtime
 
 # Install CA certificates for HTTPS
 RUN apk add --no-cache ca-certificates

@@ -31,7 +31,7 @@ jobs:
     # tarballs has proven less reliable than the runner image itself.
     runs-on: &linux_runner roku-arc
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/ensure-native-build-toolchain
         with:
           required-tools: |
@@ -86,7 +86,7 @@ jobs:
       CARGO_PROFILE_RELEASE_LTO: true
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/ensure-native-build-toolchain
         with:
           required-tools: |
@@ -100,7 +100,7 @@ jobs:
   unit:
     runs-on: *linux_runner
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/ensure-native-build-toolchain
         with:
           required-tools: |
