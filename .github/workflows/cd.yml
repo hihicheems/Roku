@@ -28,7 +28,7 @@ jobs:
       pull-requests: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -48,12 +48,12 @@ jobs:
           echo "Default branch: $DEFAULT_BRANCH"
 
           # Fetch and checkout to default branch with proper upstream
-          git fetch origin $DEFAULT_BRANCH
-          if git show-ref --verify --quiet refs/heads/$DEFAULT_BRANCH; then
-            git checkout $DEFAULT_BRANCH
-            git branch --set-upstream-to=origin/$DEFAULT_BRANCH $DEFAULT_BRANCH
+          git fetch origin "$DEFAULT_BRANCH"
+          if git show-ref --verify --quiet "refs/heads/$DEFAULT_BRANCH"; then
+            git checkout "$DEFAULT_BRANCH"
+            git branch --set-upstream-to="origin/$DEFAULT_BRANCH" "$DEFAULT_BRANCH"
           else
-            git checkout -b $DEFAULT_BRANCH origin/$DEFAULT_BRANCH
+            git checkout -b "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH"
           fi
 
           git-cliff -c cliff.toml -o CHANGELOG.md --verbose
@@ -68,12 +68,12 @@ jobs:
           echo "Default branch: $DEFAULT_BRANCH"
 
           # Ensure we're on the default branch
-          git fetch origin $DEFAULT_BRANCH
-          if git show-ref --verify --quiet refs/heads/$DEFAULT_BRANCH; then
-            git checkout $DEFAULT_BRANCH
-            git branch --set-upstream-to=origin/$DEFAULT_BRANCH $DEFAULT_BRANCH
+          git fetch origin "$DEFAULT_BRANCH"
+          if git show-ref --verify --quiet "refs/heads/$DEFAULT_BRANCH"; then
+            git checkout "$DEFAULT_BRANCH"
+            git branch --set-upstream-to="origin/$DEFAULT_BRANCH" "$DEFAULT_BRANCH"
           else
-            git checkout -b $DEFAULT_BRANCH origin/$DEFAULT_BRANCH
+            git checkout -b "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH"
           fi
 
           git config user.name "github-actions[bot]"
@@ -90,7 +90,7 @@ jobs:
             echo "Changes detected in CHANGELOG.md. Committing..."
             git add CHANGELOG.md
             git commit -m "Update CHANGELOG for $GITHUB_REF"
-            git push origin $DEFAULT_BRANCH
+            git push origin "$DEFAULT_BRANCH"
             echo "Successfully pushed CHANGELOG.md to $DEFAULT_BRANCH"
           else
             echo "No changes in CHANGELOG.md. Skipping commit."
@@ -110,7 +110,7 @@ jobs:
       pull-requests: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           fetch-tags: true
@@ -141,7 +141,7 @@ jobs:
           else
             TAG_NAME="${{ github.ref_name }}"
           fi
-          echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
           echo "Tag name: ${TAG_NAME}"
 
       - name: Generate release notes for current tag
