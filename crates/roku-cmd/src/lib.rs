@@ -61,6 +61,34 @@ pub(crate) mod test_support {
 
 	pub(crate) static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
+	pub(crate) fn with_env_var<T>(key: &str, value: &str, run: impl FnOnce() -> T) -> T {
+		struct RestoreEnv<'a> {
+			key: &'a str,
+			original: Option<std::ffi::OsString>,
+		}
+
+		impl Drop for RestoreEnv<'_> {
+			fn drop(&mut self) {
+				// SAFETY: the shared environment lock is still held during restoration.
+				unsafe {
+					match &self.original {
+						Some(value) => std::env::set_var(self.key, value),
+						None => std::env::remove_var(self.key),
+					}
+				}
+			}
+		}
+
+		let _lock = ENV_MUTEX.lock().expect("env mutex should lock");
+		let _restore = RestoreEnv {
+			key,
+			original: std::env::var_os(key),
+		};
+		// SAFETY: environment-mutating tests serialize through ENV_MUTEX.
+		unsafe { std::env::set_var(key, value) };
+		run()
+	}
+
 	pub(crate) fn pending_inventory_resume_success_loop_state() -> (LoopState, String) {
 		let context = LoopContext {
 			request_id: "req-pending-inventory-loop-success".to_string(),
@@ -1118,8 +1146,10 @@ fn format_unix_ms(ms: u64) -> String {
 	let secs = (ms / 1000) as i64;
 	let dt =
 		time::OffsetDateTime::from_unix_timestamp(secs).unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
-	let format = time::format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]")
-		.unwrap_or_default();
+	let format = time::format_description::parse_borrowed::<1>(
+		"[year]-[month]-[day] [hour]:[minute]:[second]",
+	)
+	.unwrap_or_default();
 	dt.format(&format).unwrap_or_else(|_| "unknown".to_string())
 }
 
