@@ -109,6 +109,7 @@ pub(crate) fn diff_stats(old: &str, new: &str) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::test_support::with_env_var;
 
 	#[test]
 	fn identical_returns_none() {
@@ -124,13 +125,12 @@ mod tests {
 
 	#[test]
 	fn plain_diff_no_color() {
-		// SAFETY: test-only env manipulation, single-threaded test.
-		unsafe { std::env::set_var("NO_COLOR", "1") };
-		let result = render_unified_diff("f.rs", "old\n", "new\n", 3);
-		assert!(result.is_some());
-		let text = result.unwrap();
-		assert!(text.contains("-old"));
-		assert!(text.contains("+new"));
-		unsafe { std::env::remove_var("NO_COLOR") };
+		with_env_var("NO_COLOR", "1", || {
+			let result = render_unified_diff("f.rs", "old\n", "new\n", 3);
+			assert!(result.is_some());
+			let text = result.unwrap();
+			assert!(text.contains("-old"));
+			assert!(text.contains("+new"));
+		});
 	}
 }
