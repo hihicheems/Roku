@@ -28,7 +28,7 @@ jobs:
     # or proxy rotation localized to runner config instead of this workflow.
     runs-on: roku-arc
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Validate linux/amd64 Dockerfile build
         env:
